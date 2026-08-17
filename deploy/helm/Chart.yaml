@@ -1,0 +1,19 @@
+apiVersion: v2
+name: linkedparticles-engine
+description: >-
+  The Particles engine — a single-replica, single-writer epistemic knowledge
+  store served over HTTP, with the resident daemon running the
+  consolidation cycle in-process.
+type: application
+# Chart version. Bumped independently of the app; `appVersion` tracks the SDK.
+version: 0.1.0
+# The SDK release this chart's default image tag targets. Kept in step with
+# pyproject.toml's version at each chart change.
+appVersion: "1.123.1"
+keywords:
+  - particles
+  - knowledge-graph
+  - agent-memory
+home: https://github.com/LinkedParticles/particles-engine-py
+sources:
+  - https://github.com/LinkedParticles/particles-engine-py

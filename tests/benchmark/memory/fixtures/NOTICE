@@ -1,0 +1,22 @@
+Memory-benchmark fixture provenance
+==================================================
+
+longmemeval_oracle_synthetic.json is a SYNTHETIC, format-faithful fixture
+authored for this repository's unit and integration-smoke tiers. It follows
+the published LongMemEval instance format (question_id / question_type /
+question / answer / question_date / haystack_session_ids / haystack_dates /
+haystack_sessions / answer_session_ids; Wu et al., "LongMemEval:
+Benchmarking Chat Assistants on Long-Term Interactive Memory", ICLR 2025),
+but every question, answer, and conversation turn in it was written from
+scratch for this fixture.
+
+It contains NO excerpt of the LongMemEval dataset and is NOT attributed to
+it; do not treat these three questions as LongMemEval data or compare
+numbers produced from them with published LongMemEval results. If this
+fixture is ever replaced with a real 3-question excerpt of the MIT-licensed
+LongMemEval dataset, replace this NOTICE with the dataset's MIT attribution
+§4.
+
+The fixture is oracle-variant-shaped: each question's haystack contains its
+evidence session(s) plus at most one distractor, so the offline tiers stay
+tiny and cheap.

@@ -1,0 +1,822 @@
+# Prose CALIBRATION suite for the general extractor.
+#
+# Read the header of `numismatic-calibration-001.yaml` first — it explains why
+# this directory exists and why its gold sets are not §13.3 gold sets. This file
+# is the third suite in the family and the first for an LLM-driven extractor,
+# and it departs from the other two in two ways that are both deliberate and
+# both explained below: it carries its own source bytes inline, and its gold
+# coverage is TOTAL rather than partial.
+#
+# ---------------------------------------------------------------------------
+# What this suite is for
+# ---------------------------------------------------------------------------
+#
+# `particles extractor calibrate general-extractor` reported "No applicable
+# calibration suites found" from activation until this file landed:
+# the family shipped with suites for the two deterministic extractors and none
+# for the fallback extractor, which is the one that mints most of a real store.
+#
+# The thing a suite CANNOT supply is confidence contrast —
+# "a gold set creates label contrast, but spread is a property of the
+# extractor's output". That is true of a gold set and false of a FIXTURE. What
+# the general extractor states is a function of what it is reading, and the
+# 2026-08-02 measurement behind the ADR (94 of 101 emissions at exactly 1.00,
+# against `prose-article-seed-001`) is a measurement of that suite's fixtures
+# as much as of the extractor. Those fixtures are engineering blog posts,
+# annual results, and an interview: prose whose claims are flatly stated, so
+# the extractor flatly states them back.
+#
+# The four fixtures here are written the other way. Every one is prose in which
+# the author's own certainty varies within the document — a firm count beside an
+# explicitly provisional one, a confirmed territory beside a suspected one, two
+# sourced figures that disagree, an anonymous claim met with an official denial,
+# a range whose width the author explains, an estimate given as odds, a printed
+# correction, a total that does not reconcile. That texture is what a claim
+# miner has to price, and pricing it is what produces a spread.
+#
+# Measured against general-extractor 0.14.0 on anthropic/claude-sonnet-5
+# (2026-08-03, five runs), the four cases emit 66–69 candidates carrying nine to
+# eleven distinct confidence values from 0.40 to 0.97, and **not one saturated
+# emission in any run** — against 94-of-101 saturated on the §13.3 prose suite.
+#(a) the fittable population is therefore N of N every time,
+# where `prose-article-seed-001` leaves 7 of 101.
+#
+# That is the whole reason this file exists, and it is worth stating plainly
+# because the ADR's measurement is read as a property of the extraction
+# prompt: on this evidence it is substantially a property of the source genre.
+# The prompt has a confidence vocabulary; flat prose just never exercises it.
+#
+# ---------------------------------------------------------------------------
+# Why the gold coverage here is TOTAL, against the default
+# ---------------------------------------------------------------------------
+#
+# §2 says target two-thirds to three-quarters of what the extractor emits, and
+# the two deterministic suites do exactly that: each names all but one of its
+# extractor's emissions, and the unnamed one is the negative label the fit
+# learns from. That device works there because those extractors are parsers —
+# they emit the same set every run, so the omission is stable and the resulting
+# base rate (6/7, 5/6) is a fixed property of the file.
+#
+# It does not transfer here, and the reason is worth having written down before
+# someone "fixes" this file to match §2. A deliberate omission labels a claim
+# INCORRECT that the author knows to be correct. A temperature is then regressed
+# onto stated confidence, and what it actually learns is the omission fraction
+# the suite author chose: omit a quarter and the fit sees 75 % accuracy at every
+# confidence level, so it fits the T that maps 0.90 toward 0.75 — a substantial
+# T, improving in-sample ECE, clearing every guard, and persisted.
+# It would then rewrite every future general-extractor confidence, immutably at
+# creation, on the strength of a coverage fraction chosen by hand.
+# That is the failure mode — a fit regressed from evidence that does
+# not mean what the fit takes it to mean — reappearing in the other variable.
+#
+# So every claim these four fixtures support is named below. The intent is that a
+# negative label means what it says — an over-emission or a genuine mis-read,
+# rather than a claim the author chose not to name. That makes the labels honest
+# about the *gold set*, and whatever the fit does with them is honest too.
+#
+# It does NOT make them noise-free, and the § Paraphrase twins section below is
+# the necessary qualification: with the omissions gone, the residual negatives
+# turn out to be mostly the equivalence judge failing to align a reworded
+# restatement of a claim this file already names. Total coverage removes the
+# error the author controls; it does not remove the one the judge introduces.
+#
+# ---------------------------------------------------------------------------
+# What the honest labels actually produce — read this before "fixing" a refusal
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-08-03, anthropic/claude-sonnet-5: the extractor is correct on
+# essentially every claim it emits from these fixtures, including the ones
+# planted to be hard (a printed correction superseding a figure, two depots
+# whose names differ by one word, an ambiguous "the latter", a stated total that
+# does not match the table, a denial of a local report). It navigated all of
+# them, twice. So the label set runs heavily — sometimes entirely — True.
+#
+# Four consecutive `extractor calibrate general-extractor` runs against this
+# file as shipped — the first three `--dry-run`, the fourth a real one:
+#
+#   N=66  62 matched / 4 unmatched  T=0.7418  ECE 0.0853 → 0.0742  would persist
+#   N=68  68 matched / 0 unmatched  T=0.2486  ECE 0.1112 → 0.0319  REFUSED
+#                                                        (degenerate labels)
+#   N=66  63 matched / 3 unmatched  T=0.6877  ECE 0.0724 → 0.0686  would persist
+#   N=66  64 matched / 2 unmatched  T=0.5445  ECE 0.0936 → 0.0456  PERSISTED
+#
+# The fourth row is the one to look at hardest: it cleared all four guards
+#, printed no warning, and wrote T=0.5445 to the extractor record. Run it
+# an hour earlier and the stored value would have been 0.7418, or the run would
+# have refused outright. Nothing in the output tells the operator which of those
+# they got.
+#
+# Two things to take from that table, both load-bearing.
+#
+# **The direction is stable and the magnitude is not.** Every run fits T < 1 —
+# sharpening, the correct direction for an extractor that states 0.60–0.90 on
+# claims that are true. But T ranges over a factor of three and the *verdict*
+# flips between persist and refuse on identical inputs, because the handful of
+# unmatched emissions driving the label contrast are themselves run-to-run
+# wording drift (see § Paraphrase twins). A value persisted here is written
+# immutably at particle creation, so which run an operator happened
+# to execute would permanently set every future confidence. Do not persist a
+# single run of this suite.
+#
+# The table above was measured under the **embedding** judge, which was the
+# verb's default at the time; that default was changed to the LLM judge in
+# 1.121.4 and the spread narrowed without closing: T = 0.6174 and 0.4998 over
+# two runs, both admissible. Two samples is not evidence of stability, and
+# nothing here yet pools across runs — that is's `--runs N` lever,
+# which was deliberately left out of scope. So the rule stands.
+#
+# **A refusal is the correct reading, not a defect in this file.** It says: on
+# well-formed prose this extractor is not overconfident in the way temperature
+# scaling exists to fix. The honest response to an under-confident extractor
+# with essentially no errors to regress against is to store no calibration and
+# keep minting EXTRACTOR_DIRECT particles at the raw stated value (
+# preamble) — which is exactly what the refusal leaves in place.
+#
+# Do NOT respond to that refusal by deleting expectations until a temperature
+# appears. That is the § Why the gold coverage here is TOTAL argument, executed
+# in reverse. If you want this suite to produce a fittable population, the
+# honest lever is FIXTURES THE EXTRACTOR GETS WRONG — add a case, measure it,
+# and name every claim it supports.
+#
+# ---------------------------------------------------------------------------
+# Paraphrase twins — and why a calibration label is noisier than it looks
+# ---------------------------------------------------------------------------
+#
+# Several expectations below are marked `required: false` and restate a
+# neighbouring gold in different words. They are not extra facts. They exist
+# because the equivalence judge is embedding cosine at a 0.80 floor
+# (`equivalence.py`), and an LLM extractor rewords the same claim between runs.
+# Measured on two back-to-back runs of these fixtures, the judge scored these
+# pairs — each a restatement of one claim — below the floor:
+#
+#   0.7915  "The Kestrel Fen Trust expects to publish…" vs "The Trust expects…"
+#   0.7872  "The Cairnwell Residents' Association's tally…" vs "The Association's tally…"
+#   0.7769  "One of Larkspur's largest accounts…" vs "One of the two renewing…"
+#   0.5302  "Two of Larkspur's three largest accounts…" vs "Two of the platform's…"
+#   0.4003  "A stuck data logger was found at station 3." vs the compound gold
+#           that states the recompute and the logger together
+#
+# Every one is a correct emission. Without a twin each becomes an emission that
+# matched no gold — which for §13.3 is a precision ding, and for calibration is
+# a label saying the extractor was WRONG. A temperature regressed against those
+# labels learns that the extractor errs at whatever rate its wording drifts,
+# which is a fact about the judge's threshold and not about the extractor.
+#
+# This is the same shape as the bug that was fixed — a correct claim labelled
+# incorrect for a reason that has nothing to do with correctness — arriving
+# through the judge rather than through `confidence_min`. The twins are the
+# containable half of it; the general problem is not fixable in a suite file and
+# the fix landed in 1.121.4: `extractor calibrate` now defaults to the
+# LLM equivalence judge, which adjudicates the contested [0.65, 0.80) band
+# instead of rejecting it on cosine alone.
+#
+# The twins below are still required, for a reason worth keeping straight. The
+# LLM judge is consulted only *within* that band — `equivalence.py` rejects
+# anything under `llm_prefilter` (0.65) without asking — so of the five measured
+# misses above, the judge now covers three (0.7915, 0.7872, 0.7769) and never
+# sees the other two (0.5302, 0.4003). Those two are what the twins are for.
+# Measured under the fixed default: 66/3 and 65/1 matched, against 62/4 … 68/0
+# under the embedding judge — fewer false negatives, but the run-to-run spread
+# in T did not disappear (0.6174, 0.4998 over two runs), so the
+# "do not persist a single run" rule below still stands.
+#
+# Adding a twin is safe and does not inflate anything: matching is greedy 1:1,
+# so a twin can only ever absorb an emission its sibling did not, and an unused
+# gold is invisible to the calibration label. Add one whenever you observe a run
+# emit a claim this file already names, in words the judge scores below 0.80.
+#
+# ---------------------------------------------------------------------------
+# Why the source bytes are inline rather than `fixture:` references
+# ---------------------------------------------------------------------------
+#
+# The other two calibration suites borrow fixtures from the conformance corpus.
+# These four do not, and the reason is `fixture_corpus_hash`: adding a directory
+# under `tests/conformance/fixtures/` changes the corpus hash that every stored
+# ConformanceReport carries, and all nine baselines under
+# `docs/conformance/baseline/` currently agree on f294b5b1… . Growing the corpus
+# to house a calibration probe would make those nine mutually incomparable and
+# cost a re-capture of each, for no conformance benefit — these fixtures are
+# engineered to elicit hedged confidence, which is not what a field-population
+# contract wants to be measured against. `source_snapshot:` + `inline_content:`
+# is the techspec §13.3 default form and the loader's documented alternative, so
+# the suite is self-contained instead.
+#
+# `confidence_min: 0.0` on every expectation is the rule, and it
+# matters more here than in the sibling suites: this extractor states 0.40 on
+# claims this file asserts are correct, and any real floor would demote them to
+# under-confidence partial matches, which `graded` counts as
+# matched anyway, but the floor would still be a claim about correctness a
+# calibration suite has no business making.
+
+suite_id: prose-calibration-001
+name: Prose calibration suite (general extractor; total gold coverage)
+version: 0.1.0
+domain: general prose
+source_types: [WEB_PAGE]
+published_by: anthropic/particles-sdk
+published_at: 2026-08-03T00:00:00+00:00
+
+cases:
+  # -------------------------------------------------------------------------
+  # Preliminary field note. The genre's whole grammar is graded certainty: a
+  # firm count named as firm, a suspected territory named as suspected, a
+  # published figure the author retracts to "provisional", and an unconfirmed
+  # second-hand sighting with the absence of each corroborating trace spelled
+  # out. Measured: 20 emissions, 0.40–0.97, seven distinct values, none
+  # saturated — the widest spread of the four.
+  # -------------------------------------------------------------------------
+  - case_id: prose-survey-001
+    source_snapshot:
+      snapshot_id: "c0000000-0000-0000-0000-000000000001"
+      captured_at: "2026-06-03T00:00:00+00:00"
+      content_hash: "b9e7c3bda9f4f79a67f5cfd4c2b8b898dae3326386c3c7b33271d7e7ef876830"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-06-03T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Thornlee Marsh transect survey — preliminary note</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/notes">Field notes</a></nav>
+
+        <article>
+          <h1>Thornlee Marsh transect survey: preliminary note</h1>
+          <p class="byline">By Elin Okafor-Sund · 3 June 2026</p>
+
+          <p>The Kestrel Fen Trust completed its ninth annual transect survey of
+          Thornlee Marsh between 12 and 19 May 2026. Eleven transects were walked,
+          the same eleven as in every year since 2018.</p>
+
+          <h2>Counts</h2>
+
+          <p>We logged 214 breeding pairs of reed bunting across the eleven
+          transects. That is a firm count. The marsh harrier figure is not: we
+          recorded four occupied territories with confidence and think there may be
+          a fifth on the northern edge, but that pair was never seen carrying food
+          and we are not counting it.</p>
+
+          <p>Water levels averaged 41 cm across the season, which is roughly a third
+          below the ten-year mean. The exact ten-year mean is being recomputed after
+          we found a stuck logger at station 3, so the 62 cm we published last year
+          should be treated as provisional.</p>
+
+          <h2>The otter question</h2>
+
+          <p>A volunteer reported an otter with two cubs at the eastern sluice on
+          14 May. We have no photograph, no spraint from that stretch, and the
+          Trust's camera trap was offline that week, so the sighting is
+          unconfirmed. If it is right it would be the first otter breeding record
+          for Thornlee since 2011.</p>
+
+          <h2>What comes next</h2>
+
+          <p>We expect to publish the full survey report in September, assuming the
+          logger data can be recovered. Whether the Trust extends the survey to the
+          adjoining Barrow Levels in 2027 has not been decided and depends on
+          funding.</p>
+        </article>
+
+        <footer>© 2026 Kestrel Fen Trust · <a href="/tags/survey">survey</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "The Kestrel Fen Trust completed its ninth annual transect survey of Thornlee Marsh between 12 and 19 May 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Eleven transects were walked during the survey."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Eleven transects were walked during the 2026 Thornlee Marsh survey."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The same eleven transects have been walked every year since 2018."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "214 breeding pairs of reed bunting were logged across the eleven transects."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Four occupied marsh harrier territories were recorded with confidence at Thornlee Marsh."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "There may be a fifth marsh harrier territory on the northern edge of Thornlee Marsh."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The possible fifth marsh harrier pair was never seen carrying food."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Trust is not counting the possible fifth marsh harrier pair as a confirmed territory."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Water levels at Thornlee Marsh averaged 41 cm across the 2026 survey season."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The 41 cm average water level is roughly a third below the ten-year mean."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The exact ten-year mean water level for Thornlee Marsh is being recomputed after a stuck logger was found at station 3."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # Split twin: some runs emit the logger discovery as its own claim. It
+      # scores 0.4003 against the compound gold above — far below the judge's
+      # 0.80 floor — so without this entry a correct emission is labelled
+      # incorrect. See the § Paraphrase twins note in this file's header.
+      - content: "A stuck data logger was found at station 3."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The 62 cm ten-year mean water level figure published last year should be treated as provisional."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A volunteer reported an otter with two cubs at the eastern sluice at Thornlee Marsh on 14 May 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "There is no photograph confirming the reported otter sighting."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "There is no spraint found from the eastern sluice stretch."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "There is no spraint found from the stretch of the reported otter sighting."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The Trust's camera trap was offline during the week of the reported otter sighting."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The otter sighting at Thornlee Marsh is unconfirmed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "If the otter sighting is confirmed, it would be the first otter breeding record for Thornlee Marsh since 2011."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Trust expects to publish the full survey report in September 2026, assuming the logger data can be recovered."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # Paraphrase twin of the line above — identical claim, "the Kestrel Fen
+      # Trust" for "the Trust". Measured cosine between the two: 0.7915.
+      - content: "The Kestrel Fen Trust expects to publish the full survey report in September 2026, assuming the logger data can be recovered."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Whether the Trust extends the survey to the adjoining Barrow Levels in 2027 has not been decided and depends on funding."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      # Split twins: runs vary between one compound claim and two, and between
+      # naming the Trust and not.
+      - content: "Whether the Kestrel Fen Trust will extend the survey to the adjoining Barrow Levels in 2027 has not been decided."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The extension of the survey to Barrow Levels in 2027 depends on funding."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Disputed-figures news item. Two sourced counts of the same quantity that do
+  # not agree, with the reason for the disagreement stated; an anonymous claim
+  # met by an official denial; and one figure both parties agree on, as the
+  # control. Attribution is load-bearing throughout — an emission that strips
+  # it ("the true number is at least 61") asserts as world-fact something the
+  # document explicitly leaves contested, and this gold set does not contain it.
+  # Measured: 14 emissions, 0.70–0.95, four distinct values, none saturated.
+  # -------------------------------------------------------------------------
+  - case_id: prose-dispute-001
+    source_snapshot:
+      snapshot_id: "c0000000-0000-0000-0000-000000000002"
+      captured_at: "2026-03-19T00:00:00+00:00"
+      content_hash: "be0442d66d2735ff14e0b55ed31bc54dfe3d4fac3f898378d6c2d4398e1d3640"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-03-19T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Two counts, one landslip — Aberlaw Messenger</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/local">Local</a></nav>
+
+        <article>
+          <h1>Two counts, one landslip</h1>
+          <p class="byline">By Ines Marchetti · 19 March 2026 · Aberlaw Messenger</p>
+
+          <p>How many homes were damaged by the Cairnwell Brae landslip on 2 March
+          depends on who is counting. Aberlaw District Council put the figure at 47
+          in its situation report of 5 March. The Cairnwell Residents' Association,
+          which has been door-knocking the affected streets, says the true number is
+          at least 61. Neither body has published a street-by-street list.</p>
+
+          <p>The discrepancy appears to turn on what counts as a home. The Council's
+          report says it counted habitable structures only; the Association's
+          spokesperson, Ruth Vance, said their tally includes any property with
+          structural damage, outbuildings included.</p>
+
+          <p>A contractor working on the slope, who asked not to be named, said
+          drainage works scheduled for last autumn were postponed. Aberlaw District
+          Council denies that any works were postponed, and says the drainage
+          programme for the brae was always set to begin in April 2026.</p>
+
+          <p>Nobody was injured in the landslip. Twelve households were placed in
+          temporary accommodation, a figure both the Council and the Association
+          agree on.</p>
+
+          <p>The Council has commissioned an independent geotechnical review, which
+          is expected to report before the end of the year.</p>
+        </article>
+
+        <footer>© 2026 Aberlaw Messenger · <a href="/tags/cairnwell">Cairnwell</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "The Cairnwell Brae landslip occurred on 2 March 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Aberlaw District Council put the figure of homes damaged by the landslip at 47 in its situation report of 5 March."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Cairnwell Residents' Association says the true number of homes damaged by the landslip is at least 61."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Neither Aberlaw District Council nor the Cairnwell Residents' Association has published a street-by-street list of damaged homes."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Council's report counted only habitable structures in its tally of damaged homes."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Association's tally of damaged homes includes any property with structural damage, including outbuildings."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # Paraphrase twin of the line above — identical claim, the Association
+      # named in full. Measured cosine between the two: 0.7872.
+      - content: "The Cairnwell Residents' Association's tally includes any property with structural damage, including outbuildings."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      # The source names her; some runs reify the attribution as its own claim.
+      - content: "Ruth Vance is the spokesperson for the Cairnwell Residents' Association."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "A contractor working on the slope said drainage works scheduled for last autumn were postponed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Aberlaw District Council denies that any drainage works were postponed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Aberlaw District Council says the drainage programme for Cairnwell Brae was always set to begin in April 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Nobody was injured in the Cairnwell Brae landslip."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Twelve households were placed in temporary accommodation following the landslip."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Council and the Association agree on the figure of twelve households placed in temporary accommodation."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Council has commissioned an independent geotechnical review."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The independent geotechnical review is expected to report before the end of the year."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+  # -------------------------------------------------------------------------
+  # Internal planning memo. The author prices his own uncertainty explicitly —
+  # a recorded peak beside a projection, an estimate given as odds ("a little
+  # over half"), a cost range with the reason for its width stated, a deferred
+  # decision and a rejected alternative. The two forward-looking claims are
+  # ALEATORY: the residual uncertainty is about how the world turns out, not
+  # about what the memo said.
+  # Measured: 15 emissions, 0.60–0.95, five distinct values, none saturated.
+  # -------------------------------------------------------------------------
+  - case_id: prose-memo-001
+    source_snapshot:
+      snapshot_id: "c0000000-0000-0000-0000-000000000003"
+      captured_at: "2026-07-08T00:00:00+00:00"
+      content_hash: "f87145f559a3ca5a17d7c8626a83fcc357110f0e531d02975f199483ca824d53"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-07-08T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Q3 capacity planning — draft for comment</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/memos">Memos</a></nav>
+
+        <article>
+          <h1>Q3 capacity planning: draft for comment</h1>
+          <p class="byline">Halvard Ceder, platform team · 8 July 2026</p>
+
+          <p>Peak concurrent sessions on Larkspur reached 38,400 on 21 June, the
+          highest we have recorded. The current cluster is provisioned for 45,000.</p>
+
+          <p>Growth over the last two quarters has averaged 9 percent per quarter.
+          If that holds we cross 45,000 in early Q4. It may not hold: two of our
+          three largest accounts renew in September, and one of them has told us it
+          is evaluating alternatives, so a flat quarter is a real possibility. I put
+          the odds of crossing 45,000 before January at a little over half.</p>
+
+          <p>Adding a fourth availability zone would take about six weeks and cost
+          between $40,000 and $55,000 a year in standing capacity. The range is wide
+          because reserved-instance pricing for the region has not been published
+          for 2027.</p>
+
+          <p>My recommendation is to defer the fourth zone until after the September
+          renewals and instead raise the autoscaling ceiling, which costs nothing
+          and takes an afternoon. We considered buying reserved capacity now and
+          rejected it: it locks in a commitment against a demand curve we do not
+          trust.</p>
+        </article>
+
+        <footer>Internal · <a href="/tags/capacity">capacity</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "Peak concurrent sessions on Larkspur reached 38,400 on 21 June 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The 38,400 peak concurrent sessions figure is the highest ever recorded for Larkspur."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The current Larkspur cluster is provisioned for 45,000 concurrent sessions."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Growth in peak concurrent sessions on Larkspur over the last two quarters has averaged 9 percent per quarter."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "If 9 percent quarterly growth continues, Larkspur will cross 45,000 concurrent sessions in early Q4."
+        confidence_min: 0.0
+        uncertainty_nature: ALEATORY
+        required: true
+      - content: "Two of the platform's three largest accounts have contracts renewing in September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "One of the two renewing largest accounts has told the platform team it is evaluating alternatives."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # Paraphrase twins of the two lines above. Runs vary between naming the
+      # product ("Larkspur's largest accounts") and the team ("the platform's"),
+      # and the judge scores those variants 0.5302 and 0.7769 against the golds
+      # they restate — both below the 0.80 floor, both the same claim.
+      - content: "Two of Larkspur's three largest accounts renew in September."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "One of Larkspur's largest accounts has told the platform team it is evaluating alternatives."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Halvard Ceder estimates the odds of Larkspur crossing 45,000 concurrent sessions before January 2027 at a little over half."
+        confidence_min: 0.0
+        uncertainty_nature: ALEATORY
+        required: false
+      - content: "The author estimates the odds of crossing 45,000 concurrent sessions before January at a little over half."
+        confidence_min: 0.0
+        uncertainty_nature: ALEATORY
+        required: false
+      # The dominant drift axis in this case: the extractor includes the
+      # product name on these four claims in some runs and omits it in others,
+      # and the judge scores the two variants below its 0.80 floor. Both
+      # phrasings are named so neither reading is labelled an error.
+      - content: "Adding a fourth availability zone for Larkspur would take about six weeks."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Adding a fourth availability zone would take about six weeks."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Adding a fourth availability zone for Larkspur would cost between $40,000 and $55,000 a year in standing capacity."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Adding a fourth availability zone would cost between $40,000 and $55,000 a year in standing capacity."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Reserved-instance pricing for the region has not been published for 2027."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Raising the autoscaling ceiling for Larkspur costs nothing."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Raising the autoscaling ceiling costs nothing."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Raising the autoscaling ceiling for Larkspur takes an afternoon."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Raising the autoscaling ceiling takes an afternoon."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The platform team considered buying reserved capacity now."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The platform team rejected buying reserved capacity now because it locks in a commitment against a demand curve they do not trust."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+  # -------------------------------------------------------------------------
+  # Corrected operations post — the deliberately hard case. Five traps, each a
+  # documented claim-mining failure mode: a printed correction that supersedes
+  # a figure (the superseded 18,900-for-Ledbury-North reading is NOT in this
+  # gold set), two entities whose names differ by one word, an ambiguous "the
+  # latter", a stated total the author says does not reconcile with the table,
+  # and a denial of a local report. Measured 2026-08-03 the extractor cleared
+  # all five; the case stays because the day it stops clearing them is the day
+  # this suite acquires the honest negatives it currently lacks.
+  # Measured: 18 emissions, 0.60–0.95, four distinct values, none saturated.
+  # -------------------------------------------------------------------------
+  - case_id: prose-errata-001
+    source_snapshot:
+      snapshot_id: "c0000000-0000-0000-0000-000000000004"
+      captured_at: "2026-04-11T00:00:00+00:00"
+      content_hash: "34da17bd22d3b6542631ca37ca13494548645de937e30f04fbf867ec0067342b"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-04-11T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Depot throughput, Q1 2026 — with corrections</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/ops">Operations</a></nav>
+
+        <article>
+          <h1>Depot throughput, Q1 2026 (with corrections)</h1>
+          <p class="byline">Marek Oyelaran · posted 2 April 2026, revised 11 April 2026</p>
+
+          <p class="correction"><strong>Correction, 11 April:</strong> the figure
+          first published for Ledbury North was 18,900 pallets. That was the figure
+          for Ledbury North East. Ledbury North handled 12,400. The paragraph below
+          has been rewritten; the totals table has not.</p>
+
+          <p>Ledbury North handled 12,400 pallets in Q1. Ledbury North East, which
+          opened in November, handled 18,900. The two sites share a yard but are
+          separately staffed, and only the latter runs a night shift.</p>
+
+          <p>Across all five depots we moved 61,200 pallets. Readers will notice
+          this does not match the totals table, which still sums to 67,700; the
+          table has not yet been rebuilt and should not be quoted.</p>
+
+          <p>Damage claims ran at 0.4 percent of pallets moved, excluding the
+          Ledbury sites. Including them the rate was 0.6 percent. We report the
+          lower figure in the board pack, which is a choice I have been asked to
+          justify and cannot.</p>
+
+          <p>Contrary to what was reported locally, no depot closed during the
+          quarter. The Marchwood site suspended inbound receiving for nine days in
+          February and has since resumed.</p>
+        </article>
+
+        <footer>© 2026 · <a href="/tags/throughput">throughput</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "The figure first published for Ledbury North was 18,900 pallets."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The 18,900 pallets figure was actually the figure for Ledbury North East."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ledbury North handled 12,400 pallets in Q1."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ledbury North East handled 18,900 pallets in Q1."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ledbury North East opened in November."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ledbury North and Ledbury North East share a yard."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ledbury North and Ledbury North East are separately staffed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Only Ledbury North East runs a night shift."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Across all five depots, 61,200 pallets were moved in Q1 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The totals table in the report sums to 67,700 pallets."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The totals table has not yet been rebuilt to reflect the correction."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Damage claims ran at 0.4 percent of pallets moved, excluding the Ledbury sites."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Including the Ledbury sites, the damage claims rate was 0.6 percent of pallets moved."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The board pack reports the lower damage claims figure (0.4 percent)."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # The author's admission about that choice. The source states it in the
+      # first person ("a choice I have been asked to justify and cannot"), and
+      # runs that reify it attribute it to him by name.
+      - content: "Marek Oyelaran has been asked to justify the choice to report the lower damage claim figure and cannot do so."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "It was reported locally that a depot closed during the quarter."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "No depot closed during the quarter."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Marchwood site suspended inbound receiving for nine days in February."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Marchwood site has since resumed inbound receiving."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+metrics:
+  - name: calibration_error
+    definition: ECE (10 bins) — see particles/benchmark/metrics.py

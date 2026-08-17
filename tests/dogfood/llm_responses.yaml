@@ -1,0 +1,154 @@
+# Mock LLM responses for the dogfood corpus.
+#
+# The mock LLM intercepts synthesis calls and judge calls. For each
+# subject:
+#   * ``synthesis`` is the prose body the mock returns when it sees the
+#     synthesis prompt for that subject. ``{p0}``, ``{p1}`` etc.
+#     reference particles in the order they're declared in corpus.yaml;
+#     the test loader substitutes the particle's actual 8-char short ID
+#     at fixture-load time so the body's `[^p-{short}]` citations
+#     resolve.
+#   * ``judge_verdicts`` is the JSON array the mock returns when it
+#     sees the Layer B judge prompt for that subject's body. Static —
+#     no particle-ID substitution needed.
+#
+# Subjects below the synthesis-skip threshold (Mileva, 1 particle) are
+# omitted — the synthesis path never fires for them.
+#
+# The default-allow rule: any subject NOT in this file but encountered
+# during synthesis gets a fallback "cite every particle once" response.
+# So if you add a subject to corpus.yaml and want to test a specific
+# synthesis outcome, add an entry here; otherwise the default applies.
+
+TagSpaces:
+  synthesis: |
+    # TagSpaces
+
+    TagSpaces is a cross-platform file tagger that stores tags in
+    sidecar JSON files next to each tagged file [^p-{p0}]. It runs
+    on macOS, Windows, Linux, iOS, and Android [^p-{p1}].
+
+    The application supports tag hierarchies through a configurable
+    tag library [^p-{p2}], and the Pro edition adds AI tagging via a
+    local model [^p-{p3}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "particle backs sidecar claim"}
+    - {id: 1, verdict: "supports", reason: "platform list matches"}
+    - {id: 2, verdict: "supports", reason: "tag-library claim backed"}
+    - {id: 3, verdict: "supports", reason: "Pro AI tagging backed"}
+
+"1 Pfennig (1948-1950) GDR":
+  synthesis: |
+    # 1 Pfennig (1948-1950) GDR
+
+    The 1 Pfennig (1948-1950) [[German Democratic Republic]] coin is
+    composed of aluminium and weighs 0.75 grams [^p-{p0}]. Its
+    obverse depicts an ear of wheat [^p-{p1}]. The coin was issued
+    from 1948 to 1950 [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "composition + weight backed"}
+    - {id: 1, verdict: "supports", reason: "obverse design backed"}
+    - {id: 2, verdict: "supports", reason: "issue dates backed"}
+
+Aluminium:
+  # Skipped at synthesis_min_particles=3 threshold (only 1 particle).
+  # Included in this file as a sanity hook — should never be invoked.
+  synthesis: |
+    # Aluminium
+
+    Aluminium is a silvery-white, lightweight metal [^p-{p0}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "metallic description backed"}
+
+"German Democratic Republic":
+  # Single-particle subject — also skipped at default threshold.
+  synthesis: |
+    # German Democratic Republic
+
+    The German Democratic Republic was founded in 1949 [^p-{p0}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "founding date backed"}
+
+"u/AlgoTrader":
+  synthesis: |
+    # u/AlgoTrader
+
+    The Reddit user u/AlgoTrader shared a paper-trading framework on
+    r/algotrading [^p-{p0}]. The framework uses backtesting against
+    historical OHLCV data [^p-{p1}], and the author has contributed
+    to open-source quant tooling on GitHub [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "framework claim backed"}
+    - {id: 1, verdict: "supports", reason: "backtesting claim backed"}
+    - {id: 2, verdict: "supports", reason: "github contribution backed"}
+
+"github:karpathy":
+  synthesis: |
+    # github:karpathy
+
+    github:karpathy authored nanoGPT, a minimal GPT training
+    repository [^p-{p0}]. They co-founded [[OpenAI]] and previously
+    served as Director of AI at Tesla [^p-{p1}]. They publish
+    educational machine-learning content on YouTube [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "nanoGPT claim backed"}
+    - {id: 1, verdict: "supports", reason: "OpenAI + Tesla claim backed"}
+    - {id: 2, verdict: "supports", reason: "YouTube content backed"}
+
+"DPC Messenger":
+  synthesis: |
+    # DPC Messenger
+
+    DPC Messenger is a messaging system with a particle-style
+    knowledge graph. It was shipped by [[Mikhashev]] on May 13, 2026
+    as version 0.25.0 [^p-{p0}]. The project switched from Git's
+    object model to SQLite for its knowledge-graph storage [^p-{p1}].
+
+    For named-entity recognition the system uses GLiNER in a
+    zero-shot configuration [^p-{p2}], and the knowledge graph
+    participates as a retrieval channel alongside FAISS and BM25 [^p-{p3}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "release claim backed"}
+    - {id: 1, verdict: "supports", reason: "storage switch backed"}
+    - {id: 2, verdict: "supports", reason: "GLiNER claim backed"}
+    - {id: 3, verdict: "supports", reason: "retrieval channel backed"}
+
+BoringSubject:
+  # Three ACTIVE particles backing the article (the two SUPERSEDED
+  # ones must not appear). Tests that status filtering excludes
+  # SUPERSEDED particles from synthesis.
+  synthesis: |
+    # BoringSubject
+
+    BoringSubject was launched in 2020 [^p-{p0}] and reached version
+    2.0 in 2022 [^p-{p1}]. The project is open-source under the MIT
+    license [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "launch date backed"}
+    - {id: 1, verdict: "supports", reason: "v2 date backed"}
+    - {id: 2, verdict: "supports", reason: "license backed"}
+
+Mikhashev:
+  synthesis: |
+    # Mikhashev
+
+    Mikhashev maintains the [[DPC Messenger]] project [^p-{p0}] and
+    has shipped multiple iterations of it in 2026 [^p-{p1}]. They
+    presented the architecture at a community talk [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "maintainer claim backed"}
+    - {id: 1, verdict: "supports", reason: "iteration claim backed"}
+    - {id: 2, verdict: "supports", reason: "talk claim backed"}
+
+"Albert Einstein":
+  synthesis: |
+    # Albert Einstein
+
+    Albert Einstein developed the theory of general relativity,
+    published in 1915 [^p-{p0}]. He received the Nobel Prize in
+    Physics in 1921 for the photoelectric effect [^p-{p1}], and
+    emigrated from Germany to the United States in 1933 [^p-{p2}].
+  judge_verdicts:
+    - {id: 0, verdict: "supports", reason: "relativity claim backed"}
+    - {id: 1, verdict: "supports", reason: "Nobel claim backed"}
+    - {id: 2, verdict: "supports", reason: "emigration claim backed"}

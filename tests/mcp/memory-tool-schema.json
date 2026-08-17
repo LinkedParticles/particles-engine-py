@@ -1,0 +1,641 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create multiple new entities in the knowledge graph",
+    "inputSchema": {
+      "properties": {
+        "entities": {
+          "items": {
+            "properties": {
+              "entityType": {
+                "description": "The type of the entity",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name of the entity",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observation contents associated with the entity",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "entityType",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entities"
+      ],
+      "type": "object"
+    },
+    "name": "create_entities",
+    "outputSchema": {
+      "properties": {
+        "entities": {
+          "items": {
+            "properties": {
+              "entityType": {
+                "description": "The type of the entity",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name of the entity",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observation contents associated with the entity",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "entityType",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entities"
+      ],
+      "type": "object"
+    },
+    "title": "Create Entities"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice",
+    "inputSchema": {
+      "properties": {
+        "relations": {
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "relations"
+      ],
+      "type": "object"
+    },
+    "name": "create_relations",
+    "outputSchema": {
+      "properties": {
+        "relations": {
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "relations"
+      ],
+      "type": "object"
+    },
+    "title": "Create Relations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Add new observations to existing entities in the knowledge graph",
+    "inputSchema": {
+      "properties": {
+        "observations": {
+          "items": {
+            "properties": {
+              "contents": {
+                "description": "An array of observation contents to add",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "entityName": {
+                "description": "The name of the entity to add the observations to",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entityName",
+              "contents"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "observations"
+      ],
+      "type": "object"
+    },
+    "name": "add_observations",
+    "outputSchema": {
+      "properties": {
+        "results": {
+          "items": {
+            "properties": {
+              "addedObservations": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "entityName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entityName",
+              "addedObservations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "results"
+      ],
+      "type": "object"
+    },
+    "title": "Add Observations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Delete multiple entities and their associated relations from the knowledge graph Backed by a Particles store: this retracts with an audit trail rather than hard-deleting, so the item stops appearing in reads while its history survives.",
+    "inputSchema": {
+      "properties": {
+        "entityNames": {
+          "description": "An array of entity names to delete",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entityNames"
+      ],
+      "type": "object"
+    },
+    "name": "delete_entities",
+    "outputSchema": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success",
+        "message"
+      ],
+      "type": "object"
+    },
+    "title": "Delete Entities"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Delete specific observations from entities in the knowledge graph Backed by a Particles store: this retracts with an audit trail rather than hard-deleting, so the item stops appearing in reads while its history survives.",
+    "inputSchema": {
+      "properties": {
+        "deletions": {
+          "items": {
+            "properties": {
+              "entityName": {
+                "description": "The name of the entity containing the observations",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observations to delete",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "entityName",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "deletions"
+      ],
+      "type": "object"
+    },
+    "name": "delete_observations",
+    "outputSchema": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success",
+        "message"
+      ],
+      "type": "object"
+    },
+    "title": "Delete Observations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Delete multiple relations from the knowledge graph Backed by a Particles store: this retracts with an audit trail rather than hard-deleting, so the item stops appearing in reads while its history survives.",
+    "inputSchema": {
+      "properties": {
+        "relations": {
+          "description": "An array of relations to delete",
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "relations"
+      ],
+      "type": "object"
+    },
+    "name": "delete_relations",
+    "outputSchema": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success",
+        "message"
+      ],
+      "type": "object"
+    },
+    "title": "Delete Relations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Read the entire knowledge graph Backed by a Particles store: results are capped for context safety and any truncation is disclosed in an extra text block.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "read_graph",
+    "outputSchema": {
+      "properties": {
+        "entities": {
+          "items": {
+            "properties": {
+              "entityType": {
+                "description": "The type of the entity",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name of the entity",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observation contents associated with the entity",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "entityType",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entities",
+        "relations"
+      ],
+      "type": "object"
+    },
+    "title": "Read Graph"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Search for nodes in the knowledge graph based on a query Backed by a Particles store: results are capped for context safety and any truncation is disclosed in an extra text block.",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "description": "The search query to match against entity names, types, and observation content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search_nodes",
+    "outputSchema": {
+      "properties": {
+        "entities": {
+          "items": {
+            "properties": {
+              "entityType": {
+                "description": "The type of the entity",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name of the entity",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observation contents associated with the entity",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "entityType",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entities",
+        "relations"
+      ],
+      "type": "object"
+    },
+    "title": "Search Nodes"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Open specific nodes in the knowledge graph by their names Backed by a Particles store: results are capped for context safety and any truncation is disclosed in an extra text block.",
+    "inputSchema": {
+      "properties": {
+        "names": {
+          "description": "An array of entity names to retrieve",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "names"
+      ],
+      "type": "object"
+    },
+    "name": "open_nodes",
+    "outputSchema": {
+      "properties": {
+        "entities": {
+          "items": {
+            "properties": {
+              "entityType": {
+                "description": "The type of the entity",
+                "type": "string"
+              },
+              "name": {
+                "description": "The name of the entity",
+                "type": "string"
+              },
+              "observations": {
+                "description": "An array of observation contents associated with the entity",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "entityType",
+              "observations"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "items": {
+            "properties": {
+              "from": {
+                "description": "The name of the entity where the relation starts",
+                "type": "string"
+              },
+              "relationType": {
+                "description": "The type of the relation",
+                "type": "string"
+              },
+              "to": {
+                "description": "The name of the entity where the relation ends",
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "relationType"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entities",
+        "relations"
+      ],
+      "type": "object"
+    },
+    "title": "Open Nodes"
+  }
+]

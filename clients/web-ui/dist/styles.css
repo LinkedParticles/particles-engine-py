@@ -1,0 +1,795 @@
+/*
+ * Particles web-UI styles.
+ *
+ * Mobile-first, single-column. One shell — the top nav's Queue / Query /
+ * Graph tabs plus the global deposit & settings actions — over per-route
+ * views: the swipeable curation card stack, the query surface
+ *, and the scoped epistemic graph.
+ *
+ * Colour, type, space and radius come from the design-system tokens
+ * (design/tokens.css, copied into dist/ by the build and loaded before this
+ * file). Every value below is a --p-* token or an alias of one; no literal
+ * colour lives here. Light is the default and dark follows the OS, or the
+ * operator's explicit choice stamped as <html data-theme="light|dark"> by
+ * src/theme.ts (Settings → Appearance).
+ */
+:root {
+  /* Legacy aliases — the names this stylesheet grew up with, now pointing at
+     the tokens. New rules should use the --p-* names directly. */
+  --bg: var(--p-page);
+  --surface: var(--p-surface);
+  --surface-2: var(--p-surface-2);
+  --text: var(--p-text);
+  --muted: var(--p-text-muted);
+  --accent: var(--p-accent);
+  --ok: var(--p-green);
+  --warn: var(--p-amber);
+  --danger: var(--p-red);
+  --border: var(--p-border);
+  --radius: var(--p-radius-lg);
+  --pad: var(--p-space-4);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 var(--p-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: max(env(safe-area-inset-top), 12px) var(--pad)
+    max(env(safe-area-inset-bottom), 12px);
+  min-height: 100vh;
+}
+
+/* --- Shell nav (Queue / Query / Graph + global actions) ------ */
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+.topnav .brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px 7px 4px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+  user-select: none;
+}
+.topnav .brand-mark {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+/* On a phone the nav carries the mark, three tabs, Deposit and the gear, and
+   they do not fit: measured at 375px the row wanted 389px in a 343px box and
+   pushed the settings gear off-screen entirely — the app's only route back to
+   settings, unreachable. The words give way, since each is doubled by a glyph
+   (the mark, the ＋) or by the tab strip beside it; the tabs and both actions
+   stay. `flex-wrap` is deliberately not the answer: a nav that reflows to two
+   rows shifts every route's content down on the narrowest screens. */
+@media (max-width: 460px) {
+  .topnav {
+    gap: 3px;
+  }
+  .topnav .brand-name,
+  .topnav .navbtn-label {
+    display: none;
+  }
+  .topnav .brand {
+    padding-right: 2px;
+  }
+  .topnav .tab {
+    padding: 7px 9px;
+  }
+}
+.topnav .tab {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 7px 12px;
+  border-radius: 10px;
+}
+.topnav .tab.active {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.topnav .spacer {
+  flex: 1;
+}
+.topnav .navbtn {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+/* The gear addresses a route, so it shows the same "you are here" the tabs do. */
+.topnav .navbtn.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* --- Header / session ---------------------------------------------------- */
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px 16px;
+}
+.header h1 {
+  font-size: 1.15rem;
+  margin: 0;
+}
+.session-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 4px 12px;
+}
+.controls select,
+.controls button {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+}
+.controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* --- Card stack ---------------------------------------------------------- */
+.stack {
+  position: relative;
+  min-height: 320px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--pad);
+  box-shadow: var(--p-shadow-2);
+  touch-action: pan-y;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+  will-change: transform;
+}
+.card .kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: capitalize;
+}
+.card .kind .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.card .leverage {
+  float: right;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.card .diagnostic {
+  margin: 12px 0;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.card .refs {
+  color: var(--muted);
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+.card .refs a {
+  color: var(--accent);
+  text-decoration: none;
+}
+/* Per-particle brief: the claim text + a subject/confidence/status
+   meta line, so the card carries what a gesture needs to be judged. */
+.card .refs .particle {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.card .refs .particle .claim {
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+.card .refs .particle .particle-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+/* The LLM judge's advisory same-claim verdict on a duplicate-pair card
+   : rendered under the brief so the merge decision reads the model's
+   verdict, not raw cosine. */
+.card .refs .verdict {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+/* --- Gestures ------------------------------------------------------------ */
+.gestures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.gesture {
+  flex: 1 1 auto;
+  min-width: 88px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.gesture:active {
+  transform: scale(0.97);
+}
+.gesture.primary {
+  background: var(--accent);
+  color: var(--p-on-accent);
+  border-color: transparent;
+}
+.gesture.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.gesture[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.gesture .note {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* --- States -------------------------------------------------------------- */
+.banner {
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 8px 4px 16px;
+  font-size: 0.9rem;
+}
+.banner.error {
+  background: var(--p-red-soft);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+.banner.info {
+  background: var(--p-accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.banner.readonly {
+  background: var(--p-amber-soft);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+/* Clickable subject ids inside error banners (graph scope suggestions). */
+.banner .subject-link {
+  color: inherit;
+  text-decoration: underline dotted;
+  cursor: pointer;
+  font-family: var(--p-font-mono);
+  font-size: 0.82em;
+  word-break: break-all;
+}
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 64px 16px;
+}
+.empty .big {
+  font-size: 2rem;
+}
+
+/* --- Settings ------------------------------------------------------------ */
+.settings {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--pad);
+}
+.settings h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+.field {
+  margin: 14px 0;
+}
+.field label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.field input,
+.field select {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 12px;
+  font-size: 1rem;
+}
+.field .hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.btn {
+  flex: 1;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn.primary {
+  background: var(--accent);
+  color: var(--p-on-accent);
+  border-color: transparent;
+}
+
+/* --- Compose sheet (supersede / comment / deposit / confirm) ------------- */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--p-backdrop);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 10;
+}
+.sheet {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface);
+  border-top-left-radius: 20px;
+  border-top-right-radius: 20px;
+  padding: var(--pad)
+    var(--pad)
+    max(env(safe-area-inset-bottom), var(--pad));
+}
+.sheet h3 {
+  margin: 4px 0 12px;
+}
+.sheet textarea,
+.sheet input,
+.sheet select {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 12px;
+  font-size: 1rem;
+  font-family: inherit;
+}
+.sheet textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+/* --- Query route -------------------------------------------- */
+.query-form {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+.query-form input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 12px;
+  font-size: 1rem;
+}
+.query-form .btn {
+  flex: 0 0 auto;
+  min-width: 84px;
+}
+.query-progress {
+  color: var(--muted);
+  padding: 24px 4px;
+  font-size: 0.9rem;
+}
+.query-progress .stage::after {
+  content: "";
+  display: inline-block;
+  width: 1.2em;
+  animation: dots 1.2s steps(4, end) infinite;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+@keyframes dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "..."; }
+}
+.answer {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--pad);
+}
+.answer-text {
+  white-space: pre-wrap;
+}
+.query-actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+.query-actions .btn {
+  flex: 0 0 auto;
+  text-decoration: none;
+  text-align: center;
+}
+.cited-heading {
+  font-size: 0.95rem;
+  margin: 14px 0 4px;
+}
+.query-results .prow {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  background: var(--surface);
+  font-size: 0.9rem;
+}
+.query-results .prow .content {
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.query-results .chip {
+  display: inline-block;
+  border-radius: 3px;
+  padding: 0 5px;
+  font-size: 0.66rem;
+  margin-right: 5px;
+  color: var(--p-on-status);
+  background: var(--p-slate);
+}
+.query-results .chip.ACTIVE {
+  background: var(--p-status-active);
+  color: var(--p-on-accent);
+}
+.query-results .chip.contested {
+  background: var(--p-badge-contested);
+  color: var(--p-on-accent);
+}
+.query-results .bar {
+  height: 5px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  margin: 3px 0 1px;
+}
+.query-results .bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.query-results .kv {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.subject-chips {
+  margin-top: 5px;
+}
+.subject-chip {
+  display: inline-block;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  padding: 2px 9px;
+  margin: 0 5px 4px 0;
+  cursor: pointer;
+}
+
+/* --- Graph route ------------------------------ */
+/* The app column is 560px for the card feed; the graph deserves the window. */
+.app:has(.graph-view) {
+  max-width: 1100px;
+}
+.graph-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 2px 4px 8px;
+}
+.graph-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.graph-head label.hist {
+  color: var(--muted);
+  font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.asof-scrub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 4px 10px;
+}
+.asof-scrub .scrub-track {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.asof-scrub input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+/* Explicit belief-change tick marks under the track (native datalist ticks
+   are invisibly faint on a dark theme). Clickable: jump to that instant. */
+.asof-scrub .asof-ticks {
+  position: relative;
+  height: 10px;
+}
+.asof-scrub .asof-ticks .tick {
+  position: absolute;
+  top: 0;
+  width: 12px;
+  height: 10px;
+  margin-left: -6px;
+  cursor: pointer;
+}
+.asof-scrub .asof-ticks .tick::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 0;
+  width: 2px;
+  height: 7px;
+  background: var(--warn);
+  border-radius: 1px;
+}
+.asof-scrub .asof-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  min-width: 110px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.graph-wrap {
+  display: flex;
+  gap: 0;
+  min-height: 420px;
+  height: 62vh;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.graph-wrap .cy {
+  flex: 1;
+  min-width: 0;
+}
+.gpanel {
+  display: none;
+  width: 340px;
+  max-width: 45%;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.gpanel.open {
+  display: block;
+}
+.gpanel h2 {
+  font-size: 0.95rem;
+  margin: 0 0 4px;
+}
+.gpanel .sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.gpanel code {
+  font-size: 0.72rem;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+  user-select: all;
+}
+.gpanel a {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.gpanel .prow {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  margin: 6px 0;
+  font-size: 0.85rem;
+}
+.gpanel .prow.ghost {
+  opacity: 0.62;
+  border-style: dashed;
+}
+.gpanel .prow.hit {
+  border-color: var(--accent);
+  border-width: 2px;
+}
+.gpanel .prow .content {
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.gpanel .chip {
+  display: inline-block;
+  border-radius: 3px;
+  padding: 0 5px;
+  font-size: 0.66rem;
+  margin-right: 5px;
+  color: var(--p-on-status);
+  background: var(--p-slate);
+  vertical-align: 1px;
+}
+.gpanel .chip.ACTIVE {
+  background: var(--p-status-active);
+  color: var(--p-on-accent);
+}
+.gpanel .chip.SUPERSEDED {
+  background: var(--p-status-superseded);
+}
+.gpanel .chip.RETRACTED {
+  background: var(--p-status-retracted);
+}
+.gpanel .chip.PROVENANCE_STALE {
+  background: var(--p-status-provenance-stale);
+  color: var(--p-on-accent);
+}
+.gpanel .chip.contested {
+  background: var(--p-badge-contested);
+  color: var(--p-on-accent);
+}
+.gpanel .bar {
+  height: 5px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  margin: 3px 0 1px;
+}
+.gpanel .bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.gpanel .kv {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.gpanel .kv.contested-kv {
+  color: var(--warn);
+  word-break: break-all;
+}
+.gpanel .chain {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.graph-legend {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.graph-legend span {
+  margin-right: 12px;
+  white-space: nowrap;
+}
+.graph-legend b {
+  color: var(--text);
+  font-weight: 600;
+}
+@media (max-width: 700px) {
+  .graph-wrap {
+    flex-direction: column;
+    height: auto;
+  }
+  .graph-wrap .cy {
+    height: 48vh;
+  }
+  .gpanel {
+    width: auto;
+    max-width: none;
+    max-height: 40vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* Diagnostics footer: PWA build + engine version. */
+.build-info {
+  margin: 16px auto 8px;
+  max-width: 640px;
+  padding: 0 16px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+  opacity: 0.7;
+  word-break: break-all;
+}
+
+/* Inline "knowledge consulted" graph on the query page:
+   the shared render, sized more modestly than the full Browse route. */
+.inline-graph .graph-wrap {
+  height: 48vh;
+  min-height: 320px;
+  margin-top: 8px;
+}
+.inline-graph > .subject-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}

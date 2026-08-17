@@ -1,0 +1,72 @@
+# Wikidata seed benchmark.
+#
+# Built on the `wikidata-entity-001` conformance fixture. Like `rdf-seed-001`
+# and unlike the LLM-driven suites, the expected set is *exhaustive and exact*:
+# the extractor is a deterministic reader of a fixed blob, so precision below
+# 1.0 means it emitted something the entity does not state, and recall below
+# 1.0 means it dropped a statement.
+#
+# One caveat this suite does not share with `rdf-seed-001`: the `content`
+# strings below embed English labels the extractor fetches from the Wikibase
+# REST API (a Wikibase entity blob carries labels for itself and for nothing it
+# references). Run it with network available. A label edit upstream at Wikidata
+# will move a `content` string here — which is the honest signal that the
+# verbalized half of a structure-canonical particle tracks its source, while
+# the triple half does not move at all.
+#
+# confidence_min pins the rank tiers from `wikidata.rank_confidence`: 0.99 for a
+# preferred-rank statement, 0.85 for a normal one. Deprecated-rank statements
+# are not emitted at all, matching Wikidata's own rule that they get no truthy
+# triple — hence no case for one.
+
+suite_id: wikidata-seed-001
+name: Wikidata entity seed benchmark
+version: 0.1.0
+domain: Wikidata
+source_types: [WIKIDATA_API]
+published_by: anthropic/particles-sdk
+published_at: 2026-07-27T00:00:00+00:00
+
+cases:
+  - case_id: wikidata-entity-001
+    fixture: wikidata-entity-001
+    expected:
+      # An item value: the object is a `wd:` IRI, so the particle is a
+      # two-subject graph edge (Q42 ↔ Q350) and the object's own English label
+      # does the verbalizing.
+      - content: "Douglas Adams place of birth: Cambridge"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A time value at day precision, and the only preferred-rank statement in
+      # the fixture — so this case pins the rank→confidence tier as well as the
+      # `xsd:dateTime` normalisation behind it.
+      - content: "Douglas Adams date of birth: 11 March 1952"
+        confidence_min: 0.99
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Monolingual text tagged `en`: must NOT pick up the "(lang)" suffix that
+      # flags non-English text.
+      - content: "Douglas Adams birth name: Douglas Noel Adams"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A `url` value — serialised as an IRI node in the triple, and lexically
+      # in the prose.
+      - content: "Douglas Adams official website: https://douglasadams.com/"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # An external-id: an untyped literal, rendered as-is.
+      - content: "Douglas Adams VIAF ID: 113230702"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The `commonsMedia` statement (P18) is deliberately absent: it is in both
+      # `_SKIP_PROPERTY_IDS` and `_SKIP_DATA_TYPES`, so emitting it would be a
+      # precision failure this suite is meant to catch.

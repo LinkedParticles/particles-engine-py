@@ -1,0 +1,107 @@
+[
+  {
+    "question_id": "synthetic-001",
+    "question_type": "single-session-user",
+    "question": "What breed is the user's dog?",
+    "answer": "A border collie.",
+    "question_date": "2023/06/01 (Thu) 10:00",
+    "haystack_session_ids": ["answer_a1", "noans_d1"],
+    "haystack_dates": ["2023/05/20 (Sat) 02:21", "2023/05/22 (Mon) 14:05"],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "I just adopted a dog! She's a border collie named Pixel and she is two years old.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Congratulations on adopting Pixel! Border collies are wonderfully energetic and intelligent dogs."
+        },
+        {
+          "role": "user",
+          "content": "Any tips for keeping her busy while I work from home?"
+        },
+        {
+          "role": "assistant",
+          "content": "Puzzle feeders, a midday walk, and short training sessions work well for border collies."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Can you suggest an easy weeknight pasta recipe?"
+        },
+        {
+          "role": "assistant",
+          "content": "A simple aglio e olio takes about fifteen minutes: garlic, olive oil, chili flakes, and spaghetti."
+        }
+      ]
+    ],
+    "answer_session_ids": ["answer_a1"]
+  },
+  {
+    "question_id": "synthetic-002",
+    "question_type": "knowledge-update",
+    "question": "Which city does the user live in now?",
+    "answer": "Lisbon.",
+    "question_date": "2023/07/15 (Sat) 09:30",
+    "haystack_session_ids": ["answer_b1", "answer_b2"],
+    "haystack_dates": ["2023/04/02 (Sun) 19:12", "2023/07/01 (Sat) 08:45"],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "I live in Berlin and I'm looking for a good coworking space near Kreuzberg.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Kreuzberg has several popular coworking spaces; look for ones with day passes so you can try a few."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Big news: I finished my move last week, so I live in Lisbon now. Any tips for settling in?",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "Welcome to Lisbon! Registering for a NIF early makes everything from banking to utilities easier."
+        }
+      ]
+    ],
+    "answer_session_ids": ["answer_b2"]
+  },
+  {
+    "question_id": "synthetic-003_abs",
+    "question_type": "single-session-user",
+    "question": "What instrument does the user's sister play?",
+    "answer": "The information is not mentioned in the conversation history.",
+    "question_date": "2023/08/03 (Thu) 16:20",
+    "haystack_session_ids": ["noans_c1"],
+    "haystack_dates": ["2023/07/28 (Fri) 21:40"],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "My sister visited last weekend and we went hiking near the coast."
+        },
+        {
+          "role": "assistant",
+          "content": "That sounds lovely — coastal trails are great in late July. Did you catch the sunset?"
+        },
+        {
+          "role": "user",
+          "content": "We did, and we're planning another trip in September."
+        },
+        {
+          "role": "assistant",
+          "content": "September usually has mild weather, so that should be a great time for another hike."
+        }
+      ]
+    ],
+    "answer_session_ids": []
+  }
+]

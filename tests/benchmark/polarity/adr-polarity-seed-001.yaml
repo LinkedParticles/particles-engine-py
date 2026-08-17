@@ -1,0 +1,98 @@
+# General-extractor claim-polarity benchmark — seed suite.
+#
+# Measures the general extractor's (cap. 1) claim-polarity
+# classification, NOT content correctness (that is the §13.3 content harness's
+# job; see tests/benchmark/suites/). The classifier labels how the source
+# document *frames* each proposition — ASSERTED (a held decision / claim),
+# DECLINED (rejected / superseded / deferred / out-of-scope), or HYPOTHETICAL
+# (counterfactual / motivational / worked example) — recording the two
+# non-asserted values on properties["polarity"], which the operation layer then
+# keeps off the default factual surface (query / projection / export).
+#
+# That exclusion makes one error specifically dangerous, and this suite measures
+# it head-on: a real current decision (ASSERTED) wrongly classified DECLINED is
+# **silently hidden** from the default surface — the wrong-DECLINED rate, the
+# precision risk that bears directly on README-projection trust. Every case
+# therefore plants at least one ASSERTED decision *adjacent to* rejected /
+# superseded / deferred prose — the spot most tempted to wrongly demote a real
+# decision. The labels are authored close to the extractor's declarative output
+# so the embedding judge can align them.
+#
+# Run:  uv run particles extractor benchmark-polarity general-extractor
+# (integration-tier — it calls the LLM; needs ANTHROPIC_API_KEY.)
+
+suite_id: adr-polarity-seed-001
+name: General-extractor claim-polarity benchmark
+version: 0.1.0
+domain: architecture decision records
+source_type: ADR
+published_by: anthropic/particles-sdk
+published_at: 2026-06-20T00:00:00+00:00
+
+cases:
+  # Decision + Rejected-Alternatives: two held decisions sitting right next to
+  # the alternatives the document rejects. The two rejected designs are the
+  # DECLINED labels; the two decisions are the ASSERTED traps — a classifier
+  # that over-reads the rejection framing would wrongly demote them DECLINED.
+  - case_id: adr-decision-rejected-001
+    document: |
+      We will store each particle's confidence as an immutable scalar fixed at
+      creation time, and compute effective_confidence on demand at query time
+      without ever persisting it. We rejected storing a mutable confidence that
+      callers could update in place, because an in-place edit would erase the
+      calibrated value and break the audit trail. We also considered recomputing
+      and caching confidence on every write, but that was rejected as needless
+      coupling between the write path and the ranking math.
+    labels:
+      - content: "A particle's confidence is stored as an immutable scalar fixed at creation time."
+        polarity: ASSERTED
+      - content: "effective_confidence is computed on demand at query time and never persisted."
+        polarity: ASSERTED
+      - content: "A particle's confidence is mutable and callers can update it in place."
+        polarity: DECLINED
+      - content: "Confidence is recomputed and cached on every write."
+        polarity: DECLINED
+
+  # Motivation / Context: counterfactual and worked-example framing that
+  # motivates a decision, ending in the decision itself. The two motivational
+  # suppositions are HYPOTHETICAL; the closing decision is the ASSERTED trap,
+  # adrift in hypothetical prose.
+  - case_id: adr-motivation-hypothetical-001
+    document: |
+      Without a single source of truth for provenance, audit trails would be
+      unreliable and every agent would reinvent its own tracking. Suppose two
+      agents deposited contradictory claims drawn from the same source — a reader
+      would have no principled way to tell which to trust. To prevent exactly
+      that, the system records a provenance reference on every particle at
+      creation, naming the corpus entry and snapshot it came from.
+    labels:
+      - content: "Without a single source of truth for provenance, audit trails are unreliable."
+        polarity: HYPOTHETICAL
+      - content: "Two agents deposit contradictory claims drawn from the same source."
+        polarity: HYPOTHETICAL
+      - content: "The system records a provenance reference on every particle at creation."
+        polarity: ASSERTED
+
+  # Supersession / Deferral: a current ordering that supersedes an earlier one,
+  # plus an explicitly deferred and an out-of-scope item. The superseded
+  # cascade, the deferred matching, and the out-of-scope caching are DECLINED;
+  # the two current behaviours are the ASSERTED traps next to the rejection prose.
+  - case_id: adr-superseded-deferred-001
+    document: |
+      The resolver now matches a subject name against the local store first and
+      only falls back to Wikidata on a miss. The earlier two-pass cascade that
+      queried Wikidata before consulting the local store is superseded by this
+      ordering, since it manufactured duplicate subjects. Exact-match resolution
+      is the supported behaviour; fuzzy alias matching is deferred for now.
+      Caching Wikidata labels across runs is out of scope for this revision.
+    labels:
+      - content: "The resolver matches a subject name against the local store before Wikidata."
+        polarity: ASSERTED
+      - content: "Exact-match resolution is the supported subject-resolution behaviour."
+        polarity: ASSERTED
+      - content: "The resolver queries Wikidata before the local store in a two-pass cascade."
+        polarity: DECLINED
+      - content: "Fuzzy alias matching is performed during subject resolution."
+        polarity: DECLINED
+      - content: "Wikidata labels are cached across runs."
+        polarity: DECLINED

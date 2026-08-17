@@ -1,0 +1,355 @@
+{
+  "extractor_id": "numista-listing-extractor",
+  "extractor_version": "0.2.1",
+  "fixture_count": 1,
+  "particle_count": 2,
+  "fields": [
+    {
+      "field": "id",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "content",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.value",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "provenance",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "asserted_by",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "status",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "ACTIVE": 2
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "schema_version",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "particle_type",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "CLAIM": 2
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "subject_ids",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "uncertainty_nature",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "EPISTEMIC": 2
+      },
+      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail."
+    },
+    {
+      "field": "confidence.calibration_source",
+      "tier": "RECOMMENDED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "EXTRACTOR_DIRECT": 2
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "provenance[].snapshot_id",
+      "tier": "RECOMMENDED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "extractor_ref",
+      "tier": "RECOMMENDED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.variance",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.calibration_method",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "uncertainty_kind",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "valid_until",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "supersedes",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "tags",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "context_fingerprint",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "properties",
+      "tier": "OPTIONAL",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "structured_claim",
+      "tier": "OPTIONAL",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "canonical_form",
+      "tier": "OPTIONAL",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "PROSE": 2
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "sequence_context",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "basis",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "contributors",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 2,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    }
+  ],
+  "failures": [],
+  "warnings": [],
+  "generated_at": "2026-08-02 11:24:49.629953+00:00",
+  "fixture_corpus_hash": "f294b5b1717b5102b73a71d9c00a704f008cb8a063b527c3e8068c0c9d5f1ddf",
+  "recommended_threshold": 0.8,
+  "extraction_provider_model": null,
+  "quality_notes": [
+    "Fixture selection: routing precedence \u2014 1 of 16 corpus fixtures route to numista-listing-extractor."
+  ],
+  "advisories": [
+    {
+      "field": "uncertainty_nature",
+      "tier": "REQUIRED",
+      "populated_count": 2,
+      "total_count": 2,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "EPISTEMIC": 2
+      },
+      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail."
+    }
+  ]
+}

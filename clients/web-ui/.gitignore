@@ -1,0 +1,17 @@
+# Node toolchain
+node_modules/
+
+# npm lockfile — not committed (devDependencies only, pinned by ^ranges in
+# package.json); `npm install` regenerates it locally.
+package-lock.json
+
+# Build output (dist/) is COMMITTED: `git pull` delivers the
+# working bundle, so operators never need npm. The build stamp is
+# deterministic (package version + source hash — see esbuild.config.mjs), so
+# rebuilding identical sources is a no-op diff. When you change src/ or
+# public/, run `npm run build` and commit the dist/ diff in the same change.
+
+# Generated typed client — emitted from ../../artifacts/openapi.json by
+# `npm run gen-api` (openapi-typescript). Regenerated on every build so it never
+# drifts from the committed contract; not committed.
+src/openapi.d.ts

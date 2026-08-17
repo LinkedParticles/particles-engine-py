@@ -1,0 +1,15 @@
+{{- if .Values.config.create }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-config" (include "linkedparticles-engine.fullname" .) }}
+  labels:
+    {{- include "linkedparticles-engine.labels" . | nindent 4 }}
+data:
+  # Mounted over the image's baked /etc/particles/config.yaml. Keep the
+  # absolute /data pins (storage.database_url, storage.blob_dir,
+  # claude_code.state_dir) — dropping them re-opens the cwd-relative trap the
+  # baked config exists to close. Secrets never belong here.
+  config.yaml: |
+{{ .Values.config.content | indent 4 }}
+{{- end }}

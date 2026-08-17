@@ -1,0 +1,84 @@
+# Numismatic CALIBRATION suite.
+#
+# This directory is not `tests/benchmark/suites/`. Read the difference before
+# editing anything here, because the two look identical and want opposite
+# things from the same file format.
+#
+# A §13.3 benchmark suite measures COVERAGE: precision and recall are computed
+# over every emitted particle, so its gold set is under standing pressure to
+# cover everything the extractor emits — `numismatic-seed-001` covers all seven
+# particles this same fixture produces, deliberately.
+#
+# A calibration suite measures nothing by itself. Its only job is to produce a
+# labelled population a temperature can be regressed from, and a temperature is
+# identified only when the labels carry BOTH outcomes. Total gold coverage is
+# exactly the all-True label set `extractor calibrate` refuses.
+#
+# So the gold set here is deliberately PARTIAL — six of the seven particles the
+# numista coin extractor emits for `numista-coin-001`. The seventh (the Schön#
+# catalogue reference) is a real, correct emission that this file deliberately
+# does not name, so that it comes back unmatched and the fit has a negative to
+# learn from. It is not an error, and "fixing" it by adding the seventh
+# expectation would silently make this suite unusable for its purpose.
+#
+# Measured against numista-coin-extractor 0.2.0 (2026-08-03): 7 emitted,
+# 6 matched / 1 unmatched, two distinct stated confidences (0.95 ×6, 0.97 ×1),
+# none saturated. T = 1.6601, ECE 0.0957 -> 0.0028 — off both optimizer bounds,
+# both labels present, improving, and therefore persistable.
+#
+# `confidence_min: 0.0` on every expectation is the rule. A real
+# floor would demote a semantically-correct-but-timid emission to an
+# under-confidence partial match, and while §3 makes `graded` count those as
+# matched anyway, a floor here would still be a claim about correctness that
+# this file has no business making. Calibration's label is "did this claim
+# match", never "did it match confidently enough".
+#
+# N is 7 because `numista-coin-001` is the only fixture in tree whose
+# source_type routes to this extractor (precedence). The §2 contract
+# says a calibration suite should span several fixtures to reach a usable N;
+# this one cannot yet, and that is a property of the fixture corpus, not a
+# choice made here. Add numista coin fixtures and extend `cases` below.
+
+suite_id: numismatic-calibration-001
+name: Numismatic calibration suite (partial gold coverage)
+version: 0.1.0
+domain: numismatics
+source_types: [NUMISTA_API_COIN]
+published_by: anthropic/particles-sdk
+published_at: 2026-08-03T00:00:00+00:00
+
+cases:
+  - case_id: numista-coin-001
+    fixture: numista-coin-001
+    expected:
+      - content: "5 Pfennigs (1948-1950) GDR: made of aluminium, weight 1.1g, diameter 19.0mm, demonetized 1990-12-31."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR was struck at Berlin."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR is catalogued as KM# 2."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The obverse of 5 Pfennigs (1948-1950) GDR depicts: Ear of rye"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The reverse of 5 Pfennigs (1948-1950) GDR depicts: Face value"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR has a plain edge."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # DELIBERATELY ABSENT — do not add:
+      #   "5 Pfennigs (1948-1950) GDR is catalogued as Schön# 2."
+      # It is the negative label this suite exists to supply.
+
+metrics:
+  - name: calibration_error
+    definition: ECE (10 bins) — see particles/benchmark/metrics.py

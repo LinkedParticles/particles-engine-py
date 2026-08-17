@@ -1,0 +1,251 @@
+# Dogfood corpus — small realistic-shape fixture exercising
+# the synthesis pipeline against the regression classes we've actually
+# been bitten by in v0.22-v0.23.
+#
+# Each subject targets one or more of:
+#   * High-coverage clean synthesis (TagSpaces — many supporting particles)
+#   * Low-coverage skip path (Mileva — 1 particle, below default threshold)
+#   * Coin template (1 Pfennig — `nmo:NumismaticObject` class)
+#   * Pivot template (Aluminium — `nmo:Material` class)
+#   * Reddit user nesting (u/AlgoTrader — `reddit.com/u/…` path)
+#   * GitHub user nesting (github:karpathy — `github.com/…` path)
+#   * Mid-coverage cross-referencing (DPC Messenger — particles mention
+#     other subjects to drive Related wikilinks)
+#   * Status filtering (BoringSubject — has SUPERSEDED particles that
+#     must not contribute to the article)
+#   * Subject identity drives cache invalidation (handled by the
+#     existing TestInputHash suite, but exercised here too)
+#
+# Schema:
+#   subjects:
+#     - canonical_name: "X"
+#       subject_class: null | "nmo:NumismaticObject" | "nmo:Material" | …
+#       description: optional one-line subject description
+#       aliases: list of alternate names
+#       external_ids: list of {namespace, id} pairs
+#       particles:
+#         - content: claim text
+#           confidence: 0.0 - 1.0
+#           extractor_id: "general-extractor" | …
+#           source_url: URL of the corpus entry (drives the References)
+#           status: "ACTIVE" | "SUPERSEDED" | "RETRACTED"
+#           related_subject_names: other canonical names this particle
+#             mentions; used to populate particle.subject_ids so the
+#             Related wikilinks render correctly.
+#           tags: optional list of taxonomy tag paths — when
+#             present, the dogfood loader writes them onto particle.tags
+#             and the particle_tag_edges join table.
+#   taxonomies: (optional, top-level)
+#     - name, version, author: required identifiers
+#       tags: list of {tag, parent?, aliases?, description?}
+
+taxonomies:
+  - name: Coins
+    version: 1.0.0
+    author: dogfood
+    domain: numismatics
+    tags:
+      - tag: coins
+      - tag: coins/by-region
+        parent: coins
+      - tag: coins/by-region/germany
+        parent: coins/by-region
+      - tag: coins/by-period
+        parent: coins
+
+subjects:
+  # ---------- High-coverage clean synthesis ----------
+  - canonical_name: TagSpaces
+    description: "Cross-platform file tagger that stores tags in sidecar files."
+    particles:
+      - content: "TagSpaces stores tags in sidecar JSON files next to the tagged file."
+        confidence: 0.85
+        extractor_id: general-extractor
+        source_url: https://www.tagspaces.org/docs/tagging
+      - content: "TagSpaces runs on macOS, Windows, Linux, iOS, and Android."
+        confidence: 0.9
+        extractor_id: general-extractor
+        source_url: https://www.tagspaces.org/downloads
+      - content: "TagSpaces supports tag hierarchies through a configurable tag library."
+        confidence: 0.8
+        extractor_id: general-extractor
+        source_url: https://www.tagspaces.org/docs/taglibrary
+      - content: "TagSpaces' Pro edition adds AI tagging via a local model."
+        confidence: 0.75
+        extractor_id: general-extractor
+        source_url: https://www.tagspaces.org/pro
+
+  # ---------- Low-coverage skip path ----------
+  - canonical_name: Mileva Marić
+    description: "Serbian physicist; Albert Einstein's first wife."
+    particles:
+      - content: "Mileva Marić was the first wife of Albert Einstein."
+        confidence: 0.95
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/Mileva_Maric
+        related_subject_names: [Albert Einstein]
+
+  # ---------- Coin template (`nmo:NumismaticObject`) ----------
+  - canonical_name: 1 Pfennig (1948-1950) GDR
+    subject_class: nmo:NumismaticObject
+    external_ids:
+      - namespace: numista
+        id: "8562"
+    particles:
+      - content: "1 Pfennig (1948-1950) GDR is composed of aluminium and weighs 0.75 grams."
+        confidence: 0.9
+        extractor_id: numista-coin-extractor
+        source_url: https://en.numista.com/catalogue/pieces8562.html
+        related_subject_names: [Aluminium, German Democratic Republic]
+        tags: [coins/by-region/germany]
+      - content: "The obverse of 1 Pfennig (1948-1950) GDR depicts an ear of wheat."
+        confidence: 0.85
+        extractor_id: numista-coin-extractor
+        source_url: https://en.numista.com/catalogue/pieces8562.html
+        tags: [coins/by-region/germany]
+      - content: "1 Pfennig (1948-1950) GDR was issued from 1948 to 1950."
+        confidence: 0.95
+        extractor_id: numista-coin-extractor
+        source_url: https://en.numista.com/catalogue/pieces8562.html
+        related_subject_names: [German Democratic Republic]
+        tags: [coins/by-region/germany]
+
+  # ---------- Pivot template (`nmo:Material`) ----------
+  - canonical_name: Aluminium
+    subject_class: nmo:Material
+    description: "Silver-white lightweight metal commonly used in coinage."
+    particles:
+      - content: "Aluminium is a silvery-white, lightweight metal."
+        confidence: 0.9
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/Aluminium
+
+  # ---------- Pivot template (`nmo:Issuer`) — cross-referenced ----------
+  - canonical_name: German Democratic Republic
+    subject_class: nmo:Issuer
+    description: "East German socialist state, 1949-1990."
+    aliases: [East Germany, GDR]
+    particles:
+      - content: "The German Democratic Republic was founded in 1949."
+        confidence: 0.98
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/East_Germany
+
+  # ---------- Reddit user nesting ----------
+  - canonical_name: u/AlgoTrader
+    description: "Reddit user discussed in r/algotrading."
+    particles:
+      - content: "u/AlgoTrader shared a paper-trading framework on r/algotrading."
+        confidence: 0.7
+        extractor_id: reddit-extractor
+        source_url: https://www.reddit.com/r/algotrading/comments/abc123
+      - content: "u/AlgoTrader's framework uses backtesting against historical OHLCV data."
+        confidence: 0.7
+        extractor_id: reddit-extractor
+        source_url: https://www.reddit.com/r/algotrading/comments/abc123
+      - content: "u/AlgoTrader contributed to open-source quant tooling on GitHub."
+        confidence: 0.65
+        extractor_id: reddit-extractor
+        source_url: https://www.reddit.com/r/algotrading/comments/abc123
+
+  # ---------- GitHub user nesting ----------
+  - canonical_name: "github:karpathy"
+    description: "Andrej Karpathy on GitHub."
+    particles:
+      - content: "github:karpathy authored nanoGPT, a minimal GPT training repo."
+        confidence: 0.95
+        extractor_id: github-gist-extractor
+        source_url: https://github.com/karpathy/nanoGPT
+      - content: "github:karpathy is a co-founder of OpenAI and former Director of AI at Tesla."
+        confidence: 0.9
+        extractor_id: github-gist-extractor
+        source_url: https://github.com/karpathy
+      - content: "github:karpathy publishes educational machine-learning content on YouTube."
+        confidence: 0.85
+        extractor_id: github-gist-extractor
+        source_url: https://www.youtube.com/@AndrejKarpathy
+
+  # ---------- Mid-coverage with cross-references ----------
+  - canonical_name: DPC Messenger
+    description: "Messaging system with a particle-style knowledge graph."
+    particles:
+      - content: "DPC Messenger was shipped by Mikhashev on May 13, 2026 as version 0.25.0."
+        confidence: 0.7
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+        related_subject_names: [Mikhashev]
+      - content: "DPC Messenger switched from Git's object model to SQLite for knowledge graph storage."
+        confidence: 0.7
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+      - content: "DPC Messenger uses GLiNER for zero-shot named entity recognition."
+        confidence: 0.7
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+      - content: "DPC Messenger participates as a retrieval channel alongside FAISS and BM25."
+        confidence: 0.65
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+
+  # ---------- Status filtering: SUPERSEDED particles must not contribute ----------
+  - canonical_name: BoringSubject
+    description: "Exists to exercise status-filtering: 3 ACTIVE + 2 SUPERSEDED particles."
+    particles:
+      - content: "BoringSubject was launched in 2020."
+        confidence: 0.9
+        extractor_id: general-extractor
+        source_url: https://example.com/boring/launch
+      - content: "BoringSubject reached version 2.0 in 2022."
+        confidence: 0.88
+        extractor_id: general-extractor
+        source_url: https://example.com/boring/v2
+      - content: "BoringSubject is open-source under the MIT license."
+        confidence: 0.95
+        extractor_id: general-extractor
+        source_url: https://example.com/boring/license
+      - content: "BoringSubject's initial version was written in Ruby."
+        confidence: 0.7
+        extractor_id: general-extractor
+        source_url: https://example.com/boring/old-blog
+        status: SUPERSEDED
+      - content: "BoringSubject only supports macOS at launch."
+        confidence: 0.6
+        extractor_id: general-extractor
+        source_url: https://example.com/boring/old-blog
+        status: SUPERSEDED
+
+  # ---------- Mid-coverage with only an author mention ----------
+  - canonical_name: Mikhashev
+    description: "Software engineer and DPC Messenger maintainer."
+    particles:
+      - content: "Mikhashev maintains the DPC Messenger project."
+        confidence: 0.85
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+        related_subject_names: [DPC Messenger]
+      - content: "Mikhashev has shipped multiple iterations of DPC Messenger in 2026."
+        confidence: 0.75
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+        related_subject_names: [DPC Messenger]
+      - content: "Mikhashev presented DPC Messenger architecture at a community talk."
+        confidence: 0.65
+        extractor_id: general-extractor
+        source_url: https://gist.github.com/example/dpc-release
+
+  # ---------- Albert Einstein (link target for Mileva) ----------
+  - canonical_name: Albert Einstein
+    description: "German-born theoretical physicist; 1921 Nobel laureate."
+    particles:
+      - content: "Albert Einstein developed the theory of general relativity, published in 1915."
+        confidence: 0.99
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/Albert_Einstein
+      - content: "Albert Einstein received the Nobel Prize in Physics in 1921 for the photoelectric effect."
+        confidence: 0.99
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/Albert_Einstein
+      - content: "Albert Einstein emigrated from Germany to the United States in 1933."
+        confidence: 0.95
+        extractor_id: general-extractor
+        source_url: https://en.wikipedia.org/wiki/Albert_Einstein

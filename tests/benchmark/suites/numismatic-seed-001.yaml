@@ -1,0 +1,82 @@
+# Numismatic seed benchmark.
+#
+# This is the reference SDK's day-one benchmark suite, built on top of
+# the existing Numista coin fixture (tests/conformance/fixtures/numista-coin-001).
+# It exists so `particles extractor benchmark numista-coin-extractor`
+# produces real numbers as soon as the harness lands, and so whitepaper
+# v2.1 has at least one baseline to quote.
+#
+# Coverage is intentionally small: the structured-properties claim, the
+# obverse / reverse / edge / mint descriptions, and the two catalogue
+# references. Required vs optional reflects what a downstream operator
+# would consider non-negotiable: a Numista extractor that loses the
+# structured-properties claim or the mint attribution has lost the point.
+# Confidence_min values are calibrated to what NumistaCoinExtractor
+# 0.2.0 actually emits (0.97 for the structured particle, 0.95 for the
+# descriptive particles) — a future extractor revision that tightens its
+# stated confidence should still pass, but one that loosens it below
+# these floors should fail under-confidence.
+
+suite_id: numismatic-seed-001
+name: Numismatic seed benchmark
+version: 0.1.0
+domain: numismatics
+source_types: [NUMISTA_API_COIN]
+published_by: anthropic/particles-sdk
+published_at: 2026-05-23T00:00:00+00:00
+
+cases:
+  - case_id: numista-coin-001
+    fixture: numista-coin-001
+    expected:
+      # Required: the structured-properties summary line — the heart of
+      # the coin extractor's value.
+      - content: "5 Pfennigs (1948-1950) GDR: made of aluminium, weight 1.1g, diameter 19.0mm, demonetized 1990-12-31."
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: mint attribution. A coin extractor that loses where a
+      # coin was struck has lost a primary numismatic fact.
+      - content: "5 Pfennigs (1948-1950) GDR was struck at Berlin."
+        confidence_min: 0.90
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: at least one catalogue reference. (Two are emitted;
+      # the harness only requires one to count toward recall — the
+      # second is optional below.)
+      - content: "5 Pfennigs (1948-1950) GDR is catalogued as KM# 2."
+        confidence_min: 0.90
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Optional: the second catalogue reference.
+      - content: "5 Pfennigs (1948-1950) GDR is catalogued as Schön# 2."
+        confidence_min: 0.90
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Optional: obverse / reverse / edge descriptive particles.
+      # These are nice-to-haves; an extractor that loses them is still
+      # useful, just less rich.
+      - content: "The obverse of 5 Pfennigs (1948-1950) GDR depicts: Ear of rye"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The reverse of 5 Pfennigs (1948-1950) GDR depicts: Face value"
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "5 Pfennigs (1948-1950) GDR has a plain edge."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+metrics:
+  - name: precision
+    definition: matched_emitted / total_emitted
+  - name: recall
+    definition: matched_required / total_required
+  - name: calibration_error
+    definition: ECE (10 bins) — see particles/benchmark/metrics.py

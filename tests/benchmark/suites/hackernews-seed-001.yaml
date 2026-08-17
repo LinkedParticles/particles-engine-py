@@ -1,0 +1,84 @@
+# Hacker News seed benchmark.
+#
+# Third domain-specific suite (after numismatic-seed-001 and
+# reddit-seed-001) — adds a UGC-shaped extractor whose prose pipeline
+# differs from Reddit's (HN renders story body + indented-DFS comment
+# tree rather than top-N flat comments). Targets the calibration
+# story: gives the §3.7 worked example a third row showing whether
+# the Reddit-vs-Numista calibration contrast holds for a sibling
+# social-media extractor.
+#
+# Fixture is an Ask HN about lightweight code-search tools, so the
+# story body is *itself* a question — substantive claims come from
+# the comment thread (fzf+ripgrep recommendation; Telescope.nvim
+# tradeoffs). This exercises the comment-driven extraction path more
+# heavily than the story-substance path, which is the modal Ask HN
+# pattern in practice.
+#
+# Confidence floors are calibrated to what HackerNewsExtractor's
+# v0.7.x extraction actually emits — high (0.90+) for the
+# deterministic structured-properties claim, moderate (0.65-0.80) for
+# comment-derived LLM claims. A future extractor revision that
+# tightens confidence is fine; one that loosens it below these floors
+# should fail under-confidence.
+
+suite_id: hackernews-seed-001
+name: Hacker News seed benchmark
+version: 0.1.0
+domain: social media
+source_types: [HACKERNEWS_THREAD]
+published_by: anthropic/particles-sdk
+published_at: 2026-05-28T00:00:00+00:00
+
+cases:
+  - case_id: hackernews-thread-001
+    fixture: hackernews-thread-001
+    expected:
+      # Required: structured-properties summary. Deterministic synthesis
+      # from the story envelope — score, descendant count, author.
+      - content: "Hacker News Ask HN by asker scored 12 with 3 descendants."
+        confidence_min: 0.90
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: the post's substantive ask. Even though the story
+      # body is a question, the extractor MUST capture what the asker
+      # is looking for — a useful claim for downstream subject linking
+      # (the asker, the topic of code-search tooling).
+      - content: "The Ask HN author is looking for a lightweight code-search tool that searches file contents across multiple repositories."
+        confidence_min: 0.65
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: claim derived from the top-rated comment (fzf+ripgrep
+      # recommendation). The extractor MUST surface the comment's
+      # substantive recommendation, not just transcribe the comment.
+      - content: "Combining fzf with ripgrep provides a lightweight code-search workflow without requiring a daemon."
+        confidence_min: 0.65
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: claim from the vim_user comment about Telescope.nvim's
+      # scope and limitation.
+      - content: "Telescope.nvim provides file, buffer, git history, and LSP symbol search within neovim."
+        confidence_min: 0.65
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Optional: the Telescope.nvim limitation claim — extracted
+      # because it's substantive but the extractor's segmentation may
+      # bundle it with the previous claim instead of emitting it
+      # separately.
+      - content: "Telescope.nvim is only useful for users already working in neovim."
+        confidence_min: 0.60
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Optional: a meta-claim that the asker is open to alias-style
+      # tooling. Surfaced from the asker's reply comment. Marked
+      # optional because reply-thread claims are less reliably
+      # extracted than parent-comment claims.
+      - content: "The Ask HN author regularly rewrites the same shell alias for code search."
+        confidence_min: 0.55
+        uncertainty_nature: EPISTEMIC
+        required: false

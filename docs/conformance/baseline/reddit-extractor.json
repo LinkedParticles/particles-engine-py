@@ -1,0 +1,344 @@
+{
+  "extractor_id": "reddit-extractor",
+  "extractor_version": "0.3.1",
+  "fixture_count": 1,
+  "particle_count": 18,
+  "fields": [
+    {
+      "field": "id",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "content",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.value",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "provenance",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "asserted_by",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "status",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "ACTIVE": 18
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "schema_version",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "particle_type",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "CLAIM": 18
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "subject_ids",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "uncertainty_nature",
+      "tier": "REQUIRED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 2,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "EPISTEMIC": 16,
+        "ALEATORY": 2
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.calibration_source",
+      "tier": "RECOMMENDED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "EXTRACTOR_DIRECT": 18
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "provenance[].snapshot_id",
+      "tier": "RECOMMENDED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "extractor_ref",
+      "tier": "RECOMMENDED",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.variance",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "confidence.calibration_method",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "uncertainty_kind",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "valid_until",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "supersedes",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "tags",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "context_fingerprint",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "properties",
+      "tier": "OPTIONAL",
+      "populated_count": 3,
+      "total_count": 18,
+      "rate": 0.16666666666666666,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "structured_claim",
+      "tier": "OPTIONAL",
+      "populated_count": 17,
+      "total_count": 18,
+      "rate": 0.9444444444444444,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "canonical_form",
+      "tier": "OPTIONAL",
+      "populated_count": 18,
+      "total_count": 18,
+      "rate": 1.0,
+      "distinct_values": 1,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {
+        "PROSE": 18
+      },
+      "advisory_reason": null
+    },
+    {
+      "field": "sequence_context",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "basis",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    },
+    {
+      "field": "contributors",
+      "tier": "OPTIONAL",
+      "populated_count": 0,
+      "total_count": 18,
+      "rate": 0.0,
+      "distinct_values": 0,
+      "passes_threshold": true,
+      "failure_reason": null,
+      "value_counts": {},
+      "advisory_reason": null
+    }
+  ],
+  "failures": [],
+  "warnings": [],
+  "generated_at": "2026-08-02 22:18:35.784771+00:00",
+  "fixture_corpus_hash": "f294b5b1717b5102b73a71d9c00a704f008cb8a063b527c3e8068c0c9d5f1ddf",
+  "recommended_threshold": 0.8,
+  "extraction_provider_model": "anthropic:claude-sonnet-4-6",
+  "quality_notes": [
+    "Fixture selection: routing precedence \u2014 1 of 16 corpus fixtures route to reddit-extractor.",
+    "Fixture reddit-thread-001: body: DOCUMENT_META (labelled, excluded from factual surface): The Reddit post about Pydantic v3.0.0 was made by u/samuelcolvin.",
+    "Fixture reddit-thread-001: body: DOCUMENT_META (labelled, excluded from factual surface): The Reddit post about Pydantic v3.0.0 received a score of 2847.",
+    "Fixture reddit-thread-001: body: DOCUMENT_META (labelled, excluded from factual surface): The Reddit post about Pydantic v3.0.0 was posted in the r/Python subreddit."
+  ],
+  "advisories": []
+}

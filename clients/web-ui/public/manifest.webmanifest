@@ -1,0 +1,19 @@
+{
+  "name": "Particles",
+  "short_name": "Particles",
+  "description": "Unified web UI over the Particles engine: curation queue, query, and the scoped epistemic graph.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "linkedparticles-engine.fullname" . }}
+  labels:
+    {{- include "linkedparticles-engine.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "linkedparticles-engine.fullname" . }}
+  # A StatefulSet, not a Deployment: the engine owns a durable identity and one
+  # PersistentVolume. `replicas` is LOAD-BEARING at 1 — the store is SQLite
+  # (one writer) and the daemon schedules consolidation inside the
+  # serving process, so a second replica means a second scheduler writing the
+  # same volume. Multi-replica/HA rides a Postgres backend that is not a
+  # dependency today (deferred).
+  replicas: {{ .Values.replicaCount }}
+  # Never run two pods at once during a roll, for the same single-writer reason.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "linkedparticles-engine.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "linkedparticles-engine.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- if .Values.config.create }}
+        checksum/config: {{ .Values.config.content | sha256sum }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: engine
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The image's own CMD is `engine serve 0.0.0.0:8000 --daemon`; not
+          # restated here so the chart never drifts from it.
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: PARTICLES_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "linkedparticles-engine.secretName" . }}
+                  key: {{ .Values.auth.apiKeySecretKey }}
+            {{- if or .Values.auth.anthropicApiKey .Values.auth.existingSecret }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "linkedparticles-engine.secretName" . }}
+                  key: {{ .Values.auth.anthropicApiKeySecretKey }}
+                  optional: true
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          # /health carries no auth gate. It reports `degraded` when a daemon
+          # task has crashed but stays 200 — deliberately, so a dead background
+          # tick never restarts a pod that is still serving requests. Alert on
+          # the body; restart on the connection.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # First boot runs `alembic upgrade head` and loads the baked
+            # encoder; give it room rather than crash-looping a cold start.
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if or .Values.config.create .Values.config.existingConfigMap }}
+            - name: config
+              mountPath: /etc/particles/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if or .Values.config.create .Values.config.existingConfigMap }}
+        - name: config
+          configMap:
+            name: {{ include "linkedparticles-engine.configMapName" . }}
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}

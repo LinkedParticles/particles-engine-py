@@ -1,0 +1,40 @@
+<!-- @dsCard group="Components" name="Curation card & app shell" subtitle="The Queue route: top nav, a duplicate-pair card with brief, verdict and gestures" -->
+<div style="max-width:560px">
+  <div class="p-topnav">
+    <span class="p-brand"><svg viewBox="0 0 512 512" aria-hidden="true"><circle cx="256" cy="256" r="150" fill="none" stroke="#6ea8fe" stroke-width="18"/><circle cx="256" cy="120" r="26" fill="#6ea8fe"/><circle cx="380" cy="320" r="26" fill="#7ee787"/><circle cx="132" cy="320" r="26" fill="#f0883e"/><circle cx="256" cy="256" r="34" fill="currentColor"/></svg>Particles</span>
+    <a class="p-tab p-tab--active">Queue</a>
+    <a class="p-tab">Query</a>
+    <a class="p-tab">Browse</a>
+    <span class="p-spacer"></span>
+    <button class="p-btn p-btn--sm">＋ Deposit</button>
+    <button class="p-btn p-btn--sm p-btn--ghost" aria-label="Settings">⚙</button>
+  </div>
+  <div class="p-row" style="justify-content:space-between;padding:12px 4px 12px">
+    <span class="p-h2">Curation queue</span>
+    <span class="p-small p-muted">7 of 23 · leverage-ranked</span>
+  </div>
+  <div class="p-card p-card--raised">
+    <span class="p-card__aside">leverage 0.81</span>
+    <span class="p-card__kind"><span class="p-dot"></span>duplicate pair</span>
+    <div class="p-card__body">Two ACTIVE particles appear to state the same claim about <b>Douglas Adams</b>. Link them as co-evidential, or keep both if they differ.</div>
+    <div class="p-card__refs">
+      <div class="p-particle p-particle--nested">
+        <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-particle__id">p-741ec7ef</span>
+        <div class="p-particle__claim">Douglas Adams was born in Cambridge in 1952.</div>
+        <div class="p-particle__meta">confidence 0.94 · <span class="p-subject">Douglas Adams</span> · wikipedia.org</div>
+      </div>
+      <div class="p-particle p-particle--nested">
+        <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-particle__id">p-c31d0a9e</span>
+        <div class="p-particle__claim">Adams, born 11 March 1952, Cambridge, England.</div>
+        <div class="p-particle__meta">confidence 0.88 · <span class="p-subject">Douglas Adams</span> · britannica.com</div>
+      </div>
+      <div class="p-particle__verdict">Judge: same claim (0.93) — the second adds the day and month; linking loses nothing.</div>
+    </div>
+    <div class="p-gestures" style="margin-top:16px">
+      <button class="p-btn p-btn--primary">Link<span class="p-btn__note">same claim</span></button>
+      <button class="p-btn">Keep both<span class="p-btn__note">different</span></button>
+      <button class="p-btn p-btn--ghost">Defer</button>
+    </div>
+  </div>
+  <p class="ds-note">The card is the unit of curation: kind + leverage on top, a plain-language diagnostic, the particle briefs a decision needs, the model’s advisory verdict in italics, then the gestures. Swipe = the primary gesture on touch. Under 460 px the nav drops labels, never wraps.</p>
+</div>

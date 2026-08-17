@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "linkedparticles-engine.fullname" . }}
+  labels:
+    {{- include "linkedparticles-engine.labels" . | nindent 4 }}
+spec:
+  # ClusterIP by default and no Ingress template in this chart at all: the
+  # exposure posture is a private mesh / port-forward. Putting a
+  # public TLS endpoint in front of this is a call the operator makes, with
+  # the SSRF closure and observability hardening as the
+  # named prerequisites.
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "linkedparticles-engine.selectorLabels" . | nindent 4 }}

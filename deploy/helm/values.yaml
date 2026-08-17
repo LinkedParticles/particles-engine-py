@@ -1,0 +1,101 @@
+# Default values for linkedparticles-engine.
+#
+# Deliberately minimal. This chart is honest about what the engine is today: a
+# single SQLite writer behind one HTTP surface. Postgres, horizontal scale, and
+# a public TLS endpoint are out of scope — see the README next to this file.
+
+# ---------------------------------------------------------------------------
+# THIS IS LOAD-BEARING. DO NOT RAISE IT.
+#
+# The store is SQLite, which has exactly one writer, and the daemon
+# schedules the consolidation cycle *inside* the serving process. Two replicas
+# means two schedulers and two writers against one PersistentVolume — the
+# multi-writer shape the whole design exists to avoid. Multi-replica/HA rides a
+# Postgres backend that is not a dependency today (deferred); the
+# chart does not pretend otherwise.
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+image:
+  # Placeholder name pending the sign-off (distribution name + schema
+  # $id host). Until publication the image is built locally or in CI and is
+  # never pushed to a public registry — point this at your own registry.
+  repository: ghcr.io/linkedparticles/engine
+  tag: dev
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+auth:
+  # The engine binds 0.0.0.0, so the fail-closed gate refuses to start
+  # without a real key — the pod would CrashLoopBackOff on that refusal, by
+  # design. Supply the key one of two ways:
+  #
+  #   existingSecret: the name of a Secret you manage (recommended). It must
+  #                   carry the keys named below.
+  #   apiKey:         a literal, which the chart renders into its own Secret.
+  #                   Fine for `--set` at install time; never commit it.
+  existingSecret: ""
+  apiKeySecretKey: PARTICLES_API_KEY
+  apiKey: ""
+  # Optional. Without it, LLM-priced work (extraction, semantic lint, the
+  # consolidation cycle's semantic passes) degrades to a disclosed
+  # structural-only run rather than failing.
+  anthropicApiKeySecretKey: ANTHROPIC_API_KEY
+  anthropicApiKey: ""
+
+persistence:
+  # The PVC backing /data — the store, the corpus blobs, and the consolidation
+  # lockfile all live here (the image's baked config pins them absolute).
+  enabled: true
+  size: 20Gi
+  # Leave empty to use the cluster's default StorageClass.
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# No ingress by default, and no ingress template at all. The exposure posture
+# is the exposure posture: a private mesh or `kubectl port-forward`. A public TLS
+# endpoint stays out of scope until the SSRF closure and the
+# observability hardening land — front this with your own ingress
+# and auth only if you have made that call yourself.
+
+resources:
+  requests:
+    cpu: 250m
+    # The baked embedding encoder plus its torch closure is the floor here.
+    memory: 1Gi
+  limits:
+    memory: 4Gi
+
+# Extra environment variables, e.g. registered config overrides
+# (PARTICLES_DAEMON_STORE, DATABASE_URL, …).
+env: {}
+
+# Mount your own config.yaml over the image's baked one. Set
+# `config.create: true` and put the file body in `config.content`, or point
+# `config.existingConfigMap` at a ConfigMap whose `config.yaml` key holds it.
+config:
+  create: false
+  existingConfigMap: ""
+  content: ""
+
+podSecurityContext:
+  fsGroup: 10001
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

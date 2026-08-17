@@ -1,0 +1,41 @@
+<!-- @dsCard group="Epistemic encodings" name="Status & badges" subtitle="The five statuses of core/status.py, two read-time badges, three lint severities" -->
+<div class="p-stack">
+  <div>
+    <p class="ds-h">Particle status (stored; exactly five values)</p>
+    <div class="p-row">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span>
+      <span class="p-chip p-chip--SUPERSEDED">SUPERSEDED</span>
+      <span class="p-chip p-chip--RETRACTED">RETRACTED</span>
+      <span class="p-chip p-chip--PROVENANCE_STALE">PROVENANCE_STALE</span>
+      <span class="p-chip p-chip--INCONSISTENCY">INCONSISTENCY</span>
+    </div>
+  </div>
+  <div>
+    <p class="ds-h">Read-time badges (computed at query time; never stored)</p>
+    <div class="p-row">
+      <span class="p-chip p-chip--contested">⚠ contested</span>
+      <span class="p-chip p-chip--hit">retrieval hit</span>
+      <span class="p-particle__id">p-741ec7ef</span>
+      <span class="p-glyph--retracted">☒ retracted tombstone</span>
+    </div>
+  </div>
+  <div>
+    <p class="ds-h">Lint severity (outlined — classification, not state)</p>
+    <div class="p-row">
+      <span class="p-chip p-chip--outline p-chip--ERROR">ERROR</span>
+      <span class="p-chip p-chip--outline p-chip--WARNING">WARNING</span>
+      <span class="p-chip p-chip--outline p-chip--INFO">INFO</span>
+    </div>
+  </div>
+  <div>
+    <p class="ds-h">Subjects (pills — nouns, not adjectives)</p>
+    <div class="p-row">
+      <span class="p-subject">Douglas Adams</span>
+      <span class="p-subject">Q42</span>
+      <span class="p-subject">Cambridge</span>
+    </div>
+  </div>
+  <p class="ds-note">
+    Solid fill = a stored status. Outline = a classification. Pill = an entity. <b>Contested is a badge, not a status</b> — there is no DISPUTED status; the amber ⚠ rides beside whatever the status chip is. The glyph vocabulary is exactly two characters: <b>⚠</b> contested, <b>☒</b> retracted. Do not add emoji.
+  </p>
+</div>

@@ -1,0 +1,34 @@
+<!-- @dsCard group="Layouts" name="Website hero & feature grid" subtitle="Landing header, lead line, CTA pair, the three-idea grid, footer" -->
+<div>
+  <div class="p-siteheader">
+    <span class="p-brand"><svg viewBox="0 0 512 512" aria-hidden="true"><circle cx="256" cy="256" r="150" fill="none" stroke="#6ea8fe" stroke-width="18"/><circle cx="256" cy="120" r="26" fill="#6ea8fe"/><circle cx="380" cy="320" r="26" fill="#7ee787"/><circle cx="132" cy="320" r="26" fill="#f0883e"/><circle cx="256" cy="256" r="34" fill="currentColor"/></svg>Particles</span>
+    <nav><a href="#">Docs</a><a href="#">Standard</a><a href="#">Whitepaper</a><a href="#">Demo</a><a href="#">GitHub</a></nav>
+  </div>
+  <section class="p-hero" style="padding-top:var(--p-space-7)">
+    <p class="p-eyebrow">Epistemic knowledge management for AI agents</p>
+    <h1 class="p-display" style="margin-top:12px">A git-like ledger for what an AI system believes.</h1>
+    <p class="p-lede">Deposit sources. Extract claim-sized particles with provenance and confidence. Query with trust as a read-time lens — and when the agent is wrong, see exactly why and fix it at the source.</p>
+    <div class="p-cta">
+      <a class="p-btn p-btn--primary p-btn--lg" href="#">Get started in 5 minutes</a>
+      <a class="p-btn p-btn--lg" href="#">Read the whitepaper</a>
+    </div>
+    <div class="p-row" style="margin-top:20px;gap:12px">
+      <span class="p-particle__id">pip install linkedparticles</span>
+      <span class="p-kv">Apache-2.0 · Python 3.11+ · MCP server included</span>
+    </div>
+  </section>
+  <section style="max-width:var(--p-col-wide);margin:0 auto;padding:0 16px 48px">
+    <p class="p-eyebrow" style="margin-bottom:12px">Three ideas carry the design</p>
+    <div class="p-grid">
+      <div class="p-card p-feature"><div class="p-h3">Nothing is overwritten</div><p>Beliefs are superseded or retracted, never edited. Ask what the store believed at any instant.</p></div>
+      <div class="p-card p-feature"><div class="p-h3">Trust is a read-time lens</div><p>Stored confidence is immutable; source and extractor trust are applied when you query, so a policy change re-ranks the past without rewriting it.</p></div>
+      <div class="p-card p-feature"><div class="p-h3">Contradictions are first-class</div><p>Conflicting claims surface as INCONSISTENCY particles and contested badges — visible, reviewable, and resolvable into a trust policy.</p></div>
+    </div>
+  </section>
+  <footer class="p-footer">
+    <div class="p-row" style="justify-content:space-between">
+      <span>© LinkedParticles · Apache-2.0 · The “Particles” name and conformance claims are reserved.</span>
+      <span class="p-row" style="gap:16px"><a href="#">Security</a><a href="#">Standard</a><a href="#">Status</a></span>
+    </div>
+  </footer>
+</div>

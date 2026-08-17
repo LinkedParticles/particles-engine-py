@@ -1,0 +1,28 @@
+{
+  "name": "particles-web-ui",
+  "version": "0.3.0",
+  "description": "Unified same-origin web UI (curation + query + graph) over the Particles FastAPI engine.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen-api": "openapi-typescript ../../artifacts/openapi.json -o src/openapi.d.ts",
+    "typecheck": "npm run gen-api && tsc --noEmit",
+    "build": "npm run gen-api && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs"
+  },
+  "keywords": [
+    "particles",
+    "curation",
+    "query",
+    "graph",
+    "pwa",
+    "knowledge-management"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.20.0",
+    "openapi-typescript": "^6.7.4",
+    "typescript": "^5.4.0"
+  }
+}

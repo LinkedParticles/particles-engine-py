@@ -1,0 +1,96 @@
+# Journal-extractor modality benchmark — seed suite.
+#
+# Measures the journal extractor's assertion_modality
+# classification, NOT content correctness (that is the §13.3 content harness's
+# job; see tests/benchmark/suites/). The journal prompt inverts the usual
+# default — "when unsure, prefer non-FALSIFIABLE" — to keep feelings/opinions
+# out of the truth engine. That inversion raises one specifically dangerous
+# error this suite measures head-on: a genuinely falsifiable world-fact (a
+# date, a count, a dose) mis-tagged EVALUATIVE/EXPERIENTIAL and thereby
+# exempted from contradiction-arbitration (the **false-non-FALSIFIABLE** rate).
+#
+# Each case is a short first-person entry plus reified, third-person gold
+# labels (authored close to the extractor's reified output so the embedding
+# judge can align them). Every case carries at least one FALSIFIABLE fact
+# embedded in emotional / opinion-laden prose — the spot where the inverted
+# default is most tempted to wrongly demote a real fact. A whole-entry
+# NARRATIVE is expected for every entry.
+#
+# Run:  uv run particles extractor benchmark-modality journal-extractor
+# (integration-tier — it calls the LLM; needs ANTHROPIC_API_KEY.)
+
+suite_id: journal-modality-seed-001
+name: Journal-extractor modality benchmark
+version: 0.1.0
+domain: personal journal
+source_type: JOURNAL
+published_by: anthropic/particles-sdk
+published_at: 2026-06-15T00:00:00+00:00
+
+cases:
+  # Travel + family entry: concrete facts (place, duration, counts, dates)
+  # interleaved with a feeling and an opinion. The delay duration and the
+  # mother's age are the false-non-FALSIFIABLE traps — facts surrounded by
+  # affect.
+  - case_id: journal-travel-001
+    narrative_expected: true
+    entry: |
+      I spent two weeks in New Jersey visiting my parents this August. The
+      flight out was delayed by three hours, which left me anxious the whole
+      time at the gate. Honestly, airport food is a total rip-off. My mom
+      turned seventy this year. I'm grateful I got to be there for it.
+    labels:
+      - content: "The author spent two weeks in New Jersey visiting family in August."
+        modality: FALSIFIABLE
+      - content: "The author's flight was delayed by three hours."
+        modality: FALSIFIABLE
+      - content: "The author felt anxious during the flight delay."
+        modality: EXPERIENTIAL
+      - content: "Airport food is overpriced."
+        modality: EVALUATIVE
+      - content: "The author's mother turned seventy this year."
+        modality: FALSIFIABLE
+      - content: "The author felt grateful to be there for the occasion."
+        modality: EXPERIENTIAL
+
+  # Opinion-saturated entry: the play-time fact is the trap — one verifiable
+  # count adrift in a sea of judgements and dislikes.
+  - case_id: journal-opinion-001
+    narrative_expected: true
+    entry: |
+      Balatro is honestly tedious after the first few runs. I don't like
+      doing math under time pressure — never have. The new UI update is a
+      downgrade in every way. And yet I played for two hours straight last
+      night and couldn't make myself stop.
+    labels:
+      - content: "Balatro is tedious."
+        modality: EVALUATIVE
+      - content: "The author dislikes doing math under time pressure."
+        modality: EXPERIENTIAL
+      - content: "The new UI update is a downgrade."
+        modality: EVALUATIVE
+      - content: "The author played Balatro for two hours last night."
+        modality: FALSIFIABLE
+
+  # Health entry: clinical facts (start date, dose, timeline) wrapped in
+  # relief and a value judgement about the doctor. The dose and the start
+  # date are the traps — exactly the dossier-grade facts that must stay
+  # FALSIFIABLE.
+  - case_id: journal-health-001
+    narrative_expected: true
+    entry: |
+      I started the new medication on March 3rd, and the headaches stopped
+      within a week. I think the doctor was right to push me on it, even
+      though I resisted at first. Two hundred milligrams still seems like a
+      lot to me. I feel calmer now than I have in months.
+    labels:
+      - content: "The author started the new medication on March 3rd."
+        modality: FALSIFIABLE
+      - content: "The author's headaches stopped within a week of starting the medication."
+        modality: FALSIFIABLE
+      - content: "The doctor was right to push the author to take the medication."
+        modality: EVALUATIVE
+      - content: "The medication dose is two hundred milligrams."
+        modality: FALSIFIABLE
+      - content: "The author feels calmer than they have in months."
+        modality: EXPERIENTIAL

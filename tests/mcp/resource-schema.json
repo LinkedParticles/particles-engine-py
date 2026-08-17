@@ -1,0 +1,11 @@
+{
+  "resources": [],
+  "templates": [
+    {
+      "description": "Session-start memory digest: one line per ACTIVE belief, ranked by effective confidence, contested beliefs flagged. The MEMORY.md analog \u2014 load it at session start to recall this store's standing context.",
+      "mimeType": "text/markdown",
+      "name": "memory-digest",
+      "uriTemplate": "particles://digest/{store}"
+    }
+  ]
+}

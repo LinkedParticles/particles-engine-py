@@ -1,0 +1,39 @@
+# The baked in-image configuration.
+#
+# Copied to /etc/particles/config.yaml, which PARTICLES_CONFIG points at. Named
+# `config.container.yaml` in the repo rather than `config.yaml` because the root
+# .gitignore ignores that filename at any depth (the no-plaintext-secrets rule) —
+# and weakening that guard for one file is a worse trade than a longer name. Every
+# store-adjacent path is pinned ABSOLUTE under the single /data volume: inside
+# the image there is no cwd-relative default left to mis-fire, which is what
+# closes the §2-Correction trap class by construction rather than by
+# operator discipline.
+#
+# To override: mount your own file over /etc/particles/config.yaml, or set one
+# of the registered env overrides (DATABASE_URL, PARTICLES_BLOB_DIR, …). This
+# file is a floor, not a ceiling.
+
+storage:
+  # Four slashes = an absolute path (sqlite+aiosqlite:////data/particles.db).
+  database_url: sqlite+aiosqlite:////data/particles.db
+  blob_dir: /data/corpus_blobs
+
+claude_code:
+  # Holds the consolidation lockfile (and the integration
+  # state, unused in a container). On the volume so a restart does not lose it.
+  state_dir: /data/state
+
+daemon:
+  # Resident mode is the image's reason for existing; the entrypoint also
+  # passes --daemon, so this is belt-and-braces for a custom command.
+  enabled: true
+  consolidation_tick_minutes: 60
+
+agent_memory:
+  projection:
+    # Consolidation pass 6 (agent-memory projection) is OFF in the image: its
+    # targets are host-coupled paths (~/.claude/projects/*/memory) that do not
+    # exist in a container. The pass DISCLOSES the skip in every run record —
+    # it is never silently absent. To opt in: mount the projection targets and
+    # set this true in a mounted config (see the operator guide).
+    enabled: false

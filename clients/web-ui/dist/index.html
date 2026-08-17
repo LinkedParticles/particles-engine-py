@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <!-- Browser chrome follows the page ground of the active theme
+         (design/tokens.css --p-page); the explicit stamp below overrides. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f8fb" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b1020" />
+    <title>Particles</title>
+    <!-- Stamp the saved appearance (system / light / dark) on <html> before
+         first paint so a chosen theme never flashes the other one. Mirrors
+         src/theme.ts; keep the storage key + attribute in sync. -->
+    <script>
+      try {
+        var t = localStorage.getItem("particles.ui.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+    <!-- Relative paths: the engine serves this bundle under /app,
+         so assets must resolve against /app/, not the engine root. -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app"></div>
+    <footer id="build-info" class="build-info"></footer>
+    <!-- ES module bundle (esbuild). -->
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

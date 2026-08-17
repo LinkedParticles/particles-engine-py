@@ -1,0 +1,49 @@
+# CI for the linkedparticles (Engine) public repository.
+#
+# This repo is a per-release scrubbed export of a private development upstream
+# (see CONTRIBUTING.md). These workflows are authored in that upstream under
+# publish/overlays/ and laid into the exported tree by the release export —
+# edit them there, not on the public repo (a direct edit here is overwritten by
+# the next export).
+#
+# Supply-chain convention (matches the upstream): every `uses:` is pinned to a
+# full 40-char commit SHA, never a mutable `@vN` tag; the trailing `# vN`
+# comment is the human-readable tag that SHA resolves to. Bump a SHA only
+# deliberately.
+#
+# Scope note — DCO is the only check today; ruff and pytest are deferred, each
+# on one remaining blocker:
+#   * pytest — the suite passes against a co-installed pair (the release
+#     process verifies exactly that before every publish), but this tree omits
+#     the Client substrate: it depends on the `linkedparticles-core`
+#     distribution, which is not on an index yet. The pytest job lands with the
+#     first published release, when `uv sync` here can resolve that dependency.
+#   * ruff — the export's citation-strip rewrite still joins a citation wrapped
+#     across a line boundary into an over-length line, a lint + format issue in
+#     the exported copy only. The import-grouping half is fixed (the pyproject
+#     declares isort known-first-party = ["particles"], so `particles.core`
+#     arriving from a separate distribution no longer regroups every import);
+#     the ruff job lands once the reflow is too.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every PR commit
+        run: >-
+          python .github/dco_check.py --range
+          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"

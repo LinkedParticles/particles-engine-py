@@ -1,0 +1,68 @@
+# RDF CALIBRATION suite.
+#
+# Read the header of `numismatic-calibration-001.yaml` first — it explains why
+# this directory's gold sets are deliberately partial and why completing one
+# would break it. The same reasoning applies here, with one difference worth
+# stating because the §13.3 suite says the opposite in as many words.
+#
+# `tests/benchmark/suites/rdf-seed-001.yaml` declares its gold set exhaustive
+# *by design*: "the extractor is a deterministic parser, so a fixed blob has
+# exactly one correct output." That is exactly right for measuring a parser's
+# correctness, and exactly wrong for fitting a temperature — an exhaustive gold
+# set over a deterministic extractor is an all-True label set, every time, with
+# no run-to-run variation that could ever supply a negative.
+#
+# So this file names five of the six triples the RDF extractor emits for
+# `rdf-graph-001`. The sixth ("was minted at: Berlin Mint") is correct output
+# that this suite deliberately leaves unnamed.
+#
+# Measured against rdf-extractor (2026-08-03): 6 emitted, 5 matched /
+# 1 unmatched, two distinct stated confidences (0.95 ×5, 0.72 ×1), none
+# saturated. T = 1.9050, ECE 0.1717 -> 0.0833 — persistable.
+#
+# Both this extractor and the numista one clear the §4 guards on two distinct
+# confidence values, which is the bare minimum the predictor-degeneracy check
+# admits. Whether a deterministic extractor emitting a two-point confidence
+# distribution should be calibrated *at all* is a real question this suite does
+# not settle. It clears the admissibility bar; that is a
+# different claim from being worth believing.
+
+suite_id: rdf-calibration-001
+name: RDF calibration suite (partial gold coverage)
+version: 0.1.0
+domain: rdf
+source_types: [RDF_GRAPH]
+published_by: anthropic/particles-sdk
+published_at: 2026-08-03T00:00:00+00:00
+
+cases:
+  - case_id: rdf-graph-001
+    fixture: rdf-graph-001
+    expected:
+      - content: "Berlin Mint located in: Berlin"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR has material: Aluminium"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR has weight: 1.1"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR was issued by: German Democratic Republic"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "5 Pfennigs (1948-1950) GDR was demonetized: 1990-12-31"
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      # DELIBERATELY ABSENT — do not add:
+      #   "5 Pfennigs (1948-1950) GDR was minted at: Berlin Mint"
+      # It is the negative label this suite exists to supply.
+
+metrics:
+  - name: calibration_error
+    definition: ECE (10 bins) — see particles/benchmark/metrics.py

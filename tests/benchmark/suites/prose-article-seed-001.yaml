@@ -1,0 +1,766 @@
+# Prose-article seed benchmark.
+#
+# The first suite that measures the *general* extractor's own contract.
+# The five suites that preceded it (numismatic / wikidata / rdf / reddit /
+# hackernews) all target a domain extractor's deterministic output —
+# structured-meta claims, Numista field parsing, RDF triples — so none of
+# them exercises prose claim mining from an article-class source, which is
+# the whole job of the fallback extractor. Running the general extractor
+# against those suites produced artifact numbers (measured 2026-08-01,
+# first provider trial: recall 0.00-0.60 / precision 0.04-0.30
+# against domain suites whose "missed required" rows are code-synthesized
+# claims no LLM path emits, against 1.00/1.00 on the trivially-verbalizable
+# rdf seed). This suite is the measurement surface a cross-provider
+# comparison actually needs.
+#
+# v0.2.0 (2026-08-02) widens the suite from one case to four so a single
+# claim stops dominating the metrics: with only web-article-001's 8 required
+# claims, each one swung recall by 12.5 points — measured 2026-08-02,
+# gpt-5.6-luna scored recall 0.88 and 0.75 on back-to-back runs of the
+# identical fixture, a spread that is pure single-claim noise. Four cases
+# (35 required claims) shrink one claim's recall weight to ~2.9 points.
+#
+# Gold-set structure note (v0.2.0, learned from the first 0.2.0 run): the
+# matcher is a greedy 1:1 assignment by descending cosine, so when a run
+# bundles two facts from one source sentence into one emitted claim, an
+# optional gold that closely mirrors the secondary fact can "steal" the
+# bundle and leave the required gold unmatched — a structural recall flake,
+# not an extraction failure. Convention used throughout: at most one
+# REQUIRED gold per source sentence, phrased as a superstring of that
+# sentence's claims so a bundled emission lands on it; the secondary halves
+# get optional split twins phrased to overlap the required gold as little
+# as possible. The
+# three added cases are deliberately different in character, because the
+# 2026-08-02 provider trial showed the failure mode is
+# genre-specific (the GPT tier shed *numeric* claims — "$310 to $1,900 per
+# month", "82 percent hit rate" — while holding the rest):
+#   web-article-002  numeric-dense annual-results post; number transcription
+#                    fidelity is the whole test
+#   web-essay-001    argumentative essay; facts embedded in narrative and
+#                    contrast structure, evaluative thesis kept apart
+#   web-interview-001  Q&A transcript; attribution-sensitive claims, incl.
+#                    speaker-flagged speculation that must stay attributed
+#
+# All fixtures are self-authored synthetic prose (no third-party text;
+# every company, person, and figure is invented — the web-article-001
+# Fernwood Systems model). Each is written to make claim mining
+# discriminate rather than transcribe: hard metrics, mechanism/causal
+# claims, forward-looking plans, and boilerplate (nav, tag links,
+# copyright footers) that must NOT become claims.
+#
+# Required vs optional follows the rule: `required: true` is
+# reserved for facts whose absence would mean the extractor has lost its
+# core value — the metrics and the mechanism a reader came for. The
+# secondary framing, the inference-flavoured claims, and the DOCUMENT_META
+# byline/date pair are optional, because the extractor's segmentation
+# legitimately varies in how it splits and whether it reifies them.
+#
+# The expected set deliberately covers *nearly all* of what the extractor
+# emits, not just the highlights: `precision` and `calibration_error` are
+# both computed over every emitted particle, so a sparse gold set would
+# report an extractor that behaved perfectly as imprecise and overconfident.
+#
+# Confidence floors are calibrated to what the general extractor actually
+# states on these fixtures (0.9-1.0 across the board, raw — the benchmark
+# runner applies no temperature scaling; the 0.2.0 cases were authored
+# against extractor 0.14.0 output on anthropic/claude-sonnet-4-6): 0.85 on
+# the crisp falsifiable facts, 0.70-0.80 on the inference, evaluative, and
+# forward-looking claims. A future revision that states them lower should
+# surface as under-confidence.
+
+suite_id: prose-article-seed-001
+name: Prose-article seed benchmark
+version: 0.2.0
+domain: general prose
+source_types: [WEB_PAGE]
+published_by: anthropic/particles-sdk
+published_at: 2026-08-02T00:00:00+00:00
+
+cases:
+  - case_id: web-article-001
+    fixture: web-article-001
+    expected:
+      # --- Required: the article's load-bearing facts -------------------
+      # The event the whole post is about.
+      - content: "In January 2026, Fernwood Systems replaced its timestamp-based build cache with a content-addressed one."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The mechanism. A prose miner that returns only the outcome numbers
+      # and not the how has lost the reason to read the article.
+      - content: "The new cache keys every artifact on the SHA-256 hash of its declared inputs."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The headline metric, and the one most likely to be mangled: it is a
+      # before/after pair inside a single sentence.
+      - content: "Median CI build time on the main branch fell from 14 minutes to 3 minutes 20 seconds after the migration."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The cache hit rate on the main branch is 82 percent."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The cost side — the second before/after pair, in a different unit.
+      # v0.2.0 rephrasing: superstring of the source sentence (cost + the
+      # causal retention clause), so a run that bundles the clause still
+      # lands on this required gold rather than the optional retention twin
+      # below (the greedy-1:1 steal observed 2026-08-02).
+      - content: "Fernwood Systems' storage costs rose from $310 to $1,900 per month, because evicted cache entries are retained for 30 days."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The migration required rewriting 41 build files to declare their inputs explicitly."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Entity framing. Required because a claim set with no statement of
+      # who the article is about cannot be subject-linked downstream.
+      - content: "Fernwood Systems is a 40-person infrastructure company."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The road not taken. Required because dropping it is the failure mode
+      # that turns an honest engineering post into a marketing one — and it
+      # is the claim the polarity classifier has to keep off the
+      # factual surface without deleting.
+      - content: "Fernwood Systems evaluated moving to a remote execution cluster and decided against it for now."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # --- Optional: emitted in practice, but segmentation varies --------
+      # The migration's staffing cost. Optional rather than required because the
+      # source sentence states it alongside the 41-file count, and runs
+      # that keep the two together legitimately produce one claim the
+      # greedy assignment spends on the file count — a segmentation
+      # difference, not a lost fact.
+      - content: "The migration to the content-addressed build cache took six weeks of one engineer's time."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Split off from the 40-person claim in some runs, bundled in others.
+      - content: "Fernwood Systems is based in Halifax, Nova Scotia."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The old cache keyed each artifact on the modification time of the files that produced it."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Two builds with identical inputs resolve to the same cache entry regardless of when they ran."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Fernwood Systems retains evicted cache entries for 30 days."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The reason given for the retention window — a stated rationale, not
+      # a metric, and the kind of clause a transcribing miner drops.
+      - content: "Retaining evicted cache entries for 30 days lets a bisect across a release window still hit warm entries."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The cache alone recovered most of the wall-clock win that remote execution would have provided."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Roughly a third of the rewritten build files were reading configuration from the environment without declaring it."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The causal claim — an explanation the article states, not a metric.
+      - content: "Reading configuration from the environment without declaring it was the most common source of cache misses found during the migration."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Forward-looking: ALEATORY because the residual uncertainty is about
+      # how the world turns out, not about what the source said.
+      - content: "The rollout of the content-addressed cache to the other three engineering teams is planned for the third quarter of 2026."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      - content: "Fernwood Systems expects to revisit the remote execution decision once the cache hit rate stops improving."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      # The counterfactual the article offers as its reason — emitted as a
+      # HYPOTHETICAL-polarity claim rather than dropped.
+      - content: "Adding remote execution would have added a second failure domain to every build."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # DOCUMENT_META: byline and publication date. Optional —
+      # they are excluded from the factual surface, so whether the extractor
+      # reifies them is a legitimate policy choice, but when it does emit
+      # them they should count toward precision rather than read as noise.
+      - content: "The article about content-addressed build caching at Fernwood Systems was authored by Dana Okonkwo."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The article was published on 12 March 2026."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # ---------------------------------------------------------------------
+  # Numeric-dense case (v0.2.0). The discriminating genre from the
+  # 2026-08-02 provider trial: nearly every claim carries a figure, so a
+  # miner that paraphrases away or mangles a number fails the claim.
+  # Required tier is deliberately numeric-heavy — the range claim
+  # ($8-$23/month) and the percentage claims (6 % below P50, 4.1 % churn)
+  # are the direct analogues of the claims the GPT tier shed on
+  # web-article-001 ("$310 to $1,900 per month", "82 percent").
+  # ---------------------------------------------------------------------
+  - case_id: web-article-002
+    fixture: web-article-002
+    expected:
+      # --- Required: the post's load-bearing figures ---------------------
+      # Entity framing (location splits off in some runs; see optional).
+      - content: "Halcyon Grid Cooperative is a member-owned community-solar cooperative."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Halcyon Grid Cooperative has 1,240 subscribing households."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Halcyon Grid Cooperative's three arrays have a total nameplate capacity of 8.4 megawatts."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The headline generation number, phrased as a superstring of the
+      # source sentence (total + P50 shortfall) — runs that bundle the two
+      # figures into one claim and runs that split them both land here; the
+      # split P50 half has an optional twin below.
+      - content: "Halcyon Grid Cooperative's three arrays generated 11,208 megawatt-hours in 2025, 6 percent below the P50 forecast."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The financial pair.
+      - content: "Halcyon Grid Cooperative's revenue for 2025 was $1.62 million."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Halcyon Grid Cooperative's operating costs for 2025 were $940,000."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A before/after pair inside one sentence — the shape most likely
+      # to be mangled. Deliberately the ONLY gold for the refinance event
+      # (no date twin): one observed run emitted date + rates as a single
+      # claim and another split them, and any second gold here steals one
+      # segmentation's emission from this required one. The date-only
+      # split claim is accepted as a precision ding instead.
+      - content: "Halcyon Grid Cooperative refinanced the construction loan on the Pike Lake array from an interest rate of 7.2 percent down to 5.8 percent."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Halcyon Grid Cooperative subscribers buy generation credits at 8.9 cents per kilowatt-hour."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The dollar-range claim — the "$310 to $1,900 per month" analogue.
+      - content: "Halcyon Grid Cooperative members saw their monthly electric bills fall by between $8 and $23 in 2025."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The bare-percentage claim — the "82 percent" analogue.
+      - content: "Halcyon Grid Cooperative's subscriber churn rate for 2025 was 4.1 percent."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # --- Optional: emitted in practice, but segmentation varies --------
+      # Split twin of the required generation gold: home for the P50 half
+      # when a run emits the two figures as separate claims.
+      - content: "Halcyon Grid Cooperative's 2025 generation was 6 percent below the P50 forecast."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Splits off from the entity claim in some runs.
+      - content: "Halcyon Grid Cooperative is located in Duluth, Minnesota."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Halcyon Grid Cooperative operates three solar arrays."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The surplus is arithmetic on the two required financials, so runs
+      # that state it as one claim or two (amount vs first-ness) both count.
+      - content: "Halcyon Grid Cooperative's first operating surplus was $680,000 in 2025."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "2025 was Halcyon Grid Cooperative's first year with an operating surplus."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Nearly all of Halcyon Grid Cooperative's 2025 generation shortfall occurred in the first quarter."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The causal claim behind the shortfall.
+      - content: "Persistent snow cover kept the Pike Lake array offline or derated for 31 days in the first quarter of 2025."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The degradation pair — secondary metrics.
+      - content: "Measured panel degradation across Halcyon Grid Cooperative's fleet was 0.6 percent for 2025."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The module warranty for Halcyon Grid Cooperative's panels assumes an annual degradation figure of 0.8 percent."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Forward-looking savings estimate: ALEATORY.
+      - content: "The refinancing of the Pike Lake array construction loan will save approximately $86,000 per year in interest."
+        confidence_min: 0.75
+        uncertainty_nature: ALEATORY
+        required: false
+
+      - content: "The local utility's residential electricity rate is 10.5 cents per kilowatt-hour."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Halcyon Grid Cooperative's generation credit rate is 1.6 cents below the local utility's residential rate."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The average Halcyon Grid Cooperative member saved $14 per month on their electric bill in 2025."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Most of Halcyon Grid Cooperative's 2025 subscriber churn was from members moving out of the service territory."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Halcyon Grid Cooperative's board has approved early engineering work on a fourth solar array."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The planned fourth array has a capacity of 3.1 megawatts."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Conditional plan — emitted HYPOTHETICAL-polarity, ALEATORY.
+      - content: "Halcyon Grid Cooperative expects to energize the fourth array in 2027 if interconnection approval arrives on schedule."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      - content: "Halcyon Grid Cooperative's waitlist currently stands at 380 households."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Halcyon Grid Cooperative expects to open enrollment to the waitlist once the fourth array clears its interconnection study."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      - content: "Halcyon Grid Cooperative's audited financials for 2025 will be published in April."
+        confidence_min: 0.75
+        uncertainty_nature: ALEATORY
+        required: false
+
+      # DOCUMENT_META: genre, byline, publication date.
+      - content: "This post is an annual results summary by Halcyon Grid Cooperative."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The post was written by Tomas Ilves, board treasurer of Halcyon Grid Cooperative."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The post was published on 10 February 2026."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # ---------------------------------------------------------------------
+  # Argumentative-essay case (v0.2.0). The facts arrive embedded in an
+  # argument rather than labelled as findings, so the miner has to
+  # separate the falsifiable substrate from the evaluative thesis it is
+  # deployed to support. The thesis claims are legitimately extractable
+  # (they are the author's stated position) but sit in the optional tier
+  # at lower floors.
+  # ---------------------------------------------------------------------
+  - case_id: web-essay-001
+    fixture: web-essay-001
+    expected:
+      # --- Required: the essay's falsifiable substrate -------------------
+      - content: "Priya Raghunathan spent four years maintaining the shift-scheduling system at Bracken & Doyle."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Entity framing.
+      - content: "Bracken & Doyle is a warehouse logistics firm."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The shift-scheduling system at Bracken & Doyle assigned shifts to about 9,000 warehouse workers."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The shift-scheduling system at Bracken & Doyle operated across 23 sites."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "In a normal week the shift-scheduling system at Bracken & Doyle processed roughly 30,000 shift assignments."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The failed-rewrite arc — the story the essay's argument rests on.
+      - content: "In 2021, Bracken & Doyle approved a full rewrite of the shift-scheduling system."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Superstring of the source sentence (cancellation + cost) — runs
+      # that bundle the two facts and runs that split them both land here;
+      # the split $2M half has an optional twin below.
+      - content: "The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly $2 million spent."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The counter-arc's before/after pair.
+      - content: "The production incident count fell from 31 in the quarter the rewrite started to 6 in the quarter it was cancelled."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # --- Optional: emitted in practice, but segmentation varies --------
+      # Bundled with the four-years claim in some runs.
+      - content: "Priya Raghunathan's maintenance work at Bracken & Doyle lasted from 2019 to 2023."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The rewrite of the shift-scheduling system was budgeted at eighteen months."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Split twin of the required cancellation gold: home for the $2M half
+      # when a run emits the cost as its own claim.
+      - content: "Approximately $2 million was spent on the rewrite before it was cancelled."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Nothing from the rewrite was shipped to production before it was cancelled."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Priya Raghunathan's maintenance team at Bracken & Doyle consisted of three people."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Bundled with the team-size claim in some runs.
+      - content: "Over the fourteen months of the rewrite, the three-person maintenance team shipped 41 releases."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The shift-scheduling system at Bracken & Doyle was written before Priya Raghunathan arrived."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The causal explanation — stated by the author as diagnosis, not metric.
+      - content: "The rewrite of the shift-scheduling system failed because the old system's real specification lived in a decade of accumulated fixes that no document recorded."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Priya Raghunathan left Bracken & Doyle in 2023."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The shift-scheduling system at Bracken & Doyle was still running at the time of writing."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The evaluative thesis — the author's position, carried as such.
+      # Segmentation varies (one industry-rewards claim vs one per example),
+      # so both variants sit here.
+      - content: "The industry's promotion criteria are calibrated toward novelty rather than stewardship."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Conference programs in the software industry are calibrated toward novelty rather than stewardship."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # DOCUMENT_META: byline, publication date, genre tag.
+      - content: "The article was written by Priya Raghunathan."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The article was published on 4 November 2025."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "This article is categorized as an Essay on the Salt Marsh Notes blog."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # ---------------------------------------------------------------------
+  # Interview / quote-bearing case (v0.2.0). All claims are speech, so
+  # attribution is the test: reported findings should surface as facts,
+  # while the speaker's self-flagged speculation (storm loss vs
+  # grounding, with a named dissent) must stay attributed — promoting it
+  # to a bare world-fact is the failure mode this case exists to catch.
+  # ---------------------------------------------------------------------
+  - case_id: web-interview-001
+    fixture: web-interview-001
+    expected:
+      # --- Required: the excavation's established findings ---------------
+      # Entity framing.
+      - content: "Dr. Maren Kaldestad is a marine archaeologist at the Kvitholm Institute."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The Meridian Rose is a seventeenth-century merchant wreck."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The Meridian Rose was discovered in 2023 during a routine sonar survey."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Superstring of the source sentence (depth + its consequence), so a
+      # run that bundles the "deep enough that she was never salvaged"
+      # clause still lands on this required gold.
+      - content: "The Meridian Rose wreck lies at a depth of 41 meters, deep enough that it was never salvaged."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Dendrochronology of the Meridian Rose's hull timbers showed the trees were felled in 1684."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Stated with an explicit hedge ("in or shortly after"), so the
+      # floor sits below the crisp-fact tier.
+      - content: "The Meridian Rose sank in or shortly after 1687."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The headline count — and the numismatic echo the general
+      # extractor (not a domain extractor) has to handle. Superstring of
+      # the source sentence (count + coin type); the split coin-type half
+      # has an optional twin below.
+      - content: "Over two field seasons, 612 silver coins were recovered from the Meridian Rose, the great majority of them Spanish eight-real pieces."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Superstring of the funding sentence (amount + funder + horizon);
+      # the split through-2027 half has an optional twin below.
+      - content: "The Meridian Rose excavation is funded through 2027 by a grant of 2.4 million euros from the Stray Light Foundation."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # THE attribution claim. Required because dropping it loses the
+      # interview's most newsworthy question, and stripping the
+      # attribution ("the ship was lost in a storm") would assert a
+      # world-fact the speaker herself declines to assert.
+      - content: "Kaldestad believes the Meridian Rose was lost in a storm rather than by grounding."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # --- Optional: emitted in practice, but segmentation varies --------
+      # Splits off from the affiliation claim in some runs.
+      - content: "Dr. Maren Kaldestad is the excavation lead on the Meridian Rose."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Split twin of the required depth gold, deliberately phrased short
+      # (no depth figure) so it cannot steal a bundled depth+salvage
+      # emission from the required gold.
+      - content: "The Meridian Rose was never salvaged."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Meridian Rose was never trawled."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Split twin of the required coin gold: home for the coin-type half
+      # when a run emits it as its own claim.
+      - content: "The great majority of the coins recovered from the Meridian Rose are Spanish eight-real pieces."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The hull timbers of the Meridian Rose are oak."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The cargo triple — one claim or three depending on segmentation.
+      - content: "The Meridian Rose carried salt in its hold."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Meridian Rose carried copper ingots in its hold."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Salt and copper ingots from the Meridian Rose have been physically recovered by the excavation team."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "No cargo manifest for the Meridian Rose has survived."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The evidence behind the storm reading.
+      - content: "The Meridian Rose shows no strike damage on the hull."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Meridian Rose settled upright on the seabed."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # The named dissent — the second attribution claim.
+      - content: "A colleague of Kaldestad reads the same evidence and believes the Meridian Rose was overloaded."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Meridian Rose excavation site is guarded."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The excavation team for the Meridian Rose consists of fifteen people at peak season."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Stray Light Foundation grant funds the Meridian Rose excavation through 2027."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Forward-looking: ALEATORY.
+      - content: "A third excavation season on the Meridian Rose is planned for the summer of 2027."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      - content: "The finds from the Meridian Rose are contracted to go on public display at the maritime museum in Bergen in 2028."
+        confidence_min: 0.70
+        uncertainty_nature: ALEATORY
+        required: false
+
+      # DOCUMENT_META: interviewer, date, editorial framing.
+      - content: "The interview with Maren Kaldestad was conducted by Jonas Brekke."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The interview was published on 21 May 2026."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The interview was conducted after Kaldestad's team's second field season."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The transcript of the interview was edited for length."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The interview was published in Tidewrack Quarterly."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false

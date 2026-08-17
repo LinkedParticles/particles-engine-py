@@ -1,0 +1,84 @@
+# RDF deposit seed benchmark.
+#
+# Built on the `rdf-graph-001` conformance fixture. Unlike every other suite in
+# this directory, the expected set here is *exhaustive and exact*: the extractor
+# is a deterministic parser, so a fixed blob has exactly one correct output.
+# There is no sampling noise to tolerate and no "the model might phrase it
+# differently" allowance — every emitted particle is required, and precision
+# below 1.0 means the extractor emitted something the graph does not say.
+#
+# That makes this suite the strictest in the corpus, deliberately. If a future
+# verbalization change alters any `content` string, this suite fails, and that
+# is the intended signal: `content` is the embedding input for a
+# structure-canonical particle, so changing it changes what semantic query
+# retrieves. The remedy is a deliberate EXTRACTOR_VERSION bump plus
+# `particles reindex --extractor-version <old>` — never a quiet
+# edit of stored rows.
+#
+# confidence_min values pin the two-tier confidence story: 0.95 is
+# `rdf.default_confidence` (the parser's confidence in its *reading*, per the
+# two-quantity separation), and 0.72 is the reification bundle's own
+# `p:confidenceValue`, which must override the default rather than be averaged
+# with it.
+
+suite_id: rdf-seed-001
+name: RDF deposit seed benchmark
+version: 0.1.0
+domain: linked data
+source_types: [RDF_GRAPH]
+published_by: anthropic/particles-sdk
+published_at: 2026-07-26T00:00:00+00:00
+
+cases:
+  - case_id: rdf-graph-001
+    fixture: rdf-graph-001
+    expected:
+      # An IRI object: a two-subject graph edge, and the case where the
+      # object's own document-carried label does the verbalizing.
+      - content: "5 Pfennigs (1948-1950) GDR was minted at: Berlin Mint"
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A typed literal (xsd:decimal) — renders lexically, no datatype noise
+      # leaking into the prose.
+      - content: "5 Pfennigs (1948-1950) GDR has weight: 1.1"
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A language-tagged literal that IS English: must NOT pick up the
+      # "(en)" suffix reserved for flagging non-English text.
+      - content: "5 Pfennigs (1948-1950) GDR has material: Aluminium"
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A Wikidata IRI in object position — the external-ref mapping case.
+      - content: "5 Pfennigs (1948-1950) GDR was issued by: German Democratic Republic"
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # A second Wikidata IRI, reached from a different subject.
+      - content: "Berlin Mint located in: Berlin"
+        confidence_min: 0.95
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # The reification bundle: one particle, carrying the publisher's own
+      # 0.72 rather than the 0.95 parser default. The five plumbing triples
+      # (rdf:type/subject/predicate/object + the confidence) must NOT appear
+      # as claims — that is what precision measures on this case.
+      - content: "5 Pfennigs (1948-1950) GDR was demonetized: 1990-12-31"
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+metrics:
+  - name: precision
+    definition: matched_emitted / total_emitted
+  - name: recall
+    definition: matched_required / total_required
+  - name: calibration_error
+    definition: ECE (10 bins) — see particles/benchmark/metrics.py

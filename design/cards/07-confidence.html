@@ -1,0 +1,47 @@
+<!-- @dsCard group="Epistemic encodings" name="Confidence & the particle row" subtitle="Bar + opacity for confidence; solid / dashed / dotted / hit-ring for state" -->
+<div class="p-stack">
+  <div>
+    <p class="ds-h">Confidence bar (effective confidence, 0–1)</p>
+    <div class="p-stack" style="max-width:360px">
+      <div><div class="p-conf"><i style="width:92%"></i></div><span class="p-kv">0.92 · stored 0.95 × trust 0.97</span></div>
+      <div><div class="p-conf"><i style="width:61%"></i></div><span class="p-kv">0.61 · stored 0.80 × source trust 0.76</span></div>
+      <div><div class="p-conf"><i style="width:23%"></i></div><span class="p-kv">0.23 · recency-decayed</span></div>
+    </div>
+  </div>
+  <div>
+    <p class="ds-h">Opacity is confidence — decay is literal fading</p>
+    <div class="p-particle p-fade" style="--conf:1">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-particle__id">p-741ec7ef</span>
+      <div class="p-particle__claim">Douglas Adams was born in Cambridge in 1952.</div>
+      <div class="p-conf"><i style="width:94%"></i></div>
+      <div class="p-particle__meta">effective 0.94 · <span class="p-subject">Douglas Adams</span></div>
+    </div>
+    <div class="p-particle p-fade" style="--conf:0.55">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-chip p-chip--contested">⚠ contested</span>
+      <div class="p-particle__claim">The first Hitchhiker’s radio series aired in March 1978.</div>
+      <div class="p-conf"><i style="width:55%"></i></div>
+      <div class="p-particle__meta p-glyph--contested">⚠ contested (stance, divergence 0.4) — vs. p-9a3c1d20</div>
+    </div>
+    <div class="p-particle p-fade p-particle--ghost" style="--conf:0.3">
+      <span class="p-chip p-chip--SUPERSEDED">SUPERSEDED</span>
+      <div class="p-particle__claim">Adams wrote four Hitchhiker’s novels.</div>
+      <div class="p-particle__meta">superseded by p-2b77e0c4 · dashed = ghost</div>
+    </div>
+    <div class="p-particle p-particle--stale">
+      <span class="p-chip p-chip--PROVENANCE_STALE">PROVENANCE_STALE</span>
+      <div class="p-particle__claim">The Wikipedia article lists 12 published works.</div>
+      <div class="p-particle__meta">source snapshot changed · dotted = stale provenance</div>
+    </div>
+    <div class="p-particle p-particle--hit">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-chip p-chip--hit">hit</span>
+      <div class="p-particle__claim">Adams died in Santa Barbara in May 2001.</div>
+      <div class="p-particle__meta">2 px accent ring = this row answered the query</div>
+    </div>
+    <div class="p-particle p-particle--ghost">
+      <span class="p-chip p-chip--RETRACTED">RETRACTED</span>
+      <div class="p-particle__claim"><span class="p-glyph--retracted">☒</span> Adams was born in Oxford.</div>
+      <div class="p-particle__meta">operator retraction · tombstone glyph, dashed</div>
+    </div>
+  </div>
+  <p class="ds-note">These encodings are shared verbatim by the web UI, the graph exporter and the Markdown/Obsidian renderer, and are kept in lockstep. <b>Opacity → effective confidence · solid/dashed/dotted → ACTIVE / SUPERSEDED-or-RETRACTED ghost / PROVENANCE_STALE · bold accent → retrieval hit · size → evidence mass · shade → best-supported claim.</b> Never encode confidence with a colour ramp; colour is reserved for status.</p>
+</div>

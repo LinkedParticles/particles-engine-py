@@ -1,0 +1,37 @@
+<!-- @dsCard group="Components" name="Forms, banners & callouts" subtitle="Inputs with hint/error; four banner states; the docs/exporter callout family" -->
+<div class="p-stack">
+  <div style="max-width:420px">
+    <div class="p-field">
+      <label>Engine URL</label>
+      <input class="p-input" value="https://particles.example.org" />
+      <div class="p-field__hint">Same-origin by default. Set only for a remote engine.</div>
+    </div>
+    <div class="p-field p-field--error">
+      <label>Client bearer</label>
+      <input class="p-input" placeholder="pcb_…" />
+      <div class="p-field__hint">Token rejected (401). Check the operator’s issued bearer.</div>
+    </div>
+    <div class="p-field">
+      <label>Query</label>
+      <div class="p-row" style="flex-wrap:nowrap"><input class="p-input" placeholder="What did we believe about…" /><button class="p-btn p-btn--primary">Ask</button></div>
+    </div>
+    <label class="p-check"><input type="checkbox" checked /> include superseded ghosts</label>
+  </div>
+  <div class="p-stack">
+    <div class="p-banner p-banner--error">Engine unreachable — retrying. Subject <a href="#" class="p-mono">Q42</a> is still in scope.</div>
+    <div class="p-banner p-banner--info">Showing the store as of 2001-05-11. Beliefs asserted later are hidden.</div>
+    <div class="p-banner p-banner--readonly">Read-only: this store’s write tools are not enabled for your bearer.</div>
+    <div class="p-banner p-banner--success">Deposited. 14 particles extracted, 2 contested.</div>
+  </div>
+  <div>
+    <p class="ds-h">Callouts (Markdown admonitions → Obsidian / mkdocs / wiki)</p>
+    <div class="p-callout p-callout--success"><div class="p-callout__title">Particle [ACTIVE] — confidence: 0.94</div>Douglas Adams was born in Cambridge in 1952.</div>
+    <div class="p-callout p-callout--contested"><div class="p-callout__title">⚠ contested</div>stance divergence 0.4 — vs. <span class="p-particle__id">p-9a3c1d20</span></div>
+    <div class="p-callout p-callout--warning"><div class="p-callout__title">Particle [PROVENANCE_STALE] — confidence: 0.80</div>The source snapshot changed since extraction.</div>
+    <div class="p-callout p-callout--danger"><div class="p-callout__title">Particle [INCONSISTENCY] — confidence: 0.50</div>Two ACTIVE particles assert incompatible birth years.</div>
+    <div class="p-callout p-callout--note"><div class="p-callout__title">Particle [SUPERSEDED] — confidence: 0.70</div>Superseded by <span class="p-particle__id">p-2b77e0c4</span>.</div>
+    <div class="p-callout p-callout--failure"><div class="p-callout__title">☒ Particle [RETRACTED]</div>Retracted by operator on 2026-08-01.</div>
+    <div class="p-callout p-callout--agreement"><div class="p-callout__title">Agreement</div>3 sources agree · 1 dissents (stance distribution).</div>
+  </div>
+  <p class="ds-note">Banner tints are the <code>-soft</code> primitives with the hue as border + text. Callouts map 1:1 to <code>_STATUS_CALLOUT</code> / <code>_SEVERITY_CALLOUT</code> in <code>particles/render/markdown.py</code>: success · note · warning · danger · failure · info, plus the custom <code>[!contested]</code> and <code>[!agreement]</code>.</p>
+</div>

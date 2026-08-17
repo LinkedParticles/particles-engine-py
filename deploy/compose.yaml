@@ -1,0 +1,53 @@
+# Particles Engine — local / single-host compose.
+#
+#   export PARTICLES_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#   docker compose -f deploy/compose.yaml up --build
+#
+# Then: http://localhost:8000/health, and the web UI at http://localhost:8000/app
+# (send `Authorization: Bearer $PARTICLES_API_KEY`).
+#
+# The image name is the owner's `linkedparticles` placeholder pending the
+# sign-off, and is built locally — never pushed to a public registry
+# before publication.
+
+services:
+  engine:
+    image: ghcr.io/linkedparticles/engine:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # Provenance stamped into the image: OCI labels for `docker inspect`,
+      # and the date again on GET /health so the web UI can show how old the
+      # engine is. Compose cannot compute these, so export them first —
+      #
+      #   export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      #          VCS_REF="$(git rev-parse --short HEAD)" \
+      #          VERSION="$(grep -m1 '^version' ../pyproject.toml | cut -d'"' -f2)"
+      #
+      # — or skip them and get an image that declines to say what it is,
+      # which builds fine and is exactly the status quo.
+      args:
+        BUILD_DATE: ${BUILD_DATE:-}
+        VCS_REF: ${VCS_REF:-}
+        VERSION: ${VERSION:-}
+    # Nothing here re-declares the entrypoint: the image already runs
+    # `particles engine serve 0.0.0.0:8000 --daemon`.
+    environment:
+      # Required. The bind is non-loopback, so the fail-closed gate
+      # refuses to start without it — `:?` fails the `up` with a clear message
+      # instead of letting the container crash-loop on the same refusal.
+      PARTICLES_API_KEY: ${PARTICLES_API_KEY:?set PARTICLES_API_KEY before `docker compose up` — the engine refuses to start on a non-loopback bind without it}
+      # Optional. Without it the engine still serves every read/write verb;
+      # the LLM-priced work (extraction, semantic lint, the consolidation
+      # cycle's semantic passes) degrades to a disclosed structural-only run.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # One volume, every store-adjacent path inside it (baked config):
+      # /data/particles.db, /data/corpus_blobs, /data/state.
+      - particles-data:/data
+    restart: unless-stopped
+
+volumes:
+  particles-data:

@@ -1,0 +1,238 @@
+# Build configuration for the `linkedparticles` distribution — the Engine layer
+# and the surfaces (HTTP API, CLI, MCP server, exporters).
+#
+# `linkedparticles` and `linkedparticles-core` ship code under the SAME import
+# package, `particles`, split along the Client/Engine boundary. Exactly one
+# distribution owns each path, and the four shared ones —
+# `particles/__init__.py`, `particles/py.typed`,
+# `particles/render/__init__.py`, `particles/interchange/__init__.py` — belong
+# to `linkedparticles-core`, which is always installed alongside this. Those
+# files call `pkgutil.extend_path`, which is what lets the modules in THIS
+# distribution resolve even when the two land in different `sys.path` roots.
+#
+# The wheels must have ZERO file overlap. If you add a file here that the core
+# distribution also ships, the two installs overwrite each other and
+# uninstalling either breaks the other.
+#
+# `version` and the `linkedparticles-core` pin are stamped from the development
+# upstream at export time. The pin is EXACT: the two distributions are one
+# source tree cut along an architectural line, and engine modules import client
+# modules by exact symbol — a version skew is a broken install, not a
+# compatibility question.
+[project]
+name = "linkedparticles"
+version = "1.130.0"
+description = "Python reference SDK for the Particles epistemic knowledge standard — Engine layer and surfaces"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The Particles authors" }]
+keywords = [
+    "epistemic", "knowledge-management", "provenance", "uncertainty", "psum",
+    "knowledge-graph", "beliefs", "llm", "agents", "rag", "citations",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The store-free Client layer. Pinned exactly, and rewritten to the release
+    # version at export time — never relax this to a compatible-release range.
+    "linkedparticles-core==1.130.0",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "aiosqlite>=0.20",
+    "greenlet>=3.5.0",
+    "fastapi>=0.111",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+    "typer>=0.12",
+    "jinja2>=3.1",
+    "warcio>=1.7",
+    # Capped below the 2.x major: `mcp` 2.0 moved `mcp.server.fastmcp`, which
+    # the native MCP server and the memory-compat façade both import, so an
+    # unbounded floor resolves a downstream `pip install` straight into an
+    # ImportError. The development upstream is insulated by its lockfile; a
+    # published distribution is not. Raise the cap when 2.x is tested.
+    "mcp>=1.27.1,<2",
+    "apscheduler>=3.10",
+    # Cross-process advisory write lock: a small, cross-platform file-lock
+    # library used to serialize SQLite writers across processes (the always-on
+    # engine vs. a direct-I/O CLI verb on the host).
+    "filelock>=3.13",
+    # Observability API only (no-op unless the `otel` extra is installed). Also
+    # a dependency of the core distribution, since Client modules emit spans
+    # through it unconditionally.
+    "opentelemetry-api>=1.27",
+]
+
+[project.optional-dependencies]
+# Opt-in observability runtime. Installs the OTel SDK, the OTLP/HTTP exporter,
+# and the auto-instrumentation for our stack. Absent by default — the base
+# `opentelemetry-api` no-op covers the off case. The bootstrap imports these
+# lazily and degrades to a no-op with a warning when the extra is missing.
+otel = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-logging>=0.48b0",
+]
+# Opt-in LangChain adapter. Installs the small, stable, framework-agnostic
+# `langchain-core` base only (not the churning umbrella meta-package) —
+# `BaseTool` / `StructuredTool` / `BaseRetriever` / `Document` all live there.
+# The adapter imports it lazily and raises an actionable ImportError when the
+# extra is missing, so the package imports cleanly without it.
+langchain = [
+    "langchain-core>=0.3",
+]
+
+[project.scripts]
+particles = "particles.api.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/LinkedParticles/particles-engine-py"
+Repository = "https://github.com/LinkedParticles/particles-engine-py"
+Issues = "https://github.com/LinkedParticles/particles-engine-py/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The Python package is `particles/` only. `clients/` is a non-Python front-end
+# tree and `deploy/` holds container/chart artifacts — neither belongs in the
+# wheel or sdist.
+[tool.hatch.build.targets.wheel]
+packages = ["particles"]
+
+# Ship the vendored graph-view assets so the graph exporter can inline them
+# into a self-contained HTML artifact offline. Resolved at runtime from the
+# packaged copy first, with the source-tree `artifacts/graph/` as the checkout
+# fallback. The normative schema artifacts are the core distribution's to ship —
+# every force-include belongs to exactly one distribution.
+[tool.hatch.build.targets.wheel.force-include]
+"artifacts/graph" = "particles/_artifacts/graph"
+# The design tokens the graph exporter inlines into its self-contained artifact
+# (source: design/tokens.css; resolved packaged-copy-first at runtime).
+"design/tokens.css" = "particles/_artifacts/design/tokens.css"
+
+# Ship the Alembic migrations so an installed wheel can create its own schema.
+# Schema creation used to resolve them as `particles/../alembic`, which is the
+# *alembic library* for an installed package, so it only ever worked from a
+# source checkout. `_alembic` is deliberately not an importable name.
+#
+# Listed per-subpath, not as the `alembic` directory wholesale: force-include
+# bypasses the exclude patterns, so mapping the whole directory would ship any
+# non-code file that later lands beside the migrations. An allowlist here keeps
+# that impossible, and matches the sdist target's `only-include` philosophy.
+"alembic/versions" = "particles/_alembic/versions"
+"alembic/env.py" = "particles/_alembic/env.py"
+"alembic/script.py.mako" = "particles/_alembic/script.py.mako"
+"alembic.ini" = "particles/_alembic/alembic.ini"
+
+# Allowlist only what a source build / install needs. The hatch default sweeps
+# the whole repo into the sdist; keep this an explicit include, not an exclude.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "particles",
+    "artifacts/schemas",
+    "artifacts/conformance",
+    "artifacts/graph",
+    "artifacts/openapi.json",
+    "design/tokens.css",
+    "alembic",
+    "alembic.ini",
+    "config.yaml.sample",
+    "tests",
+    "constraints.txt",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "pyproject.toml",
+]
+# `only-include` is the strict allowlist; `exclude` additionally suppresses the
+# README files hatch otherwise sweeps tree-wide.
+exclude = ["docs", "clients", "deploy"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[[tool.mypy.overrides]]
+module = [
+    "opentelemetry.sdk.*",
+    "opentelemetry.exporter.*",
+    "opentelemetry.instrumentation.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["langchain_core.*"]
+ignore_missing_imports = true
+
+# The memory-compat façade is the only module that drives the MCP SDK's
+# low-level `Server`, whose handler-registration decorators are untyped
+# upstream — each one trips `untyped-decorator` + `no-untyped-call` under
+# strict mode. Scoped to the single file; its own signatures stay checked.
+[[tool.mypy.overrides]]
+module = ["particles.mcp.memory_compat.server"]
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires ANTHROPIC_API_KEY",
+    "dogfood: synthesis-pipeline regression test against the in-repo corpus",
+]
+filterwarnings = [
+    # rdflib's own JSON-LD parser still uses the deprecated ConjunctiveGraph
+    # internally. Nothing for us to fix — remove this once rdflib ships a
+    # release that migrates the plugin.
+    "ignore:ConjunctiveGraph is deprecated:DeprecationWarning:rdflib.plugins.parsers.jsonld",
+    # opentelemetry-api reads entry points through the deprecated
+    # importlib.metadata SelectableGroups dict interface. Third-party; remove
+    # once opentelemetry-api migrates off it.
+    "ignore:SelectableGroups dict interface is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "B008",  # Typer uses function calls (typer.Argument/Option) in defaults by design
+    "B904",  # raise typer.Exit() in except is CLI control flow, not exception chaining
+]
+
+# `particles` is this repo's own package even though the Client half is
+# installed from the `linkedparticles-core` distribution. Without this,
+# isolated ruff sorts those imports into the third-party block and every module
+# in the tree reports I001.
+[tool.ruff.lint.isort]
+known-first-party = ["particles"]
+
+# Security floors on packages that are not direct dependencies — they arrive
+# transitively, so a floor here raises the minimum without adding a spurious
+# direct dependency. Revisit each line once the parent's own floor moves past
+# the fixed version.
+[tool.uv]
+constraint-dependencies = [
+    "starlette>=1.0.1",   # PYSEC-2026-161, runtime HTTP path
+    "idna>=3.15",         # CVE-2026-45409, runtime hostname path
+    "setuptools>=83.0.0", # PYSEC-2026-3447, build path
+]

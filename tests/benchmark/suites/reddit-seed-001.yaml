@@ -1,0 +1,79 @@
+# Reddit seed benchmark.
+#
+# Second domain-specific suite for the reference SDK (after
+# numismatic-seed-001). The motivating gap, surfaced during whitepaper
+# v2.2 r3 external review: temperature-scaling calibration
+# only had one suite to fit against, and that suite produced an
+# at-the-ceiling T=10.0 fit because Numista confidences cluster at
+# 0.95-1.00. A social-media extractor with a different confidence
+# distribution gives the calibrator a second data point.
+#
+# Coverage is intentionally small but spans the three claim shapes the
+# Reddit extractor produces from the v0.42.5 prose pipeline:
+#   1. structured-properties (the post's score / num_comments dual-emission
+#) — required
+#   2. an LLM claim about the post's substantive content — required
+#   3. an LLM claim derived from a high-score comment — required
+#   4-5. optional LLM claims that are nice-to-have but not strictly
+#      necessary for the extractor to "work"
+#
+# Confidence floors are calibrated against what RedditExtractor 0.7.x
+# actually emits — typically 0.7-0.9 on substantive LLM claims (lower
+# than Numista's 0.95-1.00 because UGC prose is less structurally
+# certain) — so a future extractor revision that tightens its stated
+# confidence is fine but one that loosens it should fail.
+
+suite_id: reddit-seed-001
+name: Reddit seed benchmark
+version: 0.1.0
+domain: social media
+source_types: [REDDIT_POST]
+published_by: anthropic/particles-sdk
+published_at: 2026-05-28T00:00:00+00:00
+
+cases:
+  - case_id: reddit-thread-001
+    fixture: reddit-thread-001
+    expected:
+      # Required: structured-properties claim. The Reddit extractor
+      # synthesises this directly from the post envelope (score,
+      # num_comments, subreddit) without an LLM call, so the
+      # confidence is deterministic and high.
+      - content: "Reddit post in r/Python by samuelcolvin scored 2847 with 4 comments."
+        confidence_min: 0.90
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: the headline factual claim from the post body.
+      # Pydantic v3.0.0 release + Rust rewrite + 5x speedup is the
+      # substance the post communicates.
+      - content: "Pydantic v3.0.0 has been released with a Rust-backed validation core."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Pydantic v3.0.0 delivers approximately a 5x speedup over v2 on typical workloads."
+        confidence_min: 0.65
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Required: a derived fact from the post body — minimum Python
+      # version is a non-controversial verifiable claim.
+      - content: "Pydantic v3.0.0 requires Python 3.10 or newer."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      # Optional: high-score comment claim. The tiangolo comment carries
+      # weight because it's the FastAPI author, but the comment-claim
+      # signal is more variable so we mark it optional.
+      - content: "FastAPI uses Pydantic internally and will pin to v3 in its next release."
+        confidence_min: 0.55
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # Optional: a graingert comment claim about wheel size increase.
+      - content: "Pydantic v3.0.0 wheels are approximately 2 MB larger than v2 on most platforms."
+        confidence_min: 0.55
+        uncertainty_nature: EPISTEMIC
+        required: false

@@ -1,0 +1,684 @@
+[
+  {
+    "description": "Run a tag-aware semantic query against the particle store.\n\nArgs:\n    question: Natural-language question. Optional since: omit it\n        and set structural claim filters (or an aggregate / the predicate\n        listing) for the deterministic modes \u2014 no embedding, no LLM call.\n    tags: Subtree-expanded tag filters, repeatable.\n    subject_id: Restrict to particles about this subject.\n    min_confidence: Minimum confidence value (0.0\u20131.0).\n    top_k: Number of particles to retrieve (1\u2013200).\n    audience: \"GENERAL\" | \"EXPERT\" | \"REGULATORY\".\n    summary: When ``True``, each hit in ``particles`` is reduced to\n        ``{id, content, confidence, effective_confidence,\n        subject_ids}`` \u2014 provenance, tags, properties, and\n        embeddings are dropped. The NL ``answer`` string and\n        coverage gaps are unchanged. Use this when the agent only\n        needs to surface the answer and pick particles to\n        ``particle_show`` later. Default ``False`` preserves the\n        full ``QueryResponse`` shape for backward compatibility.\n    as_of: ISO-8601 past instant (a bare date means start of that\n        day, UTC): answer what the store believed at T.\n        Retired hits carry an ``as_of_notes`` entry (current status,\n        retirement instant + basis, and the superseding belief);\n        ``as_of_excluded_undatable`` discloses retirements the store\n        cannot date. A future instant is rejected.\n    predicate: Structural filter \u2014 claims whose predicate term\n        equals this string (case-insensitive, exact: a CURIE and its\n        expanded IRI are different strings; discover terms with\n        ``list_predicates``). With a question it prefilters the semantic\n        candidate set; without one it selects the deterministic listing.\n    object_eq: Claims whose object equals this value (typed comparison\n        when both sides normalize \u2014 numbers and ISO dates \u2014 else\n        case-insensitive text).\n    object_gt: Claims whose object is greater than this number or ISO\n        date; claims whose object would not normalize are excluded and\n        disclosed in ``claim_coverage.not_normalizable_excluded``.\n    object_lt: Claims whose object is less than this number or ISO date\n        (same normalization and disclosure as ``object_gt``).\n    object_contains: Claims whose object contains this substring\n        (case-insensitive; every term kind).\n    count: Deterministic aggregate \u2014 the number of matching claims with\n        their effective-confidence distribution. Rejects a simultaneous\n        question.\n    group_by: Deterministic aggregate \u2014 bucket matching claims by\n        \"subject\", \"predicate\", or \"object\" with per-bucket counts and\n        confidence distribution. Rejects a simultaneous question.\n    min_effective_confidence: Explicit confidence floor for the aggregate\n        modes; excluded rows are disclosed. There is no default floor.\n    list_predicates: List the distinct predicate terms with kind and\n        claim count (``predicate_vocabulary`` in the response) \u2014 the\n        discovery surface for the exact-string predicate filter.\n\nReturns:\n    The full ``QueryResponse`` as JSON \u2014 answer string plus the\n    ranked particles, effective confidences, coverage gaps, and\n    any truncation warning. A structural call returns rows\n    or counts, not generated prose: the deterministic listing fills\n    ``particles`` ordered by effective confidence, the aggregates fill\n    ``structural_aggregate``, the vocabulary listing fills\n    ``predicate_vocabulary``, and every structural result carries\n    ``claim_coverage`` (the annotated-fraction footer plus the\n    non-normalizable exclusion disclosure). Each particle's ``contested`` key is\n    the id of an open INCONSISTENCY referencing it,\n    else null; the composed contested badge rides\n    beside it \u2014 the response-level ``contested`` list carries one\n    badge (fired bases + drill-downs) or null per ranked particle,\n    and with ``summary=True`` each slim hit carries\n    ``contested_bases`` (the fired basis labels, else null) beside\n    its ``contested`` id. When ``summary=True``, each particle\n    entry is a small dict instead of the full Pydantic model.",
+    "inputSchema": {
+      "properties": {
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "As Of"
+        },
+        "audience": {
+          "default": "GENERAL",
+          "title": "Audience",
+          "type": "string"
+        },
+        "count": {
+          "default": false,
+          "title": "Count",
+          "type": "boolean"
+        },
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group By"
+        },
+        "list_predicates": {
+          "default": false,
+          "title": "List Predicates",
+          "type": "boolean"
+        },
+        "min_confidence": {
+          "default": 0.0,
+          "title": "Min Confidence",
+          "type": "number"
+        },
+        "min_effective_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Effective Confidence"
+        },
+        "object_contains": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Contains"
+        },
+        "object_eq": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Eq"
+        },
+        "object_gt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Gt"
+        },
+        "object_lt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Lt"
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Predicate"
+        },
+        "question": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Question"
+        },
+        "subject_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Id"
+        },
+        "summary": {
+          "default": false,
+          "title": "Summary",
+          "type": "boolean"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        },
+        "top_k": {
+          "default": 40,
+          "title": "Top K",
+          "type": "integer"
+        }
+      },
+      "title": "queryArguments",
+      "type": "object"
+    },
+    "name": "query"
+  },
+  {
+    "description": "Show one particle with its provenance, subjects, and tags.\n\nArgs:\n    particle_id: Full UUID or unambiguous prefix (\u2265 8 chars).\n\nReturns:\n    Dict with ``particle`` (Pydantic JSON), ``subjects`` (list of\n    ``{id, canonical_name}``), and ``provenance`` (list of\n    ``{type, corpus_entry_id, uri_r, source_type, snapshot_id}``).\n    Raises if the prefix matches zero or multiple particles.",
+    "inputSchema": {
+      "properties": {
+        "particle_id": {
+          "title": "Particle Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "particle_id"
+      ],
+      "title": "particle_showArguments",
+      "type": "object"
+    },
+    "name": "particle_show"
+  },
+  {
+    "description": "List particles, optionally filtered by status or subject.\n\nLightweight alternative to ``query`` and ``lint`` when an agent\njust needs the IDs of particles in a particular state \u2014 e.g. the\nopen INCONSISTENCY queue, RETRACTED particles for cleanup, or\nevery ACTIVE particle linked to a subject. Embeddings are never\nincluded; responses are designed to stay within MCP tool-result\nsize caps.\n\nArgs:\n    status: Optional status filter \u2014 one of\n        ``ACTIVE``, ``SUPERSEDED``, ``RETRACTED``,\n        ``PROVENANCE_STALE``, ``INCONSISTENCY``. Unset returns\n        particles in any status.\n    subject_id: Optional subject UUID. When set, only\n        particles linked to this subject via the\n        ``particle_subjects`` join table are returned.\n    limit: Maximum particles to return (default 50). Must be > 0.\n    offset: Number of particles to skip before returning results\n        (default 0). Combine with ``limit`` to page through the\n        full set.\n\nReturns:\n    Dict with ``particles`` \u2014 a list of summary dicts containing\n    ``id``, ``status``, ``content``, ``confidence``,\n    ``subject_ids``, ``asserted_at``, and ``status_reason``. Each\n    entry's ``contested`` key is the id of an open INCONSISTENCY\n    referencing it, else null; ``contested_bases``\n rides beside it with the fired basis labels \u2014\n    composed by the same composer the ``query`` tool uses, so all\n    three bases (stance / divergence / inconsistency) are evaluated\n    and the two surfaces on one server always agree. Plus\n    ``limit``/``offset`` echoed back so the agent can drive\n    pagination. Embeddings are intentionally omitted.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "subject_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Id"
+        }
+      },
+      "title": "particles_listArguments",
+      "type": "object"
+    },
+    "name": "particles_list"
+  },
+  {
+    "description": "List particles sharing a context fingerprint.\n\nArgs:\n    fingerprint: Full 64-char SHA-256 hex or a prefix (\u2265 8 chars).\n    limit: Maximum particles to return (default 50, capped at 200 to\n        keep responses within MCP per-tool-result token caps \u2014\n        fingerprint matches share full ``content`` strings).\n\nReturns:\n    Dict with ``fingerprint`` (the queried value) and ``particles``\n    (list of ``{id, status, content}`` summaries).",
+    "inputSchema": {
+      "properties": {
+        "fingerprint": {
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fingerprint"
+      ],
+      "title": "particle_searchArguments",
+      "type": "object"
+    },
+    "name": "particle_search"
+  },
+  {
+    "description": "List subjects in the knowledge graph (alphabetical by canonical_name).\n\nPaginated to keep responses within an MCP-client-friendly size \u2014 the\nfull subject set can easily exceed per-tool-result token caps.\n\nArgs:\n    limit: Maximum subjects to return (default 50).\n    offset: Number of subjects to skip before returning results\n        (default 0). Combine with ``limit`` to page through the\n        full set.\n    order: ``\"name\"`` (alphabetical, default) or ``\"degree\"`` \u2014\n        most-connected first, by descending count of ACTIVE\n        particles linked to each subject (name tie-break). Use\n        ``\"degree\"`` to find a store's hub subjects, e.g. as a\n        ``graph_view`` starting scope.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "order": {
+          "default": "name",
+          "title": "Order",
+          "type": "string"
+        }
+      },
+      "title": "subjects_listArguments",
+      "type": "object"
+    },
+    "name": "subjects_list"
+  },
+  {
+    "description": "Substring search over subject canonical names (case-insensitive).\n\nArgs:\n    query: Substring to match against ``canonical_name``.\n    limit: Maximum subjects to return (default 50). A generic\n        substring like \"the\" can match thousands of subjects, so\n        this caps the page size.\n    offset: Number of matches to skip before returning results\n        (default 0). Results are alphabetical by canonical_name\n        so pagination is stable.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "subjects_searchArguments",
+      "type": "object"
+    },
+    "name": "subjects_search"
+  },
+  {
+    "description": "Show one subject with the particle IDs linked to it.\n\nArgs:\n    subject_id: Full UUID or unambiguous prefix (\u2265 8 chars).\n    particle_id_limit: Maximum particle IDs to include in\n        ``particle_ids`` (default 100). For hot subjects the full\n        list can blow the per-tool-result token cap; use\n        ``particles_list(subject_id=\u2026, limit=\u2026, offset=\u2026)`` for\n        the full set when ``particle_count > particle_id_limit``.\n\nReturns:\n    Dict with ``subject`` (Pydantic JSON), ``particle_ids`` (capped\n    at ``particle_id_limit``, ordered by id for stable pagination),\n    and ``particle_count`` \u2014 the true total of linked particles,\n    so callers can detect when the list was truncated.",
+    "inputSchema": {
+      "properties": {
+        "particle_id_limit": {
+          "default": 100,
+          "title": "Particle Id Limit",
+          "type": "integer"
+        },
+        "subject_id": {
+          "title": "Subject Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "subject_id"
+      ],
+      "title": "subjects_showArguments",
+      "type": "object"
+    },
+    "name": "subjects_show"
+  },
+  {
+    "description": "List every taxonomy + its full tag tree.\n\nArgs:\n    limit: Maximum taxonomies to return (default 50). Each\n        taxonomy embeds its full tag tree, so even a handful of\n        large taxonomies can push the response past the\n        per-tool-result token cap.\n    offset: Number of taxonomies to skip before returning results\n        (default 0). Results are ordered by name so pagination is\n        stable.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        }
+      },
+      "title": "list_taxonomiesArguments",
+      "type": "object"
+    },
+    "name": "list_taxonomies"
+  },
+  {
+    "description": "List recent corpus entries (most-recently-deposited first).\n\nArgs:\n    limit: Maximum entries to return (default 50).\n    source_type: Optional filter (e.g. ``\"WIKIDATA_API\"``).",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "source_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Type"
+        }
+      },
+      "title": "list_corpus_entriesArguments",
+      "type": "object"
+    },
+    "name": "list_corpus_entries"
+  },
+  {
+    "description": "Run structural lint checks over the particle store (no fixes, no LLM).\n\nThe MCP surface is read-only, so ``--fix`` is forced off and the\nLLM-assisted semantic checks are disabled \u2014 agents read findings\nand surface them to the operator, who decides whether to act.\n\nArgs:\n    category: Optional ``finding_type`` filter (e.g. ``STALENESS``,\n        ``PHANTOM_SUBJECT``, ``WIKIDATA_LINK_MISMATCH``). When set,\n        only findings of that kind are returned; ``summary`` is\n        always the full counts dict and reflects every category\n        actually emitted by this run.\n    summary_only: When ``True``, drop the ``findings`` list and\n        return only the ``summary`` counts dict (plus ``run_at``).\n        Useful when the agent only needs to know what *kinds* of\n        problems exist before drilling in with ``category``.\n    limit: Maximum findings to include after filtering (default\n        100). Hard cap to keep the response under per-tool-result\n        size limits even when many findings of one category exist.\n        A ``truncated`` flag is added when the cap fires.\n\nReturns:\n    ``{run_at, findings, summary}`` matching the ``LintReport``\n    schema, optionally with ``truncated: True`` and (when\n    ``summary_only``) without the ``findings`` key.",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "summary_only": {
+          "default": false,
+          "title": "Summary Only",
+          "type": "boolean"
+        }
+      },
+      "title": "lintArguments",
+      "type": "object"
+    },
+    "name": "lint"
+  },
+  {
+    "description": "Return the extraction-quality dashboard snapshot.\n\nParticle counts by status / calibration_source / schema_version,\nplus the structural-mix percentages. Computed entirely from live\nDB queries \u2014 no LLM involvement.",
+    "inputSchema": {
+      "properties": {},
+      "title": "quality_reportArguments",
+      "type": "object"
+    },
+    "name": "quality_report"
+  },
+  {
+    "description": "Propose co-evidential candidate pairs within Subjects (read-only).\n\nWithin each Subject, ACTIVE particles whose embeddings exceed the\nsimilarity threshold and are not already linked CO_EVIDENTIAL are\nsurfaced as candidate pairs for operator review. No LLM call, no\nmutation \u2014 this is the ``REPORT`` mode of ``particles links suggest``.\n\nArgs:\n    subject_id: Restrict to one Subject. ``None`` scans every\n        Subject \u2014 prefer passing a ``subject_id`` to keep results focused.\n    threshold: Cosine-similarity floor (0.0\u20131.0). Defaults to\n        ``links_suggest.candidate_threshold`` when omitted.\n    limit: Maximum candidate pairs to include across all clusters\n        (default 100). A ``truncated`` flag is added when the cap fires.\n\nReturns:\n    ``{run_at, mode, clusters, total_candidates, warnings}`` matching the\n    ``SuggestReport`` schema, optionally with ``truncated: True``.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "subject_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Id"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        }
+      },
+      "title": "links_suggestArguments",
+      "type": "object"
+    },
+    "name": "links_suggest"
+  },
+  {
+    "description": "Rank undeposited URLs the corpus frequently cites (read-only).\n\nSurfaces primary sources the corpus leans on but has never deposited \u2014\n\"hearsay vs. primary source\" gaps \u2014 ranked by trust-weighted distinct-source\ndiversity \u00d7 recency. Read-only: the ``dismiss`` half of the\nworkflow lives on the CLI / HTTP API.\n\nArgs:\n    limit: Maximum suggestions to return. Defaults to\n        ``citation_signal.rank_cap`` when omitted.\n    min_sources: Minimum distinct citing sources required to surface a URL.\n        Defaults to ``citation_signal.min_distinct_sources`` when omitted.\n\nReturns:\n    ``{suggestions, total_candidates, capped}`` matching the\n    ``DepositSuggestReport`` schema.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        },
+        "min_sources": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Sources"
+        }
+      },
+      "title": "corpus_links_suggestArguments",
+      "type": "object"
+    },
+    "name": "corpus_links_suggest"
+  },
+  {
+    "description": "List operator events, newest first, optionally filtered.\n\nArgs:\n    particle: Only events touching this particle id.\n    subject: Only events touching this subject id.\n    corpus_entry: Only events touching this corpus entry id.\n        (At most one of ``particle`` / ``subject`` / ``corpus_entry``.)\n    event_type: Only events of this type, e.g. ``SOURCE_RETRACTED``,\n        ``SUBJECTS_SPLIT``, ``TRUST_CHANGED``, ``REVIEW_RESOLVED``.\n    limit: Maximum events to return (default 50).",
+    "inputSchema": {
+      "properties": {
+        "corpus_entry": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corpus Entry"
+        },
+        "event_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Type"
+        },
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "particle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Particle"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject"
+        }
+      },
+      "title": "events_listArguments",
+      "type": "object"
+    },
+    "name": "events_list"
+  },
+  {
+    "description": "Show one operator event in full \u2014 header, refs, and payload.\n\nArgs:\n    event_id: The event's id.",
+    "inputSchema": {
+      "properties": {
+        "event_id": {
+          "title": "Event Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id"
+      ],
+      "title": "event_showArguments",
+      "type": "object"
+    },
+    "name": "event_show"
+  },
+  {
+    "description": "Render one scoped epistemic subgraph of the particle store.\n\nScope is mandatory \u2014 pass exactly one of ``subject_id`` / ``query`` /\n``inconsistency_id`` / ``manifest``+``section`` (a whole-store render\ndoes not exist; the anti-hairball invariant). Every\nepistemic quantity in the result (effective confidence, contested\nbadges, as-of visibility, utility evidence) is computed at render time\nby the engine and never stored.\n\nArgs:\n    subject_id: Neighbourhood scope \u2014 this Subject, its particles, and\n        subjects reachable within ``hops`` via multi-subject particles.\n        Accepts a subject id or an exact (case-insensitive) canonical\n        name / alias; the render's ``scope_ref`` is the resolved id.\n    query: Retrieval-set scope \u2014 the top-K hits of the existing query\n        ranking rendered as their subjects plus the hit particles\n        (\"the picture of the knowledge the agent consulted\").\n    inconsistency_id: Evidence scope \u2014 a contradiction's\n        picture: the INCONSISTENCY particle as the anchor, its two\n        disputant beliefs shown with their true statuses (the\n        quarantined side included), their subjects and sources. Accepts\n        a full particle id or a unique prefix (a contested badge's\n        ``inconsistency_id`` is the usual source).\n    manifest: With ``section``, projection scope \u2014 an\n        manifest section's deterministic selection rendered as\n        a graph. The manifest path resolves on the engine host.\n    section: The manifest section's ``region`` id, or its exact\n        (case-insensitive) title.\n    hops: Neighbourhood radius for subject scope (clamped to\n        ``graph.max_hops``).\n    history: Also include retired supersession-chain ancestors, rendered\n        as ghosts.\n    as_of: ISO-8601 past instant (a bare date means start of that day,\n        UTC): render the graph as believed at T. A future\n        instant is rejected.\n    max_nodes: Per-call node cap (clamped to ``graph.max_nodes``).\n    store: Store handle to render from; ``\"default\"`` is the\n        canonical store.\n\nReturns:\n    The ``GraphData`` render as JSON \u2014 ``nodes`` (subjects with display\n    aggregates), ``edges`` (multi-subject particles), ``particles``\n    (per-particle epistemics payloads keyed by id), ``supersessions``,\n    the ``census``, and human-readable ``disclosures`` for any cap that\n    bound. When ``engine.base_url`` is configured, a ``url`` field\n    additionally deep-links the same scope on the unified web UI\n    (``/app#/browse?\u2026``) so the operator can open the\n    interactive picture \u2014 the default stdio install has no HTTP server,\n    so the field is additive, never assumed.",
+    "inputSchema": {
+      "properties": {
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "As Of"
+        },
+        "history": {
+          "default": false,
+          "title": "History",
+          "type": "boolean"
+        },
+        "hops": {
+          "default": 1,
+          "title": "Hops",
+          "type": "integer"
+        },
+        "inconsistency_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inconsistency Id"
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest"
+        },
+        "max_nodes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Nodes"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "store": {
+          "default": "default",
+          "title": "Store",
+          "type": "string"
+        },
+        "subject_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Id"
+        }
+      },
+      "title": "graph_viewArguments",
+      "type": "object"
+    },
+    "name": "graph_view"
+  }
+]

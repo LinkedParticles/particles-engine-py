@@ -1,0 +1,42 @@
+<!-- @dsCard group="Components" name="Query answer" subtitle="Answer panel, actions, cited particles with confidence bars, as-of scrubber" -->
+<div style="max-width:560px" class="p-stack">
+  <div class="p-row" style="flex-wrap:nowrap"><input class="p-input" value="Where was Douglas Adams born?" /><button class="p-btn p-btn--primary">Ask</button></div>
+  <div class="p-progress"><span class="p-stage">Ranking 27 particles</span></div>
+  <div class="p-card">
+    <div class="p-prose" style="font-size:var(--p-text-base)">Douglas Adams was born in <b>Cambridge, England</b>, on 11 March 1952. Two sources agree; an older claim naming Oxford was retracted by an operator in 2026-08.</div>
+    <div class="p-row" style="margin:12px 0"><button class="p-btn p-btn--sm">Show graph</button><button class="p-btn p-btn--sm p-btn--ghost">Copy answer</button><span class="p-spacer" style="flex:1"></span><span class="p-kv">as-of now</span></div>
+    <div class="p-h3" style="font-size:var(--p-text-base);margin:14px 0 4px">Cited particles</div>
+    <div class="p-particle p-particle--hit">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-chip p-chip--hit">hit</span>
+      <div class="p-particle__claim">Douglas Adams was born in Cambridge in 1952.</div>
+      <div class="p-conf"><i style="width:94%"></i></div>
+      <div class="p-particle__meta">effective 0.94 · rank 1.21 · <span class="p-subject">Douglas Adams</span> <span class="p-subject">Cambridge</span></div>
+    </div>
+    <div class="p-particle p-particle--hit">
+      <span class="p-chip p-chip--ACTIVE">ACTIVE</span> <span class="p-chip p-chip--hit">hit</span>
+      <div class="p-particle__claim">Adams, born 11 March 1952, Cambridge, England.</div>
+      <div class="p-conf"><i style="width:88%"></i></div>
+      <div class="p-particle__meta">effective 0.88 · rank 1.09 · <span class="p-subject">Douglas Adams</span></div>
+    </div>
+    <div class="p-particle p-particle--ghost">
+      <span class="p-chip p-chip--RETRACTED">RETRACTED</span>
+      <div class="p-particle__claim"><span class="p-glyph--retracted">☒</span> Adams was born in Oxford.</div>
+      <div class="p-particle__meta">retracted 2026-08-01 · shown because you asked for ghosts</div>
+    </div>
+  </div>
+  <div>
+    <p class="ds-h">As-of scrubber (time travel; ticks mark belief changes)</p>
+    <div class="p-row" style="flex-wrap:nowrap;gap:10px">
+      <div style="flex:1">
+        <input class="p-range" type="range" style="width:100%" min="0" max="100" value="100" />
+        <div style="position:relative;height:10px">
+          <span style="position:absolute;left:12%;top:0;width:2px;height:7px;background:var(--p-amber);border-radius:1px"></span>
+          <span style="position:absolute;left:47%;top:0;width:2px;height:7px;background:var(--p-amber);border-radius:1px"></span>
+          <span style="position:absolute;left:83%;top:0;width:2px;height:7px;background:var(--p-amber);border-radius:1px"></span>
+        </div>
+      </div>
+      <span class="p-kv" style="min-width:110px;text-align:right">2026-08-16 · now</span>
+    </div>
+  </div>
+  <p class="ds-note">The answer is prose first, evidence second — but every sentence is backed by a cited row with a hit ring, so the reader can drop from the claim to its provenance in one glance. Ghost rows stay visibly dimmer and dashed. The scrubber’s ticks are amber because each one is a moment the store’s belief changed.</p>
+</div>
