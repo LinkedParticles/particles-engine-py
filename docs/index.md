@@ -14,7 +14,7 @@
   distributions: the build materialises the Client half into the tree first, so
   the reference is whole rather than Engine-only. See the header of mkdocs.yml.
 -->
-# Particles SDK documentation
+# Particles documentation
 
 The guides for **running and extending** the Particles reference
 implementation. The project's front door, the whitepaper, the technical
@@ -23,8 +23,9 @@ specification, and the normative schema artifacts live at
 
 Particles stores an AI system's knowledge as a git-like ledger of claims: every
 belief is sourced, dated, and confidence-scored, nothing is overwritten, and
-trust and staleness are applied as a lens at query time. If that framing is new,
-start with the [whitepaper](https://linkedparticles.org/spec/whitepaper/).
+trust and staleness are applied when the store is read, never written into the
+stored claim. If that framing is new, start with
+[Why Particles?](https://linkedparticles.org/why/).
 
 ## Where to go
 

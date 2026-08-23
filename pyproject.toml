@@ -21,7 +21,7 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.134.1"
+version = "1.134.4"
 description = "Python reference SDK for the Particles epistemic knowledge standard — Engine layer and surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,7 +48,7 @@ classifiers = [
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.134.1",
+    "linkedparticles-core==1.134.4",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "aiosqlite>=0.20",
@@ -235,4 +235,20 @@ constraint-dependencies = [
     "starlette>=1.0.1",   # PYSEC-2026-161, runtime HTTP path
     "idna>=3.15",         # CVE-2026-45409, runtime hostname path
     "setuptools>=83.0.0", # PYSEC-2026-3447, build path
+]
+
+# What `pytest` needs and nothing more. The suite in this repository drives the
+# Engine layer end to end — a real (temp-file SQLite) store, the FastAPI app
+# through its test client, the MCP server — with the Anthropic client and the
+# embedding encoder mocked through their explicit seams, so no API key and no
+# model download are required. `import-linter` is here for the layer-boundary
+# test, which builds the `particles` import graph statically with grimp and
+# asserts the Client/Engine direction still holds in the split tree.
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-mock>=3.15.1",
+    "hypothesis>=6.152.4",
+    "import-linter>=2.0",
 ]

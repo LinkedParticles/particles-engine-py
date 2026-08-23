@@ -66,8 +66,9 @@ instants — before and after a supersession — and you can watch a belief get
 retired between the two files.
 
 To try it cold, seed the throwaway demo store and anchor on the subject by
-name — the script mints `Pluto` and `Solar System`, and links both claims to
-both, so each renders as an edge between them:
+name. The script mints `Pluto`, `Solar System` and five more subjects, and
+links both claims of the supersession chain to `Pluto` *and* `Solar System`,
+so each renders as an edge between that pair:
 
 ```bash
 uv run python scripts/seed_pluto_demo.py --db ./pluto-demo.db
@@ -76,9 +77,12 @@ DATABASE_URL="sqlite+aiosqlite:///$PWD/pluto-demo.db" \
   uv run particles export graph pluto.html --subject Pluto --history
 ```
 
-Open `pluto.html`: two links between the nodes, the dashed one the retired
-belief. Click it to read the claim, its dates, and what replaced it; untick
-*show history* to drop it from view. The rendered copy on the project site is
+Open `pluto.html`: seven subjects around `Pluto`, and *two* links to `Solar
+System` where every other pair has one — the dashed one is the retired belief.
+Click it to read the claim, its dates, and what replaced it; untick *show
+history* to drop it from view. Clicking any other node opens that subject's own
+claims instead, which is the point: the supersession is one feature of a normal
+neighbourhood, not the whole graph. The rendered copy on the project site is
 this exact export.
 
 ## Served: `GET /graph` and the MCP `graph_view` tool

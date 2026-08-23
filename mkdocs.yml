@@ -17,7 +17,7 @@
 #
 # Build:  pip install -r docs-requirements.txt && mkdocs build --strict
 
-site_name: Particles SDK
+site_name: Particles Docs
 site_description: Running and extending the Particles reference implementation — guides, CLI reference, and the HTTP API contract.
 site_url: https://docs.linkedparticles.org
 repo_url: https://github.com/LinkedParticles/particles-engine-py
@@ -178,6 +178,9 @@ nav:
       - Store: api/store.md
       - Operations: api/operations.md
       - Export: api/export.md
+  - Benchmarks:
+      - Agent memory (LongMemEval): benchmarks.md
+      - Provider survey (2026-08): benchmarks/provider-survey-2026-08.md
   - The standard:
       - Whitepaper: https://linkedparticles.org/spec/whitepaper/
       - Technical specification: https://linkedparticles.org/spec/technical-specification/
