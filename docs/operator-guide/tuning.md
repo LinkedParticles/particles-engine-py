@@ -324,8 +324,8 @@ real loss against labelled benchmark answers, nothing here labels which belief
 *should* occupy a head slot — so the sweep asks you, rather than inventing a
 formula. Measured on a real store, every candidate formula failed: the
 `effective_confidence` spread the obvious fit would key on is exactly zero
-across the rendered head, because the [uncalibrated-confidence
-cap](../ADR/active/0182-uncalibrated-confidence-cap.md) ties the whole head at
+across the rendered head, because the uncalibrated-confidence
+cap ties the whole head at
 one value. A spread-keyed fit therefore returns `0` and switches the feature
 off.
 

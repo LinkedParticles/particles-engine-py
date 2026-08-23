@@ -21,7 +21,7 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.132.1"
+version = "1.134.1"
 description = "Python reference SDK for the Particles epistemic knowledge standard — Engine layer and surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,7 +48,7 @@ classifiers = [
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.132.1",
+    "linkedparticles-core==1.134.1",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "aiosqlite>=0.20",

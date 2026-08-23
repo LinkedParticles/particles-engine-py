@@ -113,7 +113,7 @@ available as `*.model_dump_json()` for downstream tooling.
 ## What about other formats?
 
 A Notion exporter is scheduled for the post-1.0 **R1.5 — PKM front-ends &
-integrations** milestone (see the [roadmap](../roadmap.md) forward queue;
+integrations** milestone (see the roadmap forward queue;
 tracked in the register). The plugin registry is designed
 so an exporter is one file plus one registry line — see the
 [plugin-author guide](../plugin-author-guide/exporters.md).
