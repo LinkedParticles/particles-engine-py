@@ -34,8 +34,8 @@ structured metadata envelope. Every particle carries:
   some prose has no honest triple. See
   [operator guide → structured claims](../operator-guide/structured-claims.md).
 
-For the full schema see [`spec/technical-specification.md`](../spec/technical-specification.md)
-§6.
+For the full schema see the [technical
+specification](https://linkedparticles.org/spec/technical-specification/) §6.
 
 ## Subject
 

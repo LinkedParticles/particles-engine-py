@@ -1,4 +1,5 @@
-# CI for the linkedparticles (Engine) public repository.
+# Publish https://docs.linkedparticles.org — the SDK's guides, CLI reference,
+# and HTTP API contract.
 #
 # This repo is a per-release scrubbed export of a private development upstream
 # (see CONTRIBUTING.md). These workflows are authored in that upstream under
@@ -9,61 +10,48 @@
 # Supply-chain convention (matches the upstream): every `uses:` is pinned to a
 # full 40-char commit SHA, never a mutable `@vN` tag; the trailing `# vN`
 # comment is the human-readable tag that SHA resolves to. Bump a SHA only
-# deliberately.
+# deliberately — this workflow holds `pages: write`.
 #
-# Scope note — DCO and the docs build are the checks today; ruff, pytest, and
-# the projection drift gate are deferred, on two remaining blockers:
-#   * pytest — the suite passes against a co-installed pair (the release
-#     process verifies exactly that before every publish), but this tree omits
-#     the Client substrate: it depends on the `linkedparticles-core`
-#     distribution, which is not on an index yet. The pytest job lands with the
-#     first published release, when `uv sync` here can resolve that dependency.
-#   * projection drift gate — `scripts/projection_drift.py` restores
-#     `docs/projection/readme.corpus.jsonl` into an ephemeral store and re-derives
-#     the README's projected regions, so it needs the package importable and is
-#     blocked on exactly the same dependency as pytest. It lands in the same
-#     commit. The bundle, manifest, snapshot, and gate script all ship in this
-#     tree already, so the check is runnable by hand today:
-#         uv run python scripts/projection_drift.py
-#     Tracked upstream as its own pending item, not as a footnote on a closed
-#     one — it is live work with a named trigger, not a leftover.
-#   * ruff — the export's citation-strip rewrite still joins a citation wrapped
-#     across a line boundary into an over-length line, a lint + format issue in
-#     the exported copy only. The import-grouping half is fixed (the pyproject
-#     declares isort known-first-party = ["particles"], so `particles.core`
-#     arriving from a separate distribution no longer regroups every import);
-#     the ruff job lands once the reflow is too.
-# The `docs` job below is NOT in that list: it installs the docs toolchain
-# only, never the package, so it shares none of those blockers and is green
-# today. It is also this tree's only content gate — the guides shipped here
-# must not link to documents this repo does not carry, and nothing else
-# checks that.
-name: CI
+# The build is `mkdocs build --strict`, so a broken link fails the deploy
+# rather than publishing a site that sends readers to a 404. It installs the
+# docs toolchain only, never the package under documentation, so it needs no
+# package index and completes in seconds.
+#
+# This site serves nothing normative. The published `$id` / `@context` /
+# vocabulary identifiers resolve at https://linkedparticles.org, from the
+# standard repository's deploy, and must never be served from this host.
+#
+# One-time repository setup (owner): Settings → Pages → Source = "GitHub
+# Actions", custom domain = docs.linkedparticles.org, "Enforce HTTPS" once the
+# certificate issues. The CNAME file ships in the build output (docs/CNAME), so
+# the domain survives every deploy. The DNS record is a CNAME on the `docs`
+# subdomain pointing at linkedparticles.github.io — NOT the apex A/AAAA sets
+# the standard repository's site uses.
+name: Pages
 
 on:
-  pull_request:
   push:
     branches: [main]
+  # Rebuild after the distributions reach the index, so the API reference's
+  # Client half is the exact matching version rather than the fallback the
+  # release-landing push had to use. See the materialise step below.
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  dco:
-    name: DCO sign-off
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Check Signed-off-by on every PR commit
-        run: >-
-          python .github/dco_check.py --range
-          "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+# Never let two deploys race; queue instead of cancelling, so the last push to
+# land is the last one published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
-  docs:
-    name: docs
+jobs:
+  build:
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,8 +60,6 @@ jobs:
           python-version: "3.11"
       - name: Install the docs toolchain
         run: python -m pip install -r docs-requirements.txt
-      # Strict: an unresolvable link fails the check rather than shipping a
-      # 404 to a reader. This is the same build the Pages workflow deploys.
       # The API reference documents both layers, but this tree holds only the
       # Engine half — the Client half ships as the `linkedparticles-core`
       # distribution. griffe resolves a package to ONE location and will not
@@ -107,5 +93,26 @@ jobs:
           building the API reference against the newest available core."
             pip install --no-deps --target . "linkedparticles-core"
           fi
-      - name: Build the docs site (strict)
+      - name: Build the site (strict)
         run: mkdocs build --strict
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    # `pages: write` + `id-token: write` are what the official deploy action
+    # needs; they are scoped to this job so the build job stays read-only.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

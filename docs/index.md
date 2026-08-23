@@ -5,10 +5,14 @@
   into this tree by the release export: edit it there, not on the public repo (a
   direct edit here is overwritten by the next export).
 
-  These docs are the SDK's guides and generated API reference. The project's
-  landing page — the belief-ledger lead, the demos, the three repository doors —
-  is the standard repository's site at https://linkedparticles.org, so this page
-  is deliberately a short index and not a second front door.
+  These docs are the SDK's guides and CLI/HTTP reference. The project's landing
+  page — the belief-ledger lead, the demos, the three repository doors — is the
+  standard repository's site at https://linkedparticles.org, so this page is
+  deliberately a short index and not a second front door.
+
+  The API reference is generated from source docstrings across BOTH
+  distributions: the build materialises the Client half into the tree first, so
+  the reference is whole rather than Engine-only. See the header of mkdocs.yml.
 -->
 # Particles SDK documentation
 
@@ -32,7 +36,11 @@ start with the [whitepaper](https://linkedparticles.org/spec/whitepaper/).
   extractor, an exporter, or a benchmark suite.
 - **[CLI](cli.md)** — the workflow-oriented command index, with the
   [full command reference](cli-reference.md) beside it.
-- **[API reference](api/schema.md)** — generated from the source docstrings.
+- **[API reference](api/schema.md)** — generated from the source docstrings,
+  across both distributions: the schema models and extraction from the Client
+  layer, the corpus, store, and operations from the Engine.
+- **[HTTP API](api/http.md)** — every operation as a typed endpoint, rendered
+  from the committed OpenAPI contract.
 
 ## The standard
 
