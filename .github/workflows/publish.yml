@@ -1,0 +1,137 @@
+# Publish the linkedparticles (Engine) distribution to PyPI.
+#
+# This repo is a per-release scrubbed export of a private development upstream
+# (see CONTRIBUTING.md). These workflows are authored in that upstream under
+# publish/overlays/ and laid into the exported tree by the release export —
+# edit them there, not on the public repo (a direct edit here is overwritten by
+# the next export).
+#
+# Supply-chain convention (matches the upstream): every `uses:` is pinned to a
+# full 40-char commit SHA, never a mutable `@vN` tag; the trailing `# vN`
+# comment is the human-readable tag that SHA resolves to. Bump a SHA only
+# deliberately.
+#
+# Authentication is PyPI Trusted Publishing (OIDC): no API token is stored in
+# this repo. A short-lived, upload-scoped credential is minted from the job's
+# id-token and is bound on PyPI to exactly this repository + this workflow
+# filename + the `pypi` environment — so the trusted-publisher entry on PyPI
+# must name `publish.yml` and the `pypi` environment. The environment is also
+# the manual-approval seam: require a reviewer on it to make every upload a
+# deliberate click.
+#
+# Trigger: publishing a GitHub Release (which also cuts the tag). The
+# workflow_dispatch path is a manual re-run or a TestPyPI rehearsal.
+#
+# ORDERING: this Engine distribution pins linkedparticles-core to its own exact
+# version — the two are one source tree cut along an architectural line, and a
+# version skew is a broken install, not a compatibility question. So the core
+# must reach the index FIRST. The "require the matching core" step below fails
+# closed if it is not yet resolvable, so this workflow can never publish an
+# uninstallable engine ahead of its dependency, no matter when it is triggered.
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Index to publish to"
+        type: choice
+        options: [pypi, testpypi]
+        default: pypi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build and publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.11"
+          enable-cache: false
+
+      # The version is stamped into pyproject.toml by the release export; read
+      # it once and reuse it for the ordering gate and the smoke test.
+      - name: Read the release version
+        id: ver
+        run: |
+          set -euo pipefail
+          v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Publishing linkedparticles $v"
+
+      # Fail closed if the exactly-pinned core is not yet on the index. This is
+      # the structural core-before-engine guarantee: no amount of mis-timed
+      # triggering can ship an engine whose pinned core cannot be resolved.
+      - name: Require the matching linkedparticles-core on the index
+        run: |
+          set -euo pipefail
+          index_args=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.repository }}" = "testpypi" ]; then
+            index_args="--index-url https://test.pypi.org/simple/"
+          fi
+          python -m pip download --no-deps --dest /tmp/core-check \
+            $index_args "linkedparticles-core==${{ steps.ver.outputs.version }}"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish to PyPI (Trusted Publishing)
+        if: ${{ github.event_name == 'release' || inputs.repository == 'pypi' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+
+      - name: Publish to TestPyPI (rehearsal)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+      # Post-publish confirmation on the real index: install the just-published
+      # engine into a clean venv and assert the exact pin actually pulled the
+      # matching core — the one thing the private co-installability gate cannot
+      # observe, because it installs from local wheels rather than an index.
+      # (Skipped for the TestPyPI rehearsal, whose third-party closure is not on
+      # that index.)
+      - name: Post-publish smoke — install from PyPI and import
+        if: ${{ github.event_name == 'release' || inputs.repository == 'pypi' }}
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --upgrade pip
+          # The just-uploaded files can lag the index by a few seconds; retry.
+          for _ in 1 2 3 4 5 6; do
+            if /tmp/smoke/bin/pip install "linkedparticles==${{ steps.ver.outputs.version }}"; then
+              break
+            fi
+            sleep 15
+          done
+          /tmp/smoke/bin/python - <<'PY'
+          import particles
+          import particles.store  # engine module resolves through the pinned core
+          import os
+          want = os.environ["VERSION"]
+          got = particles.__version__
+          assert got == want, f"version mismatch: {got!r} != {want!r}"
+          print("smoke OK", got)
+          PY
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
