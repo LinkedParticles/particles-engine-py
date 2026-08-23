@@ -692,6 +692,30 @@ class TestHtmlArtifact:
         [info] = payload["particles"].values()
         assert info["content"] == evil
 
+    async def test_artifact_carries_the_embed_hooks(self, db_session: Any, tmp_path: Path) -> None:
+        """The export is normally embedded in a page that owns its own palette,
+        and an iframe cannot read its parent's DOM — so the artifact takes the
+        theme from `?theme=` at load and from a `particles-graph-theme`
+        postMessage afterwards, and its details panel is dismissible without
+        covering the element that opened it.
+        """
+        from particles.exporters.graph import GraphExporter
+
+        a, _b, _c, _ = await _seed_neighbourhood(db_session)
+        out = tmp_path / "graph.html"
+        await GraphExporter().export(db_session, out, subject=a.id)
+        html_text = out.read_text(encoding="utf-8")
+
+        assert 'get("theme")' in html_text and "particles-graph-theme" in html_text
+        # Still light by default: the encodings are calibrated on a light canvas.
+        assert '<html lang="en" data-theme="light">' in html_text
+        # The drawer shares the row with the canvas and can always be closed.
+        assert 'id="panel-close"' in html_text
+        assert "#panel.open { display: flex; }" in html_text
+        # The legend entry must fold at iframe widths, not push a scrollbar.
+        legend_rule = html_text.split(".legend span {", 1)[1].split("}", 1)[0]
+        assert "nowrap" not in legend_rule
+
     async def test_vendored_cytoscape_is_inline_safe(self) -> None:
         from particles.exporters.graph._assets import cytoscape_js, graph_assets_dir
 

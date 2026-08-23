@@ -11,33 +11,24 @@
 # comment is the human-readable tag that SHA resolves to. Bump a SHA only
 # deliberately.
 #
-# Scope note — DCO and the docs build are the checks today; ruff, pytest, and
-# the projection drift gate are deferred, on two remaining blockers:
-#   * pytest — the suite passes against a co-installed pair (the release
-#     process verifies exactly that before every publish), but this tree omits
-#     the Client substrate: it depends on the `linkedparticles-core`
-#     distribution, which is not on an index yet. The pytest job lands with the
-#     first published release, when `uv sync` here can resolve that dependency.
-#   * projection drift gate — `scripts/projection_drift.py` restores
-#     `docs/projection/readme.corpus.jsonl` into an ephemeral store and re-derives
-#     the README's projected regions, so it needs the package importable and is
-#     blocked on exactly the same dependency as pytest. It lands in the same
-#     commit. The bundle, manifest, snapshot, and gate script all ship in this
-#     tree already, so the check is runnable by hand today:
-#         uv run python scripts/projection_drift.py
-#     Tracked upstream as its own pending item, not as a footnote on a closed
-#     one — it is live work with a named trigger, not a leftover.
+# Scope note — DCO, the docs build, pytest, and the projection drift gate all
+# run. One check is still deferred:
 #   * ruff — the export's citation-strip rewrite still joins a citation wrapped
 #     across a line boundary into an over-length line, a lint + format issue in
 #     the exported copy only. The import-grouping half is fixed (the pyproject
 #     declares isort known-first-party = ["particles"], so `particles.core`
 #     arriving from a separate distribution no longer regroups every import);
 #     the ruff job lands once the reflow is too.
-# The `docs` job below is NOT in that list: it installs the docs toolchain
-# only, never the package, so it shares none of those blockers and is green
-# today. It is also this tree's only content gate — the guides shipped here
-# must not link to documents this repo does not carry, and nothing else
-# checks that.
+# `pytest` and the drift gate were both deferred on one dependency — this tree
+# omits the Client substrate, which ships as the separate
+# `linkedparticles-core` distribution, and neither check can import `particles`
+# without it. That distribution is now on PyPI, so both jobs run; see the
+# install step below for the one wrinkle that remains (the release-ordering
+# window in which the exactly-matching core is not on the index yet).
+# The `docs` job never shared those blockers: it installs the docs toolchain
+# only, because mkdocstrings collects statically. It is also this tree's
+# content gate — the guides shipped here must not link to documents this repo
+# does not carry, and nothing else checks that.
 name: CI
 
 on:
@@ -61,6 +52,110 @@ jobs:
         run: >-
           python .github/dco_check.py --range
           "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # The floor interpreter — pyproject says requires-python = ">=3.11",
+          # so testing there is what makes that claim true.
+          python-version: "3.11"
+          enable-cache: false
+
+      # Not `uv sync`, which is what the Client repository's CI runs: this
+      # distribution pins `linkedparticles-core` EXACTLY (the two are one source
+      # tree cut along an architectural line, so a version skew is a broken
+      # install, not a compatibility question), and that pin is unresolvable
+      # during one window — the Pages/CI push happens when the export PR merges,
+      # while the distributions publish later, from an approval-gated GitHub
+      # Release. So the exact pin is tried first and an unpinned `--override`
+      # is the fallback, which is the same release-ordering seam the `docs` job
+      # handles, resolved the same way: build against the newest core there is,
+      # at most one release of drift, and say so in the log rather than going
+      # red. Contributor PRs — every run that is not the release push itself —
+      # take the exact-match path.
+      - name: Install the engine and its Client layer from the index
+        run: |
+          set -euo pipefail
+          uv venv
+          v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          if uv pip install --group dev .; then
+            echo "Client layer: exact match, linkedparticles-core==$v"
+          else
+            echo "::notice::linkedparticles-core==$v is not on the index yet \
+          (the release publishes from a GitHub Release, after this push); \
+          installing the newest available core."
+            printf 'linkedparticles-core\n' >"$RUNNER_TEMP/core-override.txt"
+            uv pip install --group dev --override "$RUNNER_TEMP/core-override.txt" .
+          fi
+          # Fail here, loudly, rather than inside a test collection error.
+          .venv/bin/python -c "import particles.core.schema, particles.store.particle_store"
+
+      # `not integration` is the tier that needs no API key. The integration
+      # tier makes real Anthropic calls and is a developer-key concern.
+      - name: Run the suite
+        run: .venv/bin/pytest tests/ -m "not integration" -q
+
+  projection-drift:
+    name: projection drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.11"
+          enable-cache: false
+
+      # Not `uv sync`, which is what the Client repository's CI runs: this
+      # distribution pins `linkedparticles-core` EXACTLY (the two are one source
+      # tree cut along an architectural line, so a version skew is a broken
+      # install, not a compatibility question), and that pin is unresolvable
+      # during one window — the Pages/CI push happens when the export PR merges,
+      # while the distributions publish later, from an approval-gated GitHub
+      # Release. So the exact pin is tried first and an unpinned `--override`
+      # is the fallback, which is the same release-ordering seam the `docs` job
+      # handles, resolved the same way: build against the newest core there is,
+      # at most one release of drift, and say so in the log rather than going
+      # red. Contributor PRs — every run that is not the release push itself —
+      # take the exact-match path.
+      - name: Install the engine and its Client layer from the index
+        run: |
+          set -euo pipefail
+          uv venv
+          v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          if uv pip install --group dev .; then
+            echo "Client layer: exact match, linkedparticles-core==$v"
+          else
+            echo "::notice::linkedparticles-core==$v is not on the index yet \
+          (the release publishes from a GitHub Release, after this push); \
+          installing the newest available core."
+            printf 'linkedparticles-core\n' >"$RUNNER_TEMP/core-override.txt"
+            uv pip install --group dev --override "$RUNNER_TEMP/core-override.txt" .
+          fi
+          # Fail here, loudly, rather than inside a test collection error.
+          .venv/bin/python -c "import particles.core.schema, particles.store.particle_store"
+
+      # The README's three projected regions are rendered FROM the store, not
+      # written by hand, and this is the check that keeps that claim true in
+      # public: `docs/projection/readme.corpus.jsonl` is restored into an
+      # ephemeral SQLite store (created fresh, torn down after), the
+      # deterministic snapshot is re-derived from the manifest's pinned
+      # selection, and each region's `<!-- sources -->` trailer in README.md is
+      # checked against what the store actually selects. No API key, no
+      # embedding model, no owner store — everything it reads is committed
+      # here, which is what makes the projection reproducible by a stranger
+      # rather than only by its author.
+      #
+      # A failure means the README now cites a different claim set than the
+      # store does. Re-splice and re-bless upstream; do not hand-edit the
+      # region bodies or their trailers.
+      - name: Check the projected README against the store selection
+        run: .venv/bin/python scripts/projection_drift.py
 
   docs:
     name: docs
