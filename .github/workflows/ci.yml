@@ -11,13 +11,22 @@
 # comment is the human-readable tag that SHA resolves to. Bump a SHA only
 # deliberately.
 #
-# Scope note — DCO is the only check today; ruff and pytest are deferred, each
-# on one remaining blocker:
+# Scope note — DCO is the only check today; ruff, pytest, and the
+# projection drift gate are deferred, on two remaining blockers:
 #   * pytest — the suite passes against a co-installed pair (the release
 #     process verifies exactly that before every publish), but this tree omits
 #     the Client substrate: it depends on the `linkedparticles-core`
 #     distribution, which is not on an index yet. The pytest job lands with the
 #     first published release, when `uv sync` here can resolve that dependency.
+#   * projection drift gate — `scripts/projection_drift.py` restores
+#     `docs/projection/readme.corpus.jsonl` into an ephemeral store and re-derives
+#     the README's projected regions, so it needs the package importable and is
+#     blocked on exactly the same dependency as pytest. It lands in the same
+#     commit. The bundle, manifest, snapshot, and gate script all ship in this
+#     tree already, so the check is runnable by hand today:
+#         uv run python scripts/projection_drift.py
+#     Tracked upstream as its own pending item, not as a footnote on a closed
+#     one — it is live work with a named trigger, not a leftover.
 #   * ruff — the export's citation-strip rewrite still joins a citation wrapped
 #     across a line boundary into an over-length line, a lint + format issue in
 #     the exported copy only. The import-grouping half is fixed (the pyproject

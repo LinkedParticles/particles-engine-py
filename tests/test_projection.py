@@ -662,8 +662,12 @@ async def test_gated_readme_reproduces_via_restore(tmp_path: Path) -> None:
             await ensure_extractor_records(session)
             summary = await restore_store_bundle(session, files)
             await session.commit()
-        # 23 pinned particles in the committed bundle (8 + 9 + 6), ids preserved.
-        assert summary.particles == 23
+        # The bundle holds exactly the manifest's pinned claims, ids preserved.
+        # Derived from the manifest rather than hardcoded: re-pinning a region is
+        # a routine, expected act (a re-render, a re-source), and a hand-counted
+        # total here just fails the next one for no reason.
+        pinned = {pid for s in manifest.sections if s.select for pid in s.select.allow}
+        assert summary.particles == len(pinned)
         async with factory() as session:
             result = await check_drift(session, manifest, base_dir=base_dir, output_root=_REPO_ROOT)
         assert not result.drifted, (

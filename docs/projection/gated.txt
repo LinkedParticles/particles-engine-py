@@ -1,0 +1,19 @@
+# Projection manifests gated by the CI + pre-commit drift check
+# (scripts/projection_drift.py).
+#
+# One manifest path (relative to the repo root) per line; blank lines and
+# lines starting with '#' are ignored.
+#
+# A manifest with a sibling <name>.corpus.jsonl is CI-reproducible without the
+# owner's store: the gate restores that bundle into an ephemeral store
+# (id-preserving restore), re-derives the deterministic
+# <name>.snapshot.md, and — when the manifest declares sentinel regions —
+# checks each region's `<!-- sources -->` trailer in the output document
+# against the store selection. A manifest with no sibling bundle
+# is checked against the default store and skipped loudly when that store is
+# unreachable.
+#
+# To gate a new manifest: pin its sections (select.allow + cage suppression),
+# render + bless the output, run `particles project <manifest> --export-corpus`,
+# commit the output + snapshot + bundle, and add the manifest path below.
+docs/projection/readme.yaml

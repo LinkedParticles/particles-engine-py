@@ -63,8 +63,23 @@ decay evaluate at T, while trust and the contested marker stay current
 (temporal-vs-judgment rule). Retirements the store cannot date are
 excluded fail-closed and counted in the banner. Export the same subject at two
 instants — before and after a supersession — and you can watch a belief get
-demoted between the two files. (Seed the demo store with
-`scripts/seed_pluto_demo.py` and try the 2000 vs 2007 renders above.)
+retired between the two files.
+
+To try it cold, seed the throwaway demo store and anchor on the subject by
+name — the script mints `Pluto` and `Solar System`, and links both claims to
+both, so each renders as an edge between them:
+
+```bash
+uv run python scripts/seed_pluto_demo.py --db ./pluto-demo.db
+
+DATABASE_URL="sqlite+aiosqlite:///$PWD/pluto-demo.db" \
+  uv run particles export graph pluto.html --subject Pluto --history
+```
+
+Open `pluto.html`: two links between the nodes, the dashed one the retired
+belief. Click it to read the claim, its dates, and what replaced it; untick
+*show history* to drop it from view. The rendered copy on the project site is
+this exact export.
 
 ## Served: `GET /graph` and the MCP `graph_view` tool
 

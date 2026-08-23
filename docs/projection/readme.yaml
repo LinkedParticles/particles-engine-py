@@ -1,0 +1,195 @@
+# The self-hosted README manifest — N sentinel regions of README.md
+# projected from the store, everything else hand-authored.
+#
+# This manifest supersedes the single-region `readme-architecture.yaml`
+# (retired): one manifest ↔ one document ↔ one
+# snapshot ↔ one corpus bundle ↔ one gated.txt entry. Three regions self-host —
+# `what-is`, `design-rationale`, `architecture` — each under its hand-authored
+# heading; Quick start, the Documentation table, Contributing, Security, and
+# License stay hand-authored BY DECISION (their truth lives in repo files, not
+# the belief store).
+#
+# CORPUS — PUBLIC SOURCES ONLY. The store these pins resolve against is built
+# from documents the public repositories carry, and from nothing else:
+#
+#   particles deposit docs/spec/technical-specification.md
+#   particles deposit docs/spec/whitepaper.md
+#   particles import project particles/        # docstring-derived API reference
+#   particles extract --all-pending
+#   particles reconcile
+#
+# That restriction is the whole point of the re-source. The corpus used to be
+# swept from `docs/ADR/{active,proposed,superseded}`, which no public tree
+# carries — so a reader could not follow a single trailer id back to anything,
+# and the rendered prose cited decision records by number in sentences the
+# publication scrub cannot strip. Sourcing from the specification, the
+# whitepaper, and the docstrings makes the provenance chain end somewhere a
+# stranger can actually read.
+#
+# Corpus build is an operator act on a throwaway store, not a committed
+# artifact: only the pinned bundle (`readme.corpus.jsonl`) is committed, and it
+# is what the gate checks against. Two extraction settings need raising for the
+# build — the technical specification is 295 KB, so the default 8-call
+# per-source cap truncates it at ~40%, and its claim-dense chunks overrun the
+# default 8192-token reply budget mid-JSON:
+#
+#   extraction:
+#     max_llm_calls_per_source: 40
+#     max_tokens: 16384
+#
+# WRITE PATH:
+#   particles project docs/projection/readme.yaml --splice-all
+#   particles project docs/projection/readme.yaml README.md --splice what-is   # re-roll one region
+#
+# BUNDLE — the drift gate's CI-reproducible store:
+#   particles project docs/projection/readme.yaml --export-corpus
+#
+# GATE (§5 / 0167 / 0202 §6): listed in docs/projection/gated.txt.
+# `scripts/projection_drift.py` (pre-commit + CI) restores the sibling
+# `readme.corpus.jsonl` into an ephemeral store, re-derives the deterministic
+# `readme.snapshot.md`, and checks each region's `<!-- sources -->` trailer in
+# README.md against the store selection — a pin/store change therefore forces a
+# visible README re-splice (the explicit re-blessing act).
+#
+# EDITING MODEL: edit the pins below or the underlying
+# particles, re-render, re-bless — never the prose between the sentinels.
+# Every section is PIN-DRIVEN (cage suppressed via min_confidence: 0.99,
+# selection = select.allow — the Architecture pattern extended to all
+# regions): that is what keeps the committed bundle small and the
+# gate reproducible without embeddings. current-truth tie-break is a
+# pin-DISCOVERY aid on the operator's populated store, not a gate dependency.
+#
+# `flowing: true` is set explicitly per section (schema-stable).
+# Since (1.81.0) flipped the projection default to true, these settings
+# are REDUNDANT but deliberately RETAINED: an explicit value is self-documenting
+# at the point of use and immune to any future default change. Because they were
+# already explicit, the flip was a no-op here — no re-render, no
+# re-blessing, not one byte of README.md changed.
+name: readme
+output: README.md
+framing: >-
+  Particles is a Python SDK implementing the Particles standard: a git-like,
+  append-only ledger for an AI agent's beliefs, where every claim is a
+  provenance-tracked particle with calibrated confidence and uncertainty
+  grounded in PSUM. The spine is one loop — deposit source into an append-only
+  corpus, extract claim-granularity particles with resolved subjects, query with
+  effective-confidence ranking, lint for contradictions and staleness, review
+  inconsistencies into a reusable trust policy. Write each section as one
+  argument serving that spine, never disconnected summaries.
+sections:
+  - title: Why Particles
+    region: what-is
+    # Conceptual section: whitepaper + conceptual-ADR claims; docstring noise
+    # kept out at rank time should the cage ever be re-opened.
+    query: >-
+      what problem Particles solves compared to retrieval-augmented systems that
+      store raw text chunks: discrete citable revisable particles with explicit
+      confidence and provenance; the deposit extract query lint review loop;
+      subjects aligned to external ontologies
+    top_k: 8
+    # Cage suppressed — selection is exactly the pinned set.
+    min_confidence: 0.99
+    select:
+      allow:
+        - p-ba8cfa2c   # most RAG systems re-derive knowledge from scratch every query
+        - p-cb10c54c   # the middle ground: narrower than RDF/SPARQL, more structured than markdown
+        - p-80f9b726   # a particle = a natural-language sentence + structured metadata
+        - p-21f11766   # what the standard defines: schema, corpus model, extraction, operations
+        - p-d3fd6c56   # corpus-entry-level provenance is required at Core
+        - p-3f71ca93   # the store is a derived view, rebuildable by re-running extractors
+        - p-a5a42fe0   # queries are answered by synthesis with provenance intact
+        - p-7931228a   # subjects: the catalogue of entities particles are indexed against
+    code_symbol_rank_weight: 0.2
+    flowing: true
+    direction: >-
+      Write the opening README section for a developer deciding in ninety
+      seconds whether this project matters, grounded STRICTLY in the supplied
+      claims — add no fact the claims do not state. Contrast retrieval over raw
+      text chunks with storing discrete, citable, revisable claims; state that
+      each particle carries explicit confidence and provenance; name the core
+      loop (deposit, extract, query, lint, review) as the way an agent's
+      knowledge is built, queried, audited, and revised one belief at a time —
+      but never attach a COUNT to it ("these five operations"): the cited claim
+      also names reindex among the standard's operations, so a count drawn from
+      the loop alone contradicts the very claim the sentence cites;
+      close on subjects as canonical entities aligned to external ontologies.
+      Two or three short paragraphs of continuous prose. No sub-headings, no
+      bullet lists, no marketing superlatives.
+  - title: Design rationale
+    region: design-rationale
+    query: >-
+      append-only supersession, immutable stored confidence with query-time
+      trust, contradictions as first-class records, scheduled maintenance
+    top_k: 9
+    min_confidence: 0.99
+    select:
+      allow:
+        - p-8476c2ac   # the corpus is an append-only archive
+        - p-f1ced6c4   # stored confidence.value is immutable, calibrated at creation
+        - p-c3b1cef6   # effective confidence is computed at query time, never stored
+        - p-d0d41702   # trust, decay, and as-of are applied per observer at read time
+        - p-cea0186c   # contestedness MUST be computed at read time, never stored
+        - p-9cf41a46   # disagreement surfaces an INCONSISTENCY instead of overwriting a side
+        - p-f35e1dee   # lint runs periodic health checks
+        - p-0296afc0   # a changed source region marks its particles PROVENANCE_STALE
+        - p-8767ad66   # as-of reads the assertion-time axis, never world-time validity
+    code_symbol_rank_weight: 0.2
+    flowing: true
+    direction: >-
+      Write the design-rationale section of the README, grounded STRICTLY in
+      the supplied claims — add no mechanism or fact the claims do not state.
+      It defends four mechanics as one argument: nothing is overwritten (the
+      append-only store, supersession flagging every provenance-traced claim,
+      deterministic retraction propagation); trust is a read-time lens (stored
+      confidence is immutable, effective confidence computed at query time from
+      extractor trust, source trust and recency, so stale beliefs sink without
+      rewriting records); contradictions are first-class and visible (detection
+      by graph traversal and semantic comparison, contestedness surfaced at
+      read time); and memory maintains itself (periodic lint health checks).
+      One short paragraph per mechanic, continuous prose, never invent
+      sub-headings.
+  - title: Architecture
+    region: architecture
+    # The reference section that KEEPS docstring particles (weight 1.0 — the
+    # one section exempting the down-weight).
+    #
+    # Both the query and the direction were rewritten when the corpus was
+    # re-sourced onto public documents. They used to ask for the Client/Engine
+    # layer split and the enforced import boundary, naming the member packages
+    # of each layer outright. That is an internal architectural decision: every
+    # claim stating it lives in a docstring that cites the decision record by
+    # number, so it is both unpublishable and absent from this corpus — and the
+    # brief was instructing the synthesiser to write it anyway. It obliged, the
+    # verification layer correctly rejected sentence after sentence as
+    # unsupported, and the render fell back to a bullet listing.
+    #
+    # The lesson is about briefs, not about claims: a direction that names
+    # content the pins cannot support does not degrade gracefully, it
+    # manufactures. Ask only for what the cited claims carry — here, what stores
+    # exist, what the operations are and how they are reached, and how a source
+    # becomes particles — and the same claim set renders as clean prose.
+    query: >-
+      the two storage subsystems (the source corpus and the particle store),
+      how corpus entries and snapshot metadata are stored, the Core operations
+      and the CLI and HTTP surfaces they map onto, and how the extraction
+      pipeline selects an extractor for a source
+    direction: >-
+      Describe the shape of a Particles deployment for a developer deciding
+      whether to build on it: which stores exist and what each one holds, what
+      the operations are and how they are invoked, and how a deposited source
+      becomes particles. Stay strictly inside the cited claims — do not name
+      internal package layers, module paths, or import rules, none of which are
+      cited here. One continuous passage, no sub-headings.
+    top_k: 6
+    min_confidence: 0.99
+    select:
+      allow:
+        - p-5a941962   # two storage subsystems: the source corpus and the particle store
+        - p-cb1cd190   # the corpus store is an append-only object store
+        - p-8f670063   # corpus entry + snapshot metadata are stored queryably
+        - p-a4bdde07   # the Core operations: deposit, extract, query, lint, reindex, review
+        - p-e5639e78   # each operation maps to a CLI subcommand and a POST endpoint
+        - p-ac28fba0   # extractor selection: most specific match wins, general is the fallback
+        - p-3bd3740c   # the Core SDK exposes a Python API and a CLI
+    code_symbol_rank_weight: 1.0
+    flowing: true
