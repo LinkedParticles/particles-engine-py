@@ -134,6 +134,23 @@ class TestScopeMandatory:
         assert data.scope_ref == a.id
         assert any(n.subject_id == a.id and n.hop == 0 for n in data.nodes)
 
+    async def test_name_anchor_does_not_mint_a_phantom_node(self, db_session: Any) -> None:
+        """Anchoring by name must not turn the name itself into a node.
+
+        The anchor subject is force-added to the candidate set so it survives the
+        node cap even when it carries no in-scope particles. Forcing the
+        caller's *argument* rather than the resolved id added the raw string as a
+        second node — an empty one, labelled with the name, sitting beside the
+        real subject. Visible only in a rendered graph, so it is pinned here.
+        """
+        a, _b, _c, _ps = await _seed_neighbourhood(db_session)
+        data = await build_graph_data(db_session, subject_id="alpha")
+        ids = [n.subject_id for n in data.nodes]
+        assert ids.count(a.id) == 1
+        assert "alpha" not in ids
+        assert len(ids) == len(set(ids))
+        assert data.census.rendered_subjects == len(ids)
+
     async def test_unknown_name_suggests_matches(self, db_session: Any) -> None:
         """A pasted *name* gets did-you-mean suggestions with usable ids."""
         a, _b, _c, _ = await _seed_neighbourhood(db_session)

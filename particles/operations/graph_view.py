@@ -273,7 +273,10 @@ async def build_graph_data(
         sid for p in particles.values() for sid in p.subject_ids if sid in hop_by_subject
     }
     if subject_id is not None:
-        candidate_subject_ids.add(subject_id)  # the anchor always renders
+        # The RESOLVED anchor, never the caller's argument: `subject_id` may be
+        # a canonical name or alias, and adding that raw token here minted a
+        # second, empty node labelled with the name alongside the real subject.
+        candidate_subject_ids.add(scope_ref)  # the anchor always renders
     candidate_particles = len(particles)
 
     # on the graph: this surface's unit is a Subject, not a belief, so
