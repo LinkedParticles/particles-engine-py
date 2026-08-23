@@ -1,0 +1,23 @@
+# Build dependencies for the docs.linkedparticles.org site (mkdocs build --strict).
+#
+# Authored in the private development upstream under publish/overlays/ and laid
+# into this tree by the release export — edit it there, not here.
+#
+# Pinned to the versions the upstream's own lockfile resolves, so the published
+# site is built by the same toolchain that gates the docs upstream.
+#
+# The package under documentation is NOT installed here, and that is deliberate:
+# mkdocstrings collects statically through griffe, which reads source and never
+# imports, so the API reference renders without the runtime dependency closure
+# (no torch, no Anthropic SDK, no database driver) and the build stays under a
+# second.
+#
+# `linkedparticles-core` is deliberately absent too, even though the API
+# reference needs its source. It is installed by a separate build step at the
+# version pinned in this tree's own pyproject.toml — one source of truth for
+# that version, stamped by the release export — and with `--target .`, because
+# griffe cannot merge a split package across two search paths. See the header
+# of mkdocs.yml for the mechanics and the by-hand recipe.
+mkdocs==1.6.1
+mkdocs-material==9.7.6
+mkdocstrings[python]==1.0.4

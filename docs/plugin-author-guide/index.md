@@ -46,8 +46,8 @@ changes, no FastAPI changes.
 
 If you want to add an entirely new family (e.g. "exporters for
 custom storage backends"), that's an ADR-class change, not a
-plugin. Open a `proposed/` ADR per the
-[doc-lifecycle policy](../AGENTS.md).
+plugin. Open a `proposed/` ADR per the project's doc-lifecycle
+policy.
 
 ## Front-end clients (not SDK plugins)
 
