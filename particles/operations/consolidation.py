@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Dream cycle — the scheduled consolidation operation.
 
 ``run_consolidation`` composes the **existing** engine passes in the fixed §3
@@ -522,6 +526,7 @@ async def run_consolidation(
     actor: str = "memory-consolidate",
     projection_runner: ProjectionRunner | None = None,
     projection_skip_reason: str | None = None,
+    lock_path: Path | None = None,
 ) -> ConsolidationReport:
     """Run the fixed consolidation pass list and write the run record.
 
@@ -538,6 +543,14 @@ async def run_consolidation(
     (the SessionEnd cycle's, reused) — the Engine cannot import the CLI-side
     projection helpers without inverting the layer contract. ``None`` records
     pass 6 as skipped with ``projection_skip_reason``.
+
+    ``lock_path`` overrides the cycle lock's location. The lock exists to stop
+    two cycles running against **one store** (§8), so its natural scope is the
+    store — the default global path is merely the right answer when there is
+    one. A caller holding many independent stores at once (the benchmark's per-question scratch stores) passes a per-store path; sharing
+    the global one would make every concurrent store after the first record
+    ``skipped``, silently turning a consolidation-on arm into a
+    consolidation-off arm.
     """
     cfg = get_config().consolidation
     report = ConsolidationReport(store=store, actor=actor, scope=scope, effective_scope=scope)
@@ -562,7 +575,10 @@ async def run_consolidation(
                 )
                 return report
 
-    lock = acquire_cycle_lock(cycle_lock_path(), timeout_minutes=cfg.lock_timeout_minutes)
+    lock = acquire_cycle_lock(
+        lock_path if lock_path is not None else cycle_lock_path(),
+        timeout_minutes=cfg.lock_timeout_minutes,
+    )
     if lock is None:
         report.outcome = "skipped"
         report.skip_reason = "consolidation already running — skipped"

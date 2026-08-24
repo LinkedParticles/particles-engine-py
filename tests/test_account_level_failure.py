@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Account-level LLM failures abort a bulk run instead of repeating.
 
 The dogfood incident this fixes (2026-07-25): with an exhausted credit balance,

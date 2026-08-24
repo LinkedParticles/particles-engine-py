@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine-side ingest: reconcile candidate particles against accumulated state.
 
 The Engine layer's ingest half. Where ``particles.extraction``

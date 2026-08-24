@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles/operations/reconcile.py`` — the cross-entry
 document-supersession reconcile sweep.
 

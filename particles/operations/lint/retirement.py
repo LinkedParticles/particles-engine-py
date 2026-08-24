@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Undated-retirement detector.
 
 One aggregate, read-only structural finding: how many once-believed retired

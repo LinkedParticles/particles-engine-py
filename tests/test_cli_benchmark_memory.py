@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles benchmark memory`` verb.
 
 Pins the CLI contract with mocked seams: flag validation, the ``--estimate``
@@ -95,6 +99,42 @@ class TestEstimateGate:
         assert "Estimate:" in result.output
         assert "nothing was run" in result.output
         run_mock.assert_not_called()
+
+    def test_estimate_states_the_context_window_verdict(self) -> None:
+        """``--estimate`` is a complete dry run: cost *and* whether it fits.
+
+        An operator trying a bigger variant learns it will not fit here,
+        before the confirm gate — not from the runner's refusal later.
+        """
+        with patch(
+            "particles.benchmark.memory.run_memory_benchmark", new_callable=AsyncMock
+        ) as run_mock:
+            result = runner.invoke(
+                app,
+                ["benchmark", "memory", "--dataset-file", str(FIXTURE), "--estimate"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Context window" in result.output
+        assert "fits" in result.output
+        run_mock.assert_not_called()
+
+    def test_an_over_window_run_is_refused_with_a_nonzero_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The runner's refusal reaches the operator as an error, not a traceback."""
+        from particles.benchmark.memory import ContextWindowExceeded
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with patch(
+            "particles.benchmark.memory.run_memory_benchmark",
+            new_callable=AsyncMock,
+            side_effect=ContextWindowExceeded("does not fit on the 'm' variant"),
+        ):
+            result = runner.invoke(
+                app, ["benchmark", "memory", "--dataset-file", str(FIXTURE), "--yes"]
+            )
+        assert result.exit_code == 1
+        assert "does not fit on the 'm' variant" in result.output
 
     def test_non_interactive_over_threshold_aborts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from particles.config import reset_config
@@ -211,3 +251,126 @@ class TestOutput:
         assert code == 0, output
         assert out.exists()
         assert "== Retrieval stage" in out.read_text()
+
+
+class TestPdr0488Flags:
+    """The five memory-benchmark ablations, as CLI knobs."""
+
+    def test_estimate_drops_the_write_side_under_reuse(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The projection an operator confirms must describe the run they get."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        base = ["benchmark", "memory", "--dataset-file", str(FIXTURE), "--estimate"]
+        fresh = runner.invoke(app, base)
+        reused = runner.invoke(app, [*base, "--reuse-stores", "--store-dir", str(tmp_path)])
+        assert fresh.exit_code == 0, fresh.output
+        assert reused.exit_code == 0, reused.output
+        assert "~0 write-time" in reused.output
+        assert "~0 write-time" not in fresh.output
+
+    def test_consolidation_and_abstraction_are_mutually_exclusive(self) -> None:
+        """The cycle runs the abstraction pass itself — accepting both would
+        run it twice and record a tuple claiming two knobs for one arm."""
+        result = runner.invoke(
+            app,
+            [
+                "benchmark",
+                "memory",
+                "--dataset-file",
+                str(FIXTURE),
+                "--consolidation",
+                "--abstraction",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output
+
+    def test_reuse_stores_requires_store_dir(self) -> None:
+        result = runner.invoke(
+            app, ["benchmark", "memory", "--dataset-file", str(FIXTURE), "--reuse-stores"]
+        )
+        assert result.exit_code == 2
+        assert "--store-dir" in result.output
+
+    @pytest.mark.parametrize(
+        ("flag", "kwarg"),
+        [
+            ("--consolidation", "consolidation"),
+            ("--dedup-judge", "dedup_judge"),
+            ("--no-qa", "qa"),
+        ],
+    )
+    def test_flag_reaches_the_runner(
+        self, monkeypatch: pytest.MonkeyPatch, flag: str, kwarg: str
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        run_mock = AsyncMock(return_value=_fake_report())
+        with patch("particles.benchmark.memory.run_memory_benchmark", run_mock):
+            result = runner.invoke(
+                app,
+                ["benchmark", "memory", "--dataset-file", str(FIXTURE), "--yes", flag],
+            )
+        assert result.exit_code == 0, result.output
+        expected = flag != "--no-qa"
+        assert run_mock.await_args.kwargs[kwarg] is expected
+
+    def test_top_k_reaches_the_runner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        run_mock = AsyncMock(return_value=_fake_report())
+        with patch("particles.benchmark.memory.run_memory_benchmark", run_mock):
+            result = runner.invoke(
+                app,
+                [
+                    "benchmark",
+                    "memory",
+                    "--dataset-file",
+                    str(FIXTURE),
+                    "--yes",
+                    "--top-k",
+                    "25",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert run_mock.await_args.kwargs["top_k"] == 25
+
+    def test_unbounded_component_still_gates(self, tmp_path: Path) -> None:
+        """A projection of "~0 calls" must not be a way around the confirm gate.
+
+        --dedup-judge over reused stores has zero *boundable* calls, so the
+        threshold comparison alone would wave it through while the judge fans
+        out per Subject cluster.
+        """
+        result = runner.invoke(
+            app,
+            [
+                "benchmark",
+                "memory",
+                "--dataset-file",
+                str(FIXTURE),
+                "--reuse-stores",
+                "--store-dir",
+                str(tmp_path),
+                "--no-qa",
+                "--dedup-judge",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "NOT INCLUDED ABOVE" in result.output
+        assert "no --yes" in result.output
+
+    def test_consolidation_bound_appears_in_the_estimate(self) -> None:
+        """The two per-store probe caps are the arm's ceiling — show them."""
+        result = runner.invoke(
+            app,
+            [
+                "benchmark",
+                "memory",
+                "--dataset-file",
+                str(FIXTURE),
+                "--estimate",
+                "--consolidation",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ablation-pass probe(s), capped" in result.output

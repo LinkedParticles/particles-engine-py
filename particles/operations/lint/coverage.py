@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Coverage and extraction-quality reporters.
 
 Surface gaps in the particle/subject graph that don't fit the staleness or

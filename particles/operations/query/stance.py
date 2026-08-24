@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Query-time stance (agreement) distribution assembly.
 
 For each result particle, gather the ``ENDORSES`` / ``DISPUTES`` edges pointing

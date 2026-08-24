@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM models and repository for the taxonomy store.
 
 A ``TaxonomyDefinition`` is a depositable corpus artefact. The

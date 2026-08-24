@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.1 Deposit operation — re-export.
 
 The Deposit implementation lives in ``particles.corpus.deposit`` because it

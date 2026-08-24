@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """reindex verb — re-extract particles for stale or failed corpus entries."""
 
 from __future__ import annotations

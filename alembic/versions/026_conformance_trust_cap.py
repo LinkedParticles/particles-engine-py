@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Conformance trust-cap status column.
 
 Add a nullable ``conformance_required_failure`` boolean to ``extractor_records``.

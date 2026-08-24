@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the exporter plugin registry (particles/exporters/registry.py).
 
 Was 0% covered in the architecture-review baseline. The module is small

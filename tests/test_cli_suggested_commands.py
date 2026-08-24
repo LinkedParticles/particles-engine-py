@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Every `particles …` command we *suggest* to an operator must actually run.
 
 Operator-facing output tells people what to do next ("run `particles reindex`

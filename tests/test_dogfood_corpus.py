@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Dogfood corpus regression tests.
 
 Runs the wiki + obsidian exporters against a ~10-subject in-repo

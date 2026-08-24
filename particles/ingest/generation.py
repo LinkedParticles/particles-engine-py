@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The snapshot-generation cascade for ``MUTABLE`` corpus entries.
 
 The mutability contract: a new snapshot of a ``MUTABLE`` source sets the

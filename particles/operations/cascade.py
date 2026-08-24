@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extension B: source trust cascade.
 
 When a SourceTrustStatement is written, run_trust_cascade() auto-resolves open

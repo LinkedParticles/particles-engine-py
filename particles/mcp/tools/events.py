@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``events_list`` / ``event_show`` — read the operator event log.
 
 Read-only access to the audit trail of operator decisions (retract / split /

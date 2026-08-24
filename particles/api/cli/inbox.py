@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """inbox sub-Typer — process URLs queued from iOS via iCloud Drive.
 
 See ``docs/cli.md`` § Inbox for the iOS-Shortcut setup. The bot-of-the-

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the per-observer decay policy (decay as a 4th lens layer)."""
 
 from __future__ import annotations

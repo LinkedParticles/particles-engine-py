@@ -14,7 +14,11 @@ uv run particles query "How many planets are in the Solar System?" --as-of 2000-
 A bare date means the start of that day, UTC; any ISO-8601 datetime works. A
 future instant is rejected — as-of is a historical lens. The same parameter
 exists on all three surfaces: the CLI flag, `QueryRequest.as_of` on
-`POST /query`, and `as_of` on the MCP `query` tool.
+`POST /query`, and `as_of` on the MCP `query` tool — and on
+[`export graph`](graph-view.md#history-and-time-travel), which renders the
+same lens as a picture. Everything else about the ordinary query path
+(ranking, tag and structural filters) is unchanged: see
+[Querying](querying.md).
 
 ## What the lens does
 
@@ -37,8 +41,10 @@ With `--as-of T`, the query answers from the beliefs **believed at T**:
   reconstruct** (some pre-ADR-0191 automated demotions) are excluded
   fail-closed, with a disclosure line — the lens discloses a gap rather than
   manufacture history. The companion `UNDATED_RETIREMENT` lint finding counts
-  such rows at hygiene time; growth of that count on a current store means
-  something is writing retirements outside the SDK.
+  such rows at hygiene time (see
+  [Operator guide → lint and review](../operator-guide/lint-and-review.md));
+  growth of that count on a current store means something is writing
+  retirements outside the SDK.
 
 An instant before the store's first assertion is a valid question: the answer
 honestly says the store held no beliefs at T.
@@ -112,3 +118,7 @@ the two claims — not between 1930 and 2006. Retirement instants are exact for
 everything the SDK writes going forward and for reconstructible history
 (explicit supersessions, operator retractions, validity expiry); the rest is
 disclosed, never guessed.
+
+The statuses a belief moves between on its way out are defined in
+[Concepts → status](concepts.md#status); who retired one and why is in the
+[operator event log](../operator-guide/auditing.md).

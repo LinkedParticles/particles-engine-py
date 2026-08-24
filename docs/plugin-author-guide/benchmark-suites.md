@@ -55,9 +55,16 @@ too timidly."*
 ## Three normative metrics
 
 `precision`, `recall`, `calibration_error` are mandated by techspec
-§13.3 and the runner always reports them. Domain-specific metrics
-are opt-in extensions; see [`particles/benchmark/AGENTS.md`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/benchmark/AGENTS.md)
-for the extension hook.
+§13.3 and the runner always reports them. `calibration_error` is not just a
+score: it is the input an operator fits a temperature against, so a suite
+authored here is what makes
+[extractor calibration](../operator-guide/tuning.md#extractor-calibration)
+possible at all — and
+[benchmark + compare](../operator-guide/tuning.md#benchmark-compare) is how
+they check a tuning change moved the needle. Domain-specific metrics
+are opt-in extensions; see
+[`particles/benchmark/`](https://github.com/LinkedParticles/particles-engine-py/tree/main/particles/benchmark) for the
+extension hook.
 
 ## What good fixtures look like
 
@@ -71,4 +78,5 @@ for the extension hook.
   confidence still passes; a regression that emits below the floor
   is caught as under-confidence.
 
-The canonical contract: [`particles/benchmark/AGENTS.md`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/benchmark/AGENTS.md).
+The suite schema is normative and declared in
+[`particles/benchmark/schema.py`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/benchmark/schema.py).

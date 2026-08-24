@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared pytest fixtures — the Engine (private monorepo) half.
 
 The Client-pure fixtures live in ``tests/_client_fixtures.py`` and are

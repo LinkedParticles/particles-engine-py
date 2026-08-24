@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add URL-mention citation-signal tables.
 
 ``url_mentions`` + ``url_suggestion_state`` — track external URLs mentioned

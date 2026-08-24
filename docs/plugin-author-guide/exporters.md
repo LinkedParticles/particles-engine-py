@@ -37,7 +37,7 @@ Plus a Pydantic `MyFormatSummary(BaseExporterSummary)` in
 | Directory of cited articles | `particles/exporters/wiki.py` | LLM synthesis via shared `article_synthesis/` |
 | Directory of bullet-outline pages | `particles/exporters/logseq/` | Logseq's native format; particle IDs as block UUIDs for cross-page citation |
 | External HTTP API (no file) | `particles/exporters/notion.py` | The first API-target exporter; idempotent upsert into one Notion database. Reference for the credential pattern below. |
-| Single self-contained `.html` graph | `particles/exporters/graph/` | Scoped epistemic graph view: mandatory scope + disclosed caps; vendored Cytoscape.js inlined so the artifact works offline. The canonical contract notes live in `particles/exporters/AGENTS.md`. |
+| Single self-contained `.html` graph | `particles/exporters/graph/` | Scoped epistemic graph view: mandatory scope + disclosed caps; vendored Cytoscape.js inlined so the artifact works offline. What it renders and why is described in [User guide → graph view](../user-guide/graph-view.md); and the flags it accepts are in that page's options table. |
 
 ## Cross-exporter contract
 
@@ -51,6 +51,14 @@ Every shipped exporter — and yours — must honour two options
 
 Your summary must include `particles_dropped_below_threshold: int`
 when the threshold is non-zero (inherited from `BaseExporterSummary`).
+
+Both options reach you from two directions, and it is worth seeing each:
+the operator sets a standing floor in `config.yaml`
+([Operator guide → cross-exporter quality threshold](../operator-guide/tuning.md#cross-exporter-quality-threshold)),
+and the user overrides it per run with `--min-particle-confidence`
+([User guide → exporting](../user-guide/exporting.md)). Filter on
+`effective_confidence`, never on the stored `confidence.value` — the two are
+[deliberately different quantities](../user-guide/concepts.md#confidence).
 
 ## Output shape
 
@@ -79,8 +87,10 @@ and needs a credential, follow the Notion exporter's pattern:
    sub-model + `config.yaml.sample`.
 4. Make `--dry-run` issue zero API writes.
 
-The full contract: [`particles/exporters/AGENTS.md`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/exporters/AGENTS.md)
-§ API-target exporters & the credential pattern.
+The worked reference is
+[`particles/exporters/notion.py`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/exporters/notion.py);
+the operator's side of the same credential is
+[Operator guide → configuration → secrets](../operator-guide/configuration.md#secrets).
 
 ## Reaching across the seam
 
@@ -104,4 +114,5 @@ validation, Layer-B judge, and the fallback structured-listing
 render. The Obsidian, Wiki, and Logseq exporters all share this
 machinery.
 
-The canonical contract: [`particles/exporters/AGENTS.md`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/exporters/AGENTS.md).
+The canonical contract is the protocol itself, in
+[`particles/exporters/registry.py`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/exporters/registry.py).

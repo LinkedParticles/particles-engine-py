@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Regenerate ``tests/dogfood/llm_responses.yaml`` from a live LLM run.
 
 A developer command was deferred that runs the dogfood corpus through the

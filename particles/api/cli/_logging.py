@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared CLI logging helper.
 
 Lives apart from the verb modules because db/deposit/extract/etc. all wire

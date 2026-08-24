@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Typer CLI — wraps all Core operations (§C.6).
 
 The CLI app is defined here; commands live in sibling modules and register

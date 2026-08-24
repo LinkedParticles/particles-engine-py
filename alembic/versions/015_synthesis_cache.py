@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add synthesis_cache table.
 
 Shared cache for LLM-synthesised per-Subject prose articles. Keyed on

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Benchmark runner — ties loader + extractor + equivalence + metrics.
 
 ``run_benchmark(suite, extractor)`` is the one public entry point.

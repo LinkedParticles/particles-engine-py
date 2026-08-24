@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Layer-boundary regression tests.
 
 The *authoritative* gate is the three ``import-linter`` contracts in

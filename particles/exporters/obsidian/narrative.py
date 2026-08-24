@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """per-NARRATIVE Obsidian note rendering.
 
 A NARRATIVE has no subject note to splice into (per-subject synthesis is in

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the wiki article exporter.
 
 Covers commits 1/3 (skeleton + caching + dry-run) and 2/3 (LLM synthesis

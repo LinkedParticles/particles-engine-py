@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Article rendering — frontmatter, structured-listing, synthesised-article.
 
 This is the largest submodule of the package because it owns three

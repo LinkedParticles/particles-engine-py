@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM and repository for trust lenses.
 
 A ``TrustLensDefinition`` arrives as a deposited corpus artefact (the taxonomy pattern); the ``TrustLensExtractor`` hands the parsed model

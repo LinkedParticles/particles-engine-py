@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """LLM-assisted contradiction detector (L-SEM-01).
 
 Generate candidate pairs across **all** ACTIVE truth-apt particles store-wide

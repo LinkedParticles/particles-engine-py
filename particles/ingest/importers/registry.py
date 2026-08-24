@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Importer plugin registry (Engine layer).
 
 The importer half of the plugin machinery. Importers fetch a URL and write the

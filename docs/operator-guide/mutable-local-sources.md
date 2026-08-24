@@ -10,6 +10,11 @@ This page covers opting such a file in, tracking the whole set of
 operating documents at once, what happens when one changes, and the
 one-time cleanup for stores that predate the feature.
 
+That conversation harvest is the
+[Claude Code integration](../user-guide/claude-code.md), and this page is its
+other half: harvest tells the store what happened in a session, rule-file
+refresh tells it what the standing rules currently are.
+
 Why bother: a store fed only by conversation harvest ends up holding claims
 *about* your rules rather than the rules themselves. Measured on this project's
 own store before — 34 ACTIVE particles mentioned the

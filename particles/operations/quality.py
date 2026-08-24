@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extraction quality dashboard (Appendix B §8).
 
 Five aggregate queries delegated to the store layer; no LLM calls, no

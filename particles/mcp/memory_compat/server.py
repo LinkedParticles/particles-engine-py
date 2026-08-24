@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The drop-in memory-server MCP surface.
 
 Mirrors ``@modelcontextprotocol/server-memory`` v0.6.3 closely enough that a

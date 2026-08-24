@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-contained HTML assembly for the graph exporter.
 
 One output file, no network: the vendored Cytoscape.js, the encoding styles, the glue script, and the :class:`GraphData` JSON payload are

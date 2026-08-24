@@ -30,7 +30,17 @@ The pass list, in order:
 6. **Projection re-render** *(zero-LLM)* — the `MEMORY.md`
    render-splice cycle, via the same harvest-then-render tail the SessionEnd
    hook uses.
-7. **Record + report** — one `CONSOLIDATION_RUN` operator event per run.
+7. **Record + report** — one `CONSOLIDATION_RUN` operator event per run,
+   readable afterwards through [Auditing](auditing.md).
+
+Each pass has a page of its own if you want to run it by hand first, or to
+understand what it is doing overnight: pass 1 and 2 are the deposit → extract
+→ supersede loop that [mutable local sources](mutable-local-sources.md)
+depends on, pass 3's contradiction and duplicate findings are the same ones
+[lint and review](lint-and-review.md) and
+[co-evidential curation](co-evidential.md) surface interactively, and pass 6
+re-renders the `MEMORY.md` region described in
+[User guide → Claude Code](../user-guide/claude-code.md#the-memorymd-projection).
 
 ## Scheduling (launchd / cron)
 

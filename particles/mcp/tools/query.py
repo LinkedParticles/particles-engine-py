@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``query`` — tag-aware semantic search + NL response.
 
 Routed through the ``Backend`` seam: with no engine configured the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine-side narrative-merge post-pass for chunked journal extraction.
 
 When an over-length journal entry is extracted in multiple carry-forward passes

@@ -170,7 +170,7 @@
         "type": "object"
       },
       "AssertionModality": {
-        "description": "What *kind* of assertion a particle makes \u2014 its truth-aptness.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The Core\nengine applies truth-semantics \u2014 \u00a76.6 contradiction resolution, L-SEM-01,\nL-IDX-01 \u2014 only to ``FALSIFIABLE`` particles (see :func:`is_truth_apt`);\nthe other modalities co-exist and are never contradiction-checked or\ntrust-arbitrated. Default ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
+        "description": "What *kind* of assertion a particle makes \u2014 its truth-aptness.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The Core\nengine applies truth-semantics \u2014 the \u00a76.4 conflict ladder, L-SEM-01,\nL-IDX-01 \u2014 only to ``FALSIFIABLE`` particles (see :func:`is_truth_apt`);\nthe other modalities co-exist and are never contradiction-checked or\ntrust-arbitrated. Default ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
         "enum": [
           "FALSIFIABLE",
           "EVALUATIVE",
@@ -275,7 +275,8 @@
           "AGENT_ASSERTED",
           "CALIBRATED_BENCHMARK",
           "HUMAN_REVIEW",
-          "DERIVED"
+          "DERIVED",
+          "IMPORTED"
         ],
         "title": "CalibrationSource",
         "type": "string"
@@ -341,7 +342,7 @@
         "type": "string"
       },
       "ClaimCoverage": {
-        "description": "Coverage data for a structural-filter result.\n\nRendered as the footer line \"matched against the N of M ACTIVE particles\ncarrying a structured claim (store coverage P%)\" \u2014 absence of a hit must\nnever be mistaken for absence of a belief. ``not_normalizable_excluded``\nis the \u00a72.2 disclosure: claims excluded from a gt/lt comparison because\ntheir object would not normalize to a comparable type.",
+        "description": "Coverage data for a structural-filter result.\n\nRendered as the footer line \"matched against the N of M ACTIVE particles\ncarrying a structured claim (store coverage P%)\" \u2014 absence of a hit must\nnever be mistaken for absence of a belief. ``not_normalizable_excluded``\nis the disclosure: claims excluded from a gt/lt comparison\nbecause their object would not normalize to a comparable type.",
         "properties": {
           "active_total": {
             "title": "Active Total",
@@ -457,7 +458,7 @@
         "type": "object"
       },
       "Confidence": {
-        "description": "The stored, immutable confidence record (\u00a76.3).\n\nconfidence.value is never modified after particle creation. It is the\nextractor's confidence as calibrated at creation time;\ncalibration_source/calibration_method/calibration_ref record how.\neffective_confidence is computed at query time only and never stored.",
+        "description": "The stored, immutable confidence record (\u00a76.3).\n\nconfidence.value is never modified after particle creation. It is the\nextractor's confidence as calibrated at creation time;\ncalibration_source/calibration_method/calibration_ref record how.\neffective_confidence is computed at query time only and never stored.\n\u00a76.3 makes the separation of the two quantities normative, and the\nConformance Profile \u00a74 pins the formula and its test vectors.",
         "properties": {
           "calibration_method": {
             "anyOf": [
@@ -510,7 +511,7 @@
         "type": "object"
       },
       "ContestedBadge": {
-        "description": "The composed per-claim contested badge.\n\nA claim renders *contested* iff at least one of three named bases fires;\nthe badge is a basis-carrying disjunction \u2014 a set of fired basis labels,\nnever a blended scalar \u2014 so every badge names which instrument(s) produced\nit (\u00a71). The three gates (\u00a72): ``stance`` \u2014 \u22651 ``DISPUTES`` position in the\nclaim's query-time stance distribution; ``divergence`` \u2014 the\nclaim's :class:`ContestednessReading` spread is at least\n``contestedness.callout_threshold``; ``inconsistency`` \u2014 an open\nINCONSISTENCY particle references the claim (subsumed as a\nbasis). A claim with no available basis fired carries **no** badge (None in\nthe parallel list), never an explicit \"uncontested\" (\u00a73).\n\nInvariants (\u00a74): computed at read time, never stored; MUST NOT feed\n``effective_confidence``, ranking, ``min_confidence`` filtering, or \u00a76.6\nconflict resolution \u2014 disclosure, not discount. The divergence reading and\nstance distribution are not duplicated here; they remain the existing\nenvelope blocks (the drill-downs).",
+        "description": "The composed per-claim contested badge (\u00a76.9).\n\nA claim renders *contested* iff at least one of three named bases fires;\nthe badge is a basis-carrying disjunction \u2014 a set of fired basis labels,\nnever a blended scalar \u2014 so every badge names which instrument(s) produced\nit. The three gates: ``stance`` \u2014 \u22651\n``DISPUTES`` position in the\nclaim's query-time stance distribution; ``divergence`` \u2014 the\nclaim's :class:`ContestednessReading` spread is at least\n``contestedness.callout_threshold``; ``inconsistency`` \u2014 an open\nINCONSISTENCY particle references the claim (subsumed as a\nbasis). A claim with no available basis fired carries **no** badge (None in\nthe parallel list), never an explicit \"uncontested\".\n\nInvariants: computed at read time, never stored; MUST NOT feed\n``effective_confidence``, ranking, ``min_confidence`` filtering, or the \u00a76.4\nconflict ladder \u2014 disclosure, not discount. The divergence reading and\nstance distribution are not duplicated here; they remain the existing\nenvelope blocks (the drill-downs).",
         "properties": {
           "bases": {
             "items": {
@@ -569,7 +570,7 @@
         "type": "object"
       },
       "ContestednessReading": {
-        "description": "A claim's lens-divergence of effective confidence.\n\n``spread`` is max \u2212 min of ``effective_confidence`` evaluated separately\nunder each policy in the viewer's policy set (the local policy plus each\nadopted lens). It is **disclosure, not discount**: it MUST NOT\nfeed ``effective_confidence``, ranking, ``min_confidence`` filtering, or\n\u00a76.6 conflict resolution. Computed at read time, never stored. Present only\nwhen the viewer has two or more policies (\u00a73) \u2014 a one-policy store mints no\ncontestedness, since absence of measurement is not measured invariance.",
+        "description": "A claim's lens-divergence of effective confidence.\n\n``spread`` is max \u2212 min of ``effective_confidence`` evaluated separately\nunder each policy in the viewer's policy set (the local policy plus each\nadopted lens). It is **disclosure, not discount**: it MUST NOT\nfeed ``effective_confidence``, ranking, ``min_confidence`` filtering, or the\n\u00a76.4 conflict ladder. Computed at read time, never stored. Present only\nwhen the viewer has two or more policies \u2014 a one-policy store\nmints no contestedness, since absence of measurement is not measured\ninvariance.",
         "properties": {
           "renderings": {
             "items": {
@@ -617,7 +618,7 @@
         "type": "object"
       },
       "CorpusEntry": {
-        "description": "Stable record of a source and its relationship to its origin (\u00a77.3).",
+        "description": "Stable record of a source and its relationship to its origin (\u00a77.2).\n\nThe entry is the append-only unit of the corpus (\u00a77.1); ``mutability``\n(\u00a77.4) and ``fetch_policy`` (\u00a77.5) declare how its snapshot list may grow.",
         "properties": {
           "contributors": {
             "anyOf": [
@@ -2455,6 +2456,7 @@
         "type": "object"
       },
       "Mutability": {
+        "description": "How a source's content may change, per the \u00a77.4 class table.\n\nDeclared by the operator at deposit; it is what drives extraction behaviour\nwhen a new snapshot lands (delta-only, full re-extract with a demotion pass,\nno re-fetch, or no archive at all). \u00a77.4 is normative on the ordering of the\n``MUTABLE`` demotion.",
         "enum": [
           "APPEND_ONLY",
           "MUTABLE",
@@ -2708,7 +2710,7 @@
         "type": "object"
       },
       "Particle": {
-        "description": "The minimal unit of knowledge in the Particles standard (\u00a76.1\u20136.2).\n\nA particle is a single claim with full provenance. `content` is the\nhuman-readable assertion. `confidence` and `uncertainty_nature` quantify\nepistemic state. `subject_ids` links the claim to canonical entities.\n`properties` carries structured ontology-keyed data for structured\nextractors (e.g. Numista); it is never used for conflict detection.\n\nAttributes:\n    content: The claim text (min length 1).\n    confidence: Stored, immutable confidence record.\n    uncertainty_nature: EPISTEMIC (reducible) or ALEATORY (irreducible).\n    provenance: Corpus entry / snapshot references.\n    asserted_by: Agent or extractor ID that created this particle.\n    status: Lifecycle status (ACTIVE, SUPERSEDED, RETRACTED, \u2026).\n    subject_ids: UUIDs of subjects this particle is a statement about.\n    properties: Nomisma ontology-keyed structured data.",
+        "description": "The minimal unit of knowledge in the Particles standard (\u00a76.1\u20136.2).\n\nA particle is a single claim with full provenance. `content` is the\nhuman-readable assertion. `confidence` and `uncertainty_nature` quantify\nepistemic state. `subject_ids` links the claim to canonical entities.\n`properties` carries structured ontology-keyed data for structured\nextractors (e.g. Numista); it is never used for conflict detection.\n\nAttributes:\n    content: The claim text (min length 1) \u2014 one falsifiable assertion\n        (\u00a76.1).\n    confidence: Stored, immutable confidence record (\u00a76.3); never modified\n        after creation.\n    uncertainty_nature: EPISTEMIC (reducible) or ALEATORY (irreducible).\n    provenance: Corpus entry / snapshot references.\n    asserted_by: Agent or extractor ID that created this particle.\n    status: Lifecycle status (ACTIVE, SUPERSEDED, RETRACTED, \u2026). Only the\n        transitions in the normative \u00a76.6 table are legal; go through\n        :func:`particles.core.status.validate_transition`, never a direct\n        assignment.\n    subject_ids: UUIDs of subjects this particle is a statement about.\n    properties: Nomisma ontology-keyed structured data.",
         "properties": {
           "asserted_at": {
             "format": "date-time",
@@ -4277,7 +4279,7 @@
         "type": "object"
       },
       "Snapshot": {
-        "description": "A timestamped, content-addressed capture of a corpus source (\u00a77.3).",
+        "description": "A timestamped, content-addressed capture of a corpus source (\u00a77.2).\n\nSnapshots are only ever appended: the corpus is an append-only archive and\nthe system of record, with the particle store a derived view over it\n(\u00a77.1), so a re-fetch adds a snapshot rather than rewriting one. Sharing\nthem between stores is \u00a77.3.",
         "properties": {
           "archive_path": {
             "anyOf": [
@@ -4489,7 +4491,7 @@
         "type": "object"
       },
       "StancePosition": {
-        "description": "One holder's position in a claim's query-time agreement distribution.\n\nComputed at query time over the ``ENDORSES`` / ``DISPUTES`` edges into the\ntarget's CO_EVIDENTIAL group; never stored (substrate-plus-lens).\n``effective_confidence`` is the *stance particle's own* believability\n(how sure we are the holder holds the attitude) \u2014 it is surfaced alongside,\nand never folded into, the target claim's confidence (the \u00a74 MUST).",
+        "description": "One holder's position in a claim's query-time agreement distribution.\n\nComputed at query time over the ``ENDORSES`` / ``DISPUTES`` edges into the\ntarget's CO_EVIDENTIAL group; never stored (substrate-plus-lens).\n``effective_confidence`` is the *stance particle's own* believability\n(how sure we are the holder holds the attitude) \u2014 it is surfaced alongside,\nand never folded into, the target claim's confidence.",
         "properties": {
           "effective_confidence": {
             "title": "Effective Confidence",

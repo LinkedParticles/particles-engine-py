@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/cli/_projection_git.py — git-versioned history.
 
 Covers the two things the ADR calls out explicitly: the **degrade-when-not-a-

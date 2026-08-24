@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Reference memory-server compatibility façade.
 
 A drop-in MCP surface mirroring ``@modelcontextprotocol/server-memory`` so an

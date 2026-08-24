@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """mcp sub-Typer — run the read-only MCP server, inspect its tool surface.
 
 ``particles mcp serve`` is what an MCP client (Claude Code, Claude

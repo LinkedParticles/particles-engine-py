@@ -10,6 +10,10 @@ is good at finding prose and bad at the questions that are really *relational*:
 Each of those is a comparison or a count, not a similarity ranking, and none is
 answerable without an LLM call.
 
+This page is the producing side. The reading side — the `query` flags that make
+those three questions deterministic and free — is
+[User guide → structural claim filters](../user-guide/querying.md#structural-claim-filters).
+
 A **structured claim** is a second rendering of the same claim as one
 subject-predicate-object triple, stored beside the prose:
 

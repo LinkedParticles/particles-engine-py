@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Live claim-polarity benchmark — integration tier.
 
 Runs the bundled seed suite through the **real** general extractor (one LLM

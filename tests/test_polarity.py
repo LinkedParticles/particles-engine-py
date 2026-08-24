@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for claim-polarity classification (capability 1).
 
 Covers the polarity contract (``particles.extraction.polarity``), the

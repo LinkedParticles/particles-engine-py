@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles/operations/_scope.py`` — the shared harvest-scope tier.
 
 ``pair_scope_tier`` is the two-tier priority both budgeted candidate

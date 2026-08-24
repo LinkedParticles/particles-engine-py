@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Article-synthesis orchestrator.
 
 :func:`render_article` is the single public entry point for "give me a

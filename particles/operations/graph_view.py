@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Scoped epistemic subgraph assembly.
 
 The one build behind both graph presentation surfaces: the static HTML

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Polarity-benchmark suite YAML loader.
 
 Mirrors :mod:`particles.benchmark.modality.loader`'s strictness contract —

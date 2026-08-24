@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-entry document-supersession reconcile sweep.
 
 Activates the §6.6 rung-1.5 document-supersession prior (cap. 2) on a

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.2 Extract operation — re-export.
 
 The Extract orchestration is implemented in ``particles.ingest.pipeline``

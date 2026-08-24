@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles memory useful``.
 
 The operation is pinned in ``tests/test_utility_feedback.py``; these pin what

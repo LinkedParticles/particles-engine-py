@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the derived structured-claim annotation.
 
 Covers the four surfaces the ADR adds, in the order a reader meets them:

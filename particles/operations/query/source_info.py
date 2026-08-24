@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Provenance-lookup helper for recency decay and exporter rendering.
 
 ``load_source_rows`` resolves each particle's SOURCE provenance ref to its

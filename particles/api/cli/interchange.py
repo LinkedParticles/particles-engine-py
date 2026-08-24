@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """interchange sub-Typer — export / import / restore portable store bundles.
 
 A bundle is a directory of a ``manifest.json`` envelope plus particles / subjects

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Obsidian exporter plugin — registered surface.
 
 This module holds the thin :class:`ObsidianExporter` class that the

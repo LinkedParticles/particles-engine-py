@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """CLI tests for narrative construction + inspection.
 
 Exercises the operator path end to end: build a NARRATIVE over claims with

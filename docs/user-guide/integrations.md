@@ -25,9 +25,13 @@ agent = create_agent(llm, tools)
 
 - **`particles_query`** — answers a natural-language question from the store and
   returns the cited prose answer (ranked by effective confidence). Optional
-  args: `tags`, `subject_id`, `min_confidence`, `top_k`.
+  args: `tags`, `subject_id`, `min_confidence`, `top_k`. It is the same path
+  the CLI takes, so [Querying](querying.md) describes exactly what these
+  arguments do.
 - **`particles_deposit`** — archives text into the corpus as a new source entry
   (no belief is asserted) and returns the created entry / snapshot ids.
+  Turning that entry into beliefs is a separate
+  [extract](getting-started.md#extract-particles) step.
 
 ## Retriever — plug into a RAG chain
 
@@ -35,6 +39,10 @@ agent = create_agent(llm, tools)
 `Document` whose `page_content` is the claim text and whose `metadata` carries
 `particle_id`, `effective_confidence`, `confidence`, `subject_ids`, and
 `status` — so a downstream chain can cite and filter on believability.
+`confidence` and `effective_confidence` are deliberately different numbers
+([Concepts → confidence](concepts.md#confidence)); filter on the effective
+one, and tune what feeds it in
+[Operator guide → tuning](../operator-guide/tuning.md).
 
 ```python
 from particles.integrations import ParticlesRetriever

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for exact-duplicate auto-merge — `links dedup`.
 
 The Tier-A predicate is **identical content under the §6.10 normalized key**

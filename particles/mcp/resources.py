@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """MCP resource surface — the session-start memory digest.
 
 The MCP protocol's *resources* primitive: readable URIs a client pulls directly,

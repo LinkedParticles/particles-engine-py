@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/_rate_limit.py (token-bucket logic, in isolation).
 
 The endpoint-level wiring (429 on /query, /reindex, the semantic /lint path,

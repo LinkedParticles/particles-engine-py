@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """LangChain adapter — Particles query / deposit as tools + a retriever.
 
 Three primitives wrap the ``Backend`` seam so a LangChain agent or RAG

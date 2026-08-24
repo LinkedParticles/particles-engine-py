@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """subjects command — manage canonical real-world entities.
 
 This is a single Typer command with manual action dispatch via a positional

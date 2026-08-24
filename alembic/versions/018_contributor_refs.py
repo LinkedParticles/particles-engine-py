@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add contributors_json to particles, subjects, corpus_entries (0.55.0).
 
 Extension D/E contributor attribution: a nullable JSON list of

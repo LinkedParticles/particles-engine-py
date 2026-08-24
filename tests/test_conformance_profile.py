@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Conformance Profile artifact + runner tests.
 
 Covers ``particles/conformance/profile.py`` (the loader/validator),

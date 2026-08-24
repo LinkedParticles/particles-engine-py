@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """structural claim filters — the Engine composition.
 
 The deterministic modes of the one query surface (§2.1): the flags-only

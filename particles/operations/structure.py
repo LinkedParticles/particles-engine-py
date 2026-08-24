@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Structured-claim backfill — annotate particles that carry no triple.
 
 Built in the ``operations/reindex.py`` mold, because that module is this repo's

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Trust-lens decay-rule columns.
 
 Add nullable ``half_life_days`` and ``floor`` columns to ``trust_lens_entries``

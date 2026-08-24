@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """export verb — emit the knowledge base to a registered exporter format.
 
 The canonical list of formats is whatever ``get_exporters()`` returns

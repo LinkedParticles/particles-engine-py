@@ -13,9 +13,9 @@ Instead it spends its visual channels on the epistemics:
 
 | Channel | Meaning |
 |---|---|
-| **Opacity** | Effective confidence, computed at render time (never stored). Decay renders as literal fading. |
-| **Form** | Status: solid = ACTIVE; dashed ghost = SUPERSEDED (with its successor chain in the panel); dotted amber = PROVENANCE_STALE; ☒ = RETRACTED tombstone. |
-| **⚠ badge** | Contested — open the panel for the fired bases (`stance` / `divergence` / `inconsistency`) and the drill-down ids. |
+| **Opacity** | [Effective confidence](concepts.md#confidence), computed at render time (never stored). Decay renders as literal fading; what drives it is [Operator guide → tuning](../operator-guide/tuning.md). |
+| **Form** | [Status](concepts.md#status): solid = ACTIVE; dashed ghost = SUPERSEDED (with its successor chain in the panel); dotted amber = PROVENANCE_STALE; ☒ = RETRACTED tombstone. |
+| **⚠ badge** | [Contested](querying.md#the-contested-badge) — open the panel for the fired bases (`stance` / `divergence` / `inconsistency`) and the drill-down ids. |
 | **Node size** | Utility evidence: how often the belief was demonstrably used. Display only — it never changes a confidence. |
 | **Node shade** | The best-supported claim on that subject (a labeled display aggregate). |
 | **Bold blue** | A retrieval hit, in query scope. |
@@ -60,7 +60,8 @@ retired ancestors as dashed ghosts, with the directed chain in the panel.
 
 `--as-of` renders the store's beliefs *as they stood at T*: visibility and
 decay evaluate at T, while trust and the contested marker stay current
-(temporal-vs-judgment rule). Retirements the store cannot date are
+(temporal-vs-judgment rule — the same lens the `query` verb takes,
+described in full under [As-of time travel](as-of.md)). Retirements the store cannot date are
 excluded fail-closed and counted in the banner. Export the same subject at two
 instants — before and after a supersession — and you can watch a belief get
 retired between the two files.
@@ -99,7 +100,9 @@ prefix), and `scope=projection&manifest=…&section=…` (a manifest
 section's deterministic selection, addressed by region id or exact title).
 The same `hops` / `history` / `as_of` / `max_nodes` params apply, plus
 `store` to target a non-default store. The endpoint is bearer-gated and
-rate-limited like `POST /query` (query scope drives a paid embedding).
+rate-limited like `POST /query` (query scope drives a paid embedding) — see
+[Operator guide → remote engine](../operator-guide/remote-engine.md) for
+standing the engine up and issuing the token.
 
 In the web UI, contested rows link straight into the inconsistency scope:
 the Curate tab's CONTESTED card and any particle row's contested text carry
@@ -124,5 +127,5 @@ the render is interactive and carries the as-of scrubber.
 | `--history` | Include supersession-chain ghosts + a client-side toggle |
 | `--as-of <ISO-8601>` | Single-instant as-of lens |
 | `--max-nodes N` | Per-run node cap (clamped to `graph.max_nodes`) |
-| `--min-particle-confidence X` | Cross-exporter floor on effective confidence |
+| `--min-particle-confidence X` | Cross-exporter floor on effective confidence — shared with [every exporter](exporting.md), set globally under [`exporter_common`](../operator-guide/tuning.md#cross-exporter-quality-threshold) |
 | `--include-non-asserted` | Keep DECLINED / HYPOTHETICAL particles |

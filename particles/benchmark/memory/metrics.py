@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure memory-benchmark metrics.
 
 Functions over per-question retrieval hits and judged answers. No I/O, no SDK

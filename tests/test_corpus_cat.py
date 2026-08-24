@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles corpus cat`` — dump a snapshot's stored content.
 
 Same harness as ``tests/test_cli.py``: a file-based SQLite DB (``cli_db``) so

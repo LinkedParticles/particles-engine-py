@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Inbound framework integrations.
 
 This package holds adapters that let *external* agent frameworks consume a

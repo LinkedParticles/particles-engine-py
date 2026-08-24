@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Same-origin static serving of the unified web UI.
 
 The web UI (``clients/web-ui/``, formerly the curation PWA) is a thin

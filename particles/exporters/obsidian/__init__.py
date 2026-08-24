@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Obsidian vault exporter.
 
 Renders the subject+particle graph as a folder of interlinked Markdown

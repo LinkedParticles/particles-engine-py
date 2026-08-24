@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Live claim-polarity acceptance check — integration tier (cap. 1).
 
 Runs the **real** general extractor over a compact ADR-genre snippet that mirrors

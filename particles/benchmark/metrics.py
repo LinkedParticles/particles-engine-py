@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Precision / recall / Expected Calibration Error.
 
 These functions consume the equivalence result (which emitted particles

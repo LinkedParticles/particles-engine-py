@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Notion exporter + API-target credential pattern.
 
 The Notion HTTP API is mocked end-to-end — no live token, no network. The

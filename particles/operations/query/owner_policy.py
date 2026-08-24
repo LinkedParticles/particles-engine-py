@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Read-time owner-relevance policy — the aboutness lens.
 
 The aboutness analogue of the ``UtilityPolicy`` (``utility_policy.py``)

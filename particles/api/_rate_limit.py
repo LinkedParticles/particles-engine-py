@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """In-process token-bucket rate limiting for the LLM/embedding-driving endpoints.
 
 Security review F6: ``/query``, ``/extract``, ``/reindex`` and the semantic

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Documentation-projection pipeline — render a manifest into a cited doc.
 
 For each derived section, in manifest order:

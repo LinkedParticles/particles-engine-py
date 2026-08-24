@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/db.py — the lazy engine + reset_config integration.
 
 These tests prove that ``storage.database_url`` changes after ``reset_config()``

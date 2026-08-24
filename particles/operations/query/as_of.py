@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """As-of read lens — visibility predicate + retirement-instant ladder.
 
 The Engine helper behind ``QueryRequest.as_of``: an :class:`AsOfView` is

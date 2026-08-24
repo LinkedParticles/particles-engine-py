@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Agent-readable onboarding skills shipped with the SDK.
 
 An agent handed the MCP tool surface discovers *that* it can write, but not

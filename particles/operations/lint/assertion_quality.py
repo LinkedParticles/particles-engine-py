@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Compound-assertion lint — structural, no LLM.
 
 Flags ACTIVE, agent-asserted particles whose ``content`` breaches the same

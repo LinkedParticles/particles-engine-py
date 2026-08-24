@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Memory-benchmark datatypes + report renderer.
 
 These are **not** the techspec §13.3 schema — that one
@@ -18,6 +22,12 @@ artifact rather than into authorial discipline:
 * **QA numbers never render without the baseline rows.** A skipped
   ``qa_full_context`` / ``qa_no_memory`` renders as ``not run`` — the renderer
   has no flag to omit the rows.
+* **A call that produced no verdict is excluded and disclosed, never scored
+  wrong.** Both counts and every excluded question id render under the
+  condition they belong to, split by cause. Scoring an unanswered call
+  ``False`` would be systematically anti-baseline: the ~115k-token
+  ``qa_full_context`` call fails far more often than the tiny
+  ``qa_no_memory`` one.
 
 Subset runs additionally carry the full selection tuple (seed + strata +
 limit + variant + dataset revision + resolved answer/judge/extraction model
@@ -50,6 +60,21 @@ QA_CONDITIONS: tuple[str, ...] = ("qa_particles", "qa_full_context", "qa_no_memo
 
 #: The abstention-variant marker on LongMemEval question ids.
 ABSTENTION_SUFFIX = "_abs"
+
+#: Why a QA call yielded no scoreable verdict, and so was excluded from the
+#: accuracy denominator. The two are disclosed separately because
+#: they mean opposite things to the operator: ``budget`` is a configuration
+#: error they must fix and re-run, ``infra`` is transient noise that survived
+#: the retries. Folding the first into the second would hide an operator
+#: mistake behind a word that implies nobody was at fault.
+QA_EXCLUSION_BUDGET = "budget"
+QA_EXCLUSION_INFRA = "infra"
+QA_EXCLUSION_KINDS: tuple[str, ...] = (QA_EXCLUSION_BUDGET, QA_EXCLUSION_INFRA)
+
+_EXCLUSION_LABELS: dict[str, str] = {
+    QA_EXCLUSION_BUDGET: "output-budget (no text block within max_tokens)",
+    QA_EXCLUSION_INFRA: "infra (still failing after retries)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +170,21 @@ class RunSelection(BaseModel):
     # retrieve.
     context_budget_tokens: int | None = None
     abstraction: bool = False
+    # ablation knobs — same rule as the two above: an arm that ran an
+    # extra store-mutating pass before retrieval is a different experiment, so
+    # two runs are comparable only when these match. ``consolidation`` runs the
+    # dream cycle's pass list on each scratch store between extract and
+    # retrieve (the controlled instrument); ``dedup_judge`` runs
+    # the co-evidential LLM judge in APPLY mode, whose CO_EVIDENTIAL links the
+    # ranker then collapses within top-k.
+    consolidation: bool = False
+    dedup_judge: bool = False
+    # True when this run replayed scratch stores an earlier run persisted
+    # (``--reuse-stores``) instead of depositing and extracting its own. The
+    # store population is then a property of *that* run, so the flag plus the
+    # manifest's write-side tuple is what a reader needs to place this arm.
+    stores_reused: bool = False
+    reused_from: dict[str, str] | None = None
     # Snapshot of the pipeline thresholds in effect for the run.
     thresholds: dict[str, float] = Field(default_factory=dict)
     # The memory under test: ``particles`` (the store) or one of the
@@ -211,12 +251,28 @@ class RetrievalStageMetrics(BaseModel):
 
 
 class QaQuestionResult(BaseModel):
-    """Per-question end-to-end QA drill-down for one condition."""
+    """Per-question end-to-end QA drill-down for one condition.
+
+    ``correct`` is ``None`` — never ``False`` — when the answer or judge call
+    produced no verdict to score (``excluded`` names which of
+    :data:`QA_EXCLUSION_KINDS` it was). The three-way split mirrors the
+    abstention treatment one family over: the unscoreable case is typed out of
+    the aggregate rather than filtered downstream, so an accumulator that sums
+    these verdicts fails ``mypy --strict`` instead of quietly recording a
+    failed call as a wrong answer.
+
+    Scoring an unanswered call ``False`` is not a neutral default here: the
+    ~115k-token ``qa_full_context`` baseline is far likelier to fail than the
+    tiny ``qa_no_memory`` call, so a shared failure rate lands asymmetrically
+    on the very baseline this harness must not bury.
+    """
 
     question_id: str
     question_type: str
-    correct: bool
+    correct: bool | None
     abstention: bool = False
+    #: One of :data:`QA_EXCLUSION_KINDS` when ``correct`` is ``None``.
+    excluded: str | None = None
 
 
 class QaConditionMetrics(BaseModel):
@@ -226,14 +282,31 @@ class QaConditionMetrics(BaseModel):
     same-model invariant across conditions ii–iv is enforced structurally
     (the runner refuses a mismatched set), so all three conditions of a
     rendered report carry the same value.
+
+    ``questions`` is the **accuracy denominator**: calls that produced a
+    verdict. Calls excluded for want of one are counted separately by cause
+    (``excluded_budget`` / ``excluded_infra``) and disclosed by the renderer —
+    the same exclude-and-disclose contract the retrieval family applies to
+    abstention questions, applied per condition because the failure rate
+    differs per condition.
     """
 
     condition: str
     model_id: str
     questions: int = 0
     accuracy: float = 0.0
+    #: Excluded: the reply carried no text block within ``max_tokens``. An
+    #: operator misconfiguration — raise the cap and re-run those questions.
+    excluded_budget: int = 0
+    #: Excluded: the call still failed after the configured retries.
+    excluded_infra: int = 0
     accuracy_by_type: dict[str, float] = Field(default_factory=dict)
     per_question: list[QaQuestionResult] = Field(default_factory=list)
+
+    @property
+    def excluded(self) -> int:
+        """Calls excluded from the accuracy denominator, both causes."""
+        return self.excluded_budget + self.excluded_infra
 
 
 class MemoryBenchmarkReport(BaseModel):
@@ -295,6 +368,44 @@ def _selection_header(selection: RunSelection) -> str:
     )
 
 
+def _excluded_lines(metrics: QaConditionMetrics) -> list[str]:
+    """Disclose the calls excluded from this condition's accuracy denominator.
+
+    Silence here would be the whole defect: an excluded call nobody counts is
+    indistinguishable from a call that never happened, and the condition most
+    likely to lose calls is the ~115k-token baseline. So the count is stated,
+    split by cause, and every excluded question is named — the operator needs
+    the ids to re-run them, and the split to know whether the fix is their own
+    ``max_tokens`` or a flaky hour.
+    """
+    if not metrics.excluded:
+        return []
+    causes = [
+        f"{count} {_EXCLUSION_LABELS[kind]}"
+        for kind, count in (
+            (QA_EXCLUSION_BUDGET, metrics.excluded_budget),
+            (QA_EXCLUSION_INFRA, metrics.excluded_infra),
+        )
+        if count
+    ]
+    lines = [
+        f"      {metrics.excluded} call(s) excluded from the accuracy "
+        f"denominator: {', '.join(causes)}"
+    ]
+    lines.extend(
+        f"        {row.question_id}: no verdict ({row.excluded})"
+        for row in metrics.per_question
+        if row.correct is None
+    )
+    if metrics.excluded_budget:
+        lines.append(
+            "      raise the answer/judge max_tokens and re-run the "
+            "output-budget question(s) — the cap, not the memory, produced "
+            "that outcome"
+        )
+    return lines
+
+
 def render_report_table(report: MemoryBenchmarkReport) -> str:
     """Render the four-condition table with the two families separately headed.
 
@@ -304,7 +415,9 @@ def render_report_table(report: MemoryBenchmarkReport) -> str:
     condition shows ``not run``. The header always states subset status and
     the full selection tuple. Excluded abstention questions are disclosed in
     the retrieval section — the count, plus each question id rendered as
-    ``n/a (abstention)`` (correction v1.74.2).
+    ``n/a (abstention)`` (correction v1.74.2). Calls excluded from a QA
+    condition's accuracy denominator are disclosed the same way, per condition
+    and split by cause (see :func:`_excluded_lines`).
     """
     lines: list[str] = []
     lines.append("Memory benchmark — LongMemEval")
@@ -312,12 +425,21 @@ def render_report_table(report: MemoryBenchmarkReport) -> str:
     if report.selection.thresholds:
         thresholds = "  ".join(f"{k}={v:g}" for k, v in sorted(report.selection.thresholds.items()))
         lines.append(f"thresholds: {thresholds}")
-    if report.selection.context_budget_tokens is not None or report.selection.abstraction:
-        knobs: list[str] = []
-        if report.selection.context_budget_tokens is not None:
-            knobs.append(f"context_budget={report.selection.context_budget_tokens} tokens")
-        if report.selection.abstraction:
-            knobs.append("abstraction pass ON")
+    knobs: list[str] = []
+    if report.selection.context_budget_tokens is not None:
+        knobs.append(f"context_budget={report.selection.context_budget_tokens} tokens")
+    if report.selection.abstraction:
+        knobs.append("abstraction pass ON")
+    if report.selection.consolidation:
+        knobs.append("consolidation cycle ON")
+    if report.selection.dedup_judge:
+        knobs.append("dedup judge ON (APPLY)")
+    if report.selection.stores_reused:
+        # Not a knob on the pipeline but on the *provenance of the store* —
+        # rendered in the same line because it constrains comparability the
+        # same way: this arm's population was minted by another run.
+        knobs.append("stores REUSED (no extraction this run)")
+    if knobs:
         lines.append(f"ablation: {'  '.join(knobs)} — compare only against a matching run")
     lines.append("")
 
@@ -354,10 +476,16 @@ def render_report_table(report: MemoryBenchmarkReport) -> str:
         if metrics is None:
             lines.append(f"  {label}: not run")
         else:
-            lines.append(
-                f"  {label}: accuracy {metrics.accuracy:.3f} "
-                f"({metrics.questions} question(s), model {metrics.model_id})"
+            headline = (
+                "accuracy n/a — no call in this condition produced a verdict"
+                if metrics.questions == 0
+                else f"accuracy {metrics.accuracy:.3f}"
             )
+            lines.append(
+                f"  {label}: {headline} "
+                f"({metrics.questions} scored question(s), model {metrics.model_id})"
+            )
+            lines.extend(_excluded_lines(metrics))
             for qtype, acc in sorted(metrics.accuracy_by_type.items()):
                 lines.append(f"      accuracy[{qtype}]: {acc:.3f}")
     lines.append("")

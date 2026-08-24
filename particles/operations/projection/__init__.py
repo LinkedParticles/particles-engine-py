@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Documentation projection — cited views from the particle store.
 
 The flagship: make the knowledge store the source of truth for generated

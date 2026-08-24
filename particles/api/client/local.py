@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``LocalBackend`` — the in-process backend.
 
 This is today's path, unchanged: each method opens ``session_scope()`` and

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Marker for assertions that only hold in the development upstream's checkout.
 
 Most of this suite tests the SDK and runs anywhere. A few tests instead assert

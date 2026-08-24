@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/cli/_logging.py — the --verbose / --debug wiring.
 
 Named ``test_cli_logging`` (not ``test_logging``) to avoid shadowing the stdlib

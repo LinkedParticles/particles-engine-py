@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the query-time agreement distribution (operations/query/stance.py)."""
 
 from __future__ import annotations

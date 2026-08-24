@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Curation surface — the bus-stop-editing queue + session model.
 
 A finite, leverage-ranked worklist that **unions the existing read diagnostics**

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """FastMCP server registering the tool + resource surface.
 
 Every tool is a thin wrapper around an existing ``operations/`` or

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Comparator memories for the LongMemEval harness (``benchmark/memory/comparators.py``).
 
 The two comparators (raw-transcript ``chunks``, LLM-written ``notes``) are

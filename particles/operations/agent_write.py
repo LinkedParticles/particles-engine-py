@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Agent belief-write orchestration.
 
 The §6.6-reconciling write verbs an MCP agent (or any HTTP client) drives —

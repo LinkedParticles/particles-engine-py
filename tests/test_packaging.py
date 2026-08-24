@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Packaging-hygiene regression guard (SECURITY_REVIEW F23).
 
 The *authoritative* control is the ``[tool.hatch.build.*]`` configuration in

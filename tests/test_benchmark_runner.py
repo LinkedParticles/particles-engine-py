@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """End-to-end tests for the benchmark runner + CLI (commit 2/3).
 
 These cover the orchestration that ties commit-1's pure functions to a

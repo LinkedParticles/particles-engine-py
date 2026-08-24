@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Per-domain MCP tool handlers.
 
 Each module here exports one or more module-level ``async def`` tool

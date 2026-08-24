@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """LongMemEval dataset acquisition, parsing, and subset selection.
 
 **Download-on-demand, never vendored**: the ``s``-variant file is part of a

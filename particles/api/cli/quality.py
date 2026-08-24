@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """quality verb — instant extraction-quality dashboard (no LLM calls)."""
 
 from __future__ import annotations

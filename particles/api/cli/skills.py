@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """skills sub-Typer — install the shipped agent-onboarding skill files.
 
 The SDK ships three short, tool-agnostic Markdown files (``particles/skills/``)

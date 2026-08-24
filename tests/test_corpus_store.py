@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for repository helpers in particles/corpus/store.py.
 
 Covers query-shape helpers added to back the Obsidian / Wiki exporters'

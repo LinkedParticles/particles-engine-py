@@ -107,7 +107,8 @@ uv run particles query "What is the composition of the 1 Pfennig 1948-1950?"
 
 Add `--tag <path>` to restrict to a taxonomy subtree. See
 [Querying](querying.md) for how to create a taxonomy, tag particles,
-and the tag patterns and ranking that follow.
+and the tag patterns and ranking that follow. Add `--as-of <date>` to ask
+the same question of a past instant ([As-of time travel](as-of.md)).
 
 ## Export
 
@@ -125,7 +126,16 @@ options each exporter supports.
 
 - [Concepts](concepts.md) — particle, subject, status, confidence,
   provenance.
-- [Querying](querying.md) — tag filters, MCP, ranking.
+- [Querying](querying.md) — tag filters, structural filters, MCP, ranking.
 - [Exporting](exporting.md) — exporter-specific workflows.
+- [Graph view](graph-view.md) — the store's epistemics as a picture.
+- [Claude Code memory](claude-code.md) — wire the store into an agent so
+  deposits and recall happen without you running the verbs.
 - The full CLI reference is at [`cli-reference.md`](../cli-reference.md);
   the workflow-oriented index at [`cli.md`](../cli.md).
+
+Running this long-term rather than trying it out? The
+[operator guide](../operator-guide/index.md) covers
+[configuration](../operator-guide/configuration.md),
+[lint hygiene](../operator-guide/lint-and-review.md), and
+[tuning](../operator-guide/tuning.md).

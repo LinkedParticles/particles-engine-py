@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """init sub-Typer — one-command integration installers.
 
 ``particles init claude-code`` installs the SessionStart digest-push +

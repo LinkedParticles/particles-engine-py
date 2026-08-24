@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """synthesis splice for Obsidian per-subject notes.
 
 The wiki exporter writes synthesised articles as their own files; the

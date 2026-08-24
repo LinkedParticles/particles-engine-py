@@ -1,8 +1,23 @@
 # Exporting
 
-Four exporters ship with the SDK: Obsidian (vault), Anki (deck),
-wiki (per-subject cited articles), and Logseq (graph). Each writes
-to the `output` path you pass on the CLI.
+This page walks the four document-set exporters: Obsidian (vault),
+Anki (deck), wiki (per-subject cited articles), and Logseq (graph). Each
+writes to the `output` path you pass on the CLI.
+
+Three more `export` targets have different shapes and live elsewhere:
+
+- **`graph`** — a scoped, self-contained HTML render of the store's
+  epistemics rather than a document set. It has its own page:
+  [Graph view](graph-view.md).
+- **`notion`** — an idempotent upsert into a Notion database over the HTTP
+  API, so it writes no files at all (`--dry-run` plans it with zero API
+  writes). It needs a credential; see
+  [Operator guide → configuration → secrets](../operator-guide/configuration.md#secrets).
+- **`jsonl`** — line-delimited JSON for downstream tooling.
+
+`particles export --help` and the
+[command reference](../cli-reference.md) carry the full, always-current flag
+list for each.
 
 ## Obsidian vault
 
@@ -32,7 +47,11 @@ linking template; everything else gets the generic callout template.
   note whose `[[X]]` wikilinks reference a renamed subject.
 - `--min-particle-confidence F` — cross-exporter quality filter
   . Drops particles whose `effective_confidence` is below
-  `F` from every rendered note.
+  `F` from every rendered note. To set a standing floor for every export
+  instead of passing it each run, see
+  [Operator guide → cross-exporter quality threshold](../operator-guide/tuning.md#cross-exporter-quality-threshold);
+  for what `effective_confidence` is composed of, see
+  [Concepts → confidence](concepts.md#confidence).
 
 ## Anki deck
 
@@ -112,8 +131,10 @@ available as `*.model_dump_json()` for downstream tooling.
 
 ## What about other formats?
 
-A Notion exporter is scheduled for the post-1.0 **R1.5 — PKM front-ends &
-integrations** milestone (see the roadmap forward queue;
-tracked in the register). The plugin registry is designed
-so an exporter is one file plus one registry line — see the
-[plugin-author guide](../plugin-author-guide/exporters.md).
+The plugin registry is designed so an exporter is one file plus
+one registry line. If the format you want isn't in the list above, writing it
+is a small job — see
+[Plugin-author guide → writing an exporter](../plugin-author-guide/exporters.md),
+which walks the contract, the worked examples in the tree, and the
+[cross-exporter options](../plugin-author-guide/exporters.md#cross-exporter-contract)
+every exporter must honour.

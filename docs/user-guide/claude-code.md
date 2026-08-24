@@ -7,6 +7,11 @@ session's context window at session start, and everything a session produced is
 The agent is stateless compute; the store is managed storage; the integration
 moves data between them on lifecycle events the agent does not control.
 
+If you want the store exposed as tools an agent calls instead, the two other
+routes are the native MCP server
+([Querying → MCP server](querying.md#mcp-server)) and the
+[reference memory-server swap](memory-server-swap.md).
+
 ## Install
 
 ```bash
@@ -230,6 +235,13 @@ particles audit ~/.claude/projects/<project>/memory     # harvest + extract + re
 particles audit                                          # re-audit the store (no harvest)
 ```
 
+The audit is a first-run census. To keep it running unattended — and to run
+the reconcile, curation and projection passes alongside it — see
+[Operator guide → scheduled consolidation](../operator-guide/scheduled-consolidation.md).
+Contradictions and duplicates it names are resolved with
+[lint and review](../operator-guide/lint-and-review.md) and
+[co-evidential curation](../operator-guide/co-evidential.md).
+
 ```
 Audited 23 memory files → 212 beliefs about 58 subjects.
 
@@ -320,7 +332,13 @@ particles hook session-start --store memory < sample.json     # debug loop
   (memory-file harvest only).
 
 All hook knobs live under the `claude_code:` section of `config.yaml`, and the
-projection's under `agent_memory.projection:` — see `config.yaml.sample`.
+projection's under `agent_memory.projection:` — see `config.yaml.sample` and
+[Operator guide → configuration](../operator-guide/configuration.md#agent-memory-projection).
+
+One gap this integration does not close on its own: your project's *rule*
+files (`AGENTS.md`, `CLAUDE.md`) are frozen at deposit unless you opt them in,
+so the store can keep asserting a rule you have since changed. See
+[Refreshing mutable local sources](../operator-guide/mutable-local-sources.md).
 
 ## Uninstall
 

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Wikidata importer (Engine layer; moved from particles.extraction.wikidata
 ).
 

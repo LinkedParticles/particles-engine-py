@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Integration tests for temperature-scaling calibration.
 
 Covers the four moving parts that added on top of the previously-unused

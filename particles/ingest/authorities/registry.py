@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Subject authority plugin registry.
 
 An **authority** owns how one external-ID namespace (``wikidata``, ``numista``,

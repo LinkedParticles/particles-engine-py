@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Modality-benchmark runner.
 
 ``run_modality_benchmark(suite, extractor)`` is the one public entry point.

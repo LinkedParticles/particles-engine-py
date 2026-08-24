@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Optional git-versioned history of the projected ``MEMORY.md`` view.
 
 The terminal, best-effort step of ``run_projection_cycle``: when

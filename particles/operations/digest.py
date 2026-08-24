@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Session-start memory digest assembly.
 
 ``build_digest`` compiles the ``MEMORY.md`` analog served at

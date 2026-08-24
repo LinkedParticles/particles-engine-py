@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Remote-mode fail-loud helpers for operator verbs.
 
 *route or refuse, never silently local*. The verbs whose engine

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add snapshots.extraction_started_at column (0.42.2).
 
 Records when an extraction run claims a snapshot (writes IN_PROGRESS).

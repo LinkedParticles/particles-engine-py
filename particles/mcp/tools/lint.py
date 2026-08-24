@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``lint`` — structural lint findings with category/summary/limit knobs.
 
 Routed through the ``Backend`` seam: the structural-only lint runs

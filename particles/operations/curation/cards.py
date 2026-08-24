@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The normalized curation card shape (§2).
 
 Every finder's native output projects into one ``CurationCard``; each

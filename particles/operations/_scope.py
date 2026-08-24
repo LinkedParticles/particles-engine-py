@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Harvest-scope pair test shared by the audit's two candidate scans.
 
 The contradiction probe and the duplicate scan both admit a

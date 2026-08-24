@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the abstraction-promotion pass (particles/operations/abstraction.py).
 
 Covers the pure helpers (components, depth, shared subjects, parsers, the

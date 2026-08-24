@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles init claude-code`` + the settings/config surgeons.
 
 Covers the ADR's installer checklist: settings-merge idempotence, ``--remove``

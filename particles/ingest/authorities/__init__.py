@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Subject authority registry.
 
 Public surface: the :class:`SubjectAuthority` Protocol, the

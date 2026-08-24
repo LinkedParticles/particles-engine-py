@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Default values for linkedparticles-engine.
 #
 # Deliberately minimal. This chart is honest about what the engine is today: a

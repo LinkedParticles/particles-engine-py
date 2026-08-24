@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Drift guard: the published JSON-LD context must cover every Core field.
 
 `artifacts/schemas/context.jsonld` is a normative, hand-maintained artifact.

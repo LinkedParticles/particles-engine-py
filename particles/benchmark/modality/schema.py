@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Modality-benchmark suite datatypes.
 
 These are **not** the techspec §13.3 schema — that one

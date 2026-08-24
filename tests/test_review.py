@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for operations/review.py — §9.6 annotation-only Review."""
 
 from __future__ import annotations

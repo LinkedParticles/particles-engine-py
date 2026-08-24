@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Leverage scoring — finite and high-value first.
 
 The score is a weighted sum of four normalized (0–1) signals, all read from data

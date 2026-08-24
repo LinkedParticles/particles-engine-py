@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the L-CITE-01 undeposited-cited-source lint check."""
 
 from __future__ import annotations

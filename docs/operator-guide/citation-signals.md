@@ -1,6 +1,7 @@
 # Citation-signal deposit suggestions
 
-Particles never crawls the web — deposit is operator-driven. But a
+Particles never crawls the web — deposit is operator-driven
+([how to deposit](../user-guide/getting-started.md#deposit-a-source)). But a
 URL **mentioned repeatedly** across your corpus is a strong curation signal: a
 primary source many of your already-deposited discussions lean on, that the
 corpus itself doesn't contain. Until you deposit it, the database represents
@@ -69,8 +70,8 @@ recorded in the operator event log (`particles events`).
 
 ## The lint angle
 
-`particles lint` emits an INFO finding (`UNDEPOSITED_CITED_SOURCE`,
-"L-CITE-01") for each URL cited by at least
+[`particles lint`](lint-and-review.md) emits an INFO finding
+(`UNDEPOSITED_CITED_SOURCE`, "L-CITE-01") for each URL cited by at least
 `citation_signal.lint_min_distinct_sources` distinct sources (default 3 — more
 conservative than the verb). It anchors the suggestion to a real grounding gap,
 not URL popularity.

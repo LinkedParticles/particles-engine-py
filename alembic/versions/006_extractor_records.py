@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extractor registry and trust model (Extension A).
 
 Adds extractor_records table for per-extractor trust_weight and applicability

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Agent-memory benchmark evaluation — LongMemEval first.
 
 The fourth measurement package under ``particles.benchmark`` and the third
@@ -54,9 +58,13 @@ from particles.benchmark.memory.metrics import (
 )
 from particles.benchmark.memory.runner import (
     CachingExtractor,
+    ContextWindowCheck,
+    ContextWindowExceeded,
     MemoryRunEstimate,
     SameModelViolation,
+    check_context_window,
     estimate_run,
+    render_context_window_check,
     render_estimate,
     run_memory_benchmark,
     session_id_from_uri,
@@ -64,12 +72,16 @@ from particles.benchmark.memory.runner import (
 )
 from particles.benchmark.memory.schema import (
     QA_CONDITIONS,
+    QA_EXCLUSION_BUDGET,
+    QA_EXCLUSION_INFRA,
+    QA_EXCLUSION_KINDS,
     QUESTION_TYPES,
     MemoryBenchmarkReport,
     MemoryQuestion,
     MemorySession,
     MemoryTurn,
     QaConditionMetrics,
+    QaQuestionResult,
     RetrievalStageMetrics,
     RunSelection,
     render_report_table,
@@ -77,8 +89,13 @@ from particles.benchmark.memory.schema import (
 
 __all__ = [
     "QA_CONDITIONS",
+    "QA_EXCLUSION_BUDGET",
+    "QA_EXCLUSION_INFRA",
+    "QA_EXCLUSION_KINDS",
     "QUESTION_TYPES",
     "CachingExtractor",
+    "ContextWindowCheck",
+    "ContextWindowExceeded",
     "MemoryBenchmarkReport",
     "MemoryDatasetLoadError",
     "MemoryQuestion",
@@ -86,10 +103,12 @@ __all__ = [
     "MemorySession",
     "MemoryTurn",
     "QaConditionMetrics",
+    "QaQuestionResult",
     "RetrievalStageMetrics",
     "RunSelection",
     "SameModelViolation",
     "accuracy_by_type",
+    "check_context_window",
     "ensure_dataset",
     "estimate_run",
     "load_dataset_file",
@@ -98,6 +117,7 @@ __all__ = [
     "precision_at_k",
     "qa_accuracy",
     "recall_at_k",
+    "render_context_window_check",
     "render_estimate",
     "render_report_table",
     "run_memory_benchmark",

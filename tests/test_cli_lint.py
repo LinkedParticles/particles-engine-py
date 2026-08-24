@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles lint`` verb (particles/api/cli/lint.py).
 
 The lint operation itself is covered by ``tests/test_lint.py``; this file pins

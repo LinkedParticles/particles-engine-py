@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the benchmark schema + loader + metrics + equivalence.
 
 Covers commit 1/3 (pure functions). The runner orchestration and CLI

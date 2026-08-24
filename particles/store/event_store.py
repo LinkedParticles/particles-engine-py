@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Operator event log — append-only audit of operator decisions.
 
 This is **storage-layer bookkeeping, not particle schema**: it adds no field

@@ -9,7 +9,10 @@ effective_confidence = confidence.value
                      × recency_factor
 ```
 
-Four things you tune.
+Four things you tune. For what each factor *means* rather than how to set
+it, see [User guide → concepts → confidence](../user-guide/concepts.md#confidence);
+for where the number lands in a result list, see
+[User guide → querying](../user-guide/querying.md#ranking-what-the-sdk-actually-does).
 
 ## Extractor calibration
 
@@ -84,11 +87,14 @@ observed inconsistencies, not up based on hope.
 
 ### Conformance trust cap
 
-Opt-in (default **off**): an extractor whose last `extractor conform`
-run showed a *genuinely evaluable* REQUIRED failure has its **effective**
-trust weight clamped at query time — closing the loop between the conformance report and the live trust lever, without touching
-the stored `trust_weight` and without making conformance a CI gate
-(report-only stance is preserved).
+Opt-in (default **off**): an extractor whose last
+`extractor conform` run showed a *genuinely evaluable* REQUIRED failure has
+its **effective** trust weight clamped at query time — closing the loop
+between the conformance report and the live trust lever, without
+touching the stored `trust_weight` and without making conformance a CI gate
+(report-only stance is preserved). The fixtures those reports run
+against are authored per extractor; see
+[Plugin-author guide → conformance](../plugin-author-guide/conformance.md).
 
 ```yaml
 conformance:
@@ -506,7 +512,12 @@ exporter_common:
 ```
 
 Operator runs export with `--min-particle-confidence` for
-per-invocation overrides.
+per-invocation overrides. Every exporter accepts it — see
+[User guide → exporting](../user-guide/exporting.md) for the per-exporter
+flag lists, and [Graph view](../user-guide/graph-view.md#options) for the
+graph render's copy of it. If you are *writing* an exporter, honouring this
+floor is part of the
+[cross-exporter contract](../plugin-author-guide/exporters.md#cross-exporter-contract).
 
 ## Benchmark + compare
 
@@ -525,3 +536,7 @@ uv run particles extractor benchmark-compare \
 The comparison reports precision / recall / calibration_error per
 suite × extractor. Use it before rolling a calibration
 or trust-weight change to verify the direction of effect.
+
+The suites themselves are authored per extractor — see
+[Plugin-author guide → benchmark suites](../plugin-author-guide/benchmark-suites.md)
+for the file format and what makes a good fixture.

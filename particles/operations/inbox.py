@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """URL inbox processor (Option A — iCloud Drive + Mac watcher).
 
 Operators share URLs from the iOS Share Sheet (Safari, Reddit, etc.)

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """extractor sub-Typer — manage extractor registry (Extension A)."""
 
 from __future__ import annotations

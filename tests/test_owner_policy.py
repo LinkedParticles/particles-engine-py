@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the OwnerPolicy: viewer resolution, apply_owner, composition.
 
 The load-bearing property throughout is **inertness**: every way the lens can be

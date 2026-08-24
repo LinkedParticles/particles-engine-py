@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Reddit importer (Engine layer; moved from particles.extraction.reddit).
 
 Fetches the Reddit public JSON API ({url}.json?limit=200) and stores the raw

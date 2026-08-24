@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for SQL LIKE wildcard escaping (particles/sql_safety.py).
 
 Direct unit tests for escape_like_pattern, plus a regression test against

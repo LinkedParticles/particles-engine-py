@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the embedding-model marker + cosine mismatch guard.
 
 Stored vectors carry the id of the model that produced them; the cosine query

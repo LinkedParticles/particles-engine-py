@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """project verb — render a documentation-projection manifest.
 
 Renders a checked-in manifest (``docs/projection/<name>.yaml``) into a cited

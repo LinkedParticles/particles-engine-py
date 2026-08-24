@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Normalized-content hash index for extract-time duplicate suppression.
 
 The extract path declines to mint a particle whose claim is already held verbatim by an

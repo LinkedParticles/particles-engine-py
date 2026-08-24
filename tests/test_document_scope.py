@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for document-scope meta-claim labelling.
 
 Covers the scope contract (``particles.extraction.scope``), the extractor's

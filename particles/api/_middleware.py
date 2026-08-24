@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """ASGI middleware for the FastAPI app — request body-size limiting.
 
 Defense-in-depth for the HTTP surface (security review F-7): uvicorn and

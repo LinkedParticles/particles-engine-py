@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the read-only MCP server.
 
 Each tool handler is an async callable registered on FastMCP; we invoke

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Per-provider calibration table (1.54.0).
 
 Move calibration off ``extractor_records`` (one row per extractor) into a new

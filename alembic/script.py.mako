@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """${message}.
 
 REVIEW ME: autogenerate is not magic — check for wrong drops, missing

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``subjects_list`` / ``subjects_search`` / ``subjects_show``.
 
 Routed through the ``Backend`` seam: in-process locally, against

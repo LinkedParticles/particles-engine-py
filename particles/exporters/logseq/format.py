@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Logseq bullet-outline rendering primitives.
 
 Logseq's signature on-disk format: every line is a bullet (``- ``)

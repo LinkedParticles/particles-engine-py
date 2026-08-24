@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure event-anchored-validity metrics.
 
 Functions over aligned ``(expected_boundary, emitted_boundary)`` pairs — one pair

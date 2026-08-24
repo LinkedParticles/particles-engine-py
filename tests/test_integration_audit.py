@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Live end-to-end run of the acceptance fixture (integration tier).
 
 ``particles audit tests/fixtures/memory_dir`` against a real key: harvest the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """lint callouts are a write-time layer, not cached content.
 
 These tests pin ``apply_lint_callouts`` / ``strip_lint_callouts`` — the helper

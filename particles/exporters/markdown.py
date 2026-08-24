@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Back-compat shim — the Markdown rendering utilities moved to
 :mod:`particles.render.markdown`.
 

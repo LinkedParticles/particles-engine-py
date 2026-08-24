@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Locate the vendored graph-view assets at runtime.
 
 Cytoscape.js (pinned, MIT — license text ships beside it) lives in

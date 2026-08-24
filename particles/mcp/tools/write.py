@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Write tools for the read-write MCP surface.
 
 The epistemic write verbs — ``particle_assert`` (the flagship), ``particle_supersede``,

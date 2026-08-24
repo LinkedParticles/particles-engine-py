@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """curate verb — the bus-stop-editing curation queue.
 
 ``particles curate`` prints the unified, finite, leverage-ranked worklist that

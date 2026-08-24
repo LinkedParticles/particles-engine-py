@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Terminal liveness heartbeat for long-running CLI verbs (the ``run()`` seam).
 
 A verb that goes quiet for minutes is indistinguishable from a hung one — the

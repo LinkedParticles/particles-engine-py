@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the OpenTelemetry observability bootstrap.
 
 The off path (disabled / extra-absent) is the contract that matters most — it

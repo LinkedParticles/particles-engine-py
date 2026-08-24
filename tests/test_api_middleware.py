@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/_middleware.py (BodySizeLimitMiddleware).
 
 The TestClient-driven tests in tests/test_app.py cover the common

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.3 Query operation — orchestrator.
 
 Retrieves relevant particles and generates a natural language response.
@@ -382,9 +386,10 @@ def _confidence_note(top_particles: list[Particle], top_eff_confs: list[float]) 
     """Provisional-confidence disclosure for a ranked result (OVERCONFIDENCE GUARD, §6.3).
 
     Fires when the mean effective confidence is low, or when any top hit is
-    uncalibrated — raw extractor output (``EXTRACTOR_DIRECT``) or a direct agent
-    self-report (``AGENT_ASSERTED``), both the lowest, uncalibrated
-    trust tier. Returns the empty string when neither applies.
+    uncalibrated — raw extractor output (``EXTRACTOR_DIRECT``), a direct agent
+    self-report (``AGENT_ASSERTED``), or a belief migrated in from
+    another memory store (``IMPORTED``), all the lowest, uncalibrated
+    trust tier. Returns the empty string when none applies.
     """
     from particles.core.scoring.confidence import CalibrationSource
 
@@ -396,11 +401,16 @@ def _confidence_note(top_particles: list[Particle], top_eff_confs: list[float]) 
             "⚠ Note: The mean confidence of retrieved particles is below 0.6. "
             "This knowledge base has not been fully validated for this topic."
         )
-    uncalibrated = (CalibrationSource.EXTRACTOR_DIRECT, CalibrationSource.AGENT_ASSERTED)
+    uncalibrated = (
+        CalibrationSource.EXTRACTOR_DIRECT,
+        CalibrationSource.AGENT_ASSERTED,
+        CalibrationSource.IMPORTED,
+    )
     if any(p.confidence.calibration_source in uncalibrated for p in top_particles):
         return (
             "⚠ Note: Some retrieved particles are uncalibrated — raw extractor "
-            "output (EXTRACTOR_DIRECT) or direct agent self-reports (AGENT_ASSERTED). "
+            "output (EXTRACTOR_DIRECT), direct agent self-reports (AGENT_ASSERTED), "
+            "or beliefs migrated in from another memory store (IMPORTED). "
             "Confidence values are provisional."
         )
     return ""

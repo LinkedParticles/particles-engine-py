@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.2 Extract operation and §6.6 conflict resolution ladder.
 
 Extract derives particles from a corpus snapshot. It is asynchronous and re-runnable.
@@ -288,6 +292,10 @@ async def _extract_snapshot_impl(
             # pass the entry URL so the GitHub repo
             # extractor resolves owner/repo/path without reading the store.
             entry_uri_r=entry.uri_r,
+            # the entry's depositor is the actor a migration
+            # extractor attributes each imported record to (the ``importer``
+            # ContributorRef). Every other extractor ignores the kwarg.
+            deposited_by=entry.deposited_by,
             # pool-aware extractors merge their LLM requests into
             # the caller's pooled batch; everyone else ignores the kwarg.
             completion_pool=completion_pool,

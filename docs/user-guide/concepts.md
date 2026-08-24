@@ -49,6 +49,10 @@ ontologies (Numista, Nomisma). A subject may have multiple
 `external_ids` (wikidata:Q1234, numista:8562, …) and a list of
 aliases.
 
+The resolver is fast and usually right; when it folds two real-world
+entities into one, the fix is
+[Operator guide → fixing a misjoined subject](../operator-guide/lint-and-review.md#fixing-a-misjoined-subject).
+
 ## Status
 
 | Status | Meaning |
@@ -60,7 +64,11 @@ aliases.
 | `PROVENANCE_STALE` | The corpus entry it was extracted from has new content; needs re-extraction |
 
 Transitions go through `status.validate_transition()` — operators
-don't poke `status` directly.
+don't poke `status` directly. Every retirement is dated, so you can ask
+what the store believed *before* a status changed: see
+[As-of time travel](as-of.md). Getting `INCONSISTENCY` and
+`PROVENANCE_STALE` back down to `ACTIVE` is the
+[lint and review](../operator-guide/lint-and-review.md) workflow.
 
 ## Confidence
 
@@ -87,12 +95,23 @@ the immutable, append-only archive of source material. Particles
 are *rebuildable* from corpus + extractor; the corpus is the
 durable record of "what we saw, when."
 
-For the two-layer architecture details and the
-`particles/corpus/AGENTS.md` contributor guide.
+Because the corpus is durable and particles are rebuildable, most recovery
+paths re-derive rather than repair — see
+[Operator guide → schema migration](../operator-guide/schema-migration.md)
+for what survives a major bump, and
+[store consolidation](../operator-guide/store-consolidation.md) for merging
+two stores that both hold the record.
+
+A source you keep editing needs one extra promise before the corpus will
+re-read it:
+[refreshing mutable local sources](../operator-guide/mutable-local-sources.md).
 
 ## Where to go next
 
 - [Querying](querying.md) — how ranking and tag filters work.
+- [As-of time travel](as-of.md) — what the store believed at a past instant.
 - [Exporting](exporting.md) — Obsidian / Anki / wiki shapes.
+- [Graph view](graph-view.md) — the same concepts rendered as a picture:
+  confidence as opacity, status as line form, contestedness as a badge.
 - [Operator guide → lint and review](../operator-guide/lint-and-review.md) —
   how to handle INCONSISTENCY and PROVENANCE_STALE.

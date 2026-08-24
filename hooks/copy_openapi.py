@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """mkdocs build hook — copy the canonical OpenAPI snapshot into the docs tree.
 
 `artifacts/openapi.json` is the normative committed schema (see

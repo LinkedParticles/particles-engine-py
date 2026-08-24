@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Dogfood corpus fixtures + helpers.
 
 The corpus YAML + mock-LLM YAML are loaded by ``tests/test_dogfood_corpus.py``;

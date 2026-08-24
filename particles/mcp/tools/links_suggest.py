@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``links_suggest`` — co-evidential candidate proposal, report-only.
 
 The MCP surface is read-only, so only ``REPORT`` mode is exposed:

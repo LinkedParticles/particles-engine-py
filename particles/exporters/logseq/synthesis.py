@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """synthesis splice for the Logseq exporter.
 
 The orchestrator hands us the rendered structural-outline page;

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the scoped epistemic graph view.
 
 Covers the operation (``operations.graph_view.build_graph_data``) and the

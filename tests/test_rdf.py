@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """RDF parsing extractor tests.
 
 Every test here is a deterministic parse: a fixed blob in, a fixed candidate

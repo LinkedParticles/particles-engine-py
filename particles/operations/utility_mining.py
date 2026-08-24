@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Transcript-mining pass — the reliable utility signal for the usefulness lens.
 
 The spine: the harvest already records *what the agent

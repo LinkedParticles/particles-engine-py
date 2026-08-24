@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Alembic 035 — the ``properties`` key rename, round-tripped.
 
 The unit suite runs on ``create_all`` against an in-memory DB, so it never

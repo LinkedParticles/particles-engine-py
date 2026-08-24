@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for narrative traversal operations.
 
 Builds a NARRATIVE particle by hand over three CLAIM constituents wired with

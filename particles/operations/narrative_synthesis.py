@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Narrative-aware synthesis rendering.
 
 The first *consumer* of the narrative graph: given a NARRATIVE

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The ``Backend`` protocol + its result types.
 
 Every daily CLI verb targets one :class:`Backend` whose methods return the

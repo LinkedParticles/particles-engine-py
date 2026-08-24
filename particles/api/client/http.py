@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``HttpBackend`` — the remote backend.
 
 Each method issues an HTTP/JSON request to the FastAPI engine over the OpenAPI contract and parses the response back into the *same* core Pydantic

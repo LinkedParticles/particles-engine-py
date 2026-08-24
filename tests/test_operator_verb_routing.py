@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """operator-verb route-or-refuse behaviour at the CLI level.
 
 The §2(b) operator verbs have no engine endpoint, so with an engine configured

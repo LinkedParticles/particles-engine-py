@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """deposit verb — push a file or URL into the corpus."""
 
 from __future__ import annotations

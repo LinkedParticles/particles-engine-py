@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Live journal modality benchmark — integration tier.
 
 Runs the bundled seed suite through the **real** journal extractor (one LLM

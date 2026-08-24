@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``deposit_text_versioned``.
 
 The versioned text deposit is the Claude Code harvest's engine-side seam:

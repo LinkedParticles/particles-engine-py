@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-exporter synthesis cache.
 
 End-to-end behaviour: when one exporter's ``render_article`` call

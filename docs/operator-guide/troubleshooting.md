@@ -43,7 +43,7 @@ URL deposit can fail for many reasons:
 
 - **SSRF guard** (loopback / RFC 1918 / link-local) — by design;
   `validate_fetch_url()` is called on every fetch including refetch
-  (see [particles/corpus/AGENTS.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/corpus/AGENTS.md)).
+  (see [`particles/url_safety.py`](https://github.com/LinkedParticles/particles-core-py/blob/main/particles/url_safety.py)).
 - **403 / 401** — paywalled or auth-walled source. Particles logs
   and continues; no particle is extracted.
 - **DNS / network** — the corpus entry is still created with the
@@ -51,7 +51,7 @@ URL deposit can fail for many reasons:
   `particles reindex` can retry.
 
 For Reddit / Hacker News / Mastodon URLs, the
-[follow-edges behaviour](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/corpus/AGENTS.md#follow-edges-adr-0078)
+[follow-edges behaviour](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/corpus/follow_edges.py)
 deposits the post's primary URL as a separate entry. If the follow
 fails (paywall on the linked article), the primary deposit succeeds
 and a warning is logged.
@@ -223,14 +223,17 @@ Set `storage.blob_dir` to an absolute path to stop the problem recurring.
 |---|---|
 | Spec / ADR deposit produced junk "meta" particles | Expected — they're tagged `DOCUMENT_META` and hidden by default; see the section above |
 | `Blob not found for hash …` during extraction | `particles config validate` — it warns when the resolved `blob_dir` does not hold the store's content; see the section above |
-| Particle missing from query | `lint` for staleness findings; `particles quality` for status distribution |
-| Extractor regressed | `extractor benchmark-compare` against the previous extractor version |
-| Wiki articles cite the wrong subjects | `--invalidate-stale-links` after `subjects fix-labels` |
+| Particle missing from query | `lint` for staleness findings ([lint and review](lint-and-review.md)); `particles quality` for status distribution. If it was retired, [as-of](../user-guide/as-of.md) shows when and what replaced it |
+| Extractor regressed | `extractor benchmark-compare` against the previous extractor version — see [tuning → benchmark + compare](tuning.md#benchmark-compare) |
+| Wiki articles cite the wrong subjects | `--invalidate-stale-links` after `subjects fix-labels`; a genuinely misjoined Subject needs [the split workflow](lint-and-review.md#fixing-a-misjoined-subject) |
 | Database performance dropping | Check `particles quality` for stale-particle accumulation; reindex |
-| LLM cost spiking | `wiki export --dry-run` reports estimated tokens before paying |
+| LLM cost spiking | `wiki export --dry-run` reports estimated tokens before paying; the nightly passes have their own caps ([scheduled consolidation](scheduled-consolidation.md#configuration)) |
+| A rule file's beliefs are out of date | The file is frozen unless it was opted in — see [refreshing mutable local sources](mutable-local-sources.md) |
+| Answers cite nothing / "no relevant evidence" | The [relevance floor](../user-guide/querying.md#ranking-what-the-sdk-actually-does) fired, or `min_confidence` is filtering everything — see [tuning](tuning.md) |
 
-When in doubt, the implementation lives in the per-package
-`AGENTS.md` files (`particles/corpus/AGENTS.md`,
-`particles/extraction/AGENTS.md`, `particles/exporters/AGENTS.md`)
-and the relevant ADRs. The roadmap's `Status` column is the
-canonical "is this shipped?" reference.
+When in doubt, read the implementation — `particles/corpus/`,
+`particles/extraction/`, and `particles/exporters/` are the three packages
+most of these symptoms originate in. For "is this shipped?", the
+[command reference](../cli-reference.md) is generated from the live CLI, so
+a verb or flag appearing there exists in the version you are running, and
+`CHANGELOG.md` records when it arrived.

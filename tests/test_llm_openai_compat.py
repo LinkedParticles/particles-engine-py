@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the generic OpenAI-compatible completion adapter (né 0172).
 
 Covers the deterministic seams: request-body / header construction (including

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles memory consolidate`` verb (§1/§8).
 
 Pins the CLI contract with the operation mocked: flag validation, the exit

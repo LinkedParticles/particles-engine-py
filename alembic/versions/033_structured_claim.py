@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Structured-claim annotation columns.
 
 Five columns on ``particles``, split on the embedding precedent:

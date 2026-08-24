@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The nine reference memory-server operations, backed by the store.
 
 Each function mirrors one ``KnowledgeGraphManager`` method from

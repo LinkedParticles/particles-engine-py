@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """OpenTelemetry SDK bootstrap.
 
 This is the **only** module that touches the OTel SDK / exporters /
