@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Particle interchange codec + JSONL container (Part A).
 
 Covers round-trip substrate fidelity, the substrate-only rule (no derived

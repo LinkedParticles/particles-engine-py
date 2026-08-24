@@ -14,7 +14,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "content",
@@ -26,7 +27,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.value",
@@ -38,7 +40,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "provenance",
@@ -50,7 +53,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "asserted_by",
@@ -62,7 +66,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "status",
@@ -76,7 +81,8 @@
       "value_counts": {
         "ACTIVE": 5
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "schema_version",
@@ -88,7 +94,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "particle_type",
@@ -102,7 +109,8 @@
       "value_counts": {
         "CLAIM": 5
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "subject_ids",
@@ -114,7 +122,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "uncertainty_nature",
@@ -128,7 +137,8 @@
       "value_counts": {
         "EPISTEMIC": 5
       },
-      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail."
+      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail.",
+      "excluded_count": 0
     },
     {
       "field": "confidence.calibration_source",
@@ -142,7 +152,8 @@
       "value_counts": {
         "EXTRACTOR_DIRECT": 5
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "provenance[].snapshot_id",
@@ -154,7 +165,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "extractor_ref",
@@ -166,7 +178,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.variance",
@@ -178,7 +191,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.calibration_method",
@@ -190,7 +204,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "uncertainty_kind",
@@ -202,7 +217,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "valid_until",
@@ -214,7 +230,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "supersedes",
@@ -226,7 +243,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "tags",
@@ -238,7 +256,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "context_fingerprint",
@@ -250,7 +269,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "properties",
@@ -262,7 +282,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "structured_claim",
@@ -274,7 +295,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "canonical_form",
@@ -289,7 +311,8 @@
         "PROSE": 2,
         "STRUCTURED": 3
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "sequence_context",
@@ -301,7 +324,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "basis",
@@ -313,7 +337,8 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "contributors",
@@ -325,17 +350,18 @@
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     }
   ],
   "failures": [],
   "warnings": [],
-  "generated_at": "2026-08-02 11:24:48.702004+00:00",
-  "fixture_corpus_hash": "f294b5b1717b5102b73a71d9c00a704f008cb8a063b527c3e8068c0c9d5f1ddf",
+  "generated_at": "2026-08-23 23:24:45.461731+00:00",
+  "fixture_corpus_hash": "181c0ec8413de8a09a1b16d9ac6d914e3212943c058b33f37ebd0a0b6d845831",
   "recommended_threshold": 0.8,
   "extraction_provider_model": null,
   "quality_notes": [
-    "Fixture selection: routing precedence \u2014 1 of 16 corpus fixtures route to numista-issuer-extractor."
+    "Fixture selection: routing precedence \u2014 1 of 17 corpus fixtures route to numista-issuer-extractor."
   ],
   "advisories": [
     {
@@ -350,7 +376,8 @@
       "value_counts": {
         "EPISTEMIC": 5
       },
-      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail."
+      "advisory_reason": "Diversity rule violated: 1 distinct value(s) observed; rule requires 2. Rationale: ALEATORY vs EPISTEMIC is the core PSUM distinction; an extractor that always emits EPISTEMIC is technically populating the field but giving queries no signal. ADVISORY, not FAIL: the outcome tracks whether the *source vocabulary* carries a distinguishable stochastic-quantity signal \u2014 English prose does, generic RDF and catalogue records do not \u2014 so a structured extractor reporting one distinct value is honest, and an LLM extractor reporting two is a sampled result that may not repeat. Read the value_counts margin, not the pass/fail.",
+      "excluded_count": 0
     }
   ]
 }

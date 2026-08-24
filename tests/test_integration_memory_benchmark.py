@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Integration smoke test for the memory benchmark (run tiers).
 
 Drives the checked-in 3-question synthetic oracle fixture end-to-end on a
@@ -86,7 +90,11 @@ async def test_fixture_end_to_end_contract(tmp_path: Path) -> None:
         metrics = getattr(report, condition)
         assert metrics is not None, f"{condition} must be populated"
         assert metrics.condition == condition
-        assert metrics.questions == 2
+        # Scored + excluded, the same shape line 74 uses for the retrieval
+        # family: a call the API dropped leaves the denominator rather than
+        # scoring wrong, so pinning the raw denominator would make this tier
+        # flaky on exactly the transient failure the exclusion exists for.
+        assert metrics.questions + metrics.excluded == 2
         model_ids.add(metrics.model_id)
     assert len(model_ids) == 1
     assert report.selection.answer_model_id in model_ids

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The `properties`-key shape on persisted particles.
 
 Two surfaces, one predicate: `conformance.validator` asks the question of fresh

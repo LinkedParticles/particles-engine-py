@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/cli/_memory_projection.py — the MEMORY.md cycle.
 
 Covers the ADR's test checklist: the §2 FIXED-POINT (render → splice → harvest

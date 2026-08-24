@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Exhaustive blob audit and re-home — the repair half of the story.
 
 :mod:`particles.corpus.blob_health` is the cheap **detection** sibling: a

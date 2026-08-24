@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure modality-classification metrics.
 
 Functions over aligned ``(expected, emitted)`` ``assertion_modality`` pairs —

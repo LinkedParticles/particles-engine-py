@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the Typer CLI surface (particles/api/cli/).
 
 The CLI was entirely uncovered in the architecture-review baseline. These

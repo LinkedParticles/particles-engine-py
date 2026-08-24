@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Subject scope — which claims owe a subject, and who agrees about it.
 
 The defect this closes was a disagreement, not a bug in either surface:

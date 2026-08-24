@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM models and repository for the Subject store.
 
 Subjects are canonical real-world entities — the nodes of the knowledge graph.

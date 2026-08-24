@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Abstraction-promotion consolidation.
 
 The dream-cycle pass that distills clusters of settled, subject-scoped

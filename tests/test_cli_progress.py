@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The heartbeat and per-item progress must not collide on one line."""
 
 from __future__ import annotations

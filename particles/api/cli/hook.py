@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """hook sub-Typer — the machine-facing Claude Code lifecycle verbs.
 
 ``particles init claude-code`` installs these into Claude Code's settings;

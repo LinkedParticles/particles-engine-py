@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Reference knowledge-graph ↔ Particles store mapping (§8).
 
 The reference memory server (``@modelcontextprotocol/server-memory`` v0.6.3)
@@ -36,95 +40,60 @@ losing anything in either direction:
 Tags are unconstrained ``list[str]``, so the whole encoding rides existing
 mechanisms and needs no schema change — which keeps its
 ``spec_impact: implementation`` classification.
+
+**The tag vocabulary itself is defined Client-side**, in
+``particles.extraction.mcp_memory`` — the module that owns the reference
+*format* — and imported here (Surface → Client, the allowed direction). It moved there when inbound migration shipped: a migrated
+``memory.jsonl`` record and a record this façade writes must be *the same
+record*, so a user who migrates sees their history through these same reads.
+Two copies of the encoding kept in sync by hand would eventually diverge, and
+the divergence would be invisible until a migrated graph silently failed to
+appear. This module owns the store-reading projection on top; it does not own
+the vocabulary.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import quote, unquote
 
 from particles.config import get_config
 from particles.core.status import Status
 
+# The reference vocabulary is defined Client-side, in the module that owns the
+# reference *format*, so a migrated record and a record this façade
+# writes are byte-for-byte the same record — one encoding, not two kept in
+# sync. Surface → Client is the allowed direction.
+from particles.extraction.mcp_memory import (
+    OBSERVATION_TAG,
+    RELATION_TAG,
+    TOMBSTONE_TAG,
+    entity_type_of,
+    is_observation,
+    is_relation,
+    is_tombstone,
+    relation_content,
+    relation_from_particle,
+    relation_tags,
+)
+
+__all__ = [
+    "OBSERVATION_TAG",
+    "RELATION_TAG",
+    "TOMBSTONE_TAG",
+    "Subgraph",
+    "caps",
+    "entity_type_of",
+    "is_observation",
+    "is_relation",
+    "is_tombstone",
+    "load_subgraph",
+    "relation_content",
+    "relation_from_particle",
+    "relation_tags",
+]
+
 log = logging.getLogger(__name__)
-
-#: Marks a particle as a façade *observation* (one Subject, one claim).
-OBSERVATION_TAG = "memory-compat:observation"
-#: Marks a particle as a façade *relation* (two Subjects, a directed edge).
-RELATION_TAG = "memory-compat:relation"
-#: Marks a Subject as deleted through the façade (see module docstring).
-TOMBSTONE_TAG = "memory-compat:deleted"
-
-_REL_TYPE_PREFIX = "memory-compat:rel="
-_REL_FROM_PREFIX = "memory-compat:from="
-_REL_TO_PREFIX = "memory-compat:to="
-
-
-def _enc(value: str) -> str:
-    """Percent-encode a reference string so it survives as a single tag token."""
-    return quote(value, safe="")
-
-
-def _dec(value: str) -> str:
-    """Inverse of :func:`_enc`."""
-    return unquote(value)
-
-
-def _tag_value(tags: list[str] | None, prefix: str) -> str | None:
-    for tag in tags or ():
-        if tag.startswith(prefix):
-            return _dec(tag[len(prefix) :])
-    return None
-
-
-def relation_tags(from_name: str, to_name: str, relation_type: str) -> list[str]:
-    """Build the reserved tag set that carries a relation triple losslessly."""
-    return [
-        RELATION_TAG,
-        f"{_REL_TYPE_PREFIX}{_enc(relation_type)}",
-        f"{_REL_FROM_PREFIX}{_enc(from_name)}",
-        f"{_REL_TO_PREFIX}{_enc(to_name)}",
-    ]
-
-
-def relation_from_particle(particle: Any) -> dict[str, str] | None:
-    """Recover a reference relation dict from a façade relation particle.
-
-    Returns ``None`` when the particle is not a well-formed façade relation
-    (a tag was dropped or the particle predates the encoding), so a damaged
-    record degrades to omission rather than a malformed edge.
-    """
-    tags = particle.tags
-    rel = _tag_value(tags, _REL_TYPE_PREFIX)
-    src = _tag_value(tags, _REL_FROM_PREFIX)
-    dst = _tag_value(tags, _REL_TO_PREFIX)
-    if rel is None or src is None or dst is None:
-        log.warning("Skipping malformed façade relation particle %s", particle.id)
-        return None
-    return {"from": src, "to": dst, "relationType": rel}
-
-
-def relation_content(from_name: str, to_name: str, relation_type: str) -> str:
-    """The particle's human-readable content — the active voice the reference asks for."""
-    return f"{from_name} {relation_type} {to_name}"
-
-
-def is_observation(particle: Any) -> bool:
-    return OBSERVATION_TAG in (particle.tags or ())
-
-
-def is_relation(particle: Any) -> bool:
-    return RELATION_TAG in (particle.tags or ())
-
-
-def is_tombstone(particle: Any) -> bool:
-    return TOMBSTONE_TAG in (particle.tags or ())
-
-
-def entity_type_of(subject: Any) -> str:
-    """Reference entities always carry a string ``entityType``; ours may be None."""
-    return subject.subject_class or ""
 
 
 class Subgraph:

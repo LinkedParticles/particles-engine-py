@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The rule-source set — durable operating rules as tracked sources.
 
 A *rule source* is a local document that states how work is done here:

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # mkdocs configuration for the particles-engine-py public repository — the SDK
 # documentation site published at https://docs.linkedparticles.org.
 #

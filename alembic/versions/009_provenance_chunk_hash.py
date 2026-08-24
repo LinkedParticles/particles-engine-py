@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add chunk_hash column + index to particle_provenance_edges.
 
 Revision ID: 009

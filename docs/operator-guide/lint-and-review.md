@@ -16,7 +16,8 @@ surfaces problems you'd otherwise discover in queries.
 
 ## What lint catches
 
-The headline findings:
+The headline findings — the statuses in the third column are defined in
+[User guide → concepts → status](../user-guide/concepts.md#status):
 
 | Finding | Cause | Status transition (with `--fix`) |
 |---|---|---|
@@ -95,6 +96,10 @@ Reindex is rate-limited (default 100 extractions per minute). It
 respects the chunk-hash carry-forward — particles whose
 source chunks didn't change skip the LLM call.
 
+The `EXTRACTOR_VERSION` this keys on is set by the extractor's author; see
+[Plugin-author guide → extractors](../plugin-author-guide/extractors.md) for
+when a bump is required.
+
 ## Quality reports
 
 ```bash
@@ -114,6 +119,10 @@ calls; instant read from the DB.
 - Before every export — exports already run an implicit `lint
   --semantic=False` pre-pass and splice findings into the exported
   output (per-article callouts in wiki / Obsidian).
+
+You do not have to remember any of that: `particles memory consolidate`
+runs lint alongside the other maintenance passes on a schedule — see
+[Scheduled consolidation](scheduled-consolidation.md).
 
 ## Fixing a misjoined Subject
 

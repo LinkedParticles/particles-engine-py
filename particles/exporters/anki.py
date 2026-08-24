@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Anki flashcard exporter.
 
 Produces a tab-delimited text file importable by Anki. One card per particle,

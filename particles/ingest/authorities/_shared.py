@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared helpers for subject authorities.
 
 Hosts the per-namespace rate limiter (moved verbatim from

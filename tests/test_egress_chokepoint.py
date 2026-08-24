@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Egress choke-point regression + enforcement (security finding F14).
 
 Every importer / extractor that fetches external bytes into the corpus must go

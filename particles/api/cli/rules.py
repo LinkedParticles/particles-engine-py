@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """rules group — the rule-source set (operating docs as tracked sources).
 
 ``particles rules`` reports the resolved set and each file's registration state;

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Query-time source-trust evaluation.
 
 Loads the operator's source-trust policy — ``SourceTrustStatement`` rows

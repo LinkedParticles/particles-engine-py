@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """import sub-Typer — bulk-onboard existing knowledge bases.
 
 ``particles import vault <dir>`` walks an existing Obsidian vault (or any
@@ -355,3 +359,83 @@ async def _import_web_clipper(
         )
         await session.commit()
     return results
+
+
+@import_app.command("mcp-memory")
+def import_mcp_memory_cmd(
+    export_path: Path = typer.Argument(
+        ...,
+        help="Path to a reference memory-server memory.jsonl export.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    deposited_by: str = typer.Option(
+        "operator", help="Agent or operator ID performing the import."
+    ),
+    tags: str | None = typer.Option(None, help="Comma-separated tags added to the corpus entry."),
+    debug: bool = typer.Option(False, "--debug", help="Show DEBUG-level logs from deposit."),
+) -> None:
+    """Deposit a reference memory-server ``memory.jsonl`` for migration.
+
+    Brings an existing ``@modelcontextprotocol/server-memory`` graph across:
+    entities become Subjects, observations become single-subject particles, and
+    relations become two-subject particles — the same encoding
+    ``particles memory serve`` reads, so a migrated graph is visible
+    through the façade immediately.
+
+    The export is deposited **verbatim** as an ``MCP_MEMORY_EXPORT`` entry
+    (``STABLE`` / ``NEVER``: a dump is a record of what was seen, not a live
+    handle), and every particle points back at it by line number. Nothing is
+    attributed to the incumbent store itself — the SDK never fetched it and
+    cannot re-verify it, so provenance names the artifact it actually holds.
+    Re-running is idempotent (content-hash dedup).
+
+    Migrated beliefs are deliberately low-confidence: they are second-hand, and
+    the incumbent's own scores are preserved as tags rather than becoming
+    confidence values. Raise them with ``particles trust set`` once you vouch
+    for the source, not by editing the import floor.
+
+    \b
+        particles import mcp-memory ~/.mcp/memory.jsonl
+        particles extract --all-pending
+        particles lint
+    """
+    _refuse_in_remote_mode("mcp-memory")
+    configure_logging(False, debug)
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    entry_id, _snapshot_id = run(_import_mcp_memory(export_path, deposited_by, tag_list))
+    typer.echo(f"Deposited {export_path} as corpus entry {entry_id}.")
+    typer.echo(
+        "Migrated beliefs are second-hand: they carry calibration source IMPORTED and a low "
+        "import-floor confidence, and the source store's own scores do not carry over. "
+        "Use `particles trust set` to raise the whole export once you vouch for it."
+    )
+    typer.echo("Next: `particles extract --all-pending` to turn the export into particles.")
+
+
+async def _import_mcp_memory(
+    export_path: Path,
+    deposited_by: str,
+    tags: list[str],
+) -> tuple[str, str]:
+    from particles.core.schema import FetchPolicy, Mutability
+    from particles.corpus.deposit import deposit_file
+    from particles.extraction.mcp_memory import SOURCE_TYPE
+
+    async with session_scope() as session:
+        result = await deposit_file(
+            session,
+            export_path,
+            deposited_by=deposited_by,
+            # An export is a frozen dump of a store we do not own: there is
+            # nothing to re-fetch, and the incumbent may be gone.
+            mutability=Mutability.STABLE,
+            fetch_policy=FetchPolicy.NEVER,
+            source_type=SOURCE_TYPE,
+            tags=tags,
+        )
+        await session.commit()
+    return result

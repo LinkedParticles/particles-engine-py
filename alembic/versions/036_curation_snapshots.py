@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Persisted curation-card collections.
 
 Creates ``curation_snapshots``, the cache `GET /curation` and `particles curate`

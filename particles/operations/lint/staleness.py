@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Staleness / provenance-stale detectors and confidence-decay reporter.
 
 Covers the structural checks that flip ACTIVE particles to PROVENANCE_STALE

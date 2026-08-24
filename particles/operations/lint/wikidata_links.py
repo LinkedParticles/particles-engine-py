@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """L-SEM-03: flag Wikidata ExternalRefs with low confidence.
 
 These links were created by the subject resolver but the embedding similarity

@@ -72,7 +72,22 @@ uv run pytest tests/ -m "not integration"
 uv run ruff check .
 uv run ruff format --check .
 uv run mkdocs build --strict
+uv run reuse lint                          # per-file SPDX licensing
 ```
+
+Every new source file carries a two-line licensing header — after any shebang,
+before the module docstring:
+
+```python
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+```
+
+`reuse annotate --copyright "The Particles authors" --year 2026 --license
+Apache-2.0 <file>` writes it. File classes that cannot hold a comment are
+annotated in `REUSE.toml` instead.
+
 
 Architecture and conventions are in [ARCHITECTURE.md](ARCHITECTURE.md). Design
 questions that are really about the *standard* (schema semantics, confidence

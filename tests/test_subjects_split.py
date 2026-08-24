@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for `particles subjects split`.
 
 Covers both the store helper (split_subject) and the CLI verb. The CLI's

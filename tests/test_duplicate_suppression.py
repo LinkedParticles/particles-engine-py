@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for extract-time exact-duplicate suppression.
 
 The leak this closes, measured on the dogfood store 2026-07-25: 3,411 of 21,650

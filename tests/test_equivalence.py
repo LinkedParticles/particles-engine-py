@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Graded, observer-relative claim-equivalence.
 
 Covers the `effective_equivalence` lens (identity MVP + reserved hook) and the

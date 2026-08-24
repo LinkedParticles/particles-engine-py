@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Async SQLAlchemy engine registry, session factories, and ORM base.
 
 A **store** is one database (a SQLite file, or a Postgres database/schema). The

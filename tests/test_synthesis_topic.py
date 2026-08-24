@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the section-topic synthesis generalization.
 
 ``render_article`` was subject-scoped; its entry point was generalized to

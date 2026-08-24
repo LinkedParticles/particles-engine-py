@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Multi-extractor benchmark comparison.
 
 The :func:`compare_benchmarks` helper aggregates per-extractor

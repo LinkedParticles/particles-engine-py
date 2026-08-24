@@ -272,6 +272,34 @@ differ. If a baseline condition was skipped, its row renders as `not run` —
 there is no flag to omit it, so a partial comparison is always visibly
 partial.
 
+**A call that produced no verdict is excluded from the accuracy denominator,
+with a disclosed count.** If the answer or the judge call yields no usable
+reply, that question is not scored wrong for that condition — it is scored
+not at all, counted, and named in the table. The reason is asymmetry:
+`qa_full_context` sends ~115k tokens per call and `qa_no_memory` sends three
+lines, so any shared failure rate would land almost entirely on the baseline,
+weakening it with transport noise rather than with anything about the memory.
+The exclusion is disclosed per condition and **split by cause**, because the
+two mean opposite things to a reader:
+
+- **output-budget** — the reply carried no text within `max_tokens`. An
+  extended-thinking model spends its thinking from the same budget, so this is
+  a configuration error on our side; the table says so, and the fix is to
+  raise the cap and re-run those questions. It is deliberately not retried,
+  since an identical call at an identical cap reproduces it.
+- **infra** — the call still failed after its retries.
+
+The table also states, before any of this, whether the full-context baseline
+*fits* the answering model's context window on the variant being run. A run
+whose haystack would overflow is refused rather than reported: an overflowing
+baseline is not a weaker baseline, it is a destroyed one, while the
+question-only condition sails through untouched. This is the standing
+precondition on the larger `m` variant.
+
+Both rules were added in v1.137.1 and bind future runs. **No number on this
+page changed**: the run below carries zero failed answer or judge calls (see
+its run notes), so there was nothing to restate.
+
 ## Judge deviation — read before comparing
 
 Answers are scored by an LLM judge following the dataset's

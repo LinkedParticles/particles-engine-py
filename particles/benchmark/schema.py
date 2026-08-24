@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """BenchmarkSuite datatypes (techspec §13.3 frozen schema).
 
 These are the **normative** types for benchmark suite YAML files. Field

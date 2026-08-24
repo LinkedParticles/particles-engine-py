@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Granularity detectors (structural length outliers + LLM violation check).
 
 A particle is meant to express one atomic, separately-falsifiable claim.

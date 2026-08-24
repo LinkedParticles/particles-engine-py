@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Document-precedence tie-break among detected conflicts.
 
 *"The later authored decision wins."* When two **ACTIVE** particles a

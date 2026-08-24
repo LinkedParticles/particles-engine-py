@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Snapshot test for the OpenAPI 3.1 contract surface.
 
 `artifacts/openapi.json` is the committed canonical FastAPI contract.

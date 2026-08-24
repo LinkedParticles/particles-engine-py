@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Prefix the engine-side annotation ``properties`` keys.
 
 Renames three bare keys inside ``particles.properties_json`` to the

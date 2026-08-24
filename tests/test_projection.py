@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/operations/projection/project.py — pipeline.
 
 Covers projection assembly (section ordering + mechanical-block splicing), the

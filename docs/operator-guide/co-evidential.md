@@ -4,7 +4,9 @@ Two particles are **co-evidential** when they assert the same underlying
 claim — paraphrases drawn from different sources. Linking them
 (`CO_EVIDENTIAL`, §6.10) collapses the duplicate at query time so a claim
 backed by five sources counts as one well-supported claim, not five
-competing ones.
+competing ones — it changes what
+[a query returns](../user-guide/querying.md#ranking-what-the-sdk-actually-does)
+without changing any stored confidence.
 
 Finding those pairs is the job of `particles links suggest`.
 
@@ -242,7 +244,9 @@ All knobs live under `links_suggest` in `config.yaml`
   `APPLY` exceeds the confirm threshold without `confirmed`.
 - **MCP** — the `links_suggest` tool exposes **report mode only** (the
   MCP surface is read-only);
-  agents surface candidates, the operator applies them via CLI/HTTP.
+  agents surface candidates, the operator applies them via CLI/HTTP. The
+  full read-tool list is in
+  [User guide → MCP server](../user-guide/querying.md#mcp-server).
 
 ## What's deferred
 

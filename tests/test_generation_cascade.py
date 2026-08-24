@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the snapshot-generation cascade.
 
 The defect this closes, measured on the dogfood store on 2026-07-24: 3,127

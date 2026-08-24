@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.5 Reindex operation.
 
 Re-extracts particles for a scoped set of corpus entries:

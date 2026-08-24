@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared LLM helper for LLM-assisted operations (lint, links suggest).
 
 A thin wrapper around the ``semantic_lint`` completion purpose that

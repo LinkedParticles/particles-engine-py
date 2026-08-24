@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Synthesis topic — the subject of one synthesis run.
 
 ``render_article`` was subject-scoped: it wrote one cited article *about a

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQL-injection-adjacent safety helpers.
 
 Currently just ``escape_like_pattern`` — SQLAlchemy already parameterises

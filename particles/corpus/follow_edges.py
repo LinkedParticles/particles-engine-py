@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-entry follow provenance.
 
 When `deposit_url` follows a link-shaped post's primary URL and

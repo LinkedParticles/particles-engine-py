@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Store for per-belief utility evidence — the usefulness lens.
 
 The *utility evidence* half of two-quantity split: per-belief,

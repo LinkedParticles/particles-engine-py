@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM models for the source corpus (CorpusEntry + Snapshot)."""
 
 from __future__ import annotations

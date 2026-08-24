@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the modelled ExtractorRef.
 
 `extractor_ref` was an untyped ``dict[str, Any]`` through 1.109.x, with its

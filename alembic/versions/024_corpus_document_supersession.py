@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add document_supersession_json to corpus_entries (cap. 2, 1.29.0).
 
 Engine-internal capture of a document's supersession relation (the ADR genre

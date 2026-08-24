@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Wikidata extractor tests — structure-canonical emission.
 
 The label lookups the extractor performs for ``content`` are pre-seeded into its

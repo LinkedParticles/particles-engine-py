@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Blob-reachability probe — is the store's content where this process looks?
 
 *New* blob sharding was stopped by anchoring a relative ``storage.blob_dir``

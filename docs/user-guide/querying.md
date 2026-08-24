@@ -102,7 +102,9 @@ query.
 
 Since many particles carry a derived S-P-O **structured claim**
 annotation beside their prose; the structured filter makes it readable on the same
-`query` verb. Structural conditions select **claims by their form**, not
+`query` verb. Getting and maintaining those annotations — `particles structure`,
+coverage, what to do about a wrong triple — is
+[Operator guide → structured claims](../operator-guide/structured-claims.md). Structural conditions select **claims by their form**, not
 truths — the output speaks of *claims* throughout, and counts count
 claims, never entities.
 
@@ -168,11 +170,23 @@ a read-only MCP server:
 uv run particles mcp serve
 ```
 
-The MCP tools are: `query`, `particle_show`, `particles_list`,
+The read tools are: `query`, `particle_show`, `particles_list`,
 `particle_search`, `subjects_list`, `subjects_search`, `subjects_show`,
-`lint`, `quality_report`, `list_corpus_entries`, `list_taxonomies`,
-`links_suggest`, `events_list`, `event_show`. All read-only — the MCP
-surface cannot deposit, extract, or change particle status.
+[`lint`](../operator-guide/lint-and-review.md) and `quality_report`,
+`list_corpus_entries`, `list_taxonomies`,
+[`links_suggest`](../operator-guide/co-evidential.md),
+[`corpus_links_suggest`](../operator-guide/citation-signals.md),
+[`events_list` / `event_show`](../operator-guide/auditing.md), and
+[`graph_view`](graph-view.md#served-get-graph-and-the-mcp-graph_view-tool).
+These are read-only — they cannot deposit, extract, or change particle
+status. A store can additionally be *write-enabled* which adds
+the assert / supersede / retract / deposit tools.
+
+Two related routes are worth knowing about: the
+[Claude Code integration](claude-code.md) wires a store in as managed agent
+memory rather than as a tool an agent must choose to call, and the
+[memory-server swap](memory-server-swap.md) presents the store through the
+reference knowledge-graph memory server's own tool contract.
 
 ## Ranking — what the SDK actually does
 
@@ -212,8 +226,8 @@ named bases fires, and the badge always names which —
 | Basis | Fires when |
 |---|---|
 | `stance` | someone is on record **disputing** the claim — a `DISPUTES` edge in its query-time stance distribution. Endorsements alone never fire; when this basis fires the badge carries the unverified-holder caveat. |
-| `divergence` | the claim's effective confidence **spreads across your trust policies** (local + adopted lenses) by at least `contestedness.callout_threshold`. Absent — not merely quiet — until you have two or more policies. |
-| `inconsistency` | an **open INCONSISTENCY particle** references the claim; the badge keeps that particle's id as the drill-down. |
+| `divergence` | the claim's effective confidence **spreads across your trust policies** (local + adopted lenses) by at least `contestedness.callout_threshold`. Absent — not merely quiet — until you have two or more policies. Adopting a second policy is [Operator guide → lenses](../operator-guide/tuning.md#lenses-adopting-someone-elses-trust-policy). |
+| `inconsistency` | an **open INCONSISTENCY particle** references the claim; the badge keeps that particle's id as the drill-down. Clearing it is [the review workflow](../operator-guide/lint-and-review.md#the-review-workflow). |
 
 The CLI prints one `⚠ contested (…)` line per badged result;
 `--contestedness` still prints the full per-policy readings, and the
@@ -222,7 +236,8 @@ basis fired carries no badge — absence of measurement is never rendered
 as "uncontested". The badge is disclosure only: it never changes
 ranking, confidence, or filtering. Disable it with
 `contestedness.badge_enabled: false` in `config.yaml`. The same badge
-appears in the session-start digest, the `MEMORY.md` projection, and the
+appears in the session-start digest, the `MEMORY.md` projection, the
+[graph view](graph-view.md), and the
 MCP `query` / `particles_list` responses (as `contested_bases`, beside
 the existing INCONSISTENCY-id `contested` key).
 

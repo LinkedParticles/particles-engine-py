@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """config sub-Typer — inspect and validate runtime configuration."""
 
 from __future__ import annotations

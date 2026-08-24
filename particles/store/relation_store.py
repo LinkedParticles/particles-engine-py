@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM and helpers for typed particle relations (§6.10).
 
 The relation table is the storage primitive for co-evidential links: typed

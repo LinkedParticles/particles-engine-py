@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the Wikidata label cache (particles/store/wikidata_cache.py).
 
 A small persistent key/value cache (qid → label) — 0% covered in the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Semantic ranking, effective-confidence math, and co-evidential collapse.
 
 Helpers used by ``main.query``:

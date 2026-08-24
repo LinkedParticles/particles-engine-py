@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles curate`` verb (particles/api/cli/curate.py).
 
 The queue itself is covered by ``tests/test_curation.py``; this file pins the

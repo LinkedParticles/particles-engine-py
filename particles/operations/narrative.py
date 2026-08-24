@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Narrative traversal operations.
 
 A NARRATIVE particle is prose-level structural connective tissue: its

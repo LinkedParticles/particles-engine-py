@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add embedding_model_id to particles (0.56.0).
 
 Tags each stored vector with the id of the embedding model that produced it so

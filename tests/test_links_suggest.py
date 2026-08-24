@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for operations/links_suggest.py — `links suggest`.
 
 Covers REPORT-mode candidate proposal (the logic that used to be the L-IDX-01

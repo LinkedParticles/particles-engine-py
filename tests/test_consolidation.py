@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the dream-cycle consolidation operation.
 
 Pins the deterministic parts with mocked seams: the §3 pass composition and

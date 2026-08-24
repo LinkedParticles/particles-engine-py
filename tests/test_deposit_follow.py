@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Integration tests — deposit-time primary-URL follow.
 
 The per-importer parser tests (each importer's ``primary_url`` method)

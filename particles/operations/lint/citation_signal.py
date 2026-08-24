@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Citation-signal lint check — L-CITE-01.
 
 Surfaces undeposited primary sources the corpus leans on: a URL cited by many

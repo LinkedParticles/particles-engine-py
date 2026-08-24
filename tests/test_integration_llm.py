@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Live Anthropic round-trip tests — the opt-in integration tier (P3-7).
 
 The unit suite mocks every LLM call at the ``particles.llm.set_client``

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles/core/conflict_resolution.py`` — pure §6.6 ladder.
 
 These tests exercise the decision logic and the INCONSISTENCY-particle

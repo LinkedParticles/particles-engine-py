@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles hook …`` verbs + their pure helpers.
 
 Covers the ADR's test checklist for the hook side: source-gating of the

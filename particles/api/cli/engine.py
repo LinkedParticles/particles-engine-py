@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """engine sub-Typer — run the always-on remote engine.
 
 ``particles engine serve <host:port>`` is the server side of the client/engine

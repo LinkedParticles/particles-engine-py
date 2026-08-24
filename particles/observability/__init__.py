@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """OpenTelemetry observability — Engine-layer SDK bootstrap.
 
 The public surface is two idempotent bootstrap entry points:

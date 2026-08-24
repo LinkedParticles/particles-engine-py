@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Typed exporter summary models.
 
 Every :class:`particles.exporters.registry.ExporterPlugin` returns a

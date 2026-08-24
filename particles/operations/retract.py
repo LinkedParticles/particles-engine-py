@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Corpus retract operation.
 
 The non-destructive sibling of ``corpus delete``: bulk-transition every *live*

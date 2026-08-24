@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Operator-scoped belief mutation + subject-assign.
 
 Covers the operator path of ``particles.operations.agent_write``:

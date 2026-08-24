@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the journal modality benchmark.
 
 Covers the unit tier — no LLM, no real embeddings:

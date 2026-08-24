@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """reconcile verb — cross-entry document-supersession sweep.
 
 Runs the §6.6 rung-1.5 document-supersession prior over already-extracted

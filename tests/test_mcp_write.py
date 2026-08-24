@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """write-surface enforcement tests for particles/mcp/tools/write.py.
 
 These gate activation: they pin the security boundary — default-deny, server-side

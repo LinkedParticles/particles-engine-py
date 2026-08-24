@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The published JSON-LD context as the single CURIE-prefix authority.
 
 Three surfaces used to answer "is this prefix published?" from three hand-lists

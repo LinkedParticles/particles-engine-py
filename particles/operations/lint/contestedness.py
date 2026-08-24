@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Store-wide composed-contested finder + the distribution.
 
 One evaluation, two renderings. The badge composes three bases —

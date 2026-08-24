@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Test helpers for the ``get_capped`` egress choke-point (security finding F14).
 
 Every importer / extractor fetch routes through

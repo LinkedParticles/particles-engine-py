@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/core/claims.py — the normalizer + matcher."""
 
 from __future__ import annotations

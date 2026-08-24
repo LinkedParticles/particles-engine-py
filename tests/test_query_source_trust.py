@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for operations/query/source_trust.py — query-time source_trust_rank."""
 
 from __future__ import annotations

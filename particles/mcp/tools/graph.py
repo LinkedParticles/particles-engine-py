@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``graph_view`` — one scoped epistemic subgraph.
 
 Routed through the ``Backend`` seam: with no engine configured the

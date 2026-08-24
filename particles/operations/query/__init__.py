@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.3 Query operation package — semantic retrieval + NL response.
 
 Public surface (stable):

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """links sub-Typer — manage typed relations between particles."""
 
 from __future__ import annotations

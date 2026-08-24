@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add assertion_modality to particles (1.2.0).
 
 The truth-aptness axis: the engine applies truth-semantics (§6.6 contradiction

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`links suggest` — co-evidential candidate proposal and resolution.
 
 Within each Subject, compute pairwise cosine similarity between ACTIVE

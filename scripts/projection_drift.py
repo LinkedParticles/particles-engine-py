@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Documentation-projection drift gate.
 
 Regenerates each *gated* projection's deterministic snapshot from the store and

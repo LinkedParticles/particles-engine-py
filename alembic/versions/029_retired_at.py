@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """As-of bitemporal read lens — write-once ``retired_at`` on particles.
 
 One nullable column: the transaction-time end of a belief — the instant the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Align extractor_records.registered_at column type with the ORM (String).
 
 The ORM (particles/store/extractor_store.py) has always declared the column

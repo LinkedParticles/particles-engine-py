@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """General-extractor event-anchored-validity benchmark.
 
 A fourth, **additive** measurement axis alongside the techspec §13.3 content

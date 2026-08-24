@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """conformance verb — check this implementation against the Conformance Profile.
 
 ``particles conformance check`` loads ``artifacts/conformance/profile.yaml``

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Documentation-projection manifest — the editable docs-as-views surface.
 
 A manifest is a checked-in YAML file (e.g. ``docs/projection/readme.yaml``)

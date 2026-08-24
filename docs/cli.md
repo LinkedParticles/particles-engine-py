@@ -90,6 +90,7 @@ uv run particles db init
 | `import vault <dir>` | Walk an existing Obsidian vault (or any Markdown directory) and deposit every `.md` file as `LOCAL_MARKDOWN` for retrospective extract + lint (see § Onboarding an existing vault below). With a remote engine configured (`engine.base_url`), the tree-walk **routes each file to the engine** via `deposit_file` — no new endpoint, idempotent, continue-on-per-file-error — so a thin client can seed the canonical store in one command. |
 | `import project <dir>` | Walk a software-project tree and deposit every source file (`.py` by default; `import_project.extensions`) as `PYTHON_SOURCE`, one corpus entry per file. Skips dot-prefixed components and the configured build/cache dirs (`import_project.ignore_dirs`) but keeps underscore module files (`__init__.py` / `_shared.py`). `--ext .py,.pyi` overrides the glob per run; `--tags`, `--deposited-by`, `--verbose` mirror `import vault`. Re-running is idempotent (content-hash dedup). With a remote engine configured, routes each file to the engine via `deposit_file`, like `import vault`. Feeds the symbol-aware docstring extractor — see § Onboarding a source tree below. |
 | `import web-clipper <dir>` | Walk an Obsidian Web Clipper captures folder and deposit each `.md` capture as a `WEB_PAGE` entry with the provenance its frontmatter carries restored: `source`/`url` → `uri_r` (fragment-stripped, **not** fetched), `published` → `content_published_at` (below `--date`), frontmatter `tags` ∪ `--tags` → entry tags; the frontmatter-stripped body is the deposited content. A header-less / malformed capture falls back to a plain `LOCAL_MARKDOWN` body deposit. Re-running is idempotent (body-hash dedup). One-shot scan (the watch daemon is deferred) — see § Onboarding a Web Clipper captures folder below. |
+| `import mcp-memory <path>` | Deposit an existing [`@modelcontextprotocol/server-memory`](https://github.com/modelcontextprotocol/servers) `memory.jsonl` for migration: entities become Subjects, observations become single-subject particles, relations become two-subject particles — the same encoding `particles memory serve` reads, so a migrated graph is visible through the façade immediately. The export is deposited verbatim as `MCP_MEMORY_EXPORT` (`STABLE`/`NEVER`) and every particle cites it by line number; nothing is attributed to the source store. Migrated beliefs carry `calibration_source = IMPORTED` at a low import floor — see § Migrating from another memory store below. |
 | `inbox process` | Deposit URLs queued from an iOS Share Sheet via iCloud Drive — see [User Guide → Depositing URLs from your phone](user-guide/inbox.md) for the iPhone Shortcut setup |
 | `inbox watch` | Continuously poll the inbox file and deposit pending URLs as they arrive |
 | `inbox status` | Show pending / processed counts in the inbox file |
@@ -294,6 +295,82 @@ The profile is config (`web_clipper.url_keys` / `date_keys` / `tag_keys` /
 change. Out of scope for now (§ Deferred): a watching daemon
 (`import web-clipper watch`), first-class `title` / `author` capture
 , and a second profile + verb generalisation.
+
+## Migrating from another memory store
+
+`import mcp-memory` brings an existing agent-memory graph across. It is the third
+clause of the adoption story: swap in one edit (`particles memory serve`), onboard in one command, **bring your history with you**.
+
+```bash
+# Bring an existing reference-server graph across.
+uv run particles import mcp-memory ~/.mcp/memory.jsonl
+
+# Turn the export into particles (no LLM call, no network — the mapping is
+# structural, because the records are already claim-granular).
+uv run particles extract --all-pending
+
+# Lint now reasons over beliefs your previous store could not lint at all.
+uv run particles lint
+```
+
+### The second-hand attribution rule
+
+Every migrated record is attributed to the **import event** and the **export
+artifact** — never to a source the store never held. Concretely:
+
+- **The corpus entry is the export file**, stamped `MCP_MEMORY_EXPORT`, with
+  `mutability=STABLE` / `fetch_policy=NEVER`: a dump is a record of what was
+  seen, not a live handle, and the incumbent store may be gone by the time
+  anyone asks.
+- **Provenance points at that snapshot**, with the record's line number as
+  `location` — "this claim appears at this position in this file, whose bytes
+  hash to this", which is exactly true and independently checkable. A
+  `ProvenanceRef` into the source store's own ids is **never** synthesised: the
+  SDK never fetched it and cannot re-verify it.
+- **The importing operator is recorded** as a `ContributorRef` with the
+  `importer` role, so who brought a belief in is part of its record.
+- **Anything the mapping cannot honestly place is left in the blob**, never
+  guessed at. Malformed lines are skipped and *reported*, not silently dropped.
+
+### Why your migrated beliefs look less confident
+
+They are second-hand, and the SDK says so rather than flattering them:
+
+- Every migrated particle carries `calibration_source = IMPORTED` and a single
+  flat `migration.import_confidence` (default `0.35`). One number, one meaning:
+  *this was believed by a system we cannot interrogate.*
+- The source store's own scores (where its format has them) are preserved as
+  tags and **never** become `confidence.value` — that field is immutable at
+  creation and multiplies into `effective_confidence`, so importing another
+  system's unexplained scalar would silently colour every downstream ranking.
+- `IMPORTED` is a distinct calibration source precisely so you can still tell
+  **what you brought with you** from **what your agent has learned since**, and
+  so an operator can cap the two populations separately.
+
+**The lever for trusting a migrated store is `particles trust set`**, against
+the export's source type — revisable, auditable, and demotion-only. Raising
+`migration.import_confidence` is not that lever: it is frozen into each
+particle at creation and cannot be revised afterwards.
+
+### Re-running an import
+
+Importing the same export twice produces **zero new particles**. The export
+dedups to one corpus entry by content hash, entities re-attach to their existing
+Subjects through their `mcp-memory` external ref, and identical claims are
+caught by the exact-duplicate rung before reconciliation. A *changed*
+export (you kept using the old store and exported again) adds a new snapshot and
+brings only what is new.
+
+### Known limits
+
+- **Entities with no observations do not survive.** The reference server keeps
+  an entity that has never been observed; a particle store has no belief to hang
+  it on, so nothing is created. The count is reported as an extraction quality
+  note rather than passed over in silence.
+- **One format ships today.** Mem0 / Zep / SuperMemory mappers are not
+  speculative work: a format is added when a real migrating user brings that
+  export, because undocumented, unversioned schemas written against a guess rot
+  silently.
 
 ## Cross-exporter quality threshold
 

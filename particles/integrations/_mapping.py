@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure ``QueryResponse`` → LangChain return-shape mapping.
 
 These helpers carry **all** the adapter's logic that does *not* need

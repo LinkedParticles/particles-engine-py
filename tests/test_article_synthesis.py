@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/render/article_synthesis/render.py — prompt variants.
 
 Covers the directed-per-section synthesis additions: the

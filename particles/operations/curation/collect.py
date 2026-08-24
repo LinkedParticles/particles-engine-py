@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Union the existing finders into one card list.
 
 Calls the finders that **already exist** and normalizes each one's native

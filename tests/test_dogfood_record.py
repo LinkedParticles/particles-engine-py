@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the dogfood response recorder.
 
 The live LLM run in ``tests.dogfood.record`` is exercised manually

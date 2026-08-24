@@ -119,4 +119,8 @@ tailing the engine's log file into Loki today.
 
 For network exposure of the engine itself, see
 [Remote engine](remote-engine.md); observability rides whatever channel
-(Tailscale / SSH tunnel) that uses.
+(Tailscale / SSH tunnel) that uses. If the engine runs as a container, the
+OTel environment goes in the same place as the rest of its configuration —
+see [Running in a container](container-deployment.md#overriding-configuration).
+The longest-running spans you will see belong to the nightly passes; what
+they are is [Scheduled consolidation](scheduled-consolidation.md).

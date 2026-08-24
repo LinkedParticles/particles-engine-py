@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the §9.3 coverage-gap detectors (particles/operations/query/gaps.py).
 
 Two flavours: corpus-level (entries with PENDING/FAILED snapshots) and

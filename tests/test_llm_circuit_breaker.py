@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Circuit-breaker on the LLM seam for account-level failures.
 
 An account-level failure (bad/missing key, no permission, out-of-credits) fails

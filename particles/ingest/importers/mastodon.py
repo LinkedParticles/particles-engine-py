@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Mastodon importer (Engine layer; moved from particles.extraction.mastodon
 ).
 

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM models and repository for the particle store (§8).
 
 Embeddings are stored as numpy arrays serialized to bytes and loaded into memory

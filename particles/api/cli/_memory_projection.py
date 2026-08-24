@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The MEMORY.md render-splice cycle + session-start freshness check.
 
 Two consumers in ``cli/hook.py``:

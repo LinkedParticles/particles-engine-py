@@ -2,355 +2,394 @@
   "extractor_id": "general-extractor",
   "extractor_version": "0.14.0",
   "fixture_count": 4,
-  "particle_count": 103,
+  "particle_count": 104,
   "fields": [
     {
       "field": "id",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "content",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.value",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "provenance",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "asserted_by",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "status",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 1,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {
-        "ACTIVE": 103
+        "ACTIVE": 104
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "schema_version",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "particle_type",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 1,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {
-        "CLAIM": 103
+        "CLAIM": 104
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "subject_ids",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
-      "rate": 1.0,
+      "populated_count": 89,
+      "total_count": 91,
+      "rate": 0.978021978021978,
       "distinct_values": 0,
-      "passes_threshold": true,
-      "failure_reason": null,
+      "passes_threshold": false,
+      "failure_reason": "Required field populated on 89/91 particles (98%); expected 100%",
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 13
     },
     {
       "field": "uncertainty_nature",
       "tier": "REQUIRED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 2,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {
         "EPISTEMIC": 95,
-        "ALEATORY": 8
+        "ALEATORY": 9
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.calibration_source",
       "tier": "RECOMMENDED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 1,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {
-        "EXTRACTOR_DIRECT": 103
+        "EXTRACTOR_DIRECT": 104
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "provenance[].snapshot_id",
       "tier": "RECOMMENDED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "extractor_ref",
       "tier": "RECOMMENDED",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.variance",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "confidence.calibration_method",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "uncertainty_kind",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "valid_until",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "supersedes",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "tags",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "context_fingerprint",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "properties",
       "tier": "OPTIONAL",
-      "populated_count": 14,
-      "total_count": 103,
-      "rate": 0.13592233009708737,
+      "populated_count": 13,
+      "total_count": 104,
+      "rate": 0.125,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "structured_claim",
       "tier": "OPTIONAL",
-      "populated_count": 99,
-      "total_count": 103,
-      "rate": 0.9611650485436893,
+      "populated_count": 97,
+      "total_count": 104,
+      "rate": 0.9326923076923077,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "canonical_form",
       "tier": "OPTIONAL",
-      "populated_count": 103,
-      "total_count": 103,
+      "populated_count": 104,
+      "total_count": 104,
       "rate": 1.0,
       "distinct_values": 1,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {
-        "PROSE": 103
+        "PROSE": 104
       },
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "sequence_context",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "basis",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     },
     {
       "field": "contributors",
       "tier": "OPTIONAL",
       "populated_count": 0,
-      "total_count": 103,
+      "total_count": 104,
       "rate": 0.0,
       "distinct_values": 0,
       "passes_threshold": true,
       "failure_reason": null,
       "value_counts": {},
-      "advisory_reason": null
+      "advisory_reason": null,
+      "excluded_count": 0
     }
   ],
-  "failures": [],
+  "failures": [
+    {
+      "field": "subject_ids",
+      "tier": "REQUIRED",
+      "populated_count": 89,
+      "total_count": 91,
+      "rate": 0.978021978021978,
+      "distinct_values": 0,
+      "passes_threshold": false,
+      "failure_reason": "Required field populated on 89/91 particles (98%); expected 100%",
+      "value_counts": {},
+      "advisory_reason": null,
+      "excluded_count": 13
+    }
+  ],
   "warnings": [],
-  "generated_at": "2026-08-02 11:31:53.063861+00:00",
-  "fixture_corpus_hash": "f294b5b1717b5102b73a71d9c00a704f008cb8a063b527c3e8068c0c9d5f1ddf",
+  "generated_at": "2026-08-23 23:31:03.743012+00:00",
+  "fixture_corpus_hash": "181c0ec8413de8a09a1b16d9ac6d914e3212943c058b33f37ebd0a0b6d845831",
   "recommended_threshold": 0.8,
   "extraction_provider_model": "anthropic:claude-sonnet-4-6",
   "quality_notes": [
-    "Fixture selection: routing precedence \u2014 4 of 16 corpus fixtures route to general-extractor.",
-    "Fixture web-article-001: DECLINED (non-asserted, excluded from factual surface): Fernwood Systems decided against moving to a remote execution cluster at the tim",
+    "Fixture selection: routing precedence \u2014 4 of 17 corpus fixtures route to general-extractor.",
+    "Fixture web-article-001: DECLINED (non-asserted, excluded from factual surface): Fernwood Systems evaluated moving to a remote execution cluster at the same time",
     "Fixture web-article-001: HYPOTHETICAL (non-asserted, excluded from factual surface): Remote execution would have added a second failure domain to every build.",
-    "Fixture web-article-001: DOCUMENT_META (labelled, excluded from factual surface): The blog post about content-addressed build caching was authored by Dana Okonkwo",
-    "Fixture web-article-001: DOCUMENT_META (labelled, excluded from factual surface): The blog post was published on 12 March 2026.",
+    "Fixture web-article-001: DOCUMENT_META (labelled, excluded from factual surface): The article about content-addressed build caching at Fernwood Systems was author",
+    "Fixture web-article-001: DOCUMENT_META (labelled, excluded from factual surface): The article was published on 12 March 2026.",
+    "Fixture web-article-002: DOCUMENT_META (labelled, excluded from factual surface): The post is an annual results summary by Tomas Ilves, board treasurer.",
     "Fixture web-article-002: HYPOTHETICAL (non-asserted, excluded from factual surface): Halcyon Grid Cooperative expects to energize the fourth array in 2027 if interco",
-    "Fixture web-article-002: DOCUMENT_META (labelled, excluded from factual surface): This post was authored by Tomas Ilves, board treasurer of Halcyon Grid Cooperati",
-    "Fixture web-article-002: DOCUMENT_META (labelled, excluded from factual surface): This post was published on 10 February 2026.",
-    "Fixture web-essay-001: DOCUMENT_META (labelled, excluded from factual surface): This essay was written by Priya Raghunathan.",
-    "Fixture web-essay-001: DOCUMENT_META (labelled, excluded from factual surface): This essay was published on 4 November 2025.",
-    "Fixture web-essay-001: DOCUMENT_META (labelled, excluded from factual surface): This essay is categorized under Essays on the Salt Marsh Notes blog.",
-    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview with Kaldestad took place after her team's second field season.",
-    "Fixture web-interview-001: Item 24: VALIDITY_BELOW_FLOOR: boundary 2027-12-31 dropped (validity_confidence 0.7 < floor 0.75)",
-    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview was conducted by Jonas Brekke.",
+    "Fixture web-essay-001: DOCUMENT_META (labelled, excluded from factual surface): This essay was posted in the Essays category on Salt Marsh Notes.",
+    "Fixture web-essay-001: DOCUMENT_META (labelled, excluded from factual surface): This essay was authored by Priya Raghunathan and published on 4 November 2025.",
+    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview was conducted after Kaldestad's team's second field season.",
+    "Fixture web-interview-001: Item 23: VALIDITY_BELOW_FLOOR: boundary 2027-12-31 dropped (validity_confidence 0.7 < floor 0.75)",
     "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview was published on 21 May 2026.",
-    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview transcript was edited for length."
+    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview was conducted by Jonas Brekke.",
+    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview transcript was edited for length.",
+    "Fixture web-interview-001: DOCUMENT_META (labelled, excluded from factual surface): The interview was published in Tidewrack Quarterly."
   ],
   "advisories": []
 }

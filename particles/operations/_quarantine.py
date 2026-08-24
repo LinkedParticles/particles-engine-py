@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Quarantined-loser resolution shared by Review and the trust cascade.
 
 A *quarantined* particle is the losing candidate of a §6.6 INCONSISTENT

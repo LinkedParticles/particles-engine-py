@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the explicit operator usefulness gesture.
 
 The four behaviours the ADR's activation gate names, plus the surface contracts:

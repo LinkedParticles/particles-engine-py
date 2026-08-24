@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Explicit operator usefulness gesture — the second utility channel.
 
 Utility is mined from the harvest transcript's *tool-call actions* —

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Logseq exporter package.
 
 Public surface: :class:`LogseqExporter` is the registered plugin

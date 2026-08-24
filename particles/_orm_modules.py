@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Single source of truth for ORM-module registration.
 
 Every module that declares ``Mapped[...]`` columns on

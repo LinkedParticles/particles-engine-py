@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Store-aware interchange export / import / restore (Part B).
 
 Wraps the pure codec with the DB I/O the wire format needs:

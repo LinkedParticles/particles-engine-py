@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the first-run memory audit operation + renderer.
 
 Pins the deterministic parts with injected cards / mocked finders: bucket

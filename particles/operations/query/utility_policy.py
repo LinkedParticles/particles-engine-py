@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Query-time usefulness (utility) policy — the lens layer.
 
 The usefulness analogue of the ``DecayPolicy`` (``decay_policy.py``): a

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the symbol-aware docstring extractor.
 
 The extractor is deterministic and LLM-free, so the bulk of these are plain

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """query verb — natural-language Q&A over the particle store."""
 
 from __future__ import annotations

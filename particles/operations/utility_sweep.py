@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The rank-lift calibration sweep — the harness, shipped.
 
 This calibrated ``utility.default.rank_lift`` (``λ``) by hand and left the

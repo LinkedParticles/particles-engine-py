@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Comparator memories for the LongMemEval harness (§ comparators).
 
 The four-condition table answers *how good is Particles as a memory* against

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Client-layer pytest fixtures, shared by both exported trees (D4).
 
 The split-package build gives the Client (``linkedparticles-core``) and Engine

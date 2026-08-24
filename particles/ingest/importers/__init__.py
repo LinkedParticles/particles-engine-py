@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine-layer importer plugins.
 
 Importers fetch a URL and write the resulting blob into the corpus, so they

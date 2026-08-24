@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles extract``'s per-page reporting.
 
 Reported from dogfood: a single 83-page PDF printed 83 ``Page N: 0 particles``

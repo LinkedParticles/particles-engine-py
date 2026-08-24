@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # The baked in-image configuration.
 #
 # Copied to /etc/particles/config.yaml, which PARTICLES_CONFIG points at. Named

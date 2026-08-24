@@ -9,8 +9,22 @@
 # Any value here can be overridden by the corresponding PARTICLES_* env var.
 # Example: PARTICLES_TRUST_DIFFERENTIAL_THRESHOLD=0.20 overrides
 #          trust.differential_threshold below.
+#
+# Each section is tagged [client] or [engine]. Both are valid here
+# and both are always loaded — the tag says which *distribution* acts on the
+# section, and exists because the two share one import package:
+#
+#   [client]  read by the Client layer, which ships in `linkedparticles-core`.
+#             Effective in every install, core-alone or full.
+#   [engine]  read only by the Engine layer and the surfaces, which ship in
+#             `linkedparticles`. Setting one in a `linkedparticles-core`-only
+#             install is accepted and validated, but nothing there reads it.
+#
+# If you installed the full `linkedparticles`, every section applies to you and
+# the tags are informational. The declaration lives in `CLIENT_SECTIONS` in
+# `particles/config.py`; tests keep the two in agreement.
 
-storage:
+storage:  # [client]
   blob_dir: ./corpus_blobs
   database_url: sqlite+aiosqlite:///./particles.db
   # Additional named stores for multi-store / federation. The
@@ -48,7 +62,7 @@ storage:
     # Lockfile path; unset ⇒ "<database file>.writelock" beside the store DB.
     # path: ./particles.db.writelock
 
-cli:
+cli:  # [engine]
   # Seconds of silence after which a long-running verb prints a liveness line
   # ("… extract: working (2m14s elapsed)") to stderr, so a slow command is never
   # mistaken for a hung one. Written to stderr and erased on completion, and
@@ -56,7 +70,7 @@ cli:
   # and machine-read output is unaffected. Set to 0 to disable entirely.
   heartbeat_seconds: 20.0
 
-http:
+http:  # [client]
   # User-Agent sent on all outbound HTTP requests.
   user_agent: "particles-sdk/0.3.0 (https://github.com/LinkedParticles/particles-engine-py)"
   timeout_seconds: 30
@@ -68,7 +82,7 @@ http:
   max_bytes: 104857600
 
 # FastAPI app limits (defense-in-depth for the HTTP surface).
-api:
+api:  # [engine]
   # Cap on the accepted *inbound* request body, in bytes. Bodies larger than
   # this get a 413 before the handler runs — a backstop against memory
   # exhaustion from an unbounded upload (uvicorn/Starlette impose no default
@@ -121,7 +135,7 @@ api:
 # the date names the artifact. Unset from a source checkout, and /health then
 # omits the field rather than guessing. A value written here is a claim about
 # the artifact that the artifact did not make.
-build:
+build:  # [engine]
   date: null
 
 # Thin-client → remote-engine connection. When base_url is unset
@@ -132,7 +146,7 @@ build:
 # store. The bearer token the client presents is a SECRET — set the
 # PARTICLES_ENGINE_TOKEN env var (distinct from the server's PARTICLES_API_KEY);
 # it never goes here.
-engine:
+engine:  # [engine]
   # base_url: "http://mac-mini.local:8000"   # unset = local-direct (default)
   timeout_seconds: 60.0
 
@@ -155,7 +169,7 @@ engine:
 # ships this telemetry off-box. Prefer a collector inside the same trust
 # boundary as the SDK (a local Alloy/OTel Collector on the same host or
 # network); only forward to an external backend you trust with this metadata.
-observability:
+observability:  # [engine]
   enabled: false
   service_name: "particles"
   # console = print spans/metrics to the log (zero-infra, diagnose-now);
@@ -180,14 +194,14 @@ observability:
 # compiled-in EMBEDDING_MODEL_ID). They default to the reference profile and
 # must change only in lockstep with the encoder — a profile change requires
 # re-embedding the store.
-embeddings:
+embeddings:  # [client]
   progress_bars: false
   dim: 384
   normalization: l2
 
 # Read-write MCP surface. Default-deny: with enabled_stores empty the
 # MCP server accepts no writes — only the read tools are exposed.
-mcp:
+mcp:  # [engine]
   write:
     # Allowlist of store handles writable over MCP. EMPTY = no MCP writes at all.
     # A listed store must reconcile in 'multi' (see reconciliation.per_store).
@@ -251,7 +265,7 @@ mcp:
 # Claude Code hook integration. `particles init claude-code`
 # installs a SessionStart digest-push hook and a SessionEnd harvest hook;
 # these knobs tune the `particles hook …` verbs those entries run.
-claude_code:
+claude_code:  # [engine]
   # Per-machine state directory (hook log; the projection's manifest
   # and render snapshot). `~` expands to your home directory.
   state_dir: "~/.particles/claude-code"
@@ -290,7 +304,7 @@ claude_code:
 # Namespace shared with the claude_code hook integration above:
 # the hooks move the bytes; this decides what the projected `memory-index`
 # region of MEMORY.md says.
-agent_memory:
+agent_memory:  # [engine]
   projection:
     # Render + splice the sentinel-delimited memory-index region into
     # MEMORY.md at the tail of every harvest cycle, and run the session-start
@@ -342,7 +356,7 @@ agent_memory:
 # planned. max_tokens is NOT set here — it is per-call (e.g. 8192 for an
 # extraction pass, 16 for the benchmark judge) and lives with each call site
 # (extraction.max_tokens, extraction.query_max_tokens, wiki.max_tokens).
-llm:
+llm:  # [client]
   default:
     provider: anthropic
     model: claude-sonnet-4-6
@@ -437,7 +451,7 @@ llm:
   # prompt_cache:
   #   enabled: true                # false ⇒ no cache_control sent, as before 0252
 
-extraction:
+extraction:  # [client]
   # NOTE: `extraction.model` moved to `llm.default.model`. The old
   # key is still honoured for one deprecation cycle (it is migrated to
   # llm.default.model with a warning), but prefer the `llm` section above.
@@ -505,7 +519,7 @@ extraction:
 # classifies each candidate as WORLD or DOCUMENT_META (a claim about the
 # source document's own structure / editorial apparatus, e.g. "Section 10.4
 # defines the exporter") and acts on the classification per `mode`.
-extraction_scope:
+extraction_scope:  # [client]
   # Master switch. When false, the prompt and extractor output are byte-for-
   # byte the pre-0.6.0 behaviour (no classification, no exclusion).
   enabled: true
@@ -528,7 +542,7 @@ extraction_scope:
   exempt_source_tags:
     - rule-file
 
-extraction_modality:
+extraction_modality:  # [client]
   # When true (default), the general extractor classifies each
   # candidate's assertion_modality (FALSIFIABLE / EVALUATIVE / EXPERIENTIAL /
   # CONSTITUTIVE), so the engine applies truth-semantics (§6.6 / lint / links)
@@ -537,7 +551,7 @@ extraction_modality:
   # byte-for-byte the pre-0.7.0 behaviour.
   enabled: true
 
-extraction_stance:
+extraction_stance:  # [client]
   # When true (default), the general extractor flags a candidate
   # that explicitly endorses / disputes another claim co-extracted from the
   # same source, and the pipeline reifies it into a stance particle bound by an
@@ -547,7 +561,7 @@ extraction_stance:
   # derivable. Set false to opt out — no stance fields, no edges (pre-0119).
   enabled: true
 
-extraction_polarity:
+extraction_polarity:  # [client]
   # capability 1. When true (default), the general extractor classifies
   # how the source document PRESENTS each candidate — ASSERTED (default / held),
   # DECLINED (rejected / superseded / deferred / out-of-scope), or HYPOTHETICAL
@@ -561,7 +575,7 @@ extraction_polarity:
   # candidate ASSERTED, nothing excluded (pre-0145 behaviour).
   enabled: true
 
-extraction_validity:
+extraction_validity:  # [client]
   # When true (default), the general extractor emits `valid_until` on a
   # candidate — populating the existing schema field the §9.3 staleness lint and
   # the as-of rung-3 retirement ladder already consume — ONLY for a claim
@@ -580,7 +594,7 @@ extraction_validity:
   # the stored confidence.value.
   min_boundary_confidence: 0.75
 
-structured_claim:
+structured_claim:  # [client]
   # The derived S-P-O rendering stored beside the immutable prose
   # claim — a machine-readable triple (subject / predicate / object, URIs where
   # resolvable) derived from `content`, stamped with the generator's id and
@@ -607,7 +621,7 @@ structured_claim:
   # every call already paid for. Lower = less work at risk, more fsyncs.
   backfill_commit_interval: 25
 
-rdf:
+rdf:  # [client]
   # RDF deposit — the parsing extractor that turns a deposited RDF
   # document (Turtle / N-Triples / TriG / N-Quads / JSON-LD / RDF-XML) into
   # STRUCTURE-CANONICAL particles: the triple is the assertion and `content` is
@@ -671,7 +685,7 @@ rdf:
     https://www.wikidata.org/wiki/: wikidata
     http://nomisma.org/id/: nomisma
 
-extraction_vision:
+extraction_vision: {}  # [client]
   #. Vision / multimodal extraction of image-bearing PDF
   # pages. OFF by default — opt-in cost, AND requires the extra:
   # `pip install particles[vision]` (installs the pypdfium2 rasterizer). When
@@ -690,7 +704,7 @@ extraction_vision:
   # max_pages: 50            # cap on vision-path pages per doc; rest fall back
   #                          # to text-only with a VISION_PAGE_CAP note
 
-document_supersession:
+document_supersession:  # [engine]
   # capability 2. When true (default), the ADR genre adapter records
   # each ADR's `supersedes:` / `superseded_by:` frontmatter as a corpus-entry
   # supersession relation at deposit, and §6.6 conflict resolution gains a new
@@ -704,7 +718,7 @@ document_supersession:
   # a superseded decision falls through to the trust rung / INCONSISTENCY).
   enabled: true
 
-document_precedence:
+document_precedence:  # [engine]
   # latest-authored-decision-wins tie-break among DETECTED conflicts.
   # When true (default), the query/projection ranker breaks a tie between two
   # ACTIVE particles a contradiction probe has flagged as conflicting (and only
@@ -724,7 +738,7 @@ document_precedence:
   # newer; 1.0 is inert.
   rank_penalty: 0.6
 
-journal_extractor:
+journal_extractor:  # [client]
   # When true (default), a corpus entry whose source_type is JOURNAL
   # (set by `particles deposit --journal` / `--source-type JOURNAL`) is routed
   # to the journal-aware extractor: it reifies first-person prose into
@@ -741,7 +755,7 @@ journal_extractor:
   # automatically if the synthesis call fails.
   synthesize_merged_narrative: true
 
-import_project:
+import_project:  # [engine]
   # `particles import project <dir>` walks a software-project tree and
   # deposits one corpus entry per source file (recursive walk + per-file entry +
   # content-hash dedup, the same skeleton `import vault` uses).
@@ -767,7 +781,7 @@ import_project:
     - ".pytest_cache"
     - ".ruff_cache"
 
-web_clipper:
+web_clipper:  # [engine]
   # `particles import web-clipper <dir>` walks a folder of
   # frontmatter-Markdown captures (the Obsidian Web Clipper is the first profile),
   # maps each capture's YAML header onto deposit fields, strips the header, and
@@ -794,7 +808,29 @@ web_clipper:
   # archived locally — trustable, decayable, queryable as the page it clipped).
   source_type: "WEB_PAGE"
 
-trust:
+migration:  # [client]
+  # `particles import mcp-memory <path>` brings an existing memory
+  # store across: the export is deposited verbatim under its own source type
+  # (MCP_MEMORY_EXPORT, STABLE/NEVER — a dump is a record of what was seen, not
+  # a live handle) and a structured, no-LLM extractor turns each record into a
+  # particle. Every migrated particle points back at that deposit by line number
+  # and is attributed to the import event; nothing is attributed to the source
+  # store, which this SDK never fetched and cannot re-verify.
+  #
+  # The one confidence every migrated record gets. Deliberately low: a migrated
+  # belief is second-hand — this store never saw the claim made, cannot check
+  # it, and did not calibrate the number. The incumbent's own score (where the
+  # format has one) is preserved as a tag and never becomes confidence.value:
+  # confidence.value is immutable at creation and multiplies into
+  # effective_confidence, so laundering another system's unexplained scalar into
+  # it would silently colour every downstream ranking.
+  #
+  # Raising this is NOT how you come to trust a migrated store. Use
+  # `particles trust set` against the export's source type — revisable,
+  # auditable, demotion-only — where this number is frozen at creation.
+  import_confidence: 0.35
+
+trust:  # [client]
   # Minimum trust score difference required for automatic trust-based demotion
   # at step 2 of the conflict resolution ladder.
   differential_threshold: 0.15
@@ -815,7 +851,7 @@ trust:
     CONVERSATION: agent-memory
 
 # Cross-entry §6.6 reconciliation policy.
-reconciliation:
+reconciliation:  # [engine]
   # Trust-resolution regime for a confirmed contradiction:
   #   single — one global trust order; rung-2 auto-supersede fires (the
   #             higher-trust claim wins, the other is demoted). Today's
@@ -834,7 +870,7 @@ reconciliation:
 
 # Content age decay — effective_confidence multiplier based on publication age.
 #. Omit a source type entirely to disable decay for it.
-content_age_decay:
+content_age_decay:  # [client]
   sources:
     REDDIT_POST:
       # Half-life in days: effective_confidence halves every N days.
@@ -876,7 +912,7 @@ content_age_decay:
 # A config still carrying the old keys fails validation — delete them and set
 # `rank_lift`. Adopted lenses published under the old vocabulary read as silent
 # about utility until re-deposited.
-utility:
+utility:  # [engine]
   # Master switch for applying the utility rank-lift to ranking.
   enabled: true
   # The store-local base "default" utility rule (a lens `utility_rules` layer
@@ -978,7 +1014,7 @@ utility:
 # promotion-only, so enabling the lens ranks the viewer's beliefs UP and never
 # drops a domain claim; it never touches confidence.value or the displayed
 # effective confidence.
-owner_lens:
+owner_lens:  # [engine]
   # Master switch. Off restores the pre-0220 ordering byte-for-byte — as does
   # leaving `subjects` empty, so this is a kill switch, not the thing to set.
   enabled: true
@@ -1013,7 +1049,7 @@ owner_lens:
   rank_lift: 0.0
 
 # Read-side confidence-modulation operator policy.
-confidence:
+confidence:  # [client]
   # Uncalibrated-confidence cap: when enabled, the confidence.value factor
   # entering the effective_confidence formula is clamped down to cap_value
   # (a read-side `min`) for any particle whose confidence.calibration_source is
@@ -1035,7 +1071,7 @@ confidence:
     #   - AGENT_ASSERTED
 
 # Conformance-validator operator policy.
-conformance:
+conformance:  # [engine]
   # Read-side trust cap: when enabled, an extractor whose last
   # `particles extractor conform <id>` run showed a *genuinely evaluable*
   # REQUIRED failure (fixtures produced particles AND a REQUIRED field fell
@@ -1055,7 +1091,7 @@ conformance:
 # are not all stamped at import time. Precedence (highest wins): an explicit
 # `deposit --date` > a leading date line in the content > the file mtime.
 # URL / importer deposits set the date from source metadata and ignore this.
-deposit_date:
+deposit_date:  # [engine]
   # Scan the head of the content for a standalone date line (e.g. a journal's
   # leading `2026-03-15`).
   detect_leading_date: true
@@ -1071,7 +1107,7 @@ deposit_date:
     - "%Y/%m/%d"
     - "%Y.%m.%d"
 
-subjects:
+subjects:  # [engine]
   # Wikidata API rate limit (requests per second).
   wikidata_rate_limit_rps: 2.0
   # In-memory Wikidata label cache TTL in seconds (default: 24 hours).
@@ -1101,7 +1137,7 @@ subjects:
 # filenames, CLI command strings, snake_case identifiers) to Subjects before
 # subject resolution. Applies to every extractor; precision-first (a real
 # entity is never suppressed).
-subject_gate:
+subject_gate:  # [engine]
   enabled: true
   # Names that always pass the gate (operator override for false positives).
   allowlist: []
@@ -1122,16 +1158,16 @@ subject_gate:
 #     wikidata:
 #       enabled: true     # turn an authority off without code
 #       priority: 30      # arbitration rank — lower wins when >1 recognize a name
-authorities: {}
+authorities: {}  # [engine]
 
-wikidata:
+wikidata:  # [client]
   # Confidence assigned to Wikidata statements by rank.
   rank_confidence:
     preferred: 0.99
     normal: 0.85
     deprecated: 0.30
 
-reddit:
+reddit:  # [client]
   # Minimum upvote score for a comment to be included in extraction.
   min_comment_score: 2
   # Maximum number of comments (by score) passed to the LLM. The reddit
@@ -1142,7 +1178,7 @@ reddit:
   # Maximum characters per comment body in the LLM prompt.
   comment_body_limit: 1000
 
-hackernews:
+hackernews:  # [client]
   # Maximum comments the importer fetches per HN thread (one Firebase
   # API call each). Mirrors ``reddit.top_comment_count``; deep threads
   # beyond this cap are truncated and the extractor surfaces a
@@ -1156,7 +1192,7 @@ hackernews:
   # prose. Two spaces matches the HN UI indent.
   comment_indent: 2
 
-mastodon:
+mastodon:  # [client]
   # Total cap on context items (ancestors + descendants) the importer
   # keeps per thread. Ancestors are retained first (the reply chain UP
   # is typically short); remaining budget goes to descendants. Deep
@@ -1172,7 +1208,7 @@ mastodon:
   # prose.
   reply_indent: 2
 
-github:
+github:  # [client]
   # Maximum number of gist comments (oldest first) passed to the LLM.
   gist_top_comment_count: 50
   # Maximum characters per gist comment body in the LLM prompt.
@@ -1191,7 +1227,7 @@ github:
   # claim. Enable for archival / completeness use cases.
   gist_synthesize_commenter_particles: false
 
-query:
+query:  # [engine]
   # Default number of particles returned per query.
   default_top_k: 40
   # Default minimum effective_confidence for query results.
@@ -1228,7 +1264,7 @@ query:
   #. 0.0 disables the gate.
   relevance_floor: 0.25
 
-contestedness:
+contestedness:  # [client]
   # per-claim contestedness is the max−min spread of a claim's
   # effective_confidence across the viewer's policy set (local policy + each
   # adopted lens). It is disclosure, never a discount — it never feeds
@@ -1247,7 +1283,7 @@ contestedness:
   # false to restore the pre-badge per-instrument behavior exactly.
   badge_enabled: true
 
-lint:
+lint:  # [engine]
   # CONFIDENCE_DECAY detector: flag an ACTIVE EPISTEMIC particle whose
   # confidence.variance has grown past this threshold (read-only finding;
   # no status change).
@@ -1264,7 +1300,7 @@ lint:
   # least halved the recency multiplier. Read-only WARNING; never flips status.
   recency_decay_threshold: 0.5
 
-obsidian:
+obsidian:  # [engine]
   # Minimum number of extracted particles a subject must have to appear in the export.
   # 0 = include all subjects regardless of particle count.
   min_particles: 0
@@ -1284,7 +1320,7 @@ obsidian:
   #. Set false to keep only per-subject articles.
   emit_narrative_notes: true
 
-inbox:
+inbox:  # [engine]
   # URL inbox for the iOS-Share-Sheet workflow (see docs/cli.md § Inbox).
   # An iOS Shortcut appends URLs to this file via iCloud Drive; the Mac
   # runs `particles inbox process` (or `inbox watch`) to deposit them.
@@ -1294,7 +1330,7 @@ inbox:
   # cheap (mtime stat + file read on change) so default leans fresh.
   poll_interval_seconds: 30
 
-wiki:
+wiki:  # [engine]
   # Minimum ACTIVE particles a subject must have to be rendered as a standalone
   # wiki article. Subjects below the threshold are skipped because a
   # one-claim article adds nothing over the Obsidian listing export.
@@ -1330,7 +1366,7 @@ wiki:
 # Logseq exporter. Everything else it needs comes from
 # `exporter_common` (min_particle_confidence / synthesis_min_particles) and
 # `wiki` (max_tokens / layer_b_enabled).
-logseq:
+logseq:  # [engine]
   # when true (default), `export logseq --with-synthesis` also emits
   # one page per ACTIVE NARRATIVE in Logseq's `Narratives/` page namespace (on
   # disk: `pages/Narratives___<slug>.md`), rendered as cited prose.
@@ -1342,7 +1378,7 @@ logseq:
 # via secrets.py), never configured here. Run with
 # `particles export notion --dry-run` first — a dry run reads the store and
 # reports the plan but makes ZERO Notion API writes.
-notion:
+notion:  # [engine]
   # The Notion database id the exporter syncs subjects into (one database row
   # per subject). Find it in the database's "Copy link" URL — the 32-char id
   # before the `?v=`. null means `export notion` refuses to run until set, or
@@ -1364,7 +1400,7 @@ notion:
 # Cross-exporter conventions. These options apply to every
 # shipped exporter (wiki, obsidian, anki). Per-invocation CLI flags
 # (`--min-particle-confidence`) override the value here.
-exporter_common:
+exporter_common:  # [engine]
   # Drop particles with effective_confidence below this threshold before
   # any per-exporter downstream step (prompt input, cache hash,
   # count-based min_particles, rendered output, references). 0.0 = no
@@ -1383,7 +1419,7 @@ exporter_common:
 # render is a scoped subgraph (--subject or --query) — a whole-store render
 # does not exist. These caps enforce the anti-hairball rule exporter-side;
 # when one binds, the rendered page discloses it (discipline).
-graph:
+graph:  # [engine]
   # Maximum Subject nodes per render; excess drops lowest-rank first.
   max_nodes: 150
   # Maximum particles listed in one node's detail panel, by descending
@@ -1397,7 +1433,7 @@ graph:
 # `particles links suggest` — co-evidential candidate proposal.
 # Renamed from the old `lint.co_evidential_candidate_threshold` knob; lint no
 # longer emits CO_EVIDENTIAL_CANDIDATE findings.
-links_suggest:
+links_suggest:  # [engine]
   # Cosine-similarity threshold for proposing a CO_EVIDENTIAL link between two
   # same-Subject particles. Higher = more conservative (obvious paraphrases
   # only); lower = more candidates to review.
@@ -1429,7 +1465,7 @@ links_suggest:
 # the corpus — including undeposited ones — and rank the undeposited ones as
 # deposit suggestions (`particles corpus links suggest`). Suggestion-only;
 # never auto-deposits or crawls.
-citation_signal:
+citation_signal:  # [engine]
   # Harvest URL mentions at extraction time. Off = stop capturing new mentions
   # (existing rows and suggestions stay readable).
   capture_enabled: true
@@ -1455,7 +1491,7 @@ citation_signal:
 # A finite, leverage-ranked worklist that unions the existing read diagnostics
 # (lint / links_suggest / corpus_links_suggest / contested digest) into one card
 # list. Composition only — no new detection logic, no schema change.
-curation:
+curation:  # [engine]
   # "Today's N" — the finite per-session cap. The operator works the top N by
   # leverage and stops; the small cap is the guard against an infinite backlog.
   session_size: 7
@@ -1512,7 +1548,7 @@ curation:
 # only: detection thresholds stay with their finders
 # (links_suggest.candidate_threshold, lint.contradiction_candidate_threshold,
 # the decay floor).
-audit:
+audit:  # [engine]
   # Exemplar cards shown per headline class, ranked by leverage.
   exemplars_per_class: 3
   # Cap on session transcripts harvested by --transcripts (newest first).
@@ -1538,7 +1574,7 @@ audit:
 # --if-due. Cadence + cost gating only: detection thresholds and probe caps
 # stay with their finders (audit.max_contradiction_probes,
 # utility.mining.max_behavioural_calls, extraction.max_llm_calls_per_source).
-consolidation:
+consolidation:  # [engine]
   # --if-due threshold (hours): skip when the last successful run is younger.
   # 20 = daily scheduling with headroom for clock drift, so a laptop that was
   # asleep at the scheduled time can safely retry hourly.
@@ -1615,7 +1651,7 @@ consolidation:
 # itself, so a container needs no launchd/cron alongside it. This is a rider on
 # for deployments that opt in — everywhere else the external
 # scheduler contract stands. `GET /health` discloses each task's live state.
-daemon:
+daemon:  # [engine]
   # Master switch. `engine serve --daemon` turns it on for one process (the
   # flag wins over this value).
   enabled: false
@@ -1642,7 +1678,7 @@ daemon:
 # under test runs the shipped defaults (the published number must describe
 # the product, not a lab build). The answering model for QA conditions ii–iv
 # is the `llm.benchmark_answer` purpose; the judge is `llm.benchmark`.
-benchmark_memory:
+benchmark_memory:  # [engine]
   # Pinned HuggingFace revision (commit sha) of the LongMemEval v1 cleaned
   # dataset (xiaowu0162/longmemeval-cleaned). Bumping it is a deliberate
   # diff; the report records it. Finalized 2026-07-18 alongside the loader's
@@ -1662,9 +1698,25 @@ benchmark_memory:
   # (--yes pre-confirms; non-interactive runs without it abort with the
   # estimate printed). Mirrors audit.confirm_call_threshold.
   confirm_call_threshold: 50
+  # Retries for a *transient* answer/judge call failure before that call is
+  # reported as an infra failure and excluded from the accuracy denominator
+  # (with a disclosed count). A reply that carried no text block is never
+  # retried — it is deterministic at a fixed budget — and is excluded under
+  # the separate output-budget count instead, so an operator can tell a
+  # flaky network from their own too-low cap.
+  call_retries: 2
+  # Backoff before each retry, multiplied by the attempt number (0 = none).
+  call_retry_backoff_seconds: 2.0
+  # The answering model's context window in tokens. Before any LLM call, the
+  # run holds the qa_full_context baseline's largest prompt against this
+  # budget and refuses when it would overflow — the check that stops the
+  # ~500-session `m` variant from silently crushing the baseline. Default is
+  # the Claude window; set it to match whatever llm.benchmark_answer resolves
+  # to when routing elsewhere.
+  answer_context_window_tokens: 200000
 
 # Benchmark-harness run persistence (family).
-benchmark:
+benchmark:  # [engine]
   # Directory where `particles extractor benchmark` persists each run's
   # report as one JSON file (envelope: format stamp + the resolved extraction
   # provider:model pairing + the full §13.3 report), so provider comparisons
@@ -1681,7 +1733,7 @@ benchmark:
 # fetch_policy: LAZY. 0 = no floor — re-check whenever the ladder is invoked
 # (for local files the nightly consolidation cadence is the real rate limit,
 # and a stat costs ~1 microsecond).
-refetch_floors:
+refetch_floors:  # [engine]
   WEB_PAGE: 3600
   FORUM: 3600
   BLOG: 3600
@@ -1710,7 +1762,7 @@ refetch_floors:
 # (nightly) compares the file's mtime, and only then its SHA-256, against the
 # latest snapshot. A change writes a new PENDING snapshot; extraction turns it
 # into current beliefs and retires the generation it replaced.
-local_refresh:
+local_refresh:  # [engine]
   # The consolidation pass on/off. The pass makes no LLM calls, so it also runs
   # on a --structural-only night.
   enabled: true
@@ -1732,7 +1784,7 @@ local_refresh:
 #
 # Register with `particles rules sync`; inspect with `particles rules`.
 # ---------------------------------------------------------------------------
-rule_sources:
+rule_sources:  # [engine]
   enabled: true
   # Files or directories to track. `~` and $VAR are expanded; a directory is
   # walked for `filenames`. EMPTY means DISCOVER: the nearest ancestor of the

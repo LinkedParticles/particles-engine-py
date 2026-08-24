@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Persistent cache for Wikidata property and item labels.
 
 Labels are fetched once from the Wikidata REST API and stored here.

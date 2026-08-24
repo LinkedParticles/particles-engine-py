@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for deposit-time content-date capture (particles/corpus/deposit.py).
 
 Covers the pure leading-date detector, the precedence resolver

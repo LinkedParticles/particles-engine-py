@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Per-particle extraction-model provenance.
 
 One nullable column plus its index on ``particles``:

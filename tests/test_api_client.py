@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the thin-client backend seam (``particles/api/client``).
 
 Covers the three things the seam must get right: the factory picks the backend

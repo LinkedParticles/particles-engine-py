@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the shipped agent-onboarding skill files and `particles skills`.
 
 The install is a file copy, so the assertions worth making are about the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Subject resolution cascade.
 
 For each subject name extracted by the LLM, resolve to a canonical Subject:

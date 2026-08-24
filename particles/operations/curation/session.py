@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Session model + gesture dispatch (§4).
 
 ``build_curation_queue`` is the public entry point: it collects the cards (§1),

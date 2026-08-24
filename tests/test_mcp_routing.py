@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """the MCP server's tools route through the engine backend seam.
 
 With ``engine.base_url`` set, the local stdio MCP tools must operate on the

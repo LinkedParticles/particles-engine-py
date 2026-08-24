@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for conformance validation — JSON Schema and Markdown Bridge."""
 
 from __future__ import annotations

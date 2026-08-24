@@ -526,6 +526,11 @@ $ particles benchmark memory [OPTIONS]
 * `--store-dir PATH`: Directory for the per-question scratch stores (kept after the run; default: a deleted temp dir)
 * `--dataset-file PATH`: Local LongMemEval-format JSON file (skips the pinned download — used by the checked-in fixture and pre-verified copies)
 * `--context-budget INTEGER RANGE`: QA-at-budget clamp: cap condition ii's particle context at ~N tokens (rank order; baselines unclamped). Recorded on the run tuple — compare only against a matching run.  [x>=1]
+* `--top-k INTEGER RANGE`: Retrieval depth for condition i and the qa_particles context (default: benchmark_memory.top_k). Recorded on the run tuple — a top_k sweep is a sweep of this flag against one fixed store set.  [x>=1]
+* `--qa / --no-qa`: Run the end-to-end QA family (conditions ii-iv). --no-qa reports the retrieval stage alone and makes NO LLM call at all once the stores exist — the free tier for a retrieval-only ablation arm. The three QA rows then render `not run`.  [default: qa]
+* `--consolidation`: Ablation: run the dream cycle's pass list (reconcile, census, utility, abstraction) on each scratch store between extract and retrieve — the controlled instrument. LLM-priced (reconcile probes, contradiction probes); recorded on the run tuple. Mutually exclusive with --abstraction, which the cycle runs itself.
+* `--dedup-judge`: Ablation: run the co-evidential LLM judge in APPLY mode on each scratch store before retrieval, linking PARAPHRASE pairs CO_EVIDENTIAL so the ranker collapses them inside top-k. LLM-priced (one judged cluster per Subject); recorded on the run tuple.
+* `--reuse-stores`: Replay the scratch stores an earlier --store-dir run persisted instead of depositing and extracting again: zero write-time LLM calls. Requires --store-dir, and refuses unless that set's write-side tuple (dataset, selection, extraction + embedding model, write-time reconciliation knobs) matches this run's.
 * `--abstraction`: Ablation: run the abstraction-promotion pass (auto mode, age gate 0) on each scratch store between extract and retrieve. Recorded on the run tuple.
 * `--concurrency INTEGER RANGE`: Run up to N questions at once (each owns its scratch store; the report is identical to a sequential run's). Practical ceiling is your API rate tier — past ~4-8 the extra parallelism becomes 429 retries, not speed.  [default: 1; x>=1]
 * `--fresh`: Discard this experiment's checkpoint and start over. Runs are checkpointed per completed question by default, so an interrupted run resumes (and a completed run replays free) when re-invoked with identical knobs.
@@ -1579,6 +1584,7 @@ $ particles import [OPTIONS] COMMAND [ARGS]...
 * `vault`: Walk a Markdown vault and deposit every...
 * `project`: Walk a project tree and deposit every...
 * `web-clipper`: Walk a frontmatter-Markdown captures...
+* `mcp-memory`: Deposit a reference memory-server...
 
 ### `particles import vault`
 
@@ -1688,6 +1694,49 @@ $ particles import web-clipper [OPTIONS] CAPTURES_DIR
 * `--tags TEXT`: Comma-separated tags merged with each capture's frontmatter tags.
 * `-v, --verbose`: Print per-file progress while depositing.
 * `--debug`: Show DEBUG-level logs from deposit/fetch.
+* `--help`: Show this message and exit.
+
+### `particles import mcp-memory`
+
+Deposit a reference memory-server ``memory.jsonl`` for migration.
+
+Brings an existing ``@modelcontextprotocol/server-memory`` graph across:
+entities become Subjects, observations become single-subject particles, and
+relations become two-subject particles — the same encoding
+``particles memory serve`` reads, so a migrated graph is visible
+through the façade immediately.
+
+The export is deposited **verbatim** as an ``MCP_MEMORY_EXPORT`` entry
+(``STABLE`` / ``NEVER``: a dump is a record of what was seen, not a live
+handle), and every particle points back at it by line number. Nothing is
+attributed to the incumbent store itself — the SDK never fetched it and
+cannot re-verify it, so provenance names the artifact it actually holds.
+Re-running is idempotent (content-hash dedup).
+
+Migrated beliefs are deliberately low-confidence: they are second-hand, and
+the incumbent's own scores are preserved as tags rather than becoming
+confidence values. Raise them with ``particles trust set`` once you vouch
+for the source, not by editing the import floor.
+
+    particles import mcp-memory ~/.mcp/memory.jsonl
+    particles extract --all-pending
+    particles lint
+
+**Usage**:
+
+```console
+$ particles import mcp-memory [OPTIONS] EXPORT_PATH
+```
+
+**Arguments**:
+
+* `EXPORT_PATH`: Path to a reference memory-server memory.jsonl export.  [required]
+
+**Options**:
+
+* `--deposited-by TEXT`: Agent or operator ID performing the import.  [default: operator]
+* `--tags TEXT`: Comma-separated tags added to the corpus entry.
+* `--debug`: Show DEBUG-level logs from deposit.
 * `--help`: Show this message and exit.
 
 ## `particles inbox`

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared helpers for the Claude Code integration.
 
 Used by ``particles init claude-code`` (``cli/init.py``) and the

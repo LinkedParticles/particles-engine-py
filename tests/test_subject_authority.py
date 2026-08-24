@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the Subject Authority registry.
 
 Covers the Protocol/registry surface, `PatternAuthority` parity with the old

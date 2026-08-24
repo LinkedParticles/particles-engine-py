@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SQLAlchemy ORM and repository for extractor records (Extension A)."""
 
 from __future__ import annotations

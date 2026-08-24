@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the rule-source scope exemption.
 
 The defect was measured on a scratch store; the end-to-end test

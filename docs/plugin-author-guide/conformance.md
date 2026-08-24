@@ -14,6 +14,12 @@ report, but does not block merges. Run manually:
 uv run particles extractor conform <extractor-id>
 ```
 
+Report-only does not mean inert: an operator can opt in to the
+[conformance trust cap](../operator-guide/tuning.md#conformance-trust-cap),
+which clamps the effective trust weight of an extractor whose last report
+showed a genuinely evaluable REQUIRED failure. A fixture you author here is
+what that lever reads.
+
 Two prerequisites un-defer Phase 2 (open ADRs will handle them):
 
 1. **Diversity rule decision** — `uncertainty_nature` is REQUIRED
@@ -69,4 +75,7 @@ snapshot)` tuples. Two reports are only comparable if
 their corpus hashes match. This is intentional: comparing reports
 across an evolving fixture corpus is meaningless.
 
-The canonical contract: [`particles/conformance/AGENTS.md`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/conformance/AGENTS.md).
+The contract the validator walks is
+[`particles/conformance/contract.py`](https://github.com/LinkedParticles/particles-core-py/blob/main/particles/conformance/contract.py)
+— conformance is Client-layer, so it ships in `linkedparticles-core` and its
+source lives in the `particles-core-py` repository.

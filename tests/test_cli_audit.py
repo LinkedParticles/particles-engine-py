@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles audit`` verb + the init hand-off (§1/§4/§7).
 
 Pins the CLI contract with mocked seams: the no-key refusal (before anything

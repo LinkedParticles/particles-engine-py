@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Citation-signal deposit suggestions — ranking + dismiss.
 
 Ranks undeposited URL mentions (``particles.store.url_mention_store``) as

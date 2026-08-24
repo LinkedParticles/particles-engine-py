@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Utility-event channel discriminator — the explicit operator gesture.
 
 A second producer is added to ``utility_events``: an explicit operator

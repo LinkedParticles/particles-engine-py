@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extraction-quality benchmark harness (techspec §13.3).
 
 This package implements the reference runner for the frozen

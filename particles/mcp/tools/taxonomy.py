@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``list_taxonomies`` — paginated taxonomy + tag-tree dump.
 
 Routed through the ``Backend`` seam.

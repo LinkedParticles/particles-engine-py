@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Coverage-gap detectors for the §9.3 Query response.
 
 Two flavours of gap are surfaced to the caller alongside the answer:

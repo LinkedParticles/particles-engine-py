@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add taxonomy + tag_nodes + particle_tag_edges tables and tags_json column.
 
 Revision ID: 012

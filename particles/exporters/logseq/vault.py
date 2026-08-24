@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Logseq graph orchestration.
 
 The :func:`export_vault` coroutine is the entry point that

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Trust lenses (0.60.0).
 
 Three tables: ``trust_lenses`` (one row per materialised lens, latest version

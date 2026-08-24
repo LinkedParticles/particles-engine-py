@@ -24,7 +24,35 @@ once. Captured so far:
 Every report carries the hash of the **whole** fixture corpus, so adding a
 fixture invalidates the comparability of every existing baseline. A PR that
 grows the corpus therefore re-captures the untouched baselines in the same
-commit; only their `fixture_corpus_hash` and `generated_at` move.
+commit; normally only their `fixture_corpus_hash` and `generated_at` move.
+
+**"Only those two fields move" holds only if the baselines were fresh to begin
+with, and nothing checks that** (Phase 1 is report-only). The corpus-growth re-capture found six deterministic baselines carrying two
+accumulated drifts nobody had swept: `rdf-extractor` was still stamped
+`extractor_version 0.1.0` against a shipped 0.2.0, and every file predated the
+report schema gaining `excluded_count`. Neither moved a rate or a
+tier verdict, so the re-capture was benign — but a corpus-growth PR should
+**expect** a re-capture diff wider than two fields and read it before staging,
+rather than assuming the restamp is cosmetic. A gate that would have caught
+this is Phase 2 work.
+
+**Two REQUIRED-tier verdicts flipped in that same re-capture, in opposite
+directions, and neither is a regression.** Recorded here because the rule above
+("only a tier-level verdict change is a regression") would otherwise read them
+as two:
+
+* `journal-extractor` `subject_ids` **FAIL → PASS** (16/40 → 21/21). Not a
+  sample: the old denominator counted DOCUMENT_META and non-asserted particles,
+  which legitimately carry no subjects. `excluded_count` now removes them, so
+  the old FAIL was a measurement artifact and the new PASS is the corrected
+  reading. `general-extractor` gained the same 13 exclusions.
+* `general-extractor` `subject_ids` **PASS → FAIL** (103/103 → 89/91). This one
+  *is* the sample — two asserted particles came back without subjects on this
+  run. The REQUIRED rate rule wants 100%, which an LLM extractor cannot
+  guarantee run to run, so this verdict is expected to flip on re-capture in
+  both directions. That tension is; do not "fix" it by re-rolling
+  the capture until it passes, which is baseline-shopping and no more readable
+  than hand-editing the file.
 (Narrowing that scope to an extractor's routed subset — so growth in one
 source type stops invalidating unrelated baselines — is future work.)
 

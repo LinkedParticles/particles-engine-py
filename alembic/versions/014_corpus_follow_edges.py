@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add corpus_follow_edges table.
 
 Records the depth-1 follow relationship when ``deposit_url`` follows

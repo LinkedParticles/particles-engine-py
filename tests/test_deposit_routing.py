@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for deposit URL routing (particles/corpus/deposit.py).
 
 These verify that URLs are routed to the correct source type without

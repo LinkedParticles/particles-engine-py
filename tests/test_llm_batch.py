@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the batch-completion surface of ``particles/llm``.
 
 Covers the port (``complete_many`` and its sequential fallback), the Anthropic

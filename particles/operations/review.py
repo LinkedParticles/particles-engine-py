@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.6 Review operation (Extension B: cascade enabled).
 
 Presents INCONSISTENCY particles for human review; supports four resolution actions:

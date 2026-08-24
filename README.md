@@ -7,21 +7,145 @@
 > superseded, retracted, or disputed in the open. How much to trust it is a
 > perspective applied at query time, never baked into the record.
 
-The **Engine layer** of the Particles reference implementation — the
-state-holding SDK and its surfaces. This is the package you install to actually
-run a Particles knowledge store. The core loop:
+`linkedparticles` is the **Engine** of the Particles reference implementation —
+the package you install to actually run a belief store. Give it documents,
+pages, chat logs, or an agent's own session notes; get back claim-granularity
+beliefs, each carrying calibrated confidence, an uncertainty kind, a resolved
+subject, and provenance back to the exact source bytes. Ask a question and the
+answer cites the beliefs it was built from. Nothing is ever overwritten, so you
+can ask the store what it believed a year ago and why it stopped.
 
-- **deposit** source material into an append-only corpus;
-- **extract** claim-granularity particles with subject resolution and
-  confidence/provenance metadata;
-- **query** with effective-confidence ranking and subject filtering;
-- **lint** for contradictions and staleness;
-- **review** inconsistencies into a reusable source-trust policy.
+**When your agent is wrong, you can see exactly why, and fix it at the source.**
 
-When your agent is wrong, you can see exactly why, and fix it at the source.
+The Engine is a library first. The HTTP API, the CLI, the read-only MCP server,
+and the resident daemon are all *surfaces* over it.
 
-The Engine is a library first. The FastAPI server, the CLI, the read-only MCP
-server, and the resident daemon are all *surfaces* over it.
+## Install
+
+```bash
+pip install linkedparticles
+```
+
+Python 3.11+. `linkedparticles-core` — the store-free Client layer — is pulled
+in automatically.
+
+## Sixty seconds
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+particles db init
+
+# Deposit a source — file, URL, or literal text — into the append-only corpus
+particles deposit https://en.wikipedia.org/wiki/Pluto
+
+# Extract claim-granularity beliefs with confidence, subjects, and provenance
+particles extract --all-pending
+
+# Ask in natural language; the answer cites the particles behind it
+particles query "Why is Pluto not a planet?"
+
+# Health-check the store: contradictions, staleness, orphaned links
+particles lint
+```
+
+Because nothing is overwritten, the store can replay its own history. `--as-of`
+is the **assertion-time** lens — *what did the store believe at T, and why did
+it stop* — not what was true of the world at T:
+
+```bash
+particles query "How many planets are in the Solar System?" --as-of 2000-01-01
+# → the belief as it stood then, and why it no longer stands: SUPERSEDED,
+#   retired 2006-08-24, superseded by "Pluto is a dwarf planet."
+```
+
+There is a clickable version of that belief history on the
+[front door](https://linkedparticles.org). Step by step:
+[getting started](https://docs.linkedparticles.org/user-guide/getting-started/),
+then [as-of time travel](https://docs.linkedparticles.org/user-guide/as-of/).
+
+### Wiring it into an agent
+
+```bash
+particles mcp serve                 # read-only MCP server (stdio), any MCP client
+particles init claude-code          # session-start digest, session-end harvest
+particles engine serve              # HTTP API, for a shared or remote engine
+particles export obsidian ./vault   # also: anki, wiki, logseq, notion, graph, jsonl
+```
+
+It can also stand in for the reference memory server, and it plugs into
+LangChain as a retriever and a tool set — see
+[Claude Code memory](https://docs.linkedparticles.org/user-guide/claude-code/),
+[swapping in for the reference memory server](https://docs.linkedparticles.org/user-guide/memory-server-swap/),
+and [using from LangChain](https://docs.linkedparticles.org/user-guide/integrations/).
+
+## Does it hold up?
+
+Measured on **LongMemEval**, the multi-session agent-memory benchmark, with a
+full-context oracle and a no-memory floor run as controls in the same harness:
+
+| | Recall@10 | End-to-end QA |
+|---|---:|---:|
+| **Particles memory** | **0.940** | **0.733** |
+| Full-context oracle (baseline) | — | 0.793 |
+| No memory (floor) | — | 0.080 |
+
+Method, per-question-type breakdowns, comparator memories, and the
+budget-matched arm — including the arms where Particles *loses* — are on the
+[benchmarks page](https://docs.linkedparticles.org/benchmarks/), with the
+report JSONs of record beside them.
+
+## Security posture
+
+A memory layer is an *input-shaping* attack surface: it does not merely hold
+data, it shapes what the agent believes and does next, so a poisoned claim is
+an instruction on a delay timer. Before this code was opened we ran an
+adversarial application-security audit over the whole package — the HTTP, CLI,
+and MCP surfaces, the filesystem writers, the egress layer, and the build
+pipeline. The verdict, verbatim: **GO-WITH-FIXES**, with **33 findings — 2
+High, 7 Medium, 20 Low, 4 Info**. The ranked must-fix set merged the following
+day; the last open finding closed in `v1.128.0`.
+
+What that bought, and what it did not:
+
+- **Prompt injection is contained, not eliminated.** Every LLM call site that
+  touches attacker-controllable text keeps trusted instructions in the system
+  turn and wraps the untrusted material in a per-call, 128-bit-nonce data
+  fence, with structural backstops behind it — a JSON contract enforced at the
+  parser, a citation-id membership gate on synthesized prose. This raises the
+  bar materially. It is hardening, not immunity.
+- **The model is never given tools, and no model output is executed.** No
+  function-calling; nothing the model emits becomes a shell command, a SQL
+  fragment, or a fetch. An injection can at worst distort *claims* — never
+  trigger *actions*.
+- **Outbound fetches are validated per hop.** The host is resolved, the address
+  is checked against a blocklist, and the connection is made to *that vetted
+  address*, re-resolved and re-validated on every redirect — closing DNS
+  rebinding and redirect SSRF, not just the first lookup. The two fetches that
+  run as subprocesses reach the same guarantee by pinning to addresses this
+  process vetted.
+- **Fail-closed auth, and no raw SQL.** The API refuses to boot on a
+  non-loopback bind without a real bearer key, and the token comparison is
+  constant-time. Every query in the data layer is typed ORM with bound
+  parameters: no `text()`, no string-built SQL, no dynamic `ORDER BY`.
+- **Local-first by default.** Loopback bind, a local SQLite file, telemetry
+  off, and the MCP server as a locally-spawned stdio child rather than a
+  network service. The only outbound traffic in the default posture is what you
+  configured.
+
+The real answer to the residual is epistemic rather than technical: every
+particle carries its provenance, source trust is a read-time lens that
+discounts a distrusted source without rewriting anything, and `lint` / `review`
+turn your rulings on contradictions into a reusable trust policy. The store is
+a record of *what sources said, weighted by how much you trust them* — not an
+oracle — so a poisoned source is something you can see, discount, and retract
+with the audit trail intact.
+
+The limitations we ask you to read before relying on any of this — the
+unauthenticated read surface, verbatim storage of whatever you deposit
+(secrets included), the single-operator trust model, and the MCP write boundary
+— are in
+[SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md).
+That is also where to report a vulnerability; please report privately.
 
 ## Why Particles?
 
@@ -49,15 +173,6 @@ Memory in Particles maintains itself through a periodic, automated health discip
 <!-- sources: p-0296afc0, p-8476c2ac, p-8767ad66, p-9cf41a46, p-c3b1cef6, p-cea0186c, p-d0d41702, p-f1ced6c4, p-f35e1dee -->
 <!-- END PROJECTED: design-rationale -->
 
-## Install
-
-```bash
-pip install linkedparticles
-```
-
-This depends on `linkedparticles-core` (the store-free Client layer) — it is
-pulled in automatically.
-
 ## Architecture
 
 <!-- BEGIN PROJECTED: architecture (manifest: docs/projection/readme.yaml) -->
@@ -72,7 +187,8 @@ The journey from a raw source to a set of particles begins with Deposit, which w
 
 > The *Why Particles?*, *Design rationale*, and *Architecture* sections are
 > **cited projections of a particle store**, not hand-authored prose. Each
-> marked block is rendered from [`docs/projection/readme.yaml`](docs/projection/readme.yaml)
+> marked block is rendered from
+> [`docs/projection/readme.yaml`](https://github.com/LinkedParticles/particles-engine-py/blob/main/docs/projection/readme.yaml)
 > and the corpus bundle committed beside it, and the trailer under each block
 > names the exact claims it was built from. Edit the manifest or the underlying
 > particles and re-render — never the prose between the sentinels. Check it
@@ -83,26 +199,51 @@ The journey from a raw source to a set of particles begins with Deposit, which w
 > This is the project eating its own dogfood: the README argues for
 > claim-granularity knowledge with provenance, and is itself assembled that way.
 
+## Documentation
+
+Everything below is served at
+**[docs.linkedparticles.org](https://docs.linkedparticles.org)**.
+
+| Guide | What it covers |
+|---|---|
+| [User guide](https://docs.linkedparticles.org/user-guide/) | Depositing, extracting, querying, as-of time travel, exporting, agent integrations |
+| [Operator guide](https://docs.linkedparticles.org/operator-guide/) | Configuration, tuning, lint and review, remote engines, containers, observability, troubleshooting |
+| [Plugin-author guide](https://docs.linkedparticles.org/plugin-author-guide/) | Writing extractors, exporters, and benchmark suites |
+| [CLI reference](https://docs.linkedparticles.org/cli-reference/) | Every verb and flag |
+| [HTTP API](https://docs.linkedparticles.org/api/http/) | The OpenAPI contract |
+| [Benchmarks](https://docs.linkedparticles.org/benchmarks/) | LongMemEval results, method, and comparators |
+
+The standard itself — whitepaper, technical specification, and the normative
+schema, context, and vocabulary artifacts — lives at
+**[linkedparticles.org](https://linkedparticles.org)**.
+
 ## The three repositories
 
 | Repo | What it is |
 |---|---|
 | [`particles-standard`](https://github.com/LinkedParticles/particles-standard) | The standard: whitepaper, technical specification, normative schema + SHACL artifacts, conformance fixtures |
-| [`particles-core-py`](https://github.com/LinkedParticles/particles-core-py) | The Python Client layer (`linkedparticles-core`) |
+| [`particles-core-py`](https://github.com/LinkedParticles/particles-core-py) | The Python Client layer ([`linkedparticles-core`](https://pypi.org/project/linkedparticles-core/)) |
 | [`particles-engine-py`](https://github.com/LinkedParticles/particles-engine-py) | **This repo** — the Python Engine layer + surfaces (`linkedparticles`) |
 
 ## Deployment
 
-Container and chart artifacts live under [`deploy/`](deploy/). The engine ships
-as a single-writer service; see the
-[operator guide](docs/operator-guide/index.md).
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Container and chart artifacts live under
+[`deploy/`](https://github.com/LinkedParticles/particles-engine-py/tree/main/deploy).
+The engine ships as a single-writer service; see
+[running in a container](https://docs.linkedparticles.org/operator-guide/container-deployment/).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+See
+[CONTRIBUTING.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/CONTRIBUTING.md)
+and
+[ARCHITECTURE.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/ARCHITECTURE.md).
 Contributions are accepted under a Developer Certificate of Origin sign-off —
 there is no CLA.
+
+## License
+
+Apache-2.0. See
+[LICENSE](https://github.com/LinkedParticles/particles-engine-py/blob/main/LICENSE)
+and
+[NOTICE](https://github.com/LinkedParticles/particles-engine-py/blob/main/NOTICE).

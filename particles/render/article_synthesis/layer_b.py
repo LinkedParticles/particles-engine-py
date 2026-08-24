@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Layer B — semantic-alignment LLM-judge.
 
 Layer A only checks that every cited ID belongs to the allowed set;

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """SCHEMA_VERSION mismatch guard.
 
 Single guard helper called at the entry point of every operation that would

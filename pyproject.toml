@@ -21,8 +21,8 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.134.4"
-description = "Python reference SDK for the Particles epistemic knowledge standard — Engine layer and surfaces"
+version = "1.138.1"
+description = "Auditable, provenance-tracked memory for AI agents — the Particles engine and its API, CLI, and MCP surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -30,25 +30,34 @@ authors = [{ name = "The Particles authors" }]
 keywords = [
     "epistemic", "knowledge-management", "provenance", "uncertainty", "psum",
     "knowledge-graph", "beliefs", "llm", "agents", "rag", "citations",
+    "agent-memory", "memory", "mcp", "audit",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.134.4",
+    "linkedparticles-core==1.138.1",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "aiosqlite>=0.20",
@@ -101,10 +110,18 @@ langchain = [
 [project.scripts]
 particles = "particles.api.cli:app"
 
+# PyPI renders these beside the description and maps the recognized names
+# (Homepage / Documentation / Repository / Issues / Changelog) to icons. Both
+# sites are live and are the front of this project, so they lead. There is no
+# CHANGELOG.md in a published tree — the per-release notes ride the GitHub
+# Release — so "Changelog" points at the releases page.
 [project.urls]
-Homepage = "https://github.com/LinkedParticles/particles-engine-py"
+Homepage = "https://linkedparticles.org"
+Documentation = "https://docs.linkedparticles.org"
+Specification = "https://linkedparticles.org/spec/technical-specification/"
 Repository = "https://github.com/LinkedParticles/particles-engine-py"
 Issues = "https://github.com/LinkedParticles/particles-engine-py/issues"
+Changelog = "https://github.com/LinkedParticles/particles-engine-py/releases"
 
 [build-system]
 requires = ["hatchling"]

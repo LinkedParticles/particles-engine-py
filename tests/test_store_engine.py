@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Store-parameterized engine registry (2).
 
 Covers DSN resolution (default vs named vs unknown) and that two named stores

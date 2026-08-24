@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """trust sub-Typer — manage source trust rules."""
 
 from __future__ import annotations

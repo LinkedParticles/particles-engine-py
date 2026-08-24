@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """synthesis-cache sub-Typer — inspect and prune the shared article cache.
 
 The cross-exporter synthesis cache (`synthesis_cache`) never auto-evicts; this

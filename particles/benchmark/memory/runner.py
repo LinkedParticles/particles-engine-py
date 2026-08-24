@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Memory-benchmark runner (§3): deposit → extract → query → judge.
 
 The system under test is the pipeline the agent-memory wedge actually runs —
@@ -73,6 +77,8 @@ from particles.benchmark.memory.metrics import (
 )
 from particles.benchmark.memory.schema import (
     QA_CONDITIONS,
+    QA_EXCLUSION_BUDGET,
+    QA_EXCLUSION_INFRA,
     MemoryBenchmarkReport,
     MemoryQuestion,
     MemorySession,
@@ -83,7 +89,14 @@ from particles.benchmark.memory.schema import (
     RunSelection,
 )
 from particles.config import get_config
-from particles.core.schema import Mutability, Particle, QueryRequest, Snapshot, SourceType
+from particles.core.schema import (
+    Mutability,
+    Particle,
+    QueryRequest,
+    Snapshot,
+    SourceType,
+    SuggestMode,
+)
 from particles.corpus.deposit import deposit_text_versioned
 from particles.embeddings import get_embedding_model_id
 from particles.extraction.general import ExtractionResult
@@ -95,11 +108,15 @@ from particles.extraction.registry import ExtractorPlugin, select_extractor
 from particles.ingest.pipeline import extract_snapshot
 from particles.llm.registry import (
     CompletionRequest,
+    EmptyCompletionError,
+    LLMPurpose,
     complete,
     complete_many,
     get_provider,
 )
 from particles.operations.abstraction import is_derived, premise_ids_of, run_abstraction_pass
+from particles.operations.consolidation import run_consolidation
+from particles.operations.links_suggest import suggest_co_evidential
 from particles.operations.query.main import retrieve_ranked
 from particles.operations.query.source_info import SourceRow, load_source_rows
 from particles.store.particle_store import get_particles_by_ids
@@ -331,8 +348,17 @@ class MemoryRunEstimate(BaseModel):
     estimated_extraction_calls: int = 0
     estimated_answer_calls: int = 0
     estimated_judge_calls: int = 0
+    #: Upper bound on the calls made by an opted-in store-mutating pass
+    #: (``--consolidation``). Bounded, not projected: the per-store caps
+    #: (``consolidation.max_reconcile_probes`` + ``audit.max_contradiction_probes``)
+    #: are what a saturated store spends, and a sparse one spends less.
+    estimated_pass_calls: int = 0
     estimated_llm_calls: int = 0
     estimated_tokens: int = 0
+    #: Cost components this projection cannot bound, disclosed rather than
+    #: silently omitted — the confirm gate is worthless if a flag can route
+    #: spend around it.
+    unbounded_components: list[str] = Field(default_factory=list)
 
 
 def estimate_run(
@@ -341,6 +367,9 @@ def estimate_run(
     qa: bool = True,
     memory: str = "particles",
     baselines: bool = True,
+    reuse_stores: bool = False,
+    consolidation: bool = False,
+    dedup_judge: bool = False,
 ) -> MemoryRunEstimate:
     """Project LLM call counts + token volume from session byte counts.
 
@@ -350,6 +379,13 @@ def estimate_run(
     exactly one per unique session. ``baselines=False`` (a comparator run
     reusing the particles run's baseline columns) drops the full-context and
     no-memory answer/judge calls from the projection.
+
+    ``reuse_stores=True`` zeroes the write side outright: a replayed
+    store re-deposits ``unchanged`` and extracts nothing. The projection has to
+    say so, or the confirm gate demands ``--yes`` for ~8.7k phantom calls on a
+    run that makes none — and an operator who has learned to wave that through
+    is exactly the operator who will wave through the run that *does* cost
+    hundreds of dollars.
     """
     cfg = get_config().extraction
     unique_chars: dict[str, int] = {}
@@ -362,7 +398,9 @@ def estimate_run(
             unique_chars.setdefault(key, len(text))
 
     extraction_calls = 0
-    if memory == "notes":
+    if reuse_stores:
+        pass  # replayed store: no deposit, no extraction, no write-time call
+    elif memory == "notes":
         extraction_calls = sum(1 for n in unique_chars.values() if n > 0)
     elif memory == "particles":
         for n in unique_chars.values():
@@ -373,12 +411,32 @@ def estimate_run(
             else:
                 extraction_calls += min(-(-n // cfg.html_chunk_size), cfg.max_llm_calls_per_source)
 
+    # ablation passes. ``--consolidation`` is boundable from config:
+    # both probe caps are per store, and this harness gives every question its
+    # own. ``--dedup-judge`` is not — the judge fans out per Subject cluster,
+    # and how many clusters a store holds is a property of the extraction that
+    # has not happened yet — so it is disclosed as unbounded instead of being
+    # left out of the projection entirely.
+    pass_calls = 0
+    unbounded: list[str] = []
+    if consolidation:
+        cons_cfg = get_config().consolidation
+        per_store = cons_cfg.max_reconcile_probes + get_config().audit.max_contradiction_probes
+        pass_calls = per_store * len(questions)
+    if dedup_judge:
+        unbounded.append(
+            "--dedup-judge: one judged batch per Subject candidate cluster per "
+            "question — unbounded here (the cluster count is a property of the "
+            "extracted store). Probe it with a --limit 5 --reuse-stores run and "
+            "read 'dedup judge applied X of Y' in the quality notes."
+        )
+
     conditions = 3 if baselines else 1
     answer_calls = conditions * len(questions) if qa else 0
     judge_calls = conditions * len(questions) if qa else 0
     # Token magnitude: unique-session write-time input + the full-context
     # condition re-reading every question's haystack once.
-    write_chars = 0 if memory == "chunks" else sum(unique_chars.values())
+    write_chars = 0 if (memory == "chunks" or reuse_stores) else sum(unique_chars.values())
     token_chars = write_chars + (haystack_chars_total if qa and baselines else 0)
     return MemoryRunEstimate(
         questions=len(questions),
@@ -387,22 +445,150 @@ def estimate_run(
         estimated_extraction_calls=extraction_calls,
         estimated_answer_calls=answer_calls,
         estimated_judge_calls=judge_calls,
-        estimated_llm_calls=extraction_calls + answer_calls + judge_calls,
+        estimated_pass_calls=pass_calls,
+        estimated_llm_calls=extraction_calls + answer_calls + judge_calls + pass_calls,
         estimated_tokens=token_chars // 4,
+        unbounded_components=unbounded,
+    )
+
+
+class ContextWindowExceeded(RuntimeError):
+    """The ``qa_full_context`` baseline would not fit the answering model.
+
+    Raised before any LLM call. Refusal rather than a warning, for the same
+    reason :class:`SameModelViolation` is: a run that overflows the window
+    does not fail, it *degrades* — the provider truncates or errors, and the
+    baseline condition absorbs the whole loss while ``qa_no_memory``, whose
+    prompt is three lines, sails through. That is a systematically
+    anti-baseline result dressed as a measurement, and keeping the baseline
+    honest is the whole point of the four-condition table. The
+    ~500-session ``m`` variant is the case in hand; ``s`` (~115k tokens) fits a
+    200k window with room.
+    """
+
+
+class ContextWindowCheck(BaseModel):
+    """Whether the selected questions' full-context prompts fit the window.
+
+    Token counts use the harness's ~4-chars/token heuristic (the same one
+    :func:`estimate_run` reports with), so this is a magnitude check, not an
+    exact tokenizer. That is the right instrument: the failure it guards
+    against is an order-of-magnitude overflow, and a heuristic that says
+    "1.4M against a 200k budget" is as decisive as an exact count.
+    """
+
+    variant: str
+    checked_questions: int = 0
+    window_tokens: int = 0
+    reserved_output_tokens: int = 0
+    largest_question_id: str | None = None
+    largest_prompt_tokens: int = 0
+    over_window_questions: int = 0
+
+    @property
+    def budget_tokens(self) -> int:
+        """Input tokens available: the window less the reserved output budget."""
+        return self.window_tokens - self.reserved_output_tokens
+
+    @property
+    def fits(self) -> bool:
+        """True when every checked question's full-context prompt fits."""
+        return self.over_window_questions == 0
+
+
+def check_context_window(
+    questions: list[MemoryQuestion],
+    *,
+    variant: str,
+    qa: bool = True,
+    baselines: bool = True,
+) -> ContextWindowCheck:
+    """Hold each question's ``qa_full_context`` prompt against the window.
+
+    Only condition iii is unbounded: ``qa_particles`` is top-k bounded and
+    ``qa_no_memory`` carries no context at all, so a run without the baselines
+    (``qa=False``, or a comparator's ``baselines=False``) has nothing to
+    check and returns a vacuously-fitting result.
+
+    The window comes from ``benchmark_memory.answer_context_window_tokens``;
+    ``_ANSWER_MAX_TOKENS`` is reserved out of it, because on the Anthropic
+    Messages API the output budget is drawn from the same window as the
+    input.
+    """
+    cfg = get_config().benchmark_memory
+    check = ContextWindowCheck(
+        variant=variant,
+        window_tokens=cfg.answer_context_window_tokens,
+        reserved_output_tokens=_ANSWER_MAX_TOKENS,
+    )
+    if not (qa and baselines):
+        return check
+    system_tokens = len(_ANSWER_SYSTEM) // 4
+    for question in questions:
+        check.checked_questions += 1
+        prompt_tokens = len(_answer_prompt(question, _full_context(question))) // 4 + system_tokens
+        if prompt_tokens > check.largest_prompt_tokens:
+            check.largest_prompt_tokens = prompt_tokens
+            check.largest_question_id = question.question_id
+        if prompt_tokens > check.budget_tokens:
+            check.over_window_questions += 1
+    return check
+
+
+def render_context_window_check(check: ContextWindowCheck) -> str:
+    """One line stating the check's outcome — printed beside the estimate."""
+    if not check.checked_questions:
+        return "Context window: not checked — the qa_full_context baseline is not part of this run."
+    verdict = "fits" if check.fits else "DOES NOT FIT"
+    return (
+        f"Context window ({check.variant} variant): largest qa_full_context prompt "
+        f"~{check.largest_prompt_tokens:,} tokens "
+        f"({check.largest_question_id}) against a {check.budget_tokens:,}-token input "
+        f"budget ({check.window_tokens:,}-token window less {check.reserved_output_tokens:,} "
+        f"reserved for output) — {verdict}"
+        + (
+            ""
+            if check.fits
+            else f"; {check.over_window_questions} of {check.checked_questions} "
+            f"question(s) over budget"
+        )
+    )
+
+
+def _context_window_refusal(check: ContextWindowCheck) -> str:
+    """The refusal message — says which variant, by how much, and the two fixes."""
+    return (
+        f"The qa_full_context baseline does not fit the answering model's context "
+        f"window on the {check.variant!r} variant: {check.over_window_questions} of "
+        f"{check.checked_questions} question(s) exceed the {check.budget_tokens:,}-token "
+        f"input budget, the largest at ~{check.largest_prompt_tokens:,} tokens "
+        f"({check.largest_question_id}). Running anyway would not produce a weaker "
+        f"baseline — it would produce a truncated or errored one, and every lost call "
+        f"would land on the baseline condition alone. Either route "
+        f"llm.benchmark_answer to a model whose window fits and set "
+        f"benchmark_memory.answer_context_window_tokens to match, or run the "
+        f"conditions that are bounded (--no-baselines, or qa=False). Refusing to run."
     )
 
 
 def render_estimate(estimate: MemoryRunEstimate) -> str:
     """Human rendering of the estimate — always printed before any LLM call."""
-    return (
+    parts = [
         f"Estimate: {estimate.questions} question(s), {estimate.unique_sessions} unique "
         f"haystack session(s) → ~{estimate.estimated_extraction_calls} write-time "
         f"(extraction / notes) call(s) + {estimate.estimated_answer_calls} answer call(s) + "
-        f"{estimate.estimated_judge_calls} judge call(s) = "
-        f"~{estimate.estimated_llm_calls} LLM call(s), "
+        f"{estimate.estimated_judge_calls} judge call(s)"
+    ]
+    if estimate.estimated_pass_calls:
+        parts.append(f" + ≤{estimate.estimated_pass_calls} ablation-pass probe(s), capped")
+    parts.append(
+        f" = ~{estimate.estimated_llm_calls} LLM call(s), "
         f"~{estimate.estimated_tokens:,} tokens (the full-context baseline re-reads "
         f"each question's whole haystack). Repeated sessions are candidate-cached."
     )
+    for note in estimate.unbounded_components:
+        parts.append(f"\n  NOT INCLUDED ABOVE — {note}")
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -526,13 +712,87 @@ def judge_prompt(question: MemoryQuestion, model_answer: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class _CallOutcome(BaseModel):
+    """One answer/judge call: the text it returned, or why there is none.
+
+    ``excluded`` is set to a :data:`~particles.benchmark.memory.schema.
+    QA_EXCLUSION_KINDS` member exactly when ``text`` is ``None`` — the pair is
+    what lets a caller mark the condition *unscoreable* rather than wrong.
+    """
+
+    text: str | None = None
+    excluded: str = ""
+    detail: str = ""
+
+
+async def _scored_call(
+    purpose: LLMPurpose,
+    prompt: str,
+    *,
+    max_tokens: int,
+    retries: int,
+    backoff_seconds: float,
+    system: str | None = None,
+) -> _CallOutcome:
+    """One answer/judge call: retry transient failures, classify what remains.
+
+    The two failure causes are treated differently on purpose.
+
+    * A reply that carried **no text** (:class:`EmptyCompletionError`) is
+      deterministic at a fixed ``max_tokens``: an extended-thinking model that
+      spent its whole budget thinking will do it again on an identical call, so
+      retrying only spends the money twice — and on the full-context baseline a
+      retry is ~115k input tokens. Reported immediately as
+      :data:`QA_EXCLUSION_BUDGET`; the fix is the operator's cap.
+    * Anything else is transient until proven otherwise — an overload, a
+      timeout, a dropped connection — so it is retried ``retries`` times with a
+      linear backoff before being reported as :data:`QA_EXCLUSION_INFRA`.
+
+    Either way the caller gets a *typed absence*, never a verdict. Scoring
+    these ``correct=False`` is the asymmetry this exists to remove: the
+    ~115k-token baseline call fails far more often than the tiny
+    ``qa_no_memory`` one, so a shared failure rate is a systematic
+    thumb on the scale against the baseline.
+    """
+    attempt = 0
+    while True:
+        try:
+            text = await complete(
+                purpose,
+                prompt,
+                max_tokens=max_tokens,
+                system=system,
+                temperature=0.0,
+            )
+            return _CallOutcome(text=text)
+        except EmptyCompletionError as exc:
+            return _CallOutcome(excluded=QA_EXCLUSION_BUDGET, detail=repr(exc))
+        except Exception as exc:  # noqa: BLE001 — one bad call must not abort the run
+            if attempt >= retries:
+                return _CallOutcome(excluded=QA_EXCLUSION_INFRA, detail=repr(exc))
+            attempt += 1
+            log.info("benchmark %s call failed (%r); retry %d/%d", purpose, exc, attempt, retries)
+            if backoff_seconds:
+                await asyncio.sleep(backoff_seconds * attempt)
+
+
+def _excluded_note(question: MemoryQuestion, condition: str, stage: str, call: _CallOutcome) -> str:
+    """The quality note for a call that produced no verdict."""
+    return (
+        f"Question {question.question_id} [{condition}]: {stage} call produced no "
+        f"verdict ({call.excluded}: {call.detail}); excluded from the accuracy "
+        f"denominator, not scored incorrect"
+    )
+
+
 class _QaAccumulator:
-    """Per-condition accounting: verdicts + drill-down rows."""
+    """Per-condition accounting: verdicts, exclusions, and drill-down rows."""
 
     def __init__(self, condition: str) -> None:
         self.condition = condition
         self.pairs: list[tuple[str, bool]] = []
         self.rows: list[QaQuestionResult] = []
+        self.excluded: dict[str, int] = {QA_EXCLUSION_BUDGET: 0, QA_EXCLUSION_INFRA: 0}
 
     def record(self, question: MemoryQuestion, correct: bool) -> None:
         self.pairs.append((question.question_type, correct))
@@ -545,12 +805,32 @@ class _QaAccumulator:
             )
         )
 
+    def record_excluded(self, question: MemoryQuestion, kind: str) -> None:
+        """Record a question this condition could not score, by cause.
+
+        Deliberately touches neither ``pairs`` (the accuracy denominator) nor
+        ``accuracy_by_type``: an unscoreable call is absent from the rate, not
+        a zero in it.
+        """
+        self.excluded[kind] = self.excluded.get(kind, 0) + 1
+        self.rows.append(
+            QaQuestionResult(
+                question_id=question.question_id,
+                question_type=question.question_type,
+                correct=None,
+                abstention=question.is_abstention,
+                excluded=kind,
+            )
+        )
+
     def to_metrics(self, model_id: str) -> QaConditionMetrics:
         return QaConditionMetrics(
             condition=self.condition,
             model_id=model_id,
             questions=len(self.pairs),
             accuracy=qa_accuracy([c for _, c in self.pairs]),
+            excluded_budget=self.excluded[QA_EXCLUSION_BUDGET],
+            excluded_infra=self.excluded[QA_EXCLUSION_INFRA],
             accuracy_by_type=accuracy_by_type(self.pairs),
             per_question=self.rows,
         )
@@ -566,14 +846,174 @@ def _resolve_extraction_model() -> str:
     return get_provider("extraction").provider_model
 
 
+#: The one corpus source type this harness deposits (a haystack
+#: session is a ``CONVERSATION`` entry). Every read-side policy that keys off
+#: source type — decay above all — is therefore a property of *this* key alone.
+BENCHMARK_SOURCE_TYPE = "CONVERSATION"
+
+
 def _thresholds_snapshot() -> dict[str, float]:
-    """The pipeline thresholds in effect — part of the recorded run tuple (§5)."""
+    """The pipeline thresholds in effect — part of the recorded run tuple (§5).
+
+    Every knob an ablation can flip has to be *visible* here, or two arms of
+    that ablation record byte-identical tuples and the pair is unpublishable
+    (results are comparable only against the same recorded tuple).
+
+    Decay is the case that forced the point: it is
+    configured per source type and this harness deposits exactly one, so the
+    resolved ``CONVERSATION`` rule — not the whole ``content_age_decay``
+    table — is what belongs on the tuple. ``half_life_days`` of ``0.0``
+    encodes "no rule for this source type", i.e. decay is inert (see
+    :func:`decay_quality_note`).
+    """
     cfg = get_config()
+    decay = cfg.content_age_decay.sources.get(BENCHMARK_SOURCE_TYPE)
     return {
         "extraction.similarity_threshold": cfg.extraction.similarity_threshold,
         "confidence.uncalibrated_cap.enabled": float(cfg.confidence.uncalibrated_cap.enabled),
         "confidence.uncalibrated_cap.cap_value": cfg.confidence.uncalibrated_cap.cap_value,
+        "extraction.duplicate_suppression.enabled": float(
+            cfg.extraction.duplicate_suppression.enabled
+        ),
+        "links_suggest.auto_merge.enabled": float(cfg.links_suggest.auto_merge.enabled),
+        f"content_age_decay.sources.{BENCHMARK_SOURCE_TYPE}.half_life_days": (
+            decay.half_life_days if decay is not None else 0.0
+        ),
+        f"content_age_decay.sources.{BENCHMARK_SOURCE_TYPE}.floor": (
+            decay.floor if decay is not None else 1.0
+        ),
     }
+
+
+def decay_quality_note() -> str | None:
+    """Disclose an inert decay policy, or ``None`` when decay is live.
+
+    The shipped ``content_age_decay.sources`` table configures four web-ish
+    source types and **not** ``CONVERSATION``, so under stock config
+    :meth:`DecayPolicy.resolve` returns ``None`` for every particle this
+    harness mints and the recency factor is a flat 1.0. A decay on/off
+    ablation run in that state is *vacuous*: both arms are the "off" arm, and
+    the pair reads as "decay changes nothing" when in truth decay never ran.
+    The run says so in its own report rather than leaving it to whoever reads
+    the table (the honesty framing is structural).
+    """
+    if BENCHMARK_SOURCE_TYPE in get_config().content_age_decay.sources:
+        return None
+    return (
+        f"Decay is INERT for this run: content_age_decay.sources has no "
+        f"{BENCHMARK_SOURCE_TYPE} rule, so every particle scores at recency "
+        f"factor 1.0. A decay on/off ablation needs a "
+        f"{BENCHMARK_SOURCE_TYPE} entry in config before the 'on' arm means "
+        f"anything."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Persisted scratch stores — the ablation cost lever
+# ---------------------------------------------------------------------------
+
+#: Filename of the write-side manifest dropped beside a kept store set.
+STORES_MANIFEST = "stores-manifest.json"
+
+
+class StoreReuseError(Exception):
+    """A ``--reuse-stores`` run cannot safely replay the store set it was given."""
+
+
+def _write_side_tuple(
+    *,
+    dataset_revision: str,
+    variant: str,
+    selection_seed: int,
+    selection_limit: int | None,
+    selection_types: list[str],
+    extraction_model_id: str,
+    embedding_model_id: str,
+) -> dict[str, str]:
+    """The half of the run tuple that determines what lands **in** the stores.
+
+    Deliberately a strict subset of :class:`RunSelection`. ``top_k``, the
+    context budget, the answer/judge models and every read-side threshold are
+    excluded on purpose — varying those against one store set is exactly what
+    the reuse path exists to make cheap. What is in here is what a replay
+    cannot change after the fact: the dataset and question selection (which
+    sessions were deposited), the extraction model (what claims were minted),
+    the embedding model (the vectors those claims carry), and the two
+    write-time reconciliation knobs that decide which candidates became
+    particles at all.
+    """
+    cfg = get_config()
+    return {
+        "dataset_revision": dataset_revision,
+        "variant": variant,
+        "sample_seed": str(selection_seed),
+        "question_limit": "all" if selection_limit is None else str(selection_limit),
+        "question_types": ",".join(sorted(selection_types)),
+        "extraction_model_id": extraction_model_id,
+        "embedding_model_id": embedding_model_id,
+        "extraction.similarity_threshold": str(cfg.extraction.similarity_threshold),
+        "extraction.duplicate_suppression.enabled": str(
+            cfg.extraction.duplicate_suppression.enabled
+        ),
+    }
+
+
+def write_stores_manifest(
+    work_dir: Path, write_side: dict[str, str], question_ids: list[str]
+) -> None:
+    """Stamp a kept store set with the write-side tuple that produced it."""
+    payload = {
+        "format": 1,
+        "write_side": write_side,
+        "question_ids": sorted(question_ids),
+    }
+    (work_dir / STORES_MANIFEST).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def load_stores_manifest(
+    work_dir: Path, write_side: dict[str, str], question_ids: list[str]
+) -> dict[str, str]:
+    """Validate a store set against this run's write-side tuple; return the manifest's.
+
+    Refuses rather than warns. A store set built under a different extraction
+    model, a different question selection, or different write-time
+    reconciliation knobs is a **different population**, and an ablation
+    measured against it answers a question nobody asked — the failure mode
+    the comparability contract exists to prevent, arriving here
+    as a silent one because a replayed store deposits ``unchanged`` and
+    re-extracts nothing. It costs nothing to check and a paid arm to miss.
+    """
+    path = work_dir / STORES_MANIFEST
+    if not path.exists():
+        raise StoreReuseError(
+            f"{path} not found — --reuse-stores needs a store set persisted by an "
+            f"earlier --store-dir run. Run the preparing arm first."
+        )
+    try:
+        payload = json.loads(path.read_text())
+    except ValueError as exc:
+        raise StoreReuseError(f"{path} is not readable JSON: {exc}") from exc
+    stored = payload.get("write_side")
+    if not isinstance(stored, dict):
+        raise StoreReuseError(f"{path} carries no write_side tuple.")
+    drift = sorted(
+        f"{k}: stored {stored.get(k)!r} != this run {v!r}"
+        for k, v in write_side.items()
+        if stored.get(k) != v
+    )
+    if drift:
+        raise StoreReuseError(
+            "The persisted stores were built under a different write-side tuple, so "
+            "replaying them would produce an incomparable arm:\n  "
+            + "\n  ".join(drift)
+        )
+    missing = [qid for qid in question_ids if not (work_dir / f"{qid}.db").exists()]
+    if missing:
+        raise StoreReuseError(
+            f"{len(missing)} selected question(s) have no persisted store under "
+            f"{work_dir} (first: {missing[0]}). Re-run the preparing arm."
+        )
+    return {str(k): str(v) for k, v in stored.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +1039,9 @@ def _run_checkpoint_key(
     judge_model_id: str,
     memory: str = "particles",
     baselines: bool = True,
+    consolidation: bool = False,
+    dedup_judge: bool = False,
+    reuse_stores: bool = False,
 ) -> dict[str, object]:
     """The identity of one experiment — everything that AFFECTS an outcome.
 
@@ -626,6 +1069,15 @@ def _run_checkpoint_key(
         "top_k": top_k,
         "context_budget": context_budget,
         "abstraction": abstraction,
+        # Outcome-affecting: a consolidated / judged / replayed store yields a
+        # different retrieval set, so these arms must never restore each
+        # other's checkpoints. Emitted only when non-default, exactly as
+        # ``memory`` / ``baselines`` are, so the particles key that predates
+        # these knobs stays byte-identical and no paid outcome became
+        # unrestorable.
+        **({"consolidation": True} if consolidation else {}),
+        **({"dedup_judge": True} if dedup_judge else {}),
+        **({"reuse_stores": True} if reuse_stores else {}),
         "qa": qa,
         "extraction_model_id": extraction_model_id,
         "embedding_model_id": embedding_model_id,
@@ -707,6 +1159,9 @@ async def run_memory_benchmark(
     qa: bool = True,
     context_budget: int | None = None,
     abstraction: bool = False,
+    consolidation: bool = False,
+    dedup_judge: bool = False,
+    reuse_stores: bool = False,
     progress: Callable[[str], None] | None = None,
     concurrency: int = 1,
     checkpoint_dir: Path | None = None,
@@ -813,6 +1268,16 @@ async def run_memory_benchmark(
     cfg = get_config().benchmark_memory
     effective_top_k = top_k if top_k is not None else cfg.top_k
     total = questions_total if questions_total is not None else len(questions)
+    call_retries = cfg.call_retries
+    call_backoff = cfg.call_retry_backoff_seconds
+
+    # Pre-flight: refuse before spending anything if the full-context baseline
+    # would overflow the answering model's window. Enforced here rather than in
+    # the CLI so every caller — the integration smoke, a programmatic run —
+    # gets the same refusal.
+    window_check = check_context_window(questions, variant=variant, qa=qa, baselines=baselines)
+    if not window_check.fits:
+        raise ContextWindowExceeded(_context_window_refusal(window_check))
 
     # ablation: force the abstraction pass on (auto mode, age gate
     # zeroed — the scratch stores' particles are minutes old) for this run's
@@ -870,6 +1335,35 @@ async def run_memory_benchmark(
     )
     embedding_model_id = get_embedding_model_id()
 
+    # store reuse. A replayed store's sessions re-deposit ``unchanged``
+    # (identical ``uri_r`` + content hash), so ``deposits`` comes back empty and
+    # not one extraction call is made — which is the entire cost lever: the
+    # write side is ~97 % of a run's bill and every read-side ablation wants a
+    # *fixed* store population anyway. The manifest gate is what keeps that from
+    # being a silent trap (see :func:`load_stores_manifest`).
+    reused_from: dict[str, str] | None = None
+    if reuse_stores:
+        if memory != "particles":
+            raise StoreReuseError(
+                f"--reuse-stores applies to the particles store; memory={memory!r} "
+                f"builds no scratch store."
+            )
+        if work_dir is None:
+            raise StoreReuseError("--reuse-stores requires --store-dir naming the persisted set.")
+        reused_from = load_stores_manifest(
+            work_dir,
+            _write_side_tuple(
+                dataset_revision=dataset_revision,
+                variant=variant,
+                selection_seed=selection_seed,
+                selection_limit=selection_limit,
+                selection_types=list(selection_types or []),
+                extraction_model_id=extraction_model_id or "",
+                embedding_model_id=embedding_model_id,
+            ),
+            [q.question_id for q in questions],
+        )
+
     sem = asyncio.Semaphore(max(1, concurrency))
     outcomes: list[_QuestionOutcome | None] = [None] * len(questions)
     # ``batch_qa`` handoff: retrieval (phase A) stashes each live question's
@@ -894,6 +1388,9 @@ async def run_memory_benchmark(
             top_k=effective_top_k,
             context_budget=context_budget,
             abstraction=abstraction,
+            consolidation=consolidation,
+            dedup_judge=dedup_judge,
+            reuse_stores=reuse_stores,
             qa=qa,
             extraction_model_id=extraction_model_id,
             embedding_model_id=embedding_model_id,
@@ -969,6 +1466,9 @@ async def run_memory_benchmark(
                             top_k=effective_top_k,
                             context_budget=context_budget,
                             abstraction=abstraction,
+                            consolidation=consolidation,
+                            dedup_judge=dedup_judge,
+                            db_path=db_path,
                             session_factory=session_factory if pooled else None,
                         )
             except SameModelViolation:
@@ -1026,22 +1526,17 @@ async def run_memory_benchmark(
                             f"{answer_model_id!r}. A same-model comparison is the validity "
                             f"condition of the QA family; refusing to continue."
                         )
-                    try:
-                        answer_text = await complete(
-                            "benchmark_answer",
-                            _answer_prompt(question, context_block),
-                            max_tokens=_ANSWER_MAX_TOKENS,
-                            system=_ANSWER_SYSTEM,
-                            temperature=0.0,
-                        )
-                    except SameModelViolation:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 — degrade per condition, keep the run
-                        outcome.notes.append(
-                            f"Question {question.question_id} [{condition}]: answer call "
-                            f"failed ({exc!r}); scored incorrect"
-                        )
-                        outcome.qa_marks[condition] = False
+                    answer = await _scored_call(
+                        "benchmark_answer",
+                        _answer_prompt(question, context_block),
+                        max_tokens=_ANSWER_MAX_TOKENS,
+                        system=_ANSWER_SYSTEM,
+                        retries=call_retries,
+                        backoff_seconds=call_backoff,
+                    )
+                    if answer.text is None:
+                        outcome.notes.append(_excluded_note(question, condition, "answer", answer))
+                        outcome.qa_excluded[condition] = answer.excluded
                         continue
 
                     current_judge = get_provider("benchmark").provider_model
@@ -1054,21 +1549,18 @@ async def run_memory_benchmark(
                             f"One judge per table is what makes its accuracies comparable "
                             f"; refusing to continue."
                         )
-                    try:
-                        verdict_text = await complete(
-                            "benchmark",
-                            judge_prompt(question, answer_text),
-                            max_tokens=_JUDGE_MAX_TOKENS,
-                            temperature=0.0,
-                        )
-                        correct = parse_judge_verdict(verdict_text)
-                    except Exception as exc:  # noqa: BLE001
-                        outcome.notes.append(
-                            f"Question {question.question_id} [{condition}]: judge call "
-                            f"failed ({exc!r}); scored incorrect"
-                        )
-                        correct = False
-                    outcome.qa_marks[condition] = correct
+                    verdict = await _scored_call(
+                        "benchmark",
+                        judge_prompt(question, answer.text),
+                        max_tokens=_JUDGE_MAX_TOKENS,
+                        retries=call_retries,
+                        backoff_seconds=call_backoff,
+                    )
+                    if verdict.text is None:
+                        outcome.notes.append(_excluded_note(question, condition, "judge", verdict))
+                        outcome.qa_excluded[condition] = verdict.excluded
+                        continue
+                    outcome.qa_marks[condition] = parse_judge_verdict(verdict.text)
 
             outcomes[slot] = outcome
             if checkpoint_file is not None and checkpoint_key is not None:
@@ -1090,11 +1582,18 @@ async def run_memory_benchmark(
         judge per condition), each at the 50% Message Batches price. The
         one-model pins (§2/§5) are re-resolved once per condition batch
         (not per question) and still raise :class:`SameModelViolation` on a
-        mid-run config flip. A ``None`` from ``complete_many`` — a per-request
-        failure or an expired batch — scores that condition incorrect, exactly
-        as the inline path degrades an errored call. QA-complete questions are
-        checkpointed here (deferred from :func:`_process`, which returns before
-        its own checkpoint under ``batch_qa``).
+        mid-run config flip.
+
+        A ``None`` from ``complete_many`` carries **no cause** — a per-request
+        failure, an expired batch, and a reply with no text block all arrive as
+        the same ``None``. So that one call is re-issued through
+        :func:`_scored_call` on the inline path, where the adapter raises a
+        typed error: the retry both recovers a transient failure and, if it
+        persists, classifies it as budget or infra for the disclosure. Only the
+        handful of failures pay the full (non-batch) price.
+        QA-complete questions are checkpointed here (deferred from
+        :func:`_process`, which returns before its own checkpoint under
+        ``batch_qa``).
         """
         nonlocal answer_model_id, judge_model_id
         live = [
@@ -1110,7 +1609,7 @@ async def run_memory_benchmark(
         # The conditions actually built by _process — all three, or only the
         # memory-under-test slot when ``baselines=False``.
         active_conditions = [c for c in QA_CONDITIONS if c in contexts_by_slot[live[0]]]
-        answers_by_condition: dict[str, list[str | None]] = {}
+        answers_by_condition: dict[str, list[_CallOutcome]] = {}
         for condition in active_conditions:
             current_model = _resolve_answer_model()
             if answer_model_id is None:
@@ -1134,18 +1633,31 @@ async def run_memory_benchmark(
                     f"submitting answer batch [{condition}]: {len(requests)} request(s) "
                     f"via Message Batches (polling — the run is not hung)"
                 )
-            answers = await complete_many(
+            batch = await complete_many(
                 "benchmark_answer",
                 requests,
                 max_tokens=_ANSWER_MAX_TOKENS,
                 temperature=0.0,
                 latency_tolerant=True,
             )
+            answers = [
+                _CallOutcome(text=text)
+                if text is not None
+                else await _scored_call(
+                    "benchmark_answer",
+                    requests[i].prompt,
+                    max_tokens=_ANSWER_MAX_TOKENS,
+                    system=_ANSWER_SYSTEM,
+                    retries=call_retries,
+                    backoff_seconds=call_backoff,
+                )
+                for i, text in enumerate(batch)
+            ]
             answers_by_condition[condition] = answers
             if progress is not None:
                 progress(
                     f"answer batch [{condition}]: "
-                    f"{sum(a is not None for a in answers)}/{len(requests)} answered"
+                    f"{sum(a.text is not None for a in answers)}/{len(requests)} answered"
                 )
 
         for condition in active_conditions:
@@ -1161,18 +1673,17 @@ async def run_memory_benchmark(
                 )
             judge_requests: list[CompletionRequest] = []
             judged_slots: list[int] = []
-            for slot, answer_text in zip(live, answers_by_condition[condition], strict=True):
+            for slot, answer in zip(live, answers_by_condition[condition], strict=True):
                 outcome = outcomes[slot]
                 assert outcome is not None  # ``live`` filtered on this
-                if answer_text is None:
+                if answer.text is None:
                     outcome.notes.append(
-                        f"Question {questions[slot].question_id} [{condition}]: answer call "
-                        f"unavailable (batch); scored incorrect"
+                        _excluded_note(questions[slot], condition, "answer", answer)
                     )
-                    outcome.qa_marks[condition] = False
+                    outcome.qa_excluded[condition] = answer.excluded
                     continue
                 judge_requests.append(
-                    CompletionRequest(prompt=judge_prompt(questions[slot], answer_text))
+                    CompletionRequest(prompt=judge_prompt(questions[slot], answer.text))
                 )
                 judged_slots.append(slot)
             if not judge_requests:
@@ -1182,24 +1693,35 @@ async def run_memory_benchmark(
                     f"submitting judge batch [{condition}]: {len(judge_requests)} request(s) "
                     f"via Message Batches (polling — the run is not hung)"
                 )
-            verdicts = await complete_many(
+            verdict_batch = await complete_many(
                 "benchmark",
                 judge_requests,
                 max_tokens=_JUDGE_MAX_TOKENS,
                 temperature=0.0,
                 latency_tolerant=True,
             )
-            for slot, verdict_text in zip(judged_slots, verdicts, strict=True):
+            verdicts = [
+                _CallOutcome(text=text)
+                if text is not None
+                else await _scored_call(
+                    "benchmark",
+                    judge_requests[i].prompt,
+                    max_tokens=_JUDGE_MAX_TOKENS,
+                    retries=call_retries,
+                    backoff_seconds=call_backoff,
+                )
+                for i, text in enumerate(verdict_batch)
+            ]
+            for slot, verdict in zip(judged_slots, verdicts, strict=True):
                 outcome = outcomes[slot]
                 assert outcome is not None
-                if verdict_text is None:
+                if verdict.text is None:
                     outcome.notes.append(
-                        f"Question {questions[slot].question_id} [{condition}]: judge call "
-                        f"unavailable (batch); scored incorrect"
+                        _excluded_note(questions[slot], condition, "judge", verdict)
                     )
-                    outcome.qa_marks[condition] = False
+                    outcome.qa_excluded[condition] = verdict.excluded
                 else:
-                    outcome.qa_marks[condition] = parse_judge_verdict(verdict_text)
+                    outcome.qa_marks[condition] = parse_judge_verdict(verdict.text)
 
         for slot in live:
             outcome = outcomes[slot]
@@ -1258,6 +1780,30 @@ async def run_memory_benchmark(
         ab_cfg.enabled, ab_cfg.mode, ab_cfg.min_source_age_days = ab_saved
         if owns_work_dir and not keep_stores:
             shutil.rmtree(resolved_work_dir, ignore_errors=True)
+        elif keep_stores and memory == "particles" and not reuse_stores:
+            # Stamp the kept set so a later --reuse-stores run can prove it is
+            # replaying the population it thinks it is. Written in the finally
+            # so an interrupted run still leaves its partial set usable — the
+            # per-question .db existence check in load_stores_manifest is what
+            # catches a set that is short.
+            with contextlib.suppress(OSError):
+                write_stores_manifest(
+                    resolved_work_dir,
+                    _write_side_tuple(
+                        dataset_revision=dataset_revision,
+                        variant=variant,
+                        selection_seed=selection_seed,
+                        selection_limit=selection_limit,
+                        selection_types=list(selection_types or []),
+                        extraction_model_id=extraction_model_id or "",
+                        embedding_model_id=embedding_model_id,
+                    ),
+                    [
+                        q.question_id
+                        for q, o in zip(questions, outcomes, strict=True)
+                        if o is not None and o.failed_note is None
+                    ],
+                )
 
     # QA batch phase: every question has now retrieved, so a whole condition's
     # answer calls go out as one Message Batches job and the judge
@@ -1290,8 +1836,13 @@ async def run_memory_benchmark(
             precision_values.append(row.precision_at_k)
         quality_notes.extend(outcome.notes)
         if qa:
-            for condition, correct in outcome.qa_marks.items():
-                qa_acc[condition].record(question, correct)
+            # Iterate the fixed condition order (not the outcome dict's) so the
+            # drill-down rows are ordered identically in every report.
+            for condition in QA_CONDITIONS:
+                if condition in outcome.qa_excluded:
+                    qa_acc[condition].record_excluded(question, outcome.qa_excluded[condition])
+                elif condition in outcome.qa_marks:
+                    qa_acc[condition].record(question, outcome.qa_marks[condition])
 
     if restored_count:
         quality_notes.append(
@@ -1316,6 +1867,18 @@ async def run_memory_benchmark(
             f"Candidate cache: {caching_extractor.misses} unique session extraction(s), "
             f"{caching_extractor.hits} cache replay(s)."
         )
+    if reused_from is not None:
+        quality_notes.append(
+            f"Stores REUSED from {resolved_work_dir} — this run deposited and extracted "
+            f"nothing; the particle population is the one that store set was built with "
+            f"(extraction model {reused_from.get('extraction_model_id')}, "
+            f"similarity_threshold {reused_from.get('extraction.similarity_threshold')}, "
+            f"duplicate_suppression "
+            f"{reused_from.get('extraction.duplicate_suppression.enabled')})."
+        )
+    decay_note = decay_quality_note()
+    if decay_note is not None:
+        quality_notes.append(decay_note)
 
     selection = RunSelection(
         dataset_revision=dataset_revision,
@@ -1332,6 +1895,10 @@ async def run_memory_benchmark(
         embedding_model_id=embedding_model_id,
         context_budget_tokens=context_budget,
         abstraction=abstraction,
+        consolidation=consolidation,
+        dedup_judge=dedup_judge,
+        stores_reused=reuse_stores,
+        reused_from=reused_from,
         thresholds=_thresholds_snapshot(),
         memory=memory,
     )
@@ -1350,7 +1917,11 @@ async def run_memory_benchmark(
 
     def _condition_metrics(condition: str) -> QaConditionMetrics | None:
         acc = qa_acc[condition]
-        if not qa or not acc.pairs or answer_model_id is None:
+        # ``rows``, not ``pairs``: a condition every one of whose calls was
+        # excluded still *ran*, and must render with its exclusion counts
+        # rather than as ``not run`` — the one case where those two readings
+        # differ, and the dishonest one is the silent one.
+        if not qa or not acc.rows or answer_model_id is None:
             return None
         return acc.to_metrics(answer_model_id)
 
@@ -1369,6 +1940,12 @@ class _QuestionOutcome(BaseModel):
 
     retrieval: RetrievalQuestionResult | None = None
     qa_marks: dict[str, bool] = Field(default_factory=dict)
+    #: condition → why that condition produced no verdict (one of
+    #: ``QA_EXCLUSION_KINDS``). Mutually exclusive with ``qa_marks`` per
+    #: condition. A new *optional* field rather than a widened ``qa_marks``:
+    #: checkpoints from earlier runs deserialize unchanged, so no paid outcome
+    #: became unrestorable.
+    qa_excluded: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
     failed_note: str | None = None
 
@@ -1517,6 +2094,9 @@ async def _run_question(
     top_k: int,
     context_budget: int | None = None,
     abstraction: bool = False,
+    consolidation: bool = False,
+    dedup_judge: bool = False,
+    db_path: Path | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> _QuestionResult:
     """Deposit → extract → retrieve → provenance-score one question (§3).
@@ -1551,6 +2131,56 @@ async def _run_question(
             await session.commit()
     else:
         await _extract_pooled(session_factory, deposits, extractor)
+
+    # 2a. Ablation: the controlled instrument — run the
+    # dream cycle's own pass list against this scratch store before retrieval,
+    # so the "on" arm retrieves over the population reconcile + census left
+    # behind. ``scope="store"`` because a fresh store has no prior run to take
+    # a delta watermark from; the projection tail is skipped (there is no
+    # MEMORY.md to render for a throwaway store); and the cycle lock is
+    # per-store, or a concurrent run would silently skip every question after
+    # the first (see run_consolidation's ``lock_path``).
+    if consolidation:
+        cons_report = await run_consolidation(
+            session,
+            store=f"benchmark-{question.question_id}",
+            scope="store",
+            actor="benchmark-memory-consolidate",
+            projection_runner=None,
+            projection_skip_reason="scratch store has no projection manifest",
+            lock_path=(db_path.with_suffix(".consolidate.lock") if db_path is not None else None),
+        )
+        await session.commit()
+        if cons_report.outcome == "skipped":
+            notes.append(
+                f"Question {question.question_id}: consolidation SKIPPED "
+                f"({cons_report.skip_reason}) — this question's arm is not "
+                f"consolidated"
+            )
+        else:
+            notes.append(
+                f"Question {question.question_id}: consolidation demoted "
+                f"{cons_report.reconcile_demoted} (probed "
+                f"{cons_report.reconcile_probes_run} of "
+                f"{cons_report.reconcile_candidate_pairs} pair(s)); "
+                f"{cons_report.duplicate_candidate_pairs_total} duplicate pair(s) seen"
+            )
+
+    # 2a-bis. Ablation: the co-evidential LLM judge in APPLY mode.
+    # Judged PARAPHRASE pairs are linked CO_EVIDENTIAL, and the ranker collapses
+    # each CO_EVIDENTIAL group *within* top-k — so this frees
+    # slots that near-duplicate claims would otherwise occupy, which is what
+    # makes it an instrument on Precision@k and on condition ii's context
+    # rather than bookkeeping. ``confirmed=True`` because the interactive
+    # apply-confirmation threshold has no meaning on a throwaway store.
+    if dedup_judge:
+        judge_report = await suggest_co_evidential(session, mode=SuggestMode.APPLY, confirmed=True)
+        await session.commit()
+        notes.append(
+            f"Question {question.question_id}: dedup judge applied "
+            f"{judge_report.applied_pairs} of {judge_report.judged_pairs} judged "
+            f"({judge_report.total_candidates} candidate pair(s)) CO_EVIDENTIAL"
+        )
 
     # 2b. Ablation: run the abstraction pass on the scratch store
     # between extract and retrieve (the run loop forced auto mode + a zero

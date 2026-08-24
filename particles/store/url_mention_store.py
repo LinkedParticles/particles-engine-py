@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Undeposited URL-mention store — citation signal.
 
 Tracks every external URL *mentioned* across the corpus — including ones the

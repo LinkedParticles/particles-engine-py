@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the curation surface — operations/curation.
 
 Covers the card shape + key round-trip, the ``count_active_dependents`` store

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Layer A — deterministic citation ID-membership + density validation.
 
 Layer A is the first of the two synthesis guard rails.

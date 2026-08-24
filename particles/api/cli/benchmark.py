@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`particles benchmark …` sub-Typer — whole-pipeline system benchmarks.
 
 Deliberately **not** under ``particles extractor``: the system under test is
@@ -98,6 +102,48 @@ def benchmark_memory_cmd(  # noqa: PLR0913 — CLI option list is the API
         "at ~N tokens (rank order; baselines unclamped). Recorded on the run "
         "tuple — compare only against a matching run.",
     ),
+    top_k: int | None = typer.Option(
+        None,
+        "--top-k",
+        min=1,
+        help="Retrieval depth for condition i and the qa_particles context "
+        "(default: benchmark_memory.top_k). Recorded on the run tuple — a "
+        "top_k sweep is a sweep of this flag against one fixed store set.",
+    ),
+    qa: bool = typer.Option(
+        True,
+        "--qa/--no-qa",
+        help="Run the end-to-end QA family (conditions ii-iv). --no-qa reports "
+        "the retrieval stage alone and makes NO LLM call at all once the "
+        "stores exist — the free tier for a retrieval-only ablation arm. The "
+        "three QA rows then render `not run`.",
+    ),
+    consolidation: bool = typer.Option(
+        False,
+        "--consolidation",
+        help="Ablation: run the dream cycle's pass list (reconcile, "
+        "census, utility, abstraction) on each scratch store between extract "
+        "and retrieve — the controlled instrument. LLM-priced "
+        "(reconcile probes, contradiction probes); recorded on the run tuple. "
+        "Mutually exclusive with --abstraction, which the cycle runs itself.",
+    ),
+    dedup_judge: bool = typer.Option(
+        False,
+        "--dedup-judge",
+        help="Ablation: run the co-evidential LLM judge in APPLY mode on each "
+        "scratch store before retrieval, linking PARAPHRASE pairs "
+        "CO_EVIDENTIAL so the ranker collapses them inside top-k. "
+        "LLM-priced (one judged cluster per Subject); recorded on the run tuple.",
+    ),
+    reuse_stores: bool = typer.Option(
+        False,
+        "--reuse-stores",
+        help="Replay the scratch stores an earlier --store-dir run persisted "
+        "instead of depositing and extracting again: zero write-time LLM "
+        "calls. Requires --store-dir, and refuses unless that set's "
+        "write-side tuple (dataset, selection, extraction + embedding model, "
+        "write-time reconciliation knobs) matches this run's.",
+    ),
     abstraction: bool = typer.Option(
         False,
         "--abstraction",
@@ -171,6 +217,21 @@ def benchmark_memory_cmd(  # noqa: PLR0913 — CLI option list is the API
     if limit is not None and all_questions:
         typer.echo("--limit and --all are mutually exclusive.", err=True)
         raise typer.Exit(2)
+    if consolidation and abstraction:
+        # The cycle's own pass list already contains the abstraction pass
+        # (gated by consolidation.abstraction), so accepting both would run it
+        # twice and leave the tuple claiming two independent knobs where the
+        # arm has one. Refuse rather than silently pick a winner.
+        typer.echo(
+            "--consolidation and --abstraction are mutually exclusive: the "
+            "consolidation cycle runs the abstraction pass itself (configure it "
+            "under consolidation.abstraction).",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if reuse_stores and store_dir is None:
+        typer.echo("--reuse-stores requires --store-dir naming the persisted set.", err=True)
+        raise typer.Exit(2)
     try:
         run(
             _benchmark_memory(
@@ -186,6 +247,11 @@ def benchmark_memory_cmd(  # noqa: PLR0913 — CLI option list is the API
                 dataset_file=dataset_file,
                 context_budget=context_budget,
                 abstraction=abstraction,
+                top_k=top_k,
+                qa=qa,
+                consolidation=consolidation,
+                dedup_judge=dedup_judge,
+                reuse_stores=reuse_stores,
                 concurrency=concurrency,
                 fresh=fresh,
                 pooled=pooled,
@@ -225,6 +291,11 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
     dataset_file: Path | None,
     context_budget: int | None,
     abstraction: bool,
+    top_k: int | None,
+    qa: bool,
+    consolidation: bool,
+    dedup_judge: bool,
+    reuse_stores: bool,
     concurrency: int,
     fresh: bool,
     pooled: bool,
@@ -233,10 +304,13 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
     baselines: bool = True,
 ) -> None:
     from particles.benchmark.memory import (
+        ContextWindowExceeded,
         MemoryDatasetLoadError,
+        check_context_window,
         ensure_dataset,
         estimate_run,
         load_dataset_file,
+        render_context_window_check,
         render_estimate,
         render_report_table,
         run_memory_benchmark,
@@ -272,14 +346,34 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
         raise typer.Exit(1)
 
     # Estimate ALWAYS printed before any LLM call.
-    cost = estimate_run(questions, memory=memory, baselines=baselines)
+    cost = estimate_run(
+        questions,
+        qa=qa,
+        memory=memory,
+        baselines=baselines,
+        reuse_stores=reuse_stores,
+        consolidation=consolidation,
+        dedup_judge=dedup_judge,
+    )
     typer.echo(render_estimate(cost))
+
+    # ...and so is the context-window verdict, so `--estimate` is a complete
+    # dry run: an operator trying a bigger variant learns it will not fit here,
+    # before the confirm gate, rather than from the runner's refusal after the
+    # dataset download. The runner re-checks and refuses regardless — this is
+    # disclosure, not the enforcement.
+    window = check_context_window(questions, variant=effective_variant, qa=qa, baselines=baselines)
+    typer.echo(render_context_window_check(window))
     if estimate_only:
         typer.echo("--estimate: nothing was run.")
         return
 
     threshold = cfg.confirm_call_threshold
-    if cost.estimated_llm_calls > threshold and not yes:
+    # An unbounded component must gate too. Without this a --dedup-judge arm
+    # over reused stores projects "~0 LLM calls" — every *boundable* component
+    # really is zero — and sails past a threshold meant to stop exactly this
+    # kind of spend.
+    if (cost.estimated_llm_calls > threshold or cost.unbounded_components) and not yes:
         if not sys.stdin.isatty():
             typer.echo(
                 f"Estimated LLM calls ({cost.estimated_llm_calls}) exceed "
@@ -306,28 +400,37 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
         f"checkpoints per question and resumes if interrupted."
     )
 
-    report = await run_memory_benchmark(
-        questions,
-        variant=effective_variant,
-        dataset_revision=cfg.dataset_revision,
-        selection_seed=cfg.sample_seed,
-        selection_limit=effective_limit,
-        selection_types=selected_types,
-        questions_total=len(all_parsed),
-        work_dir=store_dir,
-        keep_stores=store_dir is not None,
-        context_budget=context_budget,
-        abstraction=abstraction,
-        progress=_progress_line,
-        concurrency=concurrency,
-        checkpoint_dir=_checkpoint_dir(),
-        fresh=fresh,
-        heartbeat_seconds=30,
-        pooled=pooled,
-        batch_qa=batch_qa,
-        memory=memory,
-        baselines=baselines,
-    )
+    try:
+        report = await run_memory_benchmark(
+            questions,
+            variant=effective_variant,
+            top_k=top_k,
+            dataset_revision=cfg.dataset_revision,
+            selection_seed=cfg.sample_seed,
+            selection_limit=effective_limit,
+            selection_types=selected_types,
+            questions_total=len(all_parsed),
+            work_dir=store_dir,
+            keep_stores=store_dir is not None,
+            context_budget=context_budget,
+            abstraction=abstraction,
+            qa=qa,
+            consolidation=consolidation,
+            dedup_judge=dedup_judge,
+            reuse_stores=reuse_stores,
+            progress=_progress_line,
+            concurrency=concurrency,
+            checkpoint_dir=_checkpoint_dir(),
+            fresh=fresh,
+            heartbeat_seconds=30,
+            pooled=pooled,
+            batch_qa=batch_qa,
+            memory=memory,
+            baselines=baselines,
+        )
+    except ContextWindowExceeded as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
     if output_format is _Format.json:
         rendered = report.model_dump_json(indent=2)

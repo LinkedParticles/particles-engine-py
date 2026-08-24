@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Effective-confidence scoring for a particle list.
 
 The scoring kernel shared by the read surfaces that compute effective confidence

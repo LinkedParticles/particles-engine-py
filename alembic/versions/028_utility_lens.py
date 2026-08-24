@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Usefulness (outcome-learning) lens — utility events + lens utility-rule columns.
 
 Two additive changes for the fourth-and-a-half lens layer:

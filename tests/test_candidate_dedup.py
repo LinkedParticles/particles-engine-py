@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/ingest/candidate_dedup.py — the intra-pass fold.
 
 The extractor mints one candidate per verbatim occurrence of a sentence on a

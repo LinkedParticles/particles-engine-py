@@ -5,6 +5,28 @@ model. The canonical sample is `config.yaml.sample` in the repo
 root — copy it to `config.yaml` to override defaults. `config.yaml`
 is gitignored.
 
+## Which sections apply to your install
+
+Every section is tagged `[client]` or `[engine]` in `config.yaml.sample`
+. Both are always loaded and both are valid to set — the tag says
+which *distribution* acts on the section:
+
+| Tag | Read by | Effective in |
+|---|---|---|
+| `[client]` | the Client layer, shipped in `linkedparticles-core` | every install |
+| `[engine]` | the Engine layer and the surfaces, shipped in `linkedparticles` | the full install only |
+
+If you installed `linkedparticles` — the ordinary case, and what every guide
+here assumes — all 64 sections apply and the tags are informational. They
+matter only for a `linkedparticles-core`-only install, which is the store-free
+Client substrate: there an `[engine]` section still validates and still loads,
+but nothing present reads it. That is a deliberate trade — the two
+distributions share one import package, so they share one config model — and
+the tag is how the inert surface is made visible rather than carved away.
+
+The declaration lives in `CLIENT_SECTIONS` in `particles/config.py`; tests keep
+it, the sample's tags, and the modules that actually read config in agreement.
+
 ## Which `config.yaml` loads
 
 Discovery walks upward, git-style:
@@ -201,10 +223,13 @@ A few config fields you'll likely want to set early:
   selection* above.
 - `exporter_common.min_particle_confidence` — the cross-exporter
   quality threshold. Particles below this `effective_confidence` are
-  dropped from every export.
+  dropped from every export. Per-run override and the
+  per-exporter flag lists: [User guide → exporting](../user-guide/exporting.md).
 - `wiki.min_particles` — minimum particles per subject for the wiki
-  exporter to render. Default 3.
-- `query.top_k` — top-k truncation for the semantic search.
+  exporter to render. Default 3. See
+  [User guide → exporting → wiki articles](../user-guide/exporting.md#wiki-articles).
+- `query.top_k` — top-k truncation for the semantic search. What it does
+  to a result list: [User guide → ranking](../user-guide/querying.md#ranking-what-the-sdk-actually-does).
 - `embeddings.progress_bars` — whether the embedding stack prints its
   tqdm progress bars (`Loading weights …` on model load, `Batches …` on
   each encode) to stderr. Default `false` (they are noise for a CLI verb

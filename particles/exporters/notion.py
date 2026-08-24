@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Notion exporter — the first API-target exporter.
 
 Unlike every other shipped exporter, the Notion exporter does not write to the

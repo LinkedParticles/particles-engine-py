@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Thin-client transport seam.
 
 The CLI verbs target one :class:`Backend`; :func:`get_backend` resolves it from

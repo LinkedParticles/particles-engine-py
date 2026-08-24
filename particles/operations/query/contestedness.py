@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Query-time per-claim contestedness — lens-divergence of effective confidence.
 
 Contestedness is the spread (max − min) of a claim's ``effective_confidence``

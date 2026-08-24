@@ -1,4 +1,10 @@
 /*
+ * SPDX-FileCopyrightText: 2026 The Particles authors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * Particles component styles — every rule references tokens.css; no literal
  * colours, sizes or radii appear here. Class names carry a `p-` prefix so the
  * sheet can be dropped next to an existing stylesheet without collision.

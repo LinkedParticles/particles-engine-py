@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Wikidata subject authority.
 
 The Wikidata live-lookup path, migrated **verbatim** from ``subject_resolver``

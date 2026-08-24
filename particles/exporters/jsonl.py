@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """JSON Lines exporter.
 
 A single ``.jsonl`` file with one ACTIVE particle per line — a flat,

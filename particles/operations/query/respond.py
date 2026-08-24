@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Natural-language response generation for §9.3 Query.
 
 Builds a per-audience prompt over the top-k particles and asks the shared

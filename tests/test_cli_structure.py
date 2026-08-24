@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles structure`` verb (particles/api/cli/structure.py).
 
 The backfill pass itself is covered by ``tests/test_structured_claim.py``; this

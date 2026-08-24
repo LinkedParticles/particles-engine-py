@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Particle-ID normalisation for CLI verbs (0.43.1).
 
 The rendered output (Obsidian / wiki articles, lint findings) refers to

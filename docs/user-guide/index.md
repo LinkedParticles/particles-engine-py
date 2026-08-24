@@ -12,10 +12,14 @@ need.
 |---|---|
 | [Getting started](getting-started.md) | First-time setup → first query |
 | [Concepts](concepts.md) | What's a particle, subject, status, confidence, provenance |
-| [Querying](querying.md) | Semantic search, tag filters, MCP, what the ranking does |
+| [Querying](querying.md) | Semantic search, tag filters, structural filters, MCP, what the ranking does |
+| [As-of time travel](as-of.md) | What the store believed at a past instant, and what replaced it |
 | [Exporting](exporting.md) | Obsidian vault, Anki deck, wiki articles, Logseq graph |
+| [Graph view](graph-view.md) | The scoped epistemic subgraph as a self-contained HTML file |
 | [Using from LangChain](integrations.md) | Consume a Particles store as LangChain tools / a retriever |
-| [Depositing from your phone](inbox.md) | Deposit URLs from the iOS Share Sheet via an iCloud inbox file |
+| [Claude Code memory](claude-code.md) | Wire a store in as managed agent memory — session-start push, session-end harvest |
+| [Swapping in for the reference memory server](memory-server-swap.md) | Drop-in replacement for `@modelcontextprotocol/server-memory` |
+| [Depositing from your phone](inbox.md) | Deposit URLs from the iOS Share Sheet via HTTP or an iCloud inbox file |
 
 For operator-side concerns (long-term tuning, lint hygiene,
 troubleshooting), see the [operator guide](../operator-guide/index.md).

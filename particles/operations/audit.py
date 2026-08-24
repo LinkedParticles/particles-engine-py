@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """First-run memory audit — the activation-moment census.
 
 ``run_memory_audit`` composes the **existing** machinery and adds no detection

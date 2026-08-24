@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the Wikidata importer (particles/ingest/importers/wikidata.py).
 
 Covers what tests/AGENTS.md calls for on an importer: the URL patterns

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Intra-pass exact-content candidate dedup for one extraction pass.
 
 Repetitive or multi-section sources (Wikipedia timeline/response sections, FAQ

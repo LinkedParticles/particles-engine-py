@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/store/particle_store.py — row (de)serialization.
 
 Regression coverage for review finding F4.7: ``ParticleRow.from_model`` /

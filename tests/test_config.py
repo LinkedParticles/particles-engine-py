@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles/config.py`` — default values and env-var overrides.
 
 Scoped to the knobs whose wiring is easy to get wrong (the ``_ENV_OVERRIDES``
@@ -145,13 +149,17 @@ class TestValidateConfig:
 
 
 class TestSkipLiveAuthoritiesSourceTypes:
-    """Conversational / journal-like sources skip live-ontology lookups."""
+    """Private-referent and bulk-migration sources skip live-ontology lookups."""
 
-    def test_default_covers_conversation_and_journal(self) -> None:
+    def test_default_covers_conversation_journal_and_migration(self) -> None:
         reset_config()
         assert get_config().subjects.skip_live_authorities_source_types == [
             "CONVERSATION",
             "JOURNAL",
+            # different reason, same treatment: a per-entity live
+            # lookup over a bulk export is slow, network-dependent, and can
+            # rewrite a canonical_name the migrating user never chose.
+            "MCP_MEMORY_EXPORT",
         ]
 
 

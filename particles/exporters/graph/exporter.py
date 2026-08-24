@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """GraphExporter — the scoped epistemic graph view plugin.
 
 A single-file exporter: one self-contained HTML artifact rendering one scoped

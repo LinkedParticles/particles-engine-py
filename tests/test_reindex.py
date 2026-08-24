@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the §9.5 Reindex operation (particles/operations/reindex.py).
 
 reindex.py had 0% coverage in the architecture-review baseline despite being

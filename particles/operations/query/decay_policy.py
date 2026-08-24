@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Query-time content-age decay policy.
 
 The decay analogue of the ``TrustPolicy`` (``source_trust.py``): a

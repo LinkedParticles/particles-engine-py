@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure §15.1 cascade-gating decisions (Extension B).
 
 The policy gate and the per-run cap, extracted from

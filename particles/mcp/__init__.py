@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Read-only Model Context Protocol (MCP) server for Particles.
 
 A fourth SDK front-end alongside the Typer CLI and FastAPI app. Lets AI

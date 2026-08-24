@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Bearer-token auth for the FastAPI app.
 
 ``PARTICLES_API_KEY`` is read on every request (not captured at module

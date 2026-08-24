@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``particles query`` verb (particles/api/cli/query.py).
 
 The query operation is covered by ``tests/test_query.py``; the flag-validation

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Resident daemon mode — the in-process background tasks of ``engine serve``.
 
 Running Particles as a service used to take four hand-assembled parts: the

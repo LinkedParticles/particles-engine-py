@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """particle sub-Typer — inspect individual extracted particles by ID.
 
 Read/tag-only except for ``retract``, the one narrow *operator*

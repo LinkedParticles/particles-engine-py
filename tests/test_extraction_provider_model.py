@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for per-particle extraction-model provenance.
 
 Covers the surfaces the ADR adds, in the order a reader meets them:

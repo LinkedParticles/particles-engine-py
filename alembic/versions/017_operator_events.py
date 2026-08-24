@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Add operator event log tables.
 
 ``operator_events`` + ``operator_event_refs`` — an append-only audit of

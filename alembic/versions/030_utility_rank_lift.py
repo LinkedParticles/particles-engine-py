@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Utility as an additive rank-lift — lens vocabulary λ replaces weight/floor/cap.
 
 This change supersedes the earlier design: the bounded,

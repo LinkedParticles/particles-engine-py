@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§7.5 Lazy re-fetch protocol for LAZY corpus entries.
 
 Three-tier change detection, over two transports (local tier):

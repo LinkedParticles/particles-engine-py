@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Obsidian-specific Markdown text shaping helpers.
 
 These helpers operate on already-rendered Markdown strings or compose

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """audit verb — the first-run memory audit.
 
 ``particles audit [PATH]`` harvests an agent-memory directory (or file) into

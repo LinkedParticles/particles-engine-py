@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Document-supersession relation between corpus entries (capability 2).
 
 A corpus entry MAY declare that its source **document** supersedes another

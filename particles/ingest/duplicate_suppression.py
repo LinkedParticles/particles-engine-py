@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-pass exact-duplicate suppression at write time.
 
 The prevention-side twin of Tier-A auto-merge, and the cross-pass

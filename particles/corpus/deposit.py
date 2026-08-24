@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """§9.1 Deposit operation — write a source to the corpus.
 
 Deposit is intentionally trivial and carries no extraction cost.

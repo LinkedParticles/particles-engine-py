@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """BenchmarkSuite YAML loader.
 
 Reads suite files matching the techspec §13.3 schema and resolves the

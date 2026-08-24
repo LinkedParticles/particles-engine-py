@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the lint granularity detectors (particles/operations/lint/granularity.py).
 
 Distinct from tests/test_granularity.py, which covers the *predicate* in

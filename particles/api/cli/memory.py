@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """memory group — agent-memory maintenance verbs.
 
 ``rebuild-utility`` re-derives every utility channel from its own system of

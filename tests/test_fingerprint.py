@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The §16.1 context-fingerprint digest.
 
 Steps 2–3 of the normative procedure — sort the ACTIVE UUIDs lexicographically,

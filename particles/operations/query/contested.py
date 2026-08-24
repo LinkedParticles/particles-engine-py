@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Composed contested badge — one basis-carrying disclosure per claim.
 
 A claim renders *contested* iff at least one of three named bases fires (§1):

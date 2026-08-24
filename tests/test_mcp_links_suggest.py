@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``links_suggest`` MCP tool (particles/mcp/tools/links_suggest.py).
 
 The candidate-finding operation is covered by ``tests/test_links_suggest.py``;

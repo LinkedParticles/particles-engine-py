@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """CLI output policy — the three orthogonal axes and the stream rule.
 
 **stdout is the artifact; stderr is the narration.** The result (a report, JSON,

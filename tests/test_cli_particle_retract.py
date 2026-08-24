@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles particle retract``.
 
 The verb is thin — the operation, both guards, the ``retired_at`` stamp

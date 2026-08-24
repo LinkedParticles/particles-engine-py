@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/api/auth.py.
 
 ``_verify_key`` reads ``PARTICLES_API_KEY`` at call time, not at module-import

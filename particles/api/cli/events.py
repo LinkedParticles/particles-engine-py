@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """`events` sub-Typer — read the operator event log.
 
 Read-only inspection of operator decisions (retract / split / merge / alias /

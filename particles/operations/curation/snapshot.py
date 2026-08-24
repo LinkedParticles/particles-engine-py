@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The persisted collection half of the queue (§4).
 
 `build_curation_queue` ran every finder on every request. Measured

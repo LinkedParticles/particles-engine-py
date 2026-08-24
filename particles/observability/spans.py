@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Reusable span decorator for Engine operations.
 
 API-only (no SDK import), so it is a no-op until ``setup_observability`` installs

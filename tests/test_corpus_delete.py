@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for ``particles corpus delete`` / ``corpus prune-orphans`` orphan cleanup.
 
 The index tables (``particle_subjects``, ``particle_tag_edges``,

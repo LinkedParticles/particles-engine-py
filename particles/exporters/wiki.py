@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Wiki article exporter (refactored).
 
 The wiki exporter produces a flat directory of cited Markdown articles —

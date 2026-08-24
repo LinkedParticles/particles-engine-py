@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Operator trust-statement operation with event log.
 
 Thin seam wrapping ``insert_trust_statement`` + the cascade so the operator

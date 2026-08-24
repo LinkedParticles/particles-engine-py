@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for particles/llm.py — the shared Anthropic client seam.
 
 These tests prove that the mock seam (set_client / get_client) is observed by

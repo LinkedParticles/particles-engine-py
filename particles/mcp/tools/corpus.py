@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """``list_corpus_entries`` / ``corpus_links_suggest`` — corpus reads.
 
 Routed through the ``Backend`` seam: in-process locally, against

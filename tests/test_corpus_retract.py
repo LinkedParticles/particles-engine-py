@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for `particles corpus retract`.
 
 Covers the retract operation (store-level) and the CLI verb. The verb is the
