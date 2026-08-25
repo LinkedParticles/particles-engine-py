@@ -18,7 +18,31 @@ by construction rather than by operator discipline.
 container. Nothing on this page deprecates them; see
 [Scheduled consolidation](scheduled-consolidation.md).
 
-## Quick start (compose)
+## Quick start (`docker run`)
+
+The image is published: `ghcr.io/linkedparticles/engine`, one manifest for
+`linux/amd64` and `linux/arm64`, tagged `latest` and immutably `vX.Y.Z` per
+release. Its code is exactly the released PyPI pair — the image is the
+release, containerized — and every push carries a build-provenance
+attestation you can check:
+
+```bash
+gh attestation verify oci://ghcr.io/linkedparticles/engine:latest --owner LinkedParticles
+```
+
+To run it:
+
+```bash
+export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker run -d --name particles \
+  -e PARTICLES_API_KEY -e ANTHROPIC_API_KEY \
+  -p 127.0.0.1:8000:8000 -v particles-data:/data \
+  ghcr.io/linkedparticles/engine:latest
+```
+
+## From a source checkout (compose)
+
+For development, or to run unreleased changes, build from the tree instead:
 
 ```bash
 export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -51,15 +75,15 @@ optional: without them the build succeeds and produces an image that declines
 to say. The build context is a strict allowlist that does not admit `.git`, so
 the revision cannot be discovered during the build; it has to be passed in.
 
-!!! note "Provisional names, local builds only"
+!!! note "The published image, and what still builds locally"
     `ghcr.io/linkedparticles/engine` is a placeholder: the repos are public
     and the name is consistent with the naming decision,
-    and publication is decided: the public engine
-    repository's `publish-image.yml` workflow pushes the image after each
-    PyPI publish, built from the released distributions. The first push
-    rides the next owner-published release; until it lands, images here are
-    still built and used locally or in CI. This page switches its quick
-    start to `docker pull` when it does.
+    and the image is published: the public engine
+    repository's `publish-image.yml` workflow pushes it after each PyPI
+    publish, built from the released distributions. Version tags are
+    immutable by policy; `latest` follows the newest release. Locally built
+    images (this section) remain the development path and are never pushed
+    from here.
 
 ## The one volume
 

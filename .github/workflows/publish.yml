@@ -97,8 +97,21 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.repository }}" = "testpypi" ]; then
             index_args="--index-url https://test.pypi.org/simple/"
           fi
-          python -m pip download --no-deps --dest /tmp/core-check \
-            $index_args "linkedparticles-core==${{ steps.ver.outputs.version }}"
+          # The index can lag a fresh upload by several minutes (measured
+          # 2026-08-25: the 1.139.0 core upload returned 200 OK and the JSON
+          # API still omitted it past the +99s mark), so this gate retries
+          # before failing closed rather than turning propagation lag into a
+          # red release.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if python -m pip download --no-deps --dest /tmp/core-check \
+              $index_args "linkedparticles-core==${{ steps.ver.outputs.version }}"; then
+              exit 0
+            fi
+            echo "not resolvable yet (attempt $i); retrying in 60s"
+            sleep 60
+          done
+          echo "linkedparticles-core==${{ steps.ver.outputs.version }} still not resolvable after 10 minutes" >&2
+          exit 1
 
       - name: Build sdist and wheel
         run: uv build

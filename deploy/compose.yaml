@@ -10,9 +10,10 @@
 # Then: http://localhost:8000/health, and the web UI at http://localhost:8000/app
 # (send `Authorization: Bearer $PARTICLES_API_KEY`).
 #
-# The image name is the owner's `linkedparticles` placeholder pending the
-# sign-off, and is built locally — never pushed to a public registry
-# before publication.
+# This compose file BUILDS the image from the tree — the development path.
+# The published image is `ghcr.io/linkedparticles/engine` (pushed by the
+# public engine repo); for a pull-based run see
+# docs/operator-guide/container-deployment.md § Quick start.
 
 services:
   engine:

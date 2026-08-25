@@ -21,18 +21,20 @@ page assumes the installed package.
 
 The pip install gives you the CLI against a local store. To run the engine
 as a resident service instead — HTTP API, web UI, scheduled consolidation,
-one data volume — use the container:
+one data volume — pull the published image:
 
 ```bash
-git clone https://github.com/LinkedParticles/particles-engine-py.git
-cd particles-engine-py
 export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-docker compose -f deploy/compose.yaml up --build
+docker run -d --name particles \
+  -e PARTICLES_API_KEY -e ANTHROPIC_API_KEY \
+  -p 127.0.0.1:8000:8000 -v particles-data:/data \
+  ghcr.io/linkedparticles/engine:latest
 ```
 
-The image builds from the checkout today (it is not yet on a public
-registry). The full recipe — auth, volumes, the daemon, Helm — is in
-[Running in a container](../operator-guide/container-deployment.md).
+Then `http://localhost:8000/health`, and the web UI at
+`http://localhost:8000/app` (it asks for the bearer). The full recipe —
+auth, volumes, the daemon, compose, Helm, verifying the image's provenance —
+is in [Running in a container](../operator-guide/container-deployment.md).
 
 ## Configure an LLM
 
