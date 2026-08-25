@@ -1,9 +1,11 @@
 # Claude Code memory
 
 One command wires a Particles store into [Claude Code](https://code.claude.com)
-as managed agent memory: standing context is **pushed** into every
-session's context window at session start, and everything a session produced is
-**harvested** into the corpus at session end — no agent cooperation required.
+as managed agent memory: a **small, ranked digest** of standing
+context is pushed into every session's context window at session start — the
+top beliefs by effective confidence, bounded to a few thousand tokens, never
+the whole store — and everything a session produced is **harvested** into the
+corpus at session end. No agent cooperation required.
 The agent is stateless compute; the store is managed storage; the integration
 moves data between them on lifecycle events the agent does not control.
 
@@ -11,6 +13,31 @@ If you want the store exposed as tools an agent calls instead, the two other
 routes are the native MCP server
 ([Querying → MCP server](querying.md#mcp-server)) and the
 [reference memory-server swap](memory-server-swap.md).
+
+## What this buys you
+
+A memory file accumulates lines; the store accumulates *claims* — and the
+difference shows up exactly where file memory hurts:
+
+- **Rules born from incidents keep their provenance.** "Commit, push, and
+  deploy are three separate go-aheads" is a typical agent memory: a rule
+  decreed after something went wrong once. As a particle it carries *when* it
+  was asserted and *which session* it came from, so a future session asking
+  "does this still apply, and what was it protecting against?" is one hop
+  from the answer instead of archaeology. And if a later session writes
+  "push automatically after each commit," that isn't a silent second line in
+  a file — it's a detected contradiction, queued for your ruling.
+- **Flaky-infrastructure facts age honestly.** "Sometimes the tailscale link
+  between the two servers gets stuck in a slow mode" is true the day it's
+  written and misleading the month after it's fixed. In a file it lives
+  forever; here its effective confidence decays with age, `lint` flags it
+  stale, and the fix *supersedes* it — the old claim retired with a pointer
+  to what replaced it, not erased.
+- **The store can audit what your files can't.** The first run reads the
+  memory you already have and reports what's lurking in it — contradictions,
+  likely duplicates, probably-stale facts, cited-but-never-captured
+  sources — see [The memory audit](#the-memory-audit). Those are questions a
+  directory of markdown cannot answer about itself.
 
 ## Install
 
@@ -96,6 +123,16 @@ push is skipped there; `startup`, `clear`, and `compact` get a fresh render.
 Two budgets bound the injection: `mcp.recall.digest_max_beliefs` (default 200)
 and `claude_code.digest_max_bytes` (default 24 000, truncated on a line
 boundary with a disclosed footer).
+
+The push is deliberately small because rules and facts want different
+treatment. A *rule* ("commit, push, and deploy are separate go-aheads") wants
+to be in the prompt every session — that reliable presence is the digest's
+job, and why it ranks standing, high-confidence beliefs first. A *fact* (the
+port a service ran on in May) wants to be **retrievable, not resident**;
+that's the MCP query path, and it's why the digest never tries to carry the
+store. Ranking composes effective confidence with usage — beliefs that keep
+earning recall rise — so the budget is spent on what sessions
+actually use, not on whatever was written most recently.
 
 **Session end — the harvest.** `hook session-end` deposits two kinds of
 material — *harvest, don't ask*; the agent took no action to be remembered:
