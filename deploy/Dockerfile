@@ -15,16 +15,26 @@
 # Build (from the repo root):
 #   docker build -f deploy/Dockerfile -t ghcr.io/linkedparticles/engine:dev .
 #
-# The image name is the owner's `linkedparticles` placeholder; the final names
-# ride the sign-off. Until publication these images are built and used
-# locally or in CI and are NEVER pushed to a public registry — the same
-# the internal-marker rule applies to tags.
+# Publication: the public image is pushed by the PUBLIC engine
+# repository's publish-image workflow, built with `--build-arg SOURCE=pypi`
+# so its code is the released PyPI pair; this repository never pushes images.
+# The default `SOURCE=tree` build below stays the local/CI path.
+
+# Which builder feeds the runtime stage:
+#   tree — the default: build the wheel from THIS tree via the lockfile.
+#          The dev/CI path; works only where uv.lock and the full package
+#          exist (the private monorepo).
+#   pypi — the publication path: install the released pair from PyPI
+#          (`linkedparticles==$VERSION`, which resolves its exactly-pinned
+#          linkedparticles-core). The public image is the release,
+#          containerized; requires VERSION and a resolvable index.
+ARG SOURCE=tree
 
 # ---------------------------------------------------------------------------
-# Stage 1 — builder: resolve the locked closure into a self-contained venv and
-# bake the encoder weights.
+# Stage 1a — builder-tree: resolve the locked closure into a self-contained
+# venv and bake the encoder weights.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim AS builder-tree
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -67,6 +77,39 @@ from particles.embeddings import get_embedding_model, EMBEDDING_MODEL_ID; \
 m = get_embedding_model(); \
 assert m is not None, 'embedding encoder failed to load at build time'; \
 print('baked encoder:', EMBEDDING_MODEL_ID)"
+
+# ---------------------------------------------------------------------------
+# Stage 1b — builder-pypi: the publication path. Same venv layout and
+# encoder bake as builder-tree, but the code comes from the index — so the
+# published image carries exactly the artifacts a `pip install` user gets.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder-pypi
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/huggingface
+
+RUN pip install --no-cache-dir "uv==0.9.7"
+
+# The exact released version, required: an unpinned install here would bake
+# whatever the index served that minute, which is not a publishable artifact.
+ARG VERSION=""
+RUN test -n "$VERSION" || { echo "builder-pypi requires --build-arg VERSION=<released version>" >&2; exit 1; }
+RUN uv venv /opt/venv \
+ && uv pip install --python /opt/venv/bin/python "linkedparticles==${VERSION}"
+
+# Same bake as builder-tree (kept in step by tests/test_publish_export.py):
+# predictable cold start, air-gap friendly.
+RUN /opt/venv/bin/python -c "\
+from particles.embeddings import get_embedding_model, EMBEDDING_MODEL_ID; \
+m = get_embedding_model(); \
+assert m is not None, 'embedding encoder failed to load at build time'; \
+print('baked encoder:', EMBEDDING_MODEL_ID)"
+
+# The selector: `--build-arg SOURCE=pypi` swaps the code source; everything
+# downstream (runtime layout, bakes, labels) is identical either way.
+FROM builder-${SOURCE} AS builder
 
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime.

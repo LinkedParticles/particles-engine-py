@@ -52,12 +52,14 @@ to say. The build context is a strict allowlist that does not admit `.git`, so
 the revision cannot be discovered during the build; it has to be passed in.
 
 !!! note "Provisional names, local builds only"
-    `ghcr.io/linkedparticles/engine` is the owner's placeholder while
-    The naming decision (distribution name + schema `$id` host) is blocked on
-    the repos going public. Final names ride that sign-off. Until publication
-    these images are built and used **locally or in CI and never pushed to a
-    public registry** — the same internal-marker rule applies to
-    version tags.
+    `ghcr.io/linkedparticles/engine` is a placeholder: the repos are public
+    and the name is consistent with the naming decision,
+    and publication is decided: the public engine
+    repository's `publish-image.yml` workflow pushes the image after each
+    PyPI publish, built from the released distributions. The first push
+    rides the next owner-published release; until it lands, images here are
+    still built and used locally or in CI. This page switches its quick
+    start to `docker pull` when it does.
 
 ## The one volume
 
@@ -350,6 +352,7 @@ Full values table and rationale: [`deploy/helm/README.md`](https://github.com/Li
 
 [adr122]: ../ADR/active/0122-validating-fetch-transport.md
 [adr123]: ../ADR/active/0123-fail-closed-bearer-auth.md
+[adr261]: ../ADR/active/0261-container-image-publication.md
 [adr250]: ../ADR/active/0250-subprocess-fetch-connect-pinning.md
 [adr137]: ../ADR/active/0137-remote-engine-thin-client.md
 [adr177]: ../ADR/active/0177-single-writer-discipline-cross-process-write-lock.md
