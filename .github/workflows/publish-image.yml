@@ -90,9 +90,20 @@ jobs:
       - name: Require the released pair on the index
         run: |
           set -euo pipefail
-          python3 -m pip download --no-deps --dest /tmp/pair-check \
-            "linkedparticles==${{ steps.ver.outputs.version }}" \
-            "linkedparticles-core==${{ steps.ver.outputs.version }}"
+          # Same retry as the Publish workflow's core gate: the index can lag
+          # a fresh upload by several minutes, and this workflow fires right
+          # after that upload.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if python3 -m pip download --no-deps --dest /tmp/pair-check \
+              "linkedparticles==${{ steps.ver.outputs.version }}" \
+              "linkedparticles-core==${{ steps.ver.outputs.version }}"; then
+              exit 0
+            fi
+            echo "pair not resolvable yet (attempt $i); retrying in 60s"
+            sleep 60
+          done
+          echo "released pair still not resolvable after 10 minutes" >&2
+          exit 1
 
       # Refuse to overwrite a published version tag (immutability by policy).
       # Checked per-arch before any push; the merge job re-checks before
