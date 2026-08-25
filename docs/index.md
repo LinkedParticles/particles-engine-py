@@ -27,6 +27,20 @@ trust and staleness are applied when the store is read, never written into the
 stored claim. If that framing is new, start with
 [Why Particles?](https://linkedparticles.org/why/).
 
+## Agent memory
+
+One command wires a store into Claude Code as managed memory the agent does
+not control: harvested into the corpus at session end, pushed back into the
+context window trust-ranked and contradiction-flagged at session start, and
+audited on first run against the memory you already have.
+
+```bash
+particles init claude-code
+```
+
+[Claude Code memory](user-guide/claude-code.md) walks through the hooks, the
+`MEMORY.md` projection, and the first-run audit.
+
 ## Where to go
 
 - **[User guide](user-guide/index.md)** — deposit, extract, query, lint,
@@ -45,7 +59,7 @@ stored claim. If that framing is new, start with
 
 ## The standard
 
-This SDK is one implementation of an open standard. The normative documents and
+This SDK is the reference implementation of an open, implementation-independent specification. The normative documents and
 artifacts are published separately, so a second implementation has something to
 conform to:
 

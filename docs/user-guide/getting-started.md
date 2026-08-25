@@ -1,40 +1,42 @@
 # Getting started
 
 Install, initialise a store, deposit your first source, extract
-particles, and query.
+particles, and query — with citations.
 
 ## Install
 
-Particles uses [uv](https://docs.astral.sh/uv/) for dependency
-management. Install it once:
-
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+pip install linkedparticles
 ```
 
-Then clone the repo and sync:
+That installs the `particles` CLI and the full engine. (Python 3.11+;
+`pipx install linkedparticles` or `uv tool install linkedparticles` work
+too and keep it isolated.)
 
-```bash
-git clone https://github.com/LinkedParticles/particles-engine-py.git
-cd particles-engine-py
-uv sync
-```
+Working on the engine itself, or want the bleeding edge? See
+[Development setup](#development-setup) below — everything else on this
+page assumes the installed package.
 
-## Secrets
+## Configure an LLM
 
-The extractor and semantic lint both call the Anthropic API. Set:
+Extraction and the semantic lint read your sources with an LLM. The
+default provider is Anthropic:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-For operator-level secrets handling, see the
-[operator guide](../operator-guide/configuration.md).
+Providers are configuration, never code: any OpenAI-compatible endpoint —
+including a local model — can serve any purpose via `config.yaml`
+(see the [operator guide](../operator-guide/configuration.md)). Everything
+else stays on your machine: the store is a local SQLite database, and only
+the source text being extracted (or a question being answered) goes to the
+model you configured.
 
 ## Initialise the store
 
 ```bash
-uv run particles db init
+particles db init
 ```
 
 This creates the SQLite database (default: `./particles.db`) and
@@ -42,14 +44,15 @@ the blob directory.
 
 ## Deposit a source
 
-`deposit` takes a URL or a local file path:
+`deposit` takes a URL or a local file path and writes it into the
+append-only corpus, snapshotted and content-addressed:
 
 ```bash
-uv run particles deposit https://en.numista.com/catalogue/pieces8562.html
+particles deposit https://en.wikipedia.org/wiki/Douglas_Lenat
 # entry_id:    3f2a1c8e-...
 # snapshot_id: 9b4d7e2a-...
 
-uv run particles deposit ./article.pdf
+particles deposit ./article.pdf
 ```
 
 For link-shaped sources (Reddit / Hacker News / Mastodon), the
@@ -63,7 +66,7 @@ An RDF document — Turtle, N-Triples, TriG, N-Quads, JSON-LD or RDF/XML —
 is recognised by its extension and parsed rather than read by an LLM:
 
 ```bash
-uv run particles deposit ./coins.ttl
+particles deposit ./coins.ttl
 ```
 
 Extraction is then deterministic and free: one particle per triple, no API
@@ -91,19 +94,26 @@ in RDF, so publishers differ.
 ## Extract particles
 
 ```bash
-uv run particles extract 3f2a1c8e-...
+particles extract 3f2a1c8e-...
 # or to extract every pending snapshot
-uv run particles extract --all-pending
+particles extract --all-pending
 ```
 
-The extractor calls Claude to produce structured claim-granularity
-particles with confidence + provenance + subject resolution.
+The extractor calls the configured LLM to produce structured
+claim-granularity particles with confidence + provenance + subject
+resolution.
 
 ## Query
 
 ```bash
-uv run particles query "What is the composition of the 1 Pfennig 1948-1950?"
+particles query "What was Lenat's role in building Cyc?" --show-particles
 ```
+
+`--show-particles` prints the retrieved claims above the answer, ranked by
+effective confidence — each one traceable to the exact snapshot it came
+from. The [walkthrough](https://linkedparticles.org/walkthrough/) runs this
+same example end to end, including setting per-source trust and watching
+the ranking follow.
 
 Add `--tag <path>` to restrict to a taxonomy subtree. See
 [Querying](querying.md) for how to create a taxonomy, tag particles,
@@ -113,10 +123,10 @@ the same question of a past instant ([As-of time travel](as-of.md)).
 ## Export
 
 ```bash
-uv run particles export obsidian ./my-vault
-uv run particles export anki ./deck.txt
-uv run particles export wiki ./my-wiki
-uv run particles export logseq ./my-graph
+particles export obsidian ./my-vault
+particles export anki ./deck.txt
+particles export wiki ./my-wiki
+particles export logseq ./my-graph
 ```
 
 See [Exporting](exporting.md) for the dry-run / cache / synthesis
@@ -139,3 +149,16 @@ Running this long-term rather than trying it out? The
 [configuration](../operator-guide/configuration.md),
 [lint hygiene](../operator-guide/lint-and-review.md), and
 [tuning](../operator-guide/tuning.md).
+
+## Development setup
+
+To work on the engine itself, install [uv](https://docs.astral.sh/uv/) and
+run from a checkout — and prefix every command above with `uv run`:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone https://github.com/LinkedParticles/particles-engine-py.git
+cd particles-engine-py
+uv sync
+uv run particles db init
+```
