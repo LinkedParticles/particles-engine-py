@@ -17,6 +17,23 @@ Working on the engine itself, or want the bleeding edge? See
 [Development setup](#development-setup) below — everything else on this
 page assumes the installed package.
 
+### Or run it as a service
+
+The pip install gives you the CLI against a local store. To run the engine
+as a resident service instead — HTTP API, web UI, scheduled consolidation,
+one data volume — use the container:
+
+```bash
+git clone https://github.com/LinkedParticles/particles-engine-py.git
+cd particles-engine-py
+export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker compose -f deploy/compose.yaml up --build
+```
+
+The image builds from the checkout today (it is not yet on a public
+registry). The full recipe — auth, volumes, the daemon, Helm — is in
+[Running in a container](../operator-guide/container-deployment.md).
+
 ## Configure an LLM
 
 Extraction and the semantic lint read your sources with an LLM. The

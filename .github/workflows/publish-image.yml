@@ -1,0 +1,236 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Publish the engine container image to GHCR.
+#
+# This repo is a per-release scrubbed export of a private development upstream
+# (see CONTRIBUTING.md). These workflows are authored in that upstream under
+# publish/overlays/ and laid into the exported tree by the release export —
+# edit them there, not on the public repo (a direct edit here is overwritten by
+# the next export).
+#
+# Supply-chain convention (matches the upstream): every `uses:` is pinned to a
+# full 40-char commit SHA, never a mutable `@vN` tag; the trailing `# vN`
+# comment is the human-readable tag that SHA resolves to. Bump a SHA only
+# deliberately.
+#
+# What this publishes: `ghcr.io/linkedparticles/engine`, built with
+# `--build-arg SOURCE=pypi` — the image's code is the released PyPI pair
+# (`linkedparticles==<version>`, resolving its exactly-pinned core), not this
+# tree; the tree contributes only the static bakes (web-UI dist, the baked
+# config) via deploy/Dockerfile's runtime stage. The public image is the
+# release, containerized.
+#
+# ORDERING: this workflow runs on completion of the Publish (PyPI) workflow
+# and fails closed if `linkedparticles==<version>` is not yet resolvable — so
+# a mis-timed trigger can never bake a stale or missing release. The
+# workflow_dispatch path is a manual (re-)run against a version already on
+# the index.
+#
+# Tags are immutable by policy, PyPI-style: a version tag that already exists
+# on GHCR refuses to be re-pushed (recovery is the next patch release).
+# `latest` follows the newest published version.
+name: Publish image
+
+on:
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/engine
+
+jobs:
+  # One native build per architecture — no QEMU: the encoder bake imports
+  # torch and downloads the model at build time, which emulation turns from
+  # minutes into the better part of an hour.
+  build:
+    name: build (${{ matrix.arch }})
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version is stamped into pyproject.toml by the release export.
+      - name: Read the release version
+        id: ver
+        run: |
+          set -euo pipefail
+          v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building $IMAGE for linkedparticles $v (${{ matrix.arch }})"
+
+      # Fail closed unless the released pair is on the index: the image's code
+      # comes from PyPI, so an unresolvable version means there is nothing to
+      # publish yet — never "build from the tree instead".
+      - name: Require the released pair on the index
+        run: |
+          set -euo pipefail
+          python3 -m pip download --no-deps --dest /tmp/pair-check \
+            "linkedparticles==${{ steps.ver.outputs.version }}" \
+            "linkedparticles-core==${{ steps.ver.outputs.version }}"
+
+      # Refuse to overwrite a published version tag (immutability by policy).
+      # Checked per-arch before any push; the merge job re-checks before
+      # tagging, which is the write that actually matters.
+      - name: Refuse to republish an existing version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$IMAGE:v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "$IMAGE:v${{ steps.ver.outputs.version }} already exists — tags are immutable; cut the next patch instead" >&2
+            exit 1
+          fi
+        # docker manifest inspect needs a logged-in daemon for private images;
+        # the package is public after first publish, and before it the
+        # inspect simply fails → the guard passes. Login happens next anyway.
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Push by digest only — the merge job below stitches the two
+      # architectures into one manifest list and applies the tags.
+      - name: Stamp the build date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true
+          build-args: |
+            SOURCE=pypi
+            VERSION=${{ steps.ver.outputs.version }}
+            BUILD_DATE=${{ steps.date.outputs.date }}
+            VCS_REF=${{ github.sha }}
+
+      # Matrix job *outputs* clobber each other nondeterministically, so the
+      # per-arch digest travels as an artifact instead.
+      - name: Record the digest for the merge job
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digest
+          printf '%s' "${{ steps.build.outputs.digest }}" > "/tmp/digest/${{ matrix.arch }}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digest/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: merge manifest, tag, attest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # sigstore identity for the provenance attestation
+      attestations: write
+    steps:
+      - name: Download the per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: /tmp/digest
+          merge-multiple: true
+
+      - name: Read the digests
+        id: digests
+        run: |
+          set -euo pipefail
+          amd64="$(cat /tmp/digest/amd64)"; arm64="$(cat /tmp/digest/arm64)"
+          [ -n "$amd64" ] && [ -n "$arm64" ] || { echo "missing a per-arch digest" >&2; exit 1; }
+          echo "amd64=$amd64" >> "$GITHUB_OUTPUT"
+          echo "arm64=$arm64" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # The authoritative immutability check, immediately before the tagging
+      # write it protects.
+      - name: Refuse to republish an existing version tag
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$IMAGE:v${{ needs.build.outputs.version }}" >/dev/null 2>&1; then
+            echo "$IMAGE:v${{ needs.build.outputs.version }} already exists — tags are immutable; cut the next patch instead" >&2
+            exit 1
+          fi
+
+      - name: Create the multi-arch manifest and tag it
+        id: manifest
+        run: |
+          set -euo pipefail
+          v="${{ needs.build.outputs.version }}"
+          docker buildx imagetools create \
+            --tag "$IMAGE:v$v" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@${{ steps.digests.outputs.amd64 }}" \
+            "$IMAGE@${{ steps.digests.outputs.arm64 }}"
+          digest="$(docker buildx imagetools inspect "$IMAGE:v$v" --format '{{ json .Manifest }}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published $IMAGE:v$v ($digest)"
+
+      # Sigstore-backed SLSA provenance over the manifest list, verifiable
+      # with `gh attestation verify oci://ghcr.io/... --owner LinkedParticles`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      # Post-publish smoke: pull the tagged image and assert the code inside
+      # is the released version — the property the whole SOURCE=pypi design
+      # exists to guarantee.
+      - name: Post-publish smoke — pull and verify the baked version
+        run: |
+          set -euo pipefail
+          v="${{ needs.build.outputs.version }}"
+          docker pull "$IMAGE:v$v"
+          got="$(docker run --rm --entrypoint python "$IMAGE:v$v" -c 'import particles; print(particles.__version__)')"
+          [ "$got" = "$v" ] || { echo "baked version $got != $v" >&2; exit 1; }
+          echo "smoke OK: $IMAGE:v$v carries linkedparticles $got"
