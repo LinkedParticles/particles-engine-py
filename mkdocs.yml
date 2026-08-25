@@ -116,6 +116,19 @@ extra_css:
   - stylesheets/tokens.css
   - stylesheets/particles.css
 
+copyright: >-
+  © 2026 the LinkedParticles authors ·
+  Apache-2.0 ·
+  <a href="https://pypi.org/project/linkedparticles/">linkedparticles on PyPI</a> ·
+  <a href="https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md">security</a>
+
+# Share/social metadata rendered by overrides/main.html (shared across the
+# sites); the card is served from the apex site.
+extra:
+  social_image: https://linkedparticles.org/assets/social-card.png
+  favicon_ico: assets/favicon.ico
+  apple_touch_icon: assets/apple-touch-icon.png
+
 plugins:
   - search
   # Static collection only — griffe reads source, it never imports. That is why
