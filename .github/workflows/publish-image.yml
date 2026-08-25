@@ -47,7 +47,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/engine
+  # Literal, not ${{ github.repository_owner }}: OCI repository names must
+  # be lowercase and the org name is mixed-case (bit on the first firing).
+  IMAGE: ghcr.io/linkedparticles/engine
 
 jobs:
   # One native build per architecture — no QEMU: the encoder bake imports
