@@ -19,5 +19,5 @@
 # griffe cannot merge a split package across two search paths. See the header
 # of mkdocs.yml for the mechanics and the by-hand recipe.
 mkdocs==1.6.1
-mkdocs-material==9.7.6
+mkdocs-material==9.7.7
 mkdocstrings[python]==1.0.4
