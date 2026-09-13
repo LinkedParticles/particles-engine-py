@@ -5,6 +5,12 @@
 [PyPI](https://pypi.org/project/linkedparticles/) ·
 [Apache-2.0](https://github.com/LinkedParticles/particles-engine-py/blob/main/LICENSE)
 
+<!-- Ownership proof for the official Model Context Protocol registry: the
+     registry matches this token against the server name in server.json before
+     it will accept a listing for the linkedparticles PyPI package. Keep it
+     byte-identical to server.json's `name`. -->
+<!-- mcp-name: org.linkedparticles/particles -->
+
 > **Particles is shared memory for humans and AI agents.** Each particle is one
 > claim, plus what you need to judge it: who said it, where, when, and how
 > confident they were. Facts, opinions, and memories are all claims, recorded
