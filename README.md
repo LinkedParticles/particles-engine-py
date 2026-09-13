@@ -1,5 +1,10 @@
 # linkedparticles
 
+**[linkedparticles.org](https://linkedparticles.org)** ·
+**[docs.linkedparticles.org](https://docs.linkedparticles.org)** ·
+[PyPI](https://pypi.org/project/linkedparticles/) ·
+[Apache-2.0](https://github.com/LinkedParticles/particles-engine-py/blob/main/LICENSE)
+
 > **Particles is shared memory for humans and AI agents.** Each particle is one
 > claim, plus what you need to judge it: who said it, where, when, and how
 > confident they were. Facts, opinions, and memories are all claims, recorded

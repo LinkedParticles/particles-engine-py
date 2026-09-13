@@ -1817,3 +1817,48 @@ rule_sources:  # [engine]
     - site
     - build
     - dist
+
+metrics:  # [engine]
+  # Reach measurement for a published project — how many people fetched the
+  # repositories, cloned them, starred them, installed the distributions, and
+  # read the sites. Two halves of one pipeline, deliberately not coupled: a
+  # scheduled *capture* that only writes raw JSON, and a *deposit* run by hand
+  # on the machine holding the store, which folds whatever has accumulated into
+  # dated, sourced corpus entries.
+  #
+  # The split exists because one source expires. GitHub's traffic endpoints
+  # serve a trailing 14-day window and nothing older, so a figure not captured
+  # inside it is gone permanently; everything else is backfillable. The half
+  # with the deadline therefore cannot be allowed to wait on a store that may
+  # be on a laptop that is switched off.
+  #
+  # Nothing in this section is a secret. PARTICLES_METRICS_GITHUB_TOKEN (a
+  # fine-grained PAT with `Administration: Read-only`, which is what gates the
+  # traffic endpoints) and the optional PARTICLES_METRICS_GOATCOUNTER_TOKEN are
+  # read through particles/secrets.py.
+
+  # Where snapshots live, relative to the repository root — on the data branch
+  # for the capture half, and the same layout locally for `--from-dir`.
+  snapshot_dir: metrics/snapshots
+  # Published repositories whose traffic / stars / forks are captured.
+  repos:
+    - LinkedParticles/particles-standard
+    - LinkedParticles/particles-engine-py
+    - LinkedParticles/particles-core-py
+  # PyPI distributions whose download counts are captured.
+  pypi_distributions:
+    - linkedparticles
+    - linkedparticles-core
+  # GoatCounter site code (`<code>.goatcounter.com`). Until the analytics tag
+  # reaches the published sites this source returns nothing; it is recorded as
+  # unavailable and never fails a capture run.
+  goatcounter_site: linkedparticles
+  # Tags applied to every corpus entry the deposit half writes.
+  deposit_tags:
+    - metrics
+    - publication
+  # Per-request timeout for the capture half's HTTP calls.
+  request_timeout_seconds: 30.0
+  # Hard cap on stargazer pages fetched per repository (100 stars per page).
+  # An abuse-stop, not a tuning knob: the full history is wanted.
+  stargazer_max_pages: 50
