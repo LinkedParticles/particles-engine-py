@@ -21,16 +21,25 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.139.6"
+version = "1.139.8"
 description = "Auditable, provenance-tracked memory for AI agents — the Particles engine and its API, CLI, and MCP surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "The Particles authors" }]
+# Discovery terms, each one true of THIS distribution. Deliberately absent,
+# because they describe the Client layer and not this one: "shacl" and
+# "jsonschema" (the shapes, the validators, and every caller of them live in
+# `linkedparticles-core`; no module in this tree imports
+# `particles.conformance.shacl`, and the `particles conformance` verb here runs
+# the behavioural profile, not SHACL). "json-ld" stays, because this tree's
+# interchange export/import really does emit and consume JSON-LD documents —
+# it wraps the core codec with the store I/O the wire format needs.
 keywords = [
-    "epistemic", "knowledge-management", "provenance", "uncertainty", "psum",
-    "knowledge-graph", "beliefs", "llm", "agents", "rag", "citations",
-    "agent-memory", "memory", "mcp", "audit",
+    "epistemic", "epistemics", "knowledge-management", "knowledge-graph",
+    "provenance", "uncertainty", "psum", "beliefs", "belief-store",
+    "claim-extraction", "agent-memory", "ai-memory", "memory", "mcp",
+    "llm", "agents", "rag", "citations", "audit", "json-ld",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -48,6 +57,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Database",
+    # This distribution ships the HTTP surface itself (FastAPI + uvicorn), not
+    # merely a client of one.
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Software Development :: Libraries",
@@ -57,7 +69,7 @@ classifiers = [
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.139.6",
+    "linkedparticles-core==1.139.8",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "aiosqlite>=0.20",

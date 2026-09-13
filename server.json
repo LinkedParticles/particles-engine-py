@@ -1,0 +1,112 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "org.linkedparticles/particles",
+  "title": "Particles",
+  "description": "An append-only ledger of sourced, dated, confidence-scored claims your agent cites and you audit",
+  "version": "1.139.8",
+  "websiteUrl": "https://docs.linkedparticles.org/cli/#mcp-server",
+  "repository": {
+    "url": "https://github.com/LinkedParticles/particles-engine-py",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "linkedparticles",
+      "version": "1.139.8",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--from",
+          "value": "linkedparticles",
+          "description": "The distribution that provides the server. Its console script is named `particles`, so the executable and the package name differ and `--from` is required."
+        },
+        {
+          "type": "positional",
+          "valueHint": "executable",
+          "value": "particles",
+          "description": "The console script installed by the linkedparticles distribution."
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "command",
+          "value": "mcp",
+          "description": "The CLI command group that hosts the Model Context Protocol surface."
+        },
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "serve",
+          "description": "Serve the belief store over stdio. Read-only by default: the read tools are always registered, and the write tools are added only for stores explicitly listed in `mcp.write.enabled_stores`."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Anthropic API key. Required for the tools that call a model — `query` composes a cited natural-language answer, and the semantic half of `lint` reasons over claim pairs. The accessors that only read the store (`particle_show`, `particles_list`, `subjects_*`, `events_*`, `graph_view`, `quality_report`) work without it.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "DATABASE_URL",
+          "description": "SQLAlchemy URL of the belief store to serve. Defaults to `sqlite+aiosqlite:///./particles.db` in the working directory.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "sqlite+aiosqlite:///./particles.db"
+        },
+        {
+          "name": "PARTICLES_CONFIG",
+          "description": "Path to a `config.yaml` holding the rest of the engine's settings — additional stores, model selection per purpose, and the `mcp.write.enabled_stores` allowlist that turns the write tools on.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "toolSurface": {
+        "readAlwaysRegistered": [
+          "query",
+          "lint",
+          "quality_report",
+          "particle_show",
+          "particles_list",
+          "particle_search",
+          "subjects_list",
+          "subjects_search",
+          "subjects_show",
+          "list_corpus_entries",
+          "list_taxonomies",
+          "links_suggest",
+          "corpus_links_suggest",
+          "events_list",
+          "event_show",
+          "graph_view"
+        ],
+        "writeRegisteredOnlyWhenEnabled": [
+          "particle_assert",
+          "particle_supersede",
+          "particle_retract",
+          "particle_tag",
+          "particle_untag",
+          "link_add",
+          "link_remove",
+          "deposit_text"
+        ],
+        "writeGate": "mcp.write.enabled_stores is empty by default; a store must be named there before any write tool is registered.",
+        "resources": [
+          "particles://digest/<store>"
+        ]
+      }
+    }
+  }
+}
