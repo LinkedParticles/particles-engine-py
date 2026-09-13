@@ -129,6 +129,30 @@ extra:
   favicon_ico: assets/favicon.ico
   apple_touch_icon: assets/apple-touch-icon.png
 
+  # ---- Web analytics: GoatCounter ---------------------------------------- #
+  # THE site code for docs.linkedparticles.org — the single place it is
+  # configured. The value is the subdomain of the GoatCounter site, i.e. the
+  # `MYCODE` in `https://MYCODE.goatcounter.com`; `overrides/main.html` turns
+  # it into the one script tag, and there is nothing else to change.
+  #
+  # This is deliberately the SAME code the front door at linkedparticles.org
+  # uses: the `linkedparticles` GoatCounter site is configured to accept this
+  # hostname too, so both sites report into one dashboard. To split them,
+  # create a second GoatCounter site and change this one line — the shared
+  # template needs no edit.
+  #
+  # Sharing is legible because the recorded PATH carries the hostname:
+  # GoatCounter keys a row on the path and never on the hostname, so
+  # `overrides/main.html` prefixes it and this site's rows read
+  # `docs.linkedparticles.org/user-guide/getting-started/` rather than
+  # `/user-guide/getting-started/`. Without that prefix this site's `/` and the
+  # front door's `/` would be one row. Referrers are recorded per pageview and
+  # are unaffected.
+  #
+  # GoatCounter is cookieless, stores no identifiers, and honours Do Not Track,
+  # so the site needs no consent banner. Do not add one.
+  goatcounter_code: "linkedparticles"
+
 plugins:
   - search
   # Static collection only — griffe reads source, it never imports. That is why
