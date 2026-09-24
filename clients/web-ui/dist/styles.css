@@ -238,8 +238,8 @@ body {
   color: var(--muted);
   font-size: 0.76rem;
 }
-/* The LLM judge's advisory same-claim verdict on a duplicate-pair card
-   : rendered under the brief so the merge decision reads the model's
+/* The LLM judge's advisory same-claim verdict on a duplicate-pair card:
+   rendered under the brief so the merge decision reads the model's
    verdict, not raw cosine. */
 .card .refs .verdict {
   margin: 8px 0 0;

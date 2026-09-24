@@ -23,7 +23,8 @@ from typing import Any
 
 
 class TestPageStatReporting:
-    """An 83-page PDF printed 83 lines unconditionally, and flagged pages that carry-forward had legitimately satisfied as ``⚠ zero yield``."""
+    """An 83-page PDF printed 83 lines unconditionally, and flagged pages that
+    carry-forward had legitimately satisfied as ``⚠ zero yield``."""
 
     @staticmethod
     def _stats(total: int, with_particles: int) -> list[Any]:

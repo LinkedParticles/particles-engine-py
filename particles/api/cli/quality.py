@@ -18,7 +18,7 @@ def quality_cmd() -> None:
 
     \b
     Displays calibration source distribution, corpus snapshot status,
-    and subject coverage metrics. No LLM calls — instant read from the DB.
+    and subject coverage metrics. No LLM calls, just an instant read from the DB.
     For full structural and semantic diagnostics use: particles lint
     """
     report = run(get_backend().quality())

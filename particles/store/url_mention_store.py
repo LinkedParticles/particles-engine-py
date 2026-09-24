@@ -77,8 +77,8 @@ async def record_url_mentions(
     """Record URL mentions for one source, idempotently.
 
     A duplicate ``(source_entry_id, canonical_url)`` is a no-op — the mention
-    already exists — so re-extracting the same source never inflates counts
-    . ``deposited_map`` (``{canonical_url: entry_id}``, from
+    already exists — so re-extracting the same source never inflates counts.
+    ``deposited_map`` (``{canonical_url: entry_id}``, from
     :func:`build_deposited_url_map`) lets a URL that is *already* deposited be
     born with its ``target_entry_id`` set, so it never surfaces as a
     suggestion. Returns the number of new rows inserted.

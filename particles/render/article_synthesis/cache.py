@@ -15,8 +15,8 @@ Three operator-facing concerns live here:
   given a previously-rendered article file on disk, decompose it into
   frontmatter + H1 + prose + references so the exporter can read the
   cached ``input_hash`` and/or splice the pieces into a larger note.
-* ``invalidate_stale_link_articles`` — the cross-subject staleness fix
-  . Scans every cached article for ``[[X]]`` wikilinks
+* ``invalidate_stale_link_articles`` — the cross-subject staleness fix.
+  Scans every cached article for ``[[X]]`` wikilinks
   whose X has been renamed away from any current canonical name +
   alias; strips ``input_hash`` from those frontmatter blocks so the
   next export regenerates them.

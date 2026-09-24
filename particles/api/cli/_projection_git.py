@@ -14,8 +14,8 @@ is a bonus.
 Every git failure degrades **silently** — not a repo, detached HEAD, nothing to
 commit, missing identity, unsigned, permission denied — logged at ``debug`` and
 returned as a telemetry string; :func:`commit_projection` never raises. The
-SDK repo's GPG-signing requirement is never imposed on the operator's repo
-: signing defaults off so an unattended SessionEnd-hook commit can
+SDK repo's GPG-signing requirement is never imposed on the operator's repo:
+signing defaults off so an unattended SessionEnd-hook commit can
 never block on a signing agent.
 
 Surface-tier (imports config only). Git is invoked via ``asyncio`` subprocess so

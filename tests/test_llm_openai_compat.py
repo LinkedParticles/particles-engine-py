@@ -7,7 +7,8 @@
 Covers the deterministic seams: request-body / header construction (including
 the dialect knobs), response parsing, the bounded retry loop,
 fail-fast on non-retryable status, the ``CompletionError`` contract, registry
-resolution of named providers, the strict-dialect schema transform, and the breaker's duck-typing of a 401/403. The endpoint itself is never
+resolution of named providers, the strict-dialect schema transform, and the
+breaker's duck-typing of a 401/403. The endpoint itself is never
 hit — ``httpx.AsyncClient`` is mocked per ``tests/AGENTS.md``.
 """
 

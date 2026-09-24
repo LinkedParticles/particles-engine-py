@@ -1,7 +1,8 @@
 # Ground truth manifest — llm_wiki_vault fixture
 
 This directory is a small synthetic LLM-Wiki-style Obsidian vault used to
-exercise the retrospective onboarding path (`particles import vault`) end to end: deposit → extract → lint. It reads like a personal
+exercise the retrospective onboarding path (`particles import vault`)
+end to end: deposit → extract → lint. It reads like a personal
 numismatics research vault, but its defects are planted on purpose so a
 lint run against it is a measurement, not a vibe check.
 

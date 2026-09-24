@@ -873,6 +873,36 @@ def test_cli_interchange_export_yaml_import_round_trips(cli_db, tmp_path) -> Non
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_import_never_binds_a_foreign_subject_through_a_persona_alias(db_session) -> None:  # type: ignore[no-untyped-def]
+    """An imported "I" is not this store's conversational persona.
+
+    The persona fold records the surface forms it folds as aliases of the
+    persona Subject. Import binds particles to subjects by name, so it must
+    bind exactly as it did before those aliases existed: a bundle's Subject
+    named "I" imports as its own Subject, never into the persona.
+    """
+    from particles.ingest.subject_resolver import resolve_subject
+    from particles.interchange.codec import SubjectRef, subject_to_unit
+    from particles.interchange.store import _import_subject_unit, _resolve_subject_ref
+    from particles.store.subject_store import find_by_name
+
+    persona = await resolve_subject(db_session, "I", source_type="CONVERSATION")
+    await resolve_subject(db_session, "user", source_type="CONVERSATION")
+    found = await find_by_name(db_session, "I")
+    assert found is not None and found.id == persona.id
+
+    imported_id, created = await _resolve_subject_ref(db_session, SubjectRef(canonical_name="I"))
+    assert created is True
+    assert imported_id != persona.id
+
+    unit = subject_to_unit(Subject(canonical_name="User", asserted_by="elsewhere"))
+    assert await _import_subject_unit(db_session, unit) is True
+    # The persona's own canonical name still joins, as it always has.
+    same_id, created = await _resolve_subject_ref(db_session, SubjectRef(canonical_name="the user"))
+    assert (same_id, created) == (persona.id, False)
+
+
 class TestPackageRootSurface:
     """`particles.interchange` re-exports the Client half only.
 

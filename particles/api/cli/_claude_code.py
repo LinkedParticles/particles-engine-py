@@ -6,7 +6,8 @@
 
 Used by ``particles init claude-code`` (``cli/init.py``) and the
 ``particles hook …`` verbs (``cli/hook.py``). Everything here is deliberately
-**pure / store-free** except the hook-log writers (local file I/O): the
+**pure / store-free** except the hook-log writers and the project resolver
+(local file I/O): the
 settings-merge, transcript-distillation, redaction, and config.yaml-surgeon
 functions take data in and hand data back, so the ADR's determinism and
 surgicality guarantees are unit-testable without a store.
@@ -20,15 +21,18 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
 import shlex
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from particles.config import get_config
+from particles.render.markdown import find_projected_regions
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +44,326 @@ HOOK_SENTINEL = "particles hook"
 #: Truncate-rotation cap for the hook log: when the JSONL file
 #: exceeds this size, it is truncated and restarted (simple, no side-car state).
 _HOOK_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# Project identity — which memory directory a session writes to
+# ---------------------------------------------------------------------------
+
+#: How many transcript lines are read looking for the launch directory. The
+#: first ``cwd``-bearing record is normally within the first handful.
+_LAUNCH_CWD_SCAN_LINES = 60
+
+#: What ``<repo>/.claude/worktrees/<name>`` becomes under the slug rule.
+_CLAUDE_WORKTREE_INFIX = "--claude-worktrees-"
+
+
+@dataclass(frozen=True)
+class SessionProject:
+    """The project a Claude Code session belongs to, as the platform keys it.
+
+    ``key`` names the ``~/.claude/projects/<key>/`` directory that holds the
+    session's **auto-memory**, which is not always the directory holding its
+    transcript: Claude Code keys transcripts per working directory but
+    auto-memory per repository, shared across worktrees.
+    """
+
+    key: str
+    memory_dir: Path | None
+    #: ``"repository"`` when the key was resolved from the session's launch
+    #: directory; ``"worktree-name"`` when that could not be established but the
+    #: transcript directory is named like a Claude Code worktree of a project
+    #: that exists; ``"transcript-dir"`` when the transcript's own directory was
+    #: used, which is the older behaviour.
+    resolved_from: str
+
+
+def claude_project_slug(path: Path | str) -> str:
+    """The ``~/.claude/projects/`` directory name Claude Code derives from a path.
+
+    Every character outside ``[A-Za-z0-9]`` becomes ``-``. The platform does
+    not document the rule; :func:`resolve_session_project` therefore never
+    trusts it blindly — it only re-keys a session whose transcript directory
+    this function reproduces.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def repository_root(cwd: Path) -> Path:
+    """The root Claude Code keys auto-memory on for a session launched in ``cwd``.
+
+    Walks up to the nearest ``.git`` entry, reading files only — no ``git``
+    subprocess, because this runs inside the hook deadline. A ``.git``
+    *directory* marks the root. A ``.git`` *file* is a linked worktree or a
+    submodule: its ``gitdir:`` names the per-checkout git directory, and a
+    ``commondir`` file there (worktrees have one, submodules do not) names the
+    shared ``.git``, whose parent is the main checkout. With no ``.git``
+    anywhere, ``cwd`` is its own root.
+
+    The walk does not require ``cwd`` to exist: a worktree created under its
+    own repository (Claude Code's ``.claude/worktrees/``) still resolves after
+    it has been removed, which is the state a catch-up harvest finds it in.
+    Paths are normalised, never symlink-resolved, so the slug still matches
+    the string the platform saw.
+    """
+    return find_repository_root(cwd) or cwd
+
+
+def find_repository_root(cwd: Path) -> Path | None:
+    """:func:`repository_root`, or ``None`` when no ``.git`` entry is found at all."""
+    for candidate in (cwd, *cwd.parents):
+        dot_git = candidate / ".git"
+        if dot_git.is_dir():
+            return candidate
+        if dot_git.is_file():
+            return _main_checkout_of(candidate, dot_git) or candidate
+    return None
+
+
+def _main_checkout_of(checkout: Path, dot_git_file: Path) -> Path | None:
+    """The main checkout a linked worktree belongs to, or ``None`` if it is not one."""
+    try:
+        first_line = dot_git_file.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        if not first_line.startswith("gitdir:"):
+            return None
+        git_dir = Path(os.path.normpath(checkout / first_line[len("gitdir:") :].strip()))
+        common_file = git_dir / "commondir"
+        if not common_file.is_file():
+            return None  # a submodule: its own root
+        common = Path(os.path.normpath(git_dir / common_file.read_text(encoding="utf-8").strip()))
+    except (OSError, IndexError):
+        return None
+    # A bare-repository worktree has no main checkout to key on.
+    return common.parent if common.name == ".git" else None
+
+
+def _recorded_cwds(transcript_path: Path) -> list[str]:
+    """Distinct ``cwd`` values from the head of a transcript, in order."""
+    found: list[str] = []
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as fh:
+            for index, line in enumerate(fh):
+                if index >= _LAUNCH_CWD_SCAN_LINES:
+                    break
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(cwd, str) and cwd and cwd not in found:
+                    found.append(cwd)
+    except OSError:
+        pass
+    return found
+
+
+def launch_directory(project_dir_name: str, candidates: list[str]) -> Path | None:
+    """The candidate directory whose slug is ``project_dir_name``, if any.
+
+    A session can change directory, so neither the hook payload's ``cwd`` nor
+    a transcript's first record is reliably where it was launched. The
+    transcript's own directory name *is* the launch directory's slug, which
+    makes it the test: the first candidate that reproduces it is the launch
+    directory. No match means no re-keying — including when the platform's
+    slug rule has moved on, which therefore degrades to the old behaviour
+    rather than to a directory that does not exist.
+    """
+    for candidate in candidates:
+        if claude_project_slug(candidate) == project_dir_name:
+            return Path(candidate)
+    return None
+
+
+def resolve_session_project(payload: Mapping[str, Any]) -> SessionProject:
+    """Resolve a hook payload to the project whose memory the session writes to."""
+    raw_transcript = str(payload.get("transcript_path") or "")
+    transcript_path = Path(raw_transcript) if raw_transcript else None
+    if transcript_path is None or not transcript_path.name:
+        return SessionProject(key="", memory_dir=None, resolved_from="transcript-dir")
+
+    project_dir = transcript_path.parent
+    candidates = [str(payload.get("cwd") or ""), *_recorded_cwds(transcript_path)]
+    launch = launch_directory(project_dir.name, [c for c in candidates if c])
+    if launch is None:
+        # The launch directory could not be identified (a session that moved
+        # between checkouts records other directories). One thing is still
+        # knowable from the name alone: a Claude Code worktree lives under its
+        # repository, so its slug is the repository's plus a fixed infix. It is
+        # adopted only when that repository's project directory really exists.
+        repository_key = _strip_worktree_infix(project_dir.name)
+        if repository_key != project_dir.name and (project_dir.parent / repository_key).is_dir():
+            return SessionProject(
+                key=repository_key,
+                memory_dir=project_dir.parent / repository_key / "memory",
+                resolved_from="worktree-name",
+            )
+        return SessionProject(
+            key=project_dir.name,
+            memory_dir=project_dir / "memory",
+            resolved_from="transcript-dir",
+        )
+    key = claude_project_slug(repository_root(launch))
+    return SessionProject(
+        key=key,
+        memory_dir=project_dir.parent / key / "memory",
+        resolved_from="repository",
+    )
+
+
+def observer_project_for(project_key: str) -> str | None:
+    """The observer a session in ``project_key`` reads through, or ``None`` for the whole store.
+
+    ``claude_code.observer_scope`` is the one switch: ``store`` (the default)
+    leaves every session surface store-wide; ``project`` reads the digest, the
+    ``MEMORY.md`` region and the freshness check through the session's project.
+    An empty key — a session whose project could not be
+    resolved — is never an observer.
+    """
+    if get_config().claude_code.observer_scope != "project" or not project_key:
+        return None
+    return project_key
+
+
+def transcript_project_key(transcript: Path) -> str:
+    """The project key of a transcript on disk — what the SessionEnd hook would stamp.
+
+    Used where there is no hook payload (the first-run audit, ``rescope``), so
+    a transcript harvested either way carries the same ``project:`` tag.
+    """
+    resolved = resolve_session_project({"transcript_path": str(transcript)})
+    if resolved.resolved_from != "transcript-dir":
+        return resolved.key
+    # No hook is writing into a memory directory here, so the name alone is
+    # enough: a worktree's slug stands for its repository whether or not that
+    # repository's project directory still exists.
+    return _strip_worktree_infix(resolved.key)
+
+
+def rule_file_project_key(path: Path) -> str | None:
+    """The project a rule document belongs to, or ``None`` for a global one.
+
+    A rule file under the user-level ``~/.claude`` is how the user works
+    everywhere — the *global rules*. One inside a repository is that project's.
+    One in neither (a bare path the operator registered) is a hand deposit,
+    and stays global.
+    """
+    resolved = path.expanduser()
+    user_level = Path.home() / ".claude"
+    if resolved == user_level or user_level in resolved.parents:
+        return None
+    root = find_repository_root(resolved.parent)
+    return claude_project_slug(root) if root is not None else None
+
+
+def canonical_project_key(slug: str, projects_root: Path) -> str:
+    """The project key a ``~/.claude/projects/`` directory name stands for.
+
+    A directory's own transcripts say where it was launched, which resolves a
+    linked worktree anywhere on disk. When they are gone (the platform prunes
+    them), a Claude Code worktree is still recognisable by name: it lives under
+    its repository, so its slug is the repository's plus a fixed infix. Any
+    other slug is its own key.
+    """
+    project_dir = projects_root / slug
+    if project_dir.is_dir():
+        for transcript in sorted(project_dir.glob("*.jsonl")):
+            launch = launch_directory(slug, _recorded_cwds(transcript))
+            if launch is not None:
+                return claude_project_slug(repository_root(launch))
+    return _strip_worktree_infix(slug)
+
+
+def _strip_worktree_infix(slug: str) -> str:
+    return slug.split(_CLAUDE_WORKTREE_INFIX, 1)[0] if _CLAUDE_WORKTREE_INFIX in slug else slug
+
+
+_MEMORY_URI_RE = re.compile(r"/projects/(?P<slug>[^/]+)/memory/")
+_SESSION_URI_PREFIX = "claude-code://session/"
+
+
+def entry_project_key(uri_r: str | None, tags: list[str], projects_root: Path) -> str | None:
+    """The key ``rescope`` should add to an already-deposited entry, or ``None``.
+
+    Only this adapter's own deposits are attributed: a harvested memory file by
+    the directory in its URI, a transcript by where its session was launched
+    (while the session file still exists), a rule document by the repository it
+    sits in, and anything carrying an older, per-worktree ``project:`` tag by
+    what that slug stands for. Everything else — a hand deposit, a web page —
+    is left alone, and stays global.
+    """
+    uri = uri_r or ""
+    if "rule-file" in tags and uri.startswith("file://"):
+        return rule_file_project_key(Path(uri[len("file://") :]))
+    if "claude-code" not in tags:
+        return None
+    match = _MEMORY_URI_RE.search(uri) if uri.startswith("file://") else None
+    if match is not None:
+        return canonical_project_key(match.group("slug"), projects_root)
+    if uri.startswith(_SESSION_URI_PREFIX):
+        session_id = uri[len(_SESSION_URI_PREFIX) :]
+        for transcript in sorted(projects_root.glob(f"*/{session_id}.jsonl")):
+            return transcript_project_key(transcript)
+    for tag in tags:
+        if tag.startswith("project:") and len(tag) > len("project:"):
+            return canonical_project_key(tag[len("project:") :], projects_root)
+    return None
+
+
+def is_live_project_key(key: str, projects_root: Path) -> bool:
+    """Whether a session could ever observe as ``key``: its directory exists and is canonical."""
+    return (projects_root / key).is_dir() and canonical_project_key(key, projects_root) == key
+
+
+def stray_memory_dirs(projects_root: Path) -> list[Path]:
+    """Memory directories under ``projects_root`` that Claude Code never reads.
+
+    A directory is stray when its project directory is a linked worktree's:
+    the sessions launched there key their memory on the main checkout, so a
+    ``memory/`` beside their transcripts can only have been created by this
+    SDK's own projection. Two tests, both conservative:
+
+    * a transcript records the launch directory, and it resolves to a
+      different repository key; or
+    * no transcript is left to ask (the platform prunes them; the stray
+      outlives them), the project directory is named like one of Claude
+      Code's own worktrees, and it holds nothing but a ``MEMORY.md`` that is
+      purely the projected region — output only this SDK writes. A real
+      project with no memory of its own looks the same but for the name, and
+      its region *is* read, so the name is part of the test.
+    """
+    strays: list[Path] = []
+    if not projects_root.is_dir():
+        return strays
+    for memory_dir in sorted(p for p in projects_root.glob("*/memory") if p.is_dir()):
+        project_dir = memory_dir.parent
+        transcripts = sorted(project_dir.glob("*.jsonl"))
+        if not transcripts:
+            if _CLAUDE_WORKTREE_INFIX in project_dir.name and _holds_only_the_projected_region(
+                memory_dir
+            ):
+                strays.append(memory_dir)
+            continue
+        for transcript in transcripts:
+            launch = launch_directory(project_dir.name, _recorded_cwds(transcript))
+            if launch is None:
+                continue
+            if claude_project_slug(repository_root(launch)) != project_dir.name:
+                strays.append(memory_dir)
+            break
+    return strays
+
+
+def _holds_only_the_projected_region(memory_dir: Path) -> bool:
+    try:
+        if [p.name for p in memory_dir.iterdir()] != ["MEMORY.md"]:
+            return False
+        text = (memory_dir / "MEMORY.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    regions = find_projected_regions(text)
+    if len(regions) != 1:
+        return False
+    region = regions[0]
+    return not (text[: region.start] + text[region.end :]).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -402,24 +726,57 @@ def memory_manifest_path() -> Path:
     return state_dir() / "memory.yaml"
 
 
-def memory_snapshot_path() -> Path:
-    """The render snapshot: ``<state_dir>/memory-index.snapshot.md``.
+def project_state_dir(memory_dir: Path) -> Path:
+    """Per-project state: ``<state_dir>/projects/<project>/``.
+
+    ``<project>`` is the name of the ``~/.claude/projects/`` directory that
+    holds ``memory_dir``. Whatever records *what was last written into one
+    project's* ``MEMORY.md`` lives here, because one machine-wide copy is
+    overwritten by every other project's cycle.
+    """
+    return state_dir() / "projects" / memory_dir.parent.name
+
+
+def memory_snapshot_path(memory_dir: Path | None = None) -> Path:
+    """The render snapshot of one project's region.
 
     Because the bullets renderer is deterministic, snapshot ≡ last-spliced
     region body — the pristine test at harvest and the drift check before a
-    re-splice both compare against this file.
+    re-splice both compare against this file. It is kept **per project**: each
+    cycle splices only the ending session's ``MEMORY.md``, so a single
+    snapshot describes one file and makes every other project's region look
+    hand-edited, which deposits the store's own bullets as authored input.
+
+    With no ``memory_dir`` this is the machine-wide path older versions wrote,
+    ``<state_dir>/memory-index.snapshot.md``. It is still read as a fallback
+    for a project that has not been rendered since the upgrade, and never
+    written again.
     """
-    return state_dir() / f"{MEMORY_REGION}.snapshot.md"
+    name = f"{MEMORY_REGION}.snapshot.md"
+    return (project_state_dir(memory_dir) if memory_dir is not None else state_dir()) / name
 
 
-def memory_archive_path() -> Path:
-    """The fold-and-archive target: ``<state_dir>/MEMORY.archive.md``."""
-    return state_dir() / MEMORY_ARCHIVE_NAME
+def memory_archive_path(memory_dir: Path | None = None) -> Path:
+    """One project's fold-and-archive target.
+
+    Per project, like the snapshot: lines folded out of one project's
+    ``MEMORY.md`` are that project's memory, and a single shared archive is
+    harvested under whichever project deposited it first. With
+    no ``memory_dir`` this is the machine-wide file older versions appended to,
+    which is left in place and no longer written or harvested.
+    """
+    base = project_state_dir(memory_dir) if memory_dir is not None else state_dir()
+    return base / MEMORY_ARCHIVE_NAME
 
 
-def memory_backup_path() -> Path:
-    """The one-deep pre-splice backup: ``<state_dir>/MEMORY.md.pre-render``."""
-    return state_dir() / "MEMORY.md.pre-render"
+def memory_backup_path(memory_dir: Path) -> Path:
+    """One project's one-deep pre-splice backup.
+
+    Per project for the same reason as the snapshot: a single machine-wide
+    backup holds whichever project's file was spliced last, so it is the wrong
+    file to restore for every other project.
+    """
+    return project_state_dir(memory_dir) / "MEMORY.md.pre-render"
 
 
 def projection_enabled() -> bool:
@@ -456,23 +813,31 @@ def default_memory_manifest_text() -> str:
     )
 
 
-def load_projection_snapshots() -> dict[str, str]:
+def load_projection_snapshots(memory_dir: Path | None = None) -> dict[str, str]:
     """Region-name → last-rendered-body map from the state directory's snapshots.
 
-    Reads every ``*.snapshot.md`` beside the manifest state (the ``<name>.snapshot.md`` convention, relocated); the stem
+    Reads every ``*.snapshot.md`` beside the manifest state (the
+    ``<name>.snapshot.md`` convention, relocated); the stem
     before ``.snapshot`` is the region name. Unreadable files are skipped —
     the strip then treats their regions as dirtied, which routes the content
     through the harvest ladder rather than risk dropping an edit.
+
+    With ``memory_dir``, that project's own snapshots are layered over the
+    machine-wide ones and win: a file under ``memory_dir`` is compared with
+    what was last spliced into *it*.
     """
+    directories = [state_dir()]
+    if memory_dir is not None:
+        directories.append(project_state_dir(memory_dir))
     snapshots: dict[str, str] = {}
-    directory = state_dir()
-    if not directory.is_dir():
-        return snapshots
-    for path in sorted(directory.glob("*.snapshot.md")):
-        try:
-            snapshots[path.name[: -len(".snapshot.md")]] = path.read_text(encoding="utf-8")
-        except OSError:
-            log.debug("could not read snapshot %s", path, exc_info=True)
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.snapshot.md")):
+            try:
+                snapshots[path.name[: -len(".snapshot.md")]] = path.read_text(encoding="utf-8")
+            except OSError:
+                log.debug("could not read snapshot %s", path, exc_info=True)
     return snapshots
 
 
@@ -482,7 +847,10 @@ def load_projection_snapshots() -> dict[str, str]:
 
 
 def filter_memory_file_for_deposit(
-    text: str, snapshot_bodies: Mapping[str, str] | None = None
+    text: str,
+    snapshot_bodies: Mapping[str, str] | None = None,
+    *,
+    memory_dir: Path | None = None,
 ) -> str:
     """Pre-deposit filter for harvested memory files.
 
@@ -491,21 +859,24 @@ def filter_memory_file_for_deposit(
     contain the store's own rendered output (belt 1 of the round-trip
     contract; the fixed-point test rests on it). A **dirtied** region (body ≠
     snapshot, or no snapshot known) is human/agent signal: its body is kept
-    and deposited as ordinarily-authored input for the §6.6 ladder; only the sentinel comment lines are dropped.
+    and deposited as ordinarily-authored input for the §6.6 ladder;
+    only the sentinel comment lines are dropped.
 
     The fold-and-archive pointer line is dropped too — it is
     machine-generated, like the sentinels, and the archive file it points at
     is harvested in full anyway.
 
-    ``snapshot_bodies`` (region name → body) defaults to the state
-    directory's ``*.snapshot.md`` files. The parse regexes are shared with
+    ``snapshot_bodies`` (region name → body) defaults to the snapshots of the
+    project that owns ``memory_dir`` — pass it for every file harvested from a
+    memory directory, or a region last rendered before some *other* project's
+    cycle reads as dirtied. The parse regexes are shared with
     the renderer (``particles.render.markdown``), so strip and splice can
     never disagree about where a region begins.
     """
     from particles.render.markdown import strip_projected_regions_for_deposit
 
     if snapshot_bodies is None:
-        snapshot_bodies = load_projection_snapshots()
+        snapshot_bodies = load_projection_snapshots(memory_dir)
     stripped = strip_projected_regions_for_deposit(text, snapshot_bodies)
     if ARCHIVE_POINTER_PREFIX in stripped:
         kept = [

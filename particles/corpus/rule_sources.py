@@ -39,6 +39,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.observer_scope import project_tag
 from particles.core.schema import FetchPolicy, Mutability
 
 log = logging.getLogger(__name__)
@@ -241,12 +242,17 @@ def identity_filter(text: str) -> str:
     return text
 
 
+def _tags_for(path: Path, project_key_for: Callable[[Path], str | None] | None) -> list[str]:
+    key = project_key_for(path) if project_key_for is not None else None
+    return [RULE_SOURCE_TAG, *([project_tag(key)] if key else [])]
+
+
 async def sync_rule_sources(
     session: AsyncSession,
     paths: list[str] | None = None,
     *,
     cwd: Path | None = None,
-    project_tag: str | None = None,
+    project_key_for: Callable[[Path], str | None] | None = None,
     deposited_by: str = "rule-sync",
     dry_run: bool = False,
     filter_text: Callable[[str], str] = identity_filter,
@@ -258,11 +264,17 @@ async def sync_rule_sources(
     see :func:`refresh_policy_for` for the one case that is not.
 
     Idempotent: identity is the ``file://`` URI-R, so a re-run over unchanged
-    content is a content-hash no-op that still reconciles ``fetch_policy``
-     — which is what enrols a file that never changes.
+    content is a content-hash no-op that still reconciles ``fetch_policy``—
+    which is what enrols a file that never changes.
 
     ``filter_text`` transforms the raw bytes into the deposit body (see
     :func:`identity_filter`); the CLI passes the sentinel strip.
+
+    ``project_key_for`` maps a rule file to the project it belongs to, or
+    ``None`` for a global one: a repository's ``AGENTS.md`` is that
+    project's, the user-level ``~/.claude/CLAUDE.md`` is everyone's. The mapping
+    is the caller's because it is a harness's path convention, which this layer
+    does not know. Omitted, every file is deposited keyless, as before.
 
     One unreadable file does not stop the sweep; it lands in
     :attr:`RuleSyncReport.failed`. Does not commit — the caller owns the
@@ -272,7 +284,6 @@ async def sync_rule_sources(
 
     resolution = resolve_rule_sources(paths, cwd=cwd)
     report = RuleSyncReport(resolution=resolution)
-    tags = [RULE_SOURCE_TAG] + ([f"project:{project_tag}"] if project_tag else [])
 
     for path in resolution.files:
         try:
@@ -298,7 +309,7 @@ async def sync_rule_sources(
                 uri_r=path.as_uri(),
                 source_type=RULE_SOURCE_TYPE,
                 mutability=Mutability.MUTABLE,
-                tags=tags,
+                tags=_tags_for(path, project_key_for),
                 deposited_by=deposited_by,
                 content_published_at=mtime,
                 fetch_policy=refresh_policy_for(raw, text),

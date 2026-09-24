@@ -5,9 +5,11 @@
 """Article synthesis helper — shared rendering layer for cited prose articles.
 
 This package is the **content** half of the wiki/article-synthesis design
-originally introduced and lifted out of ``wiki.py``. Every exporter that wants per-Subject prose articles
+originally introduced and lifted out of ``wiki.py``.
+Every exporter that wants per-Subject prose articles
 (WikiExporter, Obsidian's ``--with-synthesis`` mode, the Logseq
-exporter, …) goes through these helpers — and so does the narrative-synthesis path in ``operations``.
+exporter, …) goes through these helpers — and so does the
+narrative-synthesis path in ``operations``.
 
 **Location / layer (follow-up).** This package used to live at
 ``particles/exporters/article_synthesis/``, which forced Engine *reasoning*

@@ -13,12 +13,14 @@ surfaces composed all three while the hygiene surfaces each keyed on one, so
 they disagreed about what "contested" meant. This module is the single finder
 they now share: it emits
 
-- one **per-claim** ``CONTESTED`` INFO finding per contested belief — the card source for ``CardKind.CONTESTED``, and through it the census bucket and the run record; and
+- one **per-claim** ``CONTESTED`` INFO finding per contested belief — the
+  card source for ``CardKind.CONTESTED``, and through it the
+  census bucket and the run record; and
 - the **store-level** ``CONTESTEDNESS_DISTRIBUTION`` INFO finding
   — the divergence drill-down histogram, unchanged in shape.
 
-Like every contestedness surface this is **disclosure, not discount**
-: it changes no status and feeds no confidence or
+Like every contestedness surface this is **disclosure, not discount**:
+it changes no status and feeds no confidence or
 ranking term. Severity is ``INFO`` for that reason — an unresolved
 contradiction is a defect (``CONTRADICTION``, ERROR); a lens disagreement is
 not.

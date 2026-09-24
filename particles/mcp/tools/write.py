@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from particles.config import get_config
+from particles.mcp.observer import bound_project
 
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
@@ -78,6 +79,8 @@ def _assert_result(result: AgentWriteResult, store: str) -> dict[str, Any]:
         out["status"] = result.status
     if result.inconsistency_id is not None:
         out["inconsistency_id"] = result.inconsistency_id
+    if result.superseded_particle_id is not None:
+        out["superseded_particle_id"] = result.superseded_particle_id
     return out
 
 
@@ -116,7 +119,11 @@ async def particle_assert(
 
     Returns:
         ``{asserted_particle_id, store, verdict, status, [inconsistency_id]}`` —
-        ``verdict`` is ``ASSERTED`` or ``INCONSISTENCY_RAISED``.
+        ``verdict`` is ``ASSERTED``, ``SUPERSEDED_PRIOR`` (this assertion
+        replaced *this agent's own* earlier belief, whose id is
+        ``superseded_particle_id``), ``INCONSISTENCY_RAISED``, or
+        ``HELD_FOR_REVIEW``
+        (the claim re-states one already held for review).
     """
     from particles.api.client import get_backend
 
@@ -130,6 +137,7 @@ async def particle_assert(
         uncertainty_nature=uncertainty_nature,
         tags=tags,
         store=handle,
+        project_key=bound_project(),
     )
     return _assert_result(result, handle)
 
@@ -144,6 +152,7 @@ async def particle_supersede(
     uncertainty_nature: str = "EPISTEMIC",
     tags: list[str] | None = None,
     store: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Revise a belief: assert a successor and move the prior particle to SUPERSEDED.
 
@@ -165,6 +174,8 @@ async def particle_supersede(
         uncertainty_nature: "EPISTEMIC" (default) or "ALEATORY".
         tags: Optional tags on the successor.
         store: Target store handle; required only when several are write-enabled.
+        reason: Why the belief is being revised. Optional here, recorded on
+            the audit event when given.
 
     Returns the assertion result plus ``superseded_id``.
     """
@@ -181,6 +192,8 @@ async def particle_supersede(
         uncertainty_nature=uncertainty_nature,
         tags=tags,
         store=handle,
+        reason=reason,
+        project_key=bound_project(),
     )
     out = _assert_result(result, handle)
     out["superseded_id"] = supersedes_id
@@ -231,7 +244,9 @@ async def deposit_text(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
-    entry_id, snapshot_id = await get_backend().deposit_text(text=text, tags=tags, store=handle)
+    entry_id, snapshot_id = await get_backend().deposit_text(
+        text=text, tags=tags, store=handle, project_key=bound_project()
+    )
     return {"corpus_entry_id": entry_id, "snapshot_id": snapshot_id, "store": handle}
 
 
@@ -245,8 +260,7 @@ def _parse_relation(relation_type: str) -> Any:
         raise ValueError(f"Unknown relation_type {relation_type!r}.") from exc
     if rt != RelationType.CO_EVIDENTIAL:
         raise ValueError(
-            f"Only CO_EVIDENTIAL relations are emittable over MCP today; "
-            f"got {relation_type!r}."
+            f"Only CO_EVIDENTIAL relations are emittable over MCP today; got {relation_type!r}."
         )
     return rt
 

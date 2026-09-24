@@ -5,7 +5,8 @@
 """Effective-confidence scoring for a particle list.
 
 The scoring kernel shared by the read surfaces that compute effective confidence
-outside a semantic query: the stance distribution and the session-start digest. Given a set of particles and a trust policy, it computes
+outside a semantic query: the stance distribution and the
+session-start digest. Given a set of particles and a trust policy, it computes
 each particle's effective confidence with the **full** query-path formula —
 ``confidence.value × extractor_trust_weight × source_trust_rank ×
 recency_factor`` — minus the embedding/similarity step. Lifting it here keeps
@@ -80,7 +81,7 @@ async def score_effective_confidence(
             (``+ ω·A``). Same rule and same caveat as ``apply_utility_factor``:
             recall path only, ordering key only, never displayed. Default
             ``False`` — a caller opts in per surface, so the graph view
-             and the hygiene surfaces stay on the truth-only
+            and the hygiene surfaces stay on the truth-only
             score.
         now: The decay reference instant (an as-of consumer
             evaluates decay at T; trust/utility stay current). ``None`` — the

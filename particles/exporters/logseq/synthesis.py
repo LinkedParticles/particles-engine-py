@@ -160,7 +160,8 @@ def _format_synthesis_block(
 
     ``heading`` is the parent block the prose nests under — the default
     ``## Synthesis`` marks LLM prose spliced *into* a structural subject page.
-    Pass ``None`` for a standalone page whose whole body is the article (the narrative pages), which emits the same blocks one level shallower.
+    Pass ``None`` for a standalone page whose whole body is the article (the
+    narrative pages), which emits the same blocks one level shallower.
     """
     depth = 1 if heading is not None else 0
     indent = _INDENT * depth

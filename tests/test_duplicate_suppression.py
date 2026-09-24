@@ -13,7 +13,8 @@ corpus entry and an exact duplicate that *does* reach the ladder returns
 
 Three properties carry the design and are asserted directly:
 
-* **exactness** — the predicate is content identity, never similarity. The false positives that a cosine tier would have merged (0.9951 for
+* **exactness** — the predicate is content identity, never similarity. The
+  false positives that a cosine tier would have merged (0.9951 for
   ``claude-opus-4-6`` / ``4-5``) must survive as distinct particles.
 * **source-faithfulness** — a suppressed candidate's provenance lands on the
   surviving particle, appended after the decay anchor, idempotently.
@@ -157,8 +158,7 @@ def test_stance_holder_separates_identical_text() -> None:
 
 
 def test_non_truth_apt_and_document_meta_are_ineligible() -> None:
-    """Suppression inherits the modality / scope / polarity gates
-    ."""
+    """Suppression inherits the modality / scope / polarity gates."""
     evaluative = _particle("The API feels clunky.", modality=AssertionModality.EVALUATIVE)
     doc_meta = _particle(
         "Section 10.4 defines the exporter.", properties={SCOPE_KEY: SCOPE_DOCUMENT_META}

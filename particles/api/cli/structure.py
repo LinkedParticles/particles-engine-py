@@ -21,7 +21,7 @@ def structure_cmd(
     limit: int | None = typer.Option(
         None,
         help="Max particles to annotate this run (default: structured_claim."
-        "backfill_batch_limit). Use 0 for the whole backlog in one run — safe, "
+        "backfill_batch_limit). Use 0 for the whole backlog in one run; that is safe, "
         "because the pass commits as it goes.",
     ),
     rate_limit_per_minute: int | None = typer.Option(
@@ -49,7 +49,7 @@ def structure_cmd(
     The annotation is derived from `content` and is never an assertion: this
     verb cannot change a claim, its confidence, or its provenance. Particles
     extracted since landed are annotated at extraction time for free;
-    this pass is for the ones that predate it, and it pays one LLM call each —
+    this pass is for the ones that predate it, and it pays one LLM call each,
     hence the rate limit and the resumable batch cap.
 
     Particles whose prose has no honest triple are *skipped*, permanently and

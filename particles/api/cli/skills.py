@@ -50,7 +50,8 @@ def install_skills(target_dir: Path, *, dry_run: bool = False) -> list[Path]:
     """Copy the shipped skill files into ``target_dir/particles/``; return the paths.
 
     Overwrites its own files unconditionally — they are SDK-owned content, not
-    operator-edited config, so a re-run is a repair/upgrade (the idempotence contract). ``dry_run`` computes the paths without writing.
+    operator-edited config, so a re-run is a repair/upgrade (the
+    idempotence contract). ``dry_run`` computes the paths without writing.
     """
     owned = target_dir / OWNED_SUBDIR
     written = []

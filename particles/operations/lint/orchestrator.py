@@ -44,7 +44,11 @@ from particles.operations._llm import llm_circuit_open
 from .assertion_quality import _check_compound_assertions
 from .citation_signal import _check_undeposited_cited_sources
 from .contestedness import _check_contested
-from .contradictions import ContradictionProbeControl, _check_contradictions
+from .contradictions import (
+    ContradictionProbeControl,
+    _check_contradictions,
+    _check_recorded_contradictions,
+)
 from .coverage import (
     _check_bare_properties_keys,
     _check_no_subject_claims,
@@ -85,14 +89,15 @@ async def run_lint(
 
     Args:
         fix: if True, apply status changes immediately (staleness → PROVENANCE_STALE etc.).
-            Defaults to False — lint is read-only unless the caller opts in.
+            Defaults to False: lint is read-only unless the caller opts in.
         semantic: if True, run LLM-assisted contradiction and granularity checks
         low_coverage_threshold: subjects with fewer than this many ACTIVE CLAIM particles
             are flagged as PHANTOM_SUBJECT (0) or LOW_COVERAGE_SUBJECT (< threshold).
-        contradiction_probe: optional cap/scope/progress control for the contradiction probe; also carries back the
+        contradiction_probe: optional cap/scope/progress control for the
+            contradiction probe; also carries back the
             candidate-pair census. ``None`` keeps the probe unbounded.
         granularity_probe: set False to skip the per-particle LLM granularity
-            check within the semantic pass. ``collect_cards`` does —
+            check within the semantic pass. ``collect_cards`` does:
             ``GRANULARITY_VIOLATION`` has no card kind, so for the curation
             queue and the audit those LLM calls would be pure discard.
     """
@@ -120,6 +125,7 @@ async def run_lint(
     findings += await _check_wikidata_link_confidence(session)
     findings += await _check_undeposited_cited_sources(session)
     findings += await _check_contested(session)
+    findings += await _check_recorded_contradictions(session)
 
     # --- Semantic checks (LLM-assisted) ---
     if semantic:
@@ -143,7 +149,7 @@ async def run_lint(
         findings=findings,
         summary=summary,
         fixed_counts=fixed_counts,
-        # Account-level LLM failure during the semantic pass tripped the breaker
-        #: report that semantic checks were skipped, not clean.
+        # Account-level LLM failure during the semantic pass tripped the breaker:
+        # report that semantic checks were skipped, not clean.
         semantic_skipped=semantic and llm_circuit_open(),
     )

@@ -9,7 +9,8 @@ Covers the ADR's test checklist: the §2 FIXED-POINT (render → splice → harv
 extract leg simulated at the seam level per tests/AGENTS.md: the strip of a
 pristine file is empty, and the hook deposits nothing for empty input), the
 sentinel strip seam, drift / dirty-region routing, atomic write + one-deep
-backup, the SpliceError refusal, fold-and-archive (+ opt-out), and the trailer freshness check (match / mismatch / parse failure).
+backup, the SpliceError refusal, fold-and-archive (+ opt-out), and the
+trailer freshness check (match / mismatch / parse failure).
 
 CLI tests follow tests/test_claude_code_hook.py: the ``cli_db`` file-based
 SQLite fixture plus ``HOME`` pointed at ``tmp_path`` so the state directory
@@ -323,6 +324,40 @@ class TestFilterMemoryFileForDeposit:
         assert "p-aa" not in out
         assert "authored" in out
 
+    def test_a_projects_own_snapshot_wins_over_the_machine_wide_one(
+        self, projection_state: Path, tmp_path: Path
+    ) -> None:
+        memory_dir = tmp_path / ".claude" / "projects" / "-mine" / "memory"
+        mine = "- what was rendered here `p-aa`\n\n<!-- sources: p-aa -->"
+        elsewhere = "- what another project rendered later `p-bb`\n\n<!-- sources: p-bb -->"
+        (projection_state / "memory-index.snapshot.md").write_text(elsewhere + "\n")
+        own = projection_state / "projects" / "-mine"
+        own.mkdir(parents=True)
+        (own / "memory-index.snapshot.md").write_text(mine + "\n")
+        text = (
+            "<!-- BEGIN PROJECTED: memory-index (manifest: m.yaml) -->\n"
+            f"{mine}\n"
+            "<!-- END PROJECTED: memory-index -->\n\nauthored\n"
+        )
+
+        assert "p-aa" not in filter_memory_file_for_deposit(text, memory_dir=memory_dir)
+        # Without the directory the comparison is against the wrong render.
+        assert "p-aa" in filter_memory_file_for_deposit(text)
+
+    def test_a_project_not_rendered_since_the_upgrade_uses_the_machine_wide_snapshot(
+        self, projection_state: Path, tmp_path: Path
+    ) -> None:
+        memory_dir = tmp_path / ".claude" / "projects" / "-not-yet" / "memory"
+        body = "- a belief `p-aa`\n\n<!-- sources: p-aa -->"
+        (projection_state / "memory-index.snapshot.md").write_text(body + "\n")
+        text = (
+            "<!-- BEGIN PROJECTED: memory-index (manifest: m.yaml) -->\n"
+            f"{body}\n"
+            "<!-- END PROJECTED: memory-index -->\n"
+        )
+
+        assert "p-aa" not in filter_memory_file_for_deposit(text, memory_dir=memory_dir)
+
     def test_archive_pointer_line_is_dropped(self, projection_state: Path) -> None:
         text = f"authored line\n{archive_pointer_line()}\n"
         out = filter_memory_file_for_deposit(text)
@@ -373,13 +408,16 @@ class TestProjectionCycle:
         # …the authored lines were folded to the archive with a pointer left…
         assert "- an authored note about tabs" not in text
         assert ARCHIVE_POINTER_PREFIX in text
-        archive = projection_state / "MEMORY.archive.md"
+        archive = projection_state / "projects" / "-p1" / "MEMORY.archive.md"
         assert "- an authored note about tabs" in archive.read_text()
         assert record["projection"]["folded"] == 2
-        # …the pre-splice file was backed up one-deep, and the snapshot written.
-        assert (projection_state / "MEMORY.md.pre-render").read_text() == pre_cycle
-        snapshot = (projection_state / "memory-index.snapshot.md").read_text()
+        # …the pre-splice file was backed up one-deep, and the snapshot written —
+        # both under this project's own state directory.
+        project_state = projection_state / "projects" / "-p1"
+        assert (project_state / "MEMORY.md.pre-render").read_text() == pre_cycle
+        snapshot = (project_state / "memory-index.snapshot.md").read_text()
         assert "- DCO is enforced." in snapshot
+        assert not (projection_state / "memory-index.snapshot.md").exists()
 
     def test_cycle_is_a_fixed_point_no_new_corpus_entries(
         self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
@@ -592,7 +630,7 @@ class TestProjectionCycle:
         text = memory_md.read_text()
         assert "- an authored note to keep" in text  # opt-out honored
         assert ARCHIVE_POINTER_PREFIX not in text
-        assert not (projection_state / "MEMORY.archive.md").exists()
+        assert not list(projection_state.rglob("MEMORY.archive.md"))
 
     def test_projection_disabled_leaves_memory_md_untouched(
         self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
@@ -672,3 +710,313 @@ class TestTrailerFreshness:
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
         assert "Memory digest" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+# ---------------------------------------------------------------------------
+# Linked worktrees — the session's memory is its repository's
+# ---------------------------------------------------------------------------
+
+
+def _worktree_session(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+    """A repository, one linked worktree of it, and a transcript launched there.
+
+    Returns ``(transcript, repo_memory_dir, worktree_memory_dir, repo_key)``.
+    """
+    from particles.api.cli._claude_code import claude_project_slug
+    from tests._claude_projects import make_repo, make_worktree
+
+    repo = make_repo(tmp_path / "src" / "repo")
+    worktree = make_worktree(repo, repo / ".claude" / "worktrees" / "wt")
+    projects = tmp_path / ".claude" / "projects"
+    project_dir = projects / claude_project_slug(worktree)
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "sess.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "cwd": str(worktree), "message": {"content": "hi"}}) + "\n"
+    )
+    repo_key = claude_project_slug(repo)
+    return transcript, projects / repo_key / "memory", project_dir / "memory", repo_key
+
+
+def _worktree_payload(transcript: Path, source: str | None = None) -> str:
+    data = json.loads(_payload(transcript, source=source))
+    data["cwd"] = json.loads(transcript.read_text().splitlines()[0])["cwd"]
+    return json.dumps(data)
+
+
+class TestWorktreeSession:
+    def test_session_end_harvests_and_renders_the_repositorys_memory(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.render.markdown import insert_projected_region_at_top
+
+        _seed(("DCO is enforced.", 0.9))
+        transcript, repo_memory, worktree_memory, repo_key = _worktree_session(tmp_path)
+        repo_memory.mkdir(parents=True)
+        (repo_memory / "topic.md").write_text("# Topic\nThe release ritual has three gates.\n")
+        (repo_memory / "MEMORY.md").write_text(
+            insert_projected_region_at_top("", MEMORY_REGION, "memory.yaml")
+        )
+
+        result = runner.invoke(
+            app, ["hook", "session-end", "--store", "default"], input=_worktree_payload(transcript)
+        )
+        assert result.exit_code == 0
+
+        record = _last_log(tmp_path)
+        assert record["outcome"] == "ok"
+        assert record["project"] == repo_key
+        assert record["project_resolved_from"] == "repository"
+        # The repository's memory files were harvested (before the fix: none)…
+        assert record["memory_files"] == 1
+        # …the render reached the file the next session actually loads…
+        assert record["projection"]["outcome"] == "rendered"
+        assert "- DCO is enforced." in (repo_memory / "MEMORY.md").read_text()
+        # …and no stray directory was minted beside the transcript.
+        assert not worktree_memory.exists()
+
+        entries = asyncio.run(_all_entries())
+        assert entries, "nothing was deposited"
+        for entry in entries:
+            assert f"project:{repo_key}" in entry.tags, entry.uri_r
+
+    def test_session_start_reads_the_repositorys_region(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _repo_memory, _worktree_memory, _key = _worktree_session(tmp_path)
+        payload = _worktree_payload(transcript)
+        runner.invoke(app, ["hook", "session-end", "--store", "default"], input=payload)
+
+        result = runner.invoke(
+            app,
+            ["hook", "session-start", "--store", "default"],
+            input=_worktree_payload(transcript, source="startup"),
+        )
+
+        # The region Claude Code loaded is current, so nothing is injected twice.
+        assert result.stdout == ""
+        assert _last_log(tmp_path)["skipped"] == "projection-current"
+
+    def test_consolidation_pass_skips_a_stray_worktree_directory(
+        self, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.api.cli.memory import build_projection_runner
+
+        _seed(("DCO is enforced.", 0.9))
+        _transcript, repo_memory, worktree_memory, _key = _worktree_session(tmp_path)
+        repo_memory.mkdir(parents=True)
+        worktree_memory.mkdir()  # what the pre-fix projection left behind
+        stray = worktree_memory / "MEMORY.md"
+        stray.write_text("untouched\n")
+
+        run, reason = build_projection_runner("default")
+        assert run is not None, reason
+        telemetry = asyncio.run(run())
+
+        assert telemetry["dirs"] == 1
+        assert telemetry["stray_dirs_skipped"] == 1
+        assert stray.read_text() == "untouched\n"
+        assert "- DCO is enforced." in (repo_memory / "MEMORY.md").read_text()
+
+
+async def _all_entries() -> list[Any]:
+    from particles.corpus.store import list_entries
+    from particles.db import session_scope
+
+    async with session_scope() as session:
+        return await list_entries(session, limit=100, source_type=None)
+
+
+# ---------------------------------------------------------------------------
+# Two projects, one store — each region is compared with its OWN last render
+# ---------------------------------------------------------------------------
+
+
+class TestTwoProjects:
+    def test_another_projects_render_does_not_make_this_region_look_authored(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        """The end-to-end reproduction: two projects, session ends, no consolidate.
+
+        Project A renders; the store moves; project B renders a different body.
+        A's region is now a cycle older than the most recent render anywhere,
+        and nothing in it was written by a person. Its next harvest must strip
+        it, not deposit the store's own bullets as authored input (belt 1 of
+        the round-trip contract).
+        """
+        from particles.render.markdown import insert_projected_region_at_top
+
+        seeded = insert_projected_region_at_top("", MEMORY_REGION, "memory.yaml")
+        _seed(("DCO is enforced.", 0.9))
+        transcript_a, memory_a = _project_dir(tmp_path, "-proj-a")
+        transcript_b, memory_b = _project_dir(tmp_path, "-proj-b")
+        for memory_dir in (memory_a, memory_b):
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "MEMORY.md").write_text(seeded)
+
+        _session_end(runner, transcript_a)
+        _seed(("Prefer general mechanisms.", 0.8))  # the store moves between the two
+        _session_end(runner, transcript_b)
+        assert (memory_a / "MEMORY.md").read_text() != (memory_b / "MEMORY.md").read_text()
+
+        result = _session_end(runner, transcript_a)
+
+        assert result.exit_code == 0
+        memory_uris = [uri for uri, _ in _corpus_state() if uri.endswith("MEMORY.md")]
+        assert memory_uris == [], "a region nobody edited was deposited as authored input"
+        assert _last_log(tmp_path)["projection"]["dirty_region"] is False
+
+    def test_an_edit_inside_one_projects_region_is_still_caught(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        """Per-project snapshots must not cost the dirty-region signal."""
+        from particles.render.markdown import insert_projected_region_at_top
+
+        seeded = insert_projected_region_at_top("", MEMORY_REGION, "memory.yaml")
+        _seed(("DCO is enforced.", 0.9))
+        transcript_a, memory_a = _project_dir(tmp_path, "-edit-a")
+        transcript_b, memory_b = _project_dir(tmp_path, "-edit-b")
+        for memory_dir in (memory_a, memory_b):
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "MEMORY.md").write_text(seeded)
+        _session_end(runner, transcript_a)
+        _session_end(runner, transcript_b)
+
+        memory_md = memory_a / "MEMORY.md"
+        memory_md.write_text(
+            memory_md.read_text().replace(
+                "<!-- END PROJECTED", "- an edit inside the region\n<!-- END PROJECTED"
+            )
+        )
+        _session_end(runner, transcript_a)
+
+        assert _last_log(tmp_path)["projection"]["dirty_region"] is True
+        assert any(uri.endswith("-edit-a/memory/MEMORY.md") for uri, _ in _corpus_state())
+        assert not any(uri.endswith("-edit-b/memory/MEMORY.md") for uri, _ in _corpus_state())
+
+    def test_each_project_keeps_its_own_pre_render_backup(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.api.cli._claude_code import memory_backup_path
+        from particles.render.markdown import insert_projected_region_at_top
+
+        _seed(("DCO is enforced.", 0.9))
+        transcript_a, memory_a = _project_dir(tmp_path, "-bak-a")
+        transcript_b, memory_b = _project_dir(tmp_path, "-bak-b")
+        originals = {}
+        for name, memory_dir in (("a", memory_a), ("b", memory_b)):
+            memory_dir.mkdir(parents=True)
+            originals[name] = insert_projected_region_at_top(
+                f"- a note only project {name} has\n", MEMORY_REGION, "memory.yaml"
+            )
+            (memory_dir / "MEMORY.md").write_text(originals[name])
+
+        _session_end(runner, transcript_a)
+        _session_end(runner, transcript_b)
+
+        assert memory_backup_path(memory_a).read_text() == originals["a"]
+        assert memory_backup_path(memory_b).read_text() == originals["b"]
+
+
+# ---------------------------------------------------------------------------
+# The project observer on the session surfaces
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_projects(key_a: str, key_b: str, *, rescope: bool = True) -> None:
+    async def _run() -> None:
+        from particles.db import session_scope
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        async with session_scope(write=True) as session:
+            in_a = await source(session, "a", project_source_tags(key_a))
+            in_b = await source(session, "b", project_source_tags(key_b))
+            page = await source(session, "page", ["web"])
+            await belief(session, "Project A deploys on Fridays.", in_a)
+            await belief(session, "Project B deploys on Mondays.", in_b)
+            await belief(session, "Pluto has five known moons.", page)
+            if rescope:
+                await rescoped(session)
+            await session.commit()
+
+    asyncio.run(_run())
+
+
+class TestProjectObserver:
+    @pytest.fixture(autouse=True)
+    def _observe_as_the_project(self, cli_db: Path) -> None:
+        # After cli_db, which reloads the config singleton this mutates.
+        from particles.config import get_config
+
+        get_config().claude_code.observer_scope = "project"
+
+    def test_each_projects_region_is_its_own_view_of_the_store(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed_two_projects("-obs-a", "-obs-b")
+        transcript_a, memory_a = _project_dir(tmp_path, "-obs-a")
+        transcript_b, memory_b = _project_dir(tmp_path, "-obs-b")
+
+        _session_end(runner, transcript_a)
+        _session_end(runner, transcript_b)
+
+        region_a = (memory_a / "MEMORY.md").read_text()
+        region_b = (memory_b / "MEMORY.md").read_text()
+        assert "Project A deploys on Fridays." in region_a and "Pluto has five" in region_a
+        assert "Project B deploys" not in region_a
+        assert "Project B deploys on Mondays." in region_b and "Project A deploys" not in region_b
+        assert "<!-- observer: project -obs-a -->" in region_a
+
+        # Two different bodies, and still a fixed point: nothing either project
+        # rendered comes back in as authored input (the per-project snapshot).
+        _session_end(runner, transcript_a)
+        _session_end(runner, transcript_b)
+        assert [uri for uri, _ in _corpus_state() if uri.endswith("MEMORY.md")] == []
+
+    def test_session_start_pushes_the_scoped_digest_and_logs_the_observer(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        _seed_two_projects("-obs-a", "-obs-b")
+        transcript_a, _ = _project_dir(tmp_path, "-obs-a")
+
+        result = _session_start(runner, transcript_a)
+
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Project A deploys on Fridays." in context and "Project B deploys" not in context
+        assert "Observer: project `-obs-a`" in context
+        assert _last_log(tmp_path)["observer_project"] == "-obs-a"
+
+    def test_a_region_rendered_store_wide_is_never_current_for_a_project_session(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.config import get_config
+
+        _seed_two_projects("-obs-a", "-obs-b")
+        transcript_a, memory_a = _project_dir(tmp_path, "-obs-a")
+        get_config().claude_code.observer_scope = "store"
+        _session_end(runner, transcript_a)  # the region an older version left behind
+        assert "Project B deploys" in (memory_a / "MEMORY.md").read_text()
+        get_config().claude_code.observer_scope = "project"
+
+        result = _session_start(runner, transcript_a)
+
+        # Not "skip", and not a top-up over a region showing another project's
+        # beliefs: the whole scoped digest.
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith("# Memory digest —") and "Project B deploys" not in context
+
+    def test_the_default_is_the_whole_store(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        from particles.config import get_config
+
+        get_config().claude_code.observer_scope = "store"
+        _seed_two_projects("-obs-a", "-obs-b")
+        transcript_a, _ = _project_dir(tmp_path, "-obs-a")
+
+        context = json.loads(_session_start(runner, transcript_a).stdout)["hookSpecificOutput"][
+            "additionalContext"
+        ]
+
+        assert "Project B deploys on Mondays." in context and "Observer" not in context

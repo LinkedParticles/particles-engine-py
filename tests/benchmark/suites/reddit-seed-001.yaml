@@ -10,8 +10,8 @@
 #
 # Coverage is intentionally small but spans the three claim shapes the
 # Reddit extractor produces from the v0.42.5 prose pipeline:
-#   1. structured-properties (the post's score / num_comments dual-emission
-#) — required
+#   1. structured-properties (the post's score / num_comments dual-emission)
+# — required
 #   2. an LLM claim about the post's substantive content — required
 #   3. an LLM claim derived from a high-score comment — required
 #   4-5. optional LLM claims that are nice-to-have but not strictly

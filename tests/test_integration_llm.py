@@ -261,8 +261,7 @@ async def test_live_stance_emission_precision(db_session: AsyncSession, tmp_path
     negatives = len(_STANCE_HELD_OUT) - expected
     fp_rate = false_pos / negatives if negatives else 0.0
     logging.getLogger(__name__).warning(
-        "stance held-out: precision=%.2f recall=%.2f fp_rate=%.2f "
-        "(tp=%d fp=%d expected=%d)",
+        "stance held-out: precision=%.2f recall=%.2f fp_rate=%.2f (tp=%d fp=%d expected=%d)",
         precision,
         recall,
         fp_rate,

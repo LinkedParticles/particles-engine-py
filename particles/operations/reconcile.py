@@ -39,10 +39,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.conflict_resolution import ConflictVerdict, resolve_conflict
-from particles.core.schema import Particle, ProvenanceRefType
+from particles.core.observer_scope import PairPrecondition
+from particles.core.schema import CorpusEntry, Particle, ProvenanceRefType
 from particles.core.status import Status, StatusReason
 from particles.corpus.supersession import iter_supersession_entry_pairs
 from particles.embeddings import cosine_similarity
+from particles.ingest.observer_gate import ObserverGate
 from particles.ingest.pipeline import _contradiction_prompt, _is_attribution_paraphrase
 from particles.operations._llm import _llm_call
 from particles.store.particle_store import (
@@ -268,6 +270,245 @@ async def reconcile_supersession(
         "Document-supersession sweep: %d entry pair(s), %d candidate pair(s), %d probed, "
         "%d demoted%s",
         len(entry_pairs),
+        len(candidates),
+        probed,
+        len(demoted_ids),
+        " (dry run)" if dry_run else "",
+    )
+    return summary
+
+
+def _source_ref(particle: Particle) -> tuple[str, str | None] | None:
+    """``(corpus_entry_id, snapshot_id)`` of a particle's SOURCE ref, if any."""
+    ref = next((r for r in particle.provenance if r.type is ProvenanceRefType.SOURCE), None)
+    return (ref.corpus_entry_id, ref.snapshot_id) if ref is not None else None
+
+
+async def _entry_of(
+    session: AsyncSession, cache: dict[str, CorpusEntry | None], entry_id: str
+) -> CorpusEntry | None:
+    """``get_entry`` memoised for one sweep — a subject's claims share entries."""
+    if entry_id not in cache:
+        from particles.corpus.store import get_entry
+
+        cache[entry_id] = await get_entry(session, entry_id)
+    return cache[entry_id]
+
+
+async def _pair_update_order(
+    session: AsyncSession,
+    cache: dict[str, CorpusEntry | None],
+    a: Particle,
+    b: Particle,
+    *,
+    require_attribution: bool,
+) -> int | None:
+    """``+1`` when ``a`` is the newer of a rung-2.5-qualifying pair, ``-1`` when ``b`` is."""
+    from particles.ingest.update_supersession import latest_source_date, update_order
+
+    a_ref, b_ref = _source_ref(a), _source_ref(b)
+    if a_ref is None or b_ref is None:
+        return None
+    a_entry = await _entry_of(session, cache, a_ref[0])
+    b_entry = await _entry_of(session, cache, b_ref[0])
+    # The latest observation of each claim, not the first: a value restated
+    # after an intervening change is current again, and dating it by its first
+    # ref retired exactly those reverted values.
+    return update_order(
+        a,
+        a_entry,
+        a_ref[1],
+        b,
+        b_entry,
+        b_ref[1],
+        require_attribution=require_attribution,
+        new_date=await latest_source_date(session, a, cache),
+        existing_date=await latest_source_date(session, b, cache),
+    )
+
+
+async def _set_supersedes_if_unset(session: AsyncSession, winner_id: str, loser_id: str) -> None:
+    """Point the winner's ``supersedes`` at the claim it replaced, if it is free.
+
+    The as-of lens dates a retirement from this edge, so the sweep
+    leaves the same trail the write-time rung does. An already-set pointer is
+    left alone: it records an earlier, equally real supersession.
+    """
+    from particles.store.particle_store import ParticleRow
+
+    row = await session.get(ParticleRow, winner_id)
+    if row is not None and row.supersedes is None:
+        row.supersedes = loser_id
+        await session.flush()
+
+
+async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
+    session: AsyncSession,
+    *,
+    dry_run: bool = False,
+    scope_ids: frozenset[str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    """Apply same-subject update supersession to the backlog.
+
+    An update is reconciled against the value it replaces **at write time**.
+    Everything written before that — and every store upgraded —
+    still holds both values ACTIVE, and will until some *new* claim about the
+    same subject happens to pair with them. This sweep is that reconciliation,
+    run over already-extracted particles.
+
+    Two phases, mirroring :func:`reconcile_supersession`:
+
+    1. **Collect, free.** Group ACTIVE reconcilable particles by subject
+       (every subject a particle names), pair each group above
+       ``update_supersession.subject_floor``, and keep only pairs
+       :func:`~particles.ingest.update_supersession.update_order` already
+       qualifies — same lineage, both extractor-asserted, strictly dated.
+       Rung 2.5 cannot fire on any other pair, so probing one would be pure
+       spend. Most same-subject pairs are about different attributes and cost
+       nothing here.
+    2. **Probe under a cap.** Highest-cosine first, up to
+       ``consolidation.max_update_probes``. A confirmed pair demotes its older
+       member ``PROVENANCE_STALE`` / ``SUPERSEDED_BY_UPDATE`` and points the
+       newer one's ``supersedes`` at it. A particle demoted earlier in the run
+       is never probed again, so a subject carrying three generations
+       converges on the newest in one pass.
+
+    ``scope_ids`` (the delta scope) keeps a pair only when at least
+    one member is in scope. Idempotent: a re-run demotes nothing.
+
+    On a rescoped store a pair the observer precondition does not reconcile —
+    another project observes the older claim, or the older claim is global — is
+    dropped before any probe and counted in ``observer_declined``.
+    """
+    from particles.ingest.update_supersession import SubjectIndex
+    from particles.operations.version_guard import assert_store_schema_current
+
+    await assert_store_schema_current(session)
+
+    cfg = get_config()
+    update_cfg = cfg.reconciliation.update_supersession
+    probe_cap = cfg.consolidation.max_update_probes
+    require_attribution = cfg.reconciliation.store_mode != "single"
+    summary: dict[str, object] = {
+        "enabled": update_cfg.enabled,
+        "dry_run": dry_run,
+        "subject_groups": 0,
+        "candidate_pairs": 0,
+        "probed": 0,
+        "probe_cap": probe_cap,
+        "demoted": 0,
+        "demotions": [],
+        "observer_declined": 0,
+    }
+    if not update_cfg.enabled:
+        log.info(
+            "Update supersession disabled "
+            "(reconciliation.update_supersession.enabled=false); sweep is a no-op."
+        )
+        return summary
+
+    pairs = await get_active_particles_with_embeddings(session)
+    index = SubjectIndex.build(pairs)
+    summary["subject_groups"] = len(index.by_subject)
+    entries: dict[str, CorpusEntry | None] = {}
+    # the observer precondition covers the backlog too. Here the
+    # would-be winner is itself a stored claim, so its current scope is the
+    # candidate's. A declined pair is skipped before any probe is spent.
+    gate = await ObserverGate.open(session)
+    declined = 0
+
+    # Phase 1 — collect qualifying pairs. No LLM spend, and the update_order
+    # pre-filter is what keeps it affordable.
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[float, Particle, Particle]] = []
+    for members in index.by_subject.values():
+        for i, (a, a_emb) in enumerate(members):
+            for b, b_emb in members[i + 1 :]:
+                key = (a.id, b.id) if a.id < b.id else (b.id, a.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if scope_ids is not None and a.id not in scope_ids and b.id not in scope_ids:
+                    continue
+                sim = _cosine(a_emb, b_emb)
+                if sim < update_cfg.subject_floor:
+                    continue
+                order = await _pair_update_order(
+                    session, entries, a, b, require_attribution=require_attribution
+                )
+                if order is None:
+                    continue
+                newer, older = (a, b) if order > 0 else (b, a)
+                if gate.engaged and (
+                    await gate.verdict(session, await gate.scope_of(session, newer), older)
+                    is not PairPrecondition.RECONCILE
+                ):
+                    declined += 1
+                    continue
+                candidates.append((sim, newer, older))
+
+    # Phase 2 — probe highest-cosine first, under the cap.
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    demoted_ids: set[str] = set()
+    probed = 0
+    demotions: list[dict[str, object]] = []
+    for sim, newer, older in candidates:
+        if probed >= probe_cap:
+            break
+        if newer.id in demoted_ids or older.id in demoted_ids:
+            continue
+        probe = await _has_contradiction_signal(newer.content, older.content)
+        probed += 1
+        verdict = resolve_conflict(
+            older,
+            newer,
+            has_contradiction_signal=(probe is True),
+            update_order=1,
+            single_trust_order=cfg.reconciliation.store_mode == "single",
+        )
+        if verdict is not ConflictVerdict.UPDATE_SUPERSEDES:
+            continue
+        demotions.append(
+            {
+                "superseded_particle_id": older.id,
+                "winning_particle_id": newer.id,
+                "similarity": round(sim, 4),
+            }
+        )
+        demoted_ids.add(older.id)
+        if not dry_run:
+            await update_particle_status(
+                session,
+                older.id,
+                Status.PROVENANCE_STALE,
+                StatusReason.SUPERSEDED_BY_UPDATE,
+            )
+            await _set_supersedes_if_unset(session, newer.id, older.id)
+        if progress is not None:
+            verb = "would demote" if dry_run else "demoted"
+            progress(f"{verb} {older.id[:8]} (superseded by {newer.id[:8]}, sim {sim:.3f})")
+
+    if not dry_run and demoted_ids:
+        await session.commit()
+
+    summary["candidate_pairs"] = len(candidates)
+    summary["observer_declined"] = declined
+    summary["probed"] = probed
+    summary["demoted"] = len(demoted_ids)
+    summary["demotions"] = demotions
+    if probed < len(candidates):
+        msg = (
+            f"Update sweep probe capped: probed {probed} of {len(candidates)} qualifying "
+            f"pair(s) (consolidation.max_update_probes = {probe_cap})."
+        )
+        log.info(msg)
+        if progress is not None:
+            progress(msg)
+    log.info(
+        "Update-supersession sweep: %d subject group(s), %d qualifying pair(s), %d probed, "
+        "%d demoted%s",
+        summary["subject_groups"],
         len(candidates),
         probed,
         len(demoted_ids),

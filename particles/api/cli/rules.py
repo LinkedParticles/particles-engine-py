@@ -5,7 +5,8 @@
 """rules group — the rule-source set (operating docs as tracked sources).
 
 ``particles rules`` reports the resolved set and each file's registration state;
-``particles rules sync`` deposits it as ``MUTABLE`` + ``LAZY`` so the loop keeps it fresh. The bare-verb-reports shape follows ``curate``.
+``particles rules sync`` deposits it as ``MUTABLE`` + ``LAZY`` so the
+loop keeps it fresh. The bare-verb-reports shape follows ``curate``.
 
 The reporting verb exists because hand-written SQL was needed to
 answer "is anything actually enrolled in the refresh loop?" — the answer on the
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._claude_code import rule_file_project_key
 from particles.api.cli._output import (
     DEBUG_OPTION,
     PROGRESS_OPTION,
@@ -263,6 +265,7 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
                 paths,
                 dry_run=dry_run,
                 filter_text=projected_region_filter(),
+                project_key_for=rule_file_project_key,
             )
         if not dry_run:
             # After the deposits, so an entry registered in this same run is

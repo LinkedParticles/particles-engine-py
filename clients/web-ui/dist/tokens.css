@@ -1,4 +1,10 @@
 /*
+ * SPDX-FileCopyrightText: 2026 The Particles authors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * Particles design tokens — the single source for colour, type, space, radius,
  * elevation and motion across the website (mkdocs), the web UI (clients/web-ui),
  * the graph exporter and every future surface. Consumers import this file and
@@ -55,9 +61,9 @@
   --p-backdrop: rgba(16, 24, 40, 0.45);
 
   /* ---- Graph canvas (kept in lockstep with graphRender.ts / render.py) - */
-  --p-graph-node-border: #6f86a0;
-  --p-graph-edge:        #8fa1b5;
-  --p-graph-edge-ghost:  #b9c4d4;
+  --p-graph-node-border: #48607c;
+  --p-graph-edge:        #7b8b9d;
+  --p-graph-edge-ghost:  #aab6c2;
   --p-graph-node-hue:    214;      /* hsl(hue 45% L) — L ramps weak → strong */
   --p-graph-node-l-weak:   88%;    /* no support: pale on light … */
   --p-graph-node-l-strong: 48%;    /* … best-supported: dark on light */

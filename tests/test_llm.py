@@ -574,3 +574,22 @@ class TestPromptCache:
         llm.set_client(mock2)
         asyncio.run(complete("extraction", "src", max_tokens=8))
         assert mock2.messages.create.call_args.kwargs["system"] is omit
+
+
+class TestOverrideProviders:
+    """The scoped purpose→provider override."""
+
+    def test_scoped_and_restored(self) -> None:
+        from particles.benchmark.rot import RefusingProvider
+        from particles.llm import get_provider, override_providers
+
+        counts: dict[str, int] = {}
+        before = get_provider("semantic_lint").provider_model
+        with override_providers({"semantic_lint": RefusingProvider("semantic_lint", counts)}):
+            assert get_provider("semantic_lint").provider_model == "rot-refused:semantic_lint"
+            with override_providers({"extraction": RefusingProvider("extraction", counts)}):
+                # Nested blocks merge.
+                assert get_provider("semantic_lint").provider_model == "rot-refused:semantic_lint"
+                assert get_provider("extraction").provider_model == "rot-refused:extraction"
+            assert get_provider("extraction").provider_model != "rot-refused:extraction"
+        assert get_provider("semantic_lint").provider_model == before

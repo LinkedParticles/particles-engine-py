@@ -1,8 +1,9 @@
 # PARITY.md — screen inventory & interaction contract
 
 This document is the **normative spec the future React Native mobile app
- mirrors 1:1** — parity by construction, not by retrofit. It
-records what the unified web UI does entirely in terms of the FastAPI contract, so a native client can reproduce every capability without
+mirrors 1:1** — parity by construction, not by retrofit. It
+records what the unified web UI does entirely in terms of the
+FastAPI contract, so a native client can reproduce every capability without
 reverse-engineering this codebase. When the web UI gains or changes a
 surface, this file changes **in the same commit**.
 
@@ -29,7 +30,8 @@ surface, this file changes **in the same commit**.
    own types are generated from the snapshot (`npm run gen-api`); the
    mobile app should generate its client the same way.
 5. **Read-only degrade.** A 403 on a belief write means the store has not
-   opted into writes (`mcp.write.enabled_stores` default-deny): the client hides write gestures and keeps every read surface
+   opted into writes (`mcp.write.enabled_stores` default-deny):
+   the client hides write gestures and keeps every read surface
    working. It never retries writes around the gate.
 6. **Deep links are API transcriptions.** A shareable location (`#/browse`
    params here; the equivalent screen params on mobile) names exactly the
@@ -74,7 +76,8 @@ engine render disabled, never guessed.
 Non-streaming v1: one call per question; the client shows **staged local
 progress** (the stages pace expectation only — they do not report engine
 state; streaming is deferred). Renders: the NL `answer`; per-hit rows with
-`status`, stored `confidence.value` vs `effective_confidences[i]`, the `contested[i]` badge (bases shown, never blended);
+`status`, stored `confidence.value` vs `effective_confidences[i]`, the
+`contested[i]` badge (bases shown, never blended);
 `truncation_warning`, `as_of` echo, and `subject_coverage_gaps` as notices.
 
 Cross-links (the unification's payoff — mobile must mirror both):

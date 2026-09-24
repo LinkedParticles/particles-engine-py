@@ -561,7 +561,7 @@ async def export_vault(
 
     ``min_particle_confidence``: drop particles whose
     ``effective_confidence`` falls below this threshold from every
-    rendered note — coin-property tables, pivot-note callouts, generic
+    rendered note: coin-property tables, pivot-note callouts, generic
     subject-note audit trails, and the ``--with-synthesis`` splice all
     consume the post-filter list. Default 0.0 keeps every existing
     invocation backwards-compatible. The ``min_particles`` count check

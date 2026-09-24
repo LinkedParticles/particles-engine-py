@@ -46,7 +46,7 @@ from particles.ingest.generation import (
     backfill_superseded_generations,
     cascade_superseded_generation,
 )
-from particles.store.particle_store import get_particle, insert_particle
+from particles.store.particle_store import append_provenance_ref, get_particle, insert_particle
 
 
 async def _entry(session: Any, *, mutability: Mutability = Mutability.MUTABLE) -> CorpusEntry:
@@ -76,6 +76,21 @@ async def _snapshot(
         content_hash=uuid.uuid4().hex * 2,
         warc_record_type=WarcRecordType.RESPONSE,
         extraction_status=status,
+    )
+    session.add(SnapshotRow.from_model(snap, entry.entry_id))
+    await session.flush()
+    return snap
+
+
+async def _revisit(session: Any, entry: CorpusEntry, refers_to: Snapshot) -> Snapshot:
+    """A REVISIT of ``refers_to``, as the fetch ladder writes it: newer, COMPLETE, blob-less."""
+    snap = Snapshot(
+        snapshot_id=str(uuid.uuid4()),
+        captured_at=datetime.now(UTC) + timedelta(minutes=1),
+        content_hash=refers_to.content_hash,
+        warc_record_type=WarcRecordType.REVISIT,
+        refers_to=refers_to.snapshot_id,
+        extraction_status=ExtractionStatus.COMPLETE,
     )
     session.add(SnapshotRow.from_model(snap, entry.entry_id))
     await session.flush()
@@ -236,6 +251,96 @@ class TestCascade:
         assert second == []
 
 
+async def _also_attested_by(
+    session: Any, particle: Particle, entry: CorpusEntry, snap: Snapshot
+) -> None:
+    """Fold a second source's observation onto ``particle``, as suppression does."""
+    await append_provenance_ref(
+        session,
+        particle.id,
+        ProvenanceRef(
+            type=ProvenanceRefType.SOURCE,
+            corpus_entry_id=entry.entry_id,
+            snapshot_id=snap.snapshot_id,
+        ),
+    )
+
+
+class TestAttestedElsewhere:
+    """A generation retires only what no entry's current snapshot attests."""
+
+    @pytest.mark.asyncio
+    async def test_a_claim_another_file_still_states_is_spared(self, db_session: Any) -> None:
+        """One rule, stated by two projects' files; one project drops it."""
+        alpha, beta = await _entry(db_session), await _entry(db_session)
+        beta_old = await _snapshot(db_session, beta, age_days=2)
+        beta_new = await _snapshot(db_session, beta)
+        alpha_now = await _snapshot(db_session, alpha, age_days=1)
+        shared = await _particle(db_session, beta, beta_old, "every commit needs a sign-off")
+        await _also_attested_by(db_session, shared, alpha, alpha_now)
+        await db_session.commit()
+
+        demoted = await cascade_superseded_generation(
+            db_session, entry_id=beta.entry_id, current_snapshot_id=beta_new.snapshot_id
+        )
+
+        assert demoted == []
+        after = await get_particle(db_session, shared.id)
+        assert after is not None and after.status == Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_an_attestation_the_other_file_has_since_dropped_does_not_count(
+        self, db_session: Any
+    ) -> None:
+        alpha, beta = await _entry(db_session), await _entry(db_session)
+        beta_old = await _snapshot(db_session, beta, age_days=2)
+        beta_new = await _snapshot(db_session, beta)
+        alpha_old = await _snapshot(db_session, alpha, age_days=3)
+        await _snapshot(db_session, alpha, age_days=1)  # alpha's current generation
+        shared = await _particle(db_session, beta, beta_old, "every commit needs a sign-off")
+        await _also_attested_by(db_session, shared, alpha, alpha_old)
+        await db_session.commit()
+
+        demoted = await cascade_superseded_generation(
+            db_session, entry_id=beta.entry_id, current_snapshot_id=beta_new.snapshot_id
+        )
+
+        assert demoted == [shared.id]
+
+    @pytest.mark.asyncio
+    async def test_a_transcript_attests_through_every_snapshot(self, db_session: Any) -> None:
+        memory = await _entry(db_session)
+        transcript = await _entry(db_session, mutability=Mutability.APPEND_ONLY)
+        old = await _snapshot(db_session, memory, age_days=2)
+        new = await _snapshot(db_session, memory)
+        said = await _snapshot(db_session, transcript, age_days=5)
+        await _snapshot(db_session, transcript)
+        claim = await _particle(db_session, memory, old, "the user prefers tabs")
+        await _also_attested_by(db_session, claim, transcript, said)
+        await db_session.commit()
+
+        demoted = await cascade_superseded_generation(
+            db_session, entry_id=memory.entry_id, current_snapshot_id=new.snapshot_id
+        )
+
+        assert demoted == []
+
+    @pytest.mark.asyncio
+    async def test_the_backfill_dry_run_counts_the_same_way(self, db_session: Any) -> None:
+        alpha, beta = await _entry(db_session), await _entry(db_session)
+        beta_old = await _snapshot(db_session, beta, age_days=2)
+        await _snapshot(db_session, beta)
+        alpha_now = await _snapshot(db_session, alpha, age_days=1)
+        shared = await _particle(db_session, beta, beta_old, "shared")
+        await _particle(db_session, beta, beta_old, "beta only")
+        await _also_attested_by(db_session, shared, alpha, alpha_now)
+        await db_session.commit()
+
+        report = await backfill_superseded_generations(db_session, dry_run=True)
+
+        assert report.demoted == 1
+
+
 class TestBackfill:
     @pytest.mark.asyncio
     async def test_dry_run_counts_without_writing(self, db_session: Any) -> None:
@@ -298,3 +403,77 @@ class TestBackfill:
         assert after is not None
         assert after.status == Status.ACTIVE
         assert old.extraction_status == ExtractionStatus.COMPLETE
+
+    @pytest.mark.asyncio
+    async def test_a_newer_revisit_is_not_the_current_generation(self, db_session: Any) -> None:
+        """A REVISIT says the content did NOT change; it must not retire what it refers to.
+
+        The fetch ladder writes every REVISIT ``COMPLETE``, and the nightly local
+        refresh mints one per unchanged file, so "the newest COMPLETE snapshot"
+        is usually a REVISIT. Taken as the current generation it has no particles
+        of its own, and the cascade would demote every ACTIVE belief the entry
+        holds — including the generation the REVISIT points at.
+        """
+        entry = await _entry(db_session)
+        current = await _snapshot(db_session, entry, age_days=1)
+        await _revisit(db_session, entry, current)
+        p = await _particle(db_session, entry, current, "the current generation's claim")
+        await db_session.commit()
+
+        preview = await backfill_superseded_generations(db_session, dry_run=True)
+        assert preview.demoted == 0
+
+        report = await backfill_superseded_generations(db_session, dry_run=False)
+        await db_session.commit()
+
+        assert report.demoted == 0
+        after = await get_particle(db_session, p.id)
+        assert after is not None
+        assert after.status == Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_revisit_does_not_shield_an_older_generation(self, db_session: Any) -> None:
+        """With a REVISIT newest, the generation before the current one is still retired."""
+        entry = await _entry(db_session)
+        old = await _snapshot(db_session, entry, age_days=8)
+        current = await _snapshot(db_session, entry, age_days=1)
+        await _revisit(db_session, entry, current)
+        stale = await _particle(db_session, entry, old, "what the file used to say")
+        live = await _particle(db_session, entry, current, "what the file says now")
+        await db_session.commit()
+
+        report = await backfill_superseded_generations(db_session, dry_run=False)
+        await db_session.commit()
+
+        assert report.demoted == 1
+        after_stale = await get_particle(db_session, stale.id)
+        after_live = await get_particle(db_session, live.id)
+        assert after_stale is not None and after_stale.status == Status.PROVENANCE_STALE
+        assert after_live is not None and after_live.status == Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_a_collapsed_snapshot_is_not_the_current_generation(
+        self, db_session: Any
+    ) -> None:
+        """COMPLETE-because-skipped carries no beliefs, so it retires nothing.
+
+        ``old`` was extracted, the middle generation was collapsed in favour of a
+        newest one that is still PENDING. Taking the collapsed row as current
+        would retire the entry's only beliefs before their replacement exists.
+        """
+        entry = await _entry(db_session)
+        old = await _snapshot(db_session, entry, age_days=8)
+        middle = await _snapshot(db_session, entry, age_days=4)
+        newest = await _snapshot(db_session, entry, status=ExtractionStatus.PENDING)
+        row = await db_session.get(SnapshotRow, middle.snapshot_id)
+        row.superseded_by_snapshot_id = newest.snapshot_id
+        p = await _particle(db_session, entry, old, "the only generation extracted so far")
+        await db_session.commit()
+
+        report = await backfill_superseded_generations(db_session, dry_run=False)
+        await db_session.commit()
+
+        assert report.demoted == 0
+        after = await get_particle(db_session, p.id)
+        assert after is not None
+        assert after.status == Status.ACTIVE

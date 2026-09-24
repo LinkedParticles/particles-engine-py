@@ -41,13 +41,23 @@ import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import LintFinding, Particle, is_truth_apt
+from particles.core.schema import (
+    LintFinding,
+    Particle,
+    RelationCreatedBy,
+    RelationType,
+    is_truth_apt,
+)
 from particles.core.stance import stance_holder
+from particles.core.status import Status
 from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
 from particles.operations._llm import _llm_call, _llm_call_many
 from particles.operations._scope import pair_scope_tier
-from particles.store.particle_store import get_active_particles_with_embeddings
+from particles.store.particle_store import (
+    get_active_particles_with_embeddings,
+    get_particles_by_ids,
+)
 
 if TYPE_CHECKING:
     from particles.llm import CompletionRequest
@@ -106,6 +116,58 @@ class ContradictionProbeControl:
         return self.probes_run < self.candidate_pairs
 
 
+async def _check_recorded_contradictions(session: AsyncSession) -> list[LintFinding]:
+    """Report every recorded ``CONTRADICTS`` edge between two ACTIVE particles — no probe.
+
+    The write path records a contradiction it confirmed but declined to settle,
+    because another project observes the existing claim. The
+    verdict was already paid for, so this is a structural read, available
+    without the semantic pass and outside any probe cap. A pair either side of
+    which has since been retired is no longer a live disagreement and is not
+    reported.
+    """
+    from particles.store.relation_store import get_all_relations
+
+    edges = await get_all_relations(session, RelationType.CONTRADICTS)
+    if not edges:
+        return []
+    ids = list({e.particle_a for e in edges} | {e.particle_b for e in edges})
+    particles = await get_particles_by_ids(session, ids)
+    findings: list[LintFinding] = []
+    for edge in edges:
+        a, b = particles.get(edge.particle_a), particles.get(edge.particle_b)
+        if a is None or b is None or a.status is not Status.ACTIVE or b.status is not Status.ACTIVE:
+            continue
+        why = (
+            "two projects state different values and each keeps its own"
+            if edge.created_by is RelationCreatedBy.OBSERVER_DIVERGENCE
+            else f"recorded by {edge.created_by.value}"
+        )
+        findings.append(
+            LintFinding(
+                particle_id=a.id,
+                particle_content=a.content,
+                finding_type="CONTRADICTION",
+                severity="ERROR",
+                detail=f"Recorded contradiction with particle {b.id} ({why}); no probe run",
+                recommended_action=(
+                    f"Widen, retract or reconcile {a.id} ↔ {b.id} "
+                    "(`particles memory widen`, `particles particle retract`)"
+                ),
+            )
+        )
+    return findings
+
+
+async def _recorded_pairs(session: AsyncSession) -> set[frozenset[str]]:
+    from particles.store.relation_store import get_all_relations
+
+    return {
+        frozenset((e.particle_a, e.particle_b))
+        for e in await get_all_relations(session, RelationType.CONTRADICTS)
+    }
+
+
 async def _check_contradictions(
     session: AsyncSession,
     fix: bool,
@@ -117,9 +179,10 @@ async def _check_contradictions(
     by embedding cosine similarity at or above
     ``lint.contradiction_candidate_threshold``; only those survivors reach the
     LLM probe. DOCUMENT_META particles and non-truth-apt particles
-     never participate — the former are claims about a document's own
+    never participate — the former are claims about a document's own
     apparatus, the latter (opinions / feelings / constitutive rules) have no
-    shared truth to contradict. Pairs already linked CO_EVIDENTIAL (§6.10) are skipped — paraphrases, not contradictions. A stance pairs for
+    shared truth to contradict. Pairs already linked CO_EVIDENTIAL (§6.10)
+    are skipped — paraphrases, not contradictions. A stance pairs for
     contradiction only with a *same-holder* stance.
 
     ``control`` caps / scopes the probe loop and receives
@@ -160,6 +223,10 @@ async def _check_contradictions(
 
     # Per-particle co-evidential cluster cache to avoid repeated BFS.
     cluster_for: dict[str, set[str]] = {}
+    # A recorded contradiction is reported by _check_recorded_contradictions
+    # without a probe; probing it again would pay twice and
+    # report it twice.
+    recorded = await _recorded_pairs(session)
 
     async def _cluster(pid: str) -> set[str]:
         if pid not in cluster_for:
@@ -192,6 +259,8 @@ async def _check_contradictions(
 
             # Skip pairs linked CO_EVIDENTIAL — paraphrases, not contradictions.
             if p_b.id in await _cluster(p_a.id):
+                continue
+            if frozenset((p_a.id, p_b.id)) in recorded:
                 continue
 
             # a stance only contradicts a same-holder stance; a

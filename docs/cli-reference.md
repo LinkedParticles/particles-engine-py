@@ -1,6 +1,6 @@
 # `particles`
 
-Particles SDK — epistemic knowledge management for AI agents (v0.3 Core).
+Particles SDK: epistemic knowledge management for AI agents (v0.3 Core).
 
 **Usage**:
 
@@ -33,9 +33,9 @@ $ particles [OPTIONS] COMMAND [ARGS]...
 * `subjects`: Manage subjects (canonical real-world...
 * `benchmark`: Whole-pipeline system benchmarks (ADR...
 * `config`: Inspect and validate Particles...
-* `conformance`: Conformance Profile checks (...
+* `conformance`: Conformance Profile checks, the...
 * `corpus`: Inspect deposited corpus entries.
-* `curate`: Bus-stop editing — the finite,...
+* `curate`: Bus-stop editing: the finite,...
 * `engine`: Remote engine server.
 * `events`: Inspect the operator event log.
 * `extractor`: Manage extractor registry (Extension A).
@@ -88,16 +88,16 @@ $ particles deposit [OPTIONS] [SOURCE]
 
 **Options**:
 
-* `--text TEXT`: Deposit a literal string instead of a file or URL — the CLI half of the MCP `deposit_text` tool, so you no longer have to write a temp file to record one note. Mutually exclusive with a source argument. `particles deposit -` reads the same content from stdin. Defaults to source-type CONVERSATION; attributed to --deposited-by on both the deposited_by and author_id axes.
+* `--text TEXT`: Deposit a literal string instead of a file or URL. This is the CLI half of the MCP `deposit_text` tool, so you no longer have to write a temp file to record one note. Mutually exclusive with a source argument. `particles deposit -` reads the same content from stdin. Defaults to source-type CONVERSATION; attributed to --deposited-by on both the deposited_by and author_id axes.
 * `--deposited-by TEXT`: Agent or operator ID  [default: operator]
-* `--source-type TEXT`: Override the source_type (normally auto-detected from the extension / URL / content — you rarely need this). Core values (particles.core.schema.SourceType): WEB_PAGE, PDF, CSV, CONVERSATION, DATA_EXPORT, LOCAL_FILE, LOCAL_MARKDOWN, ACADEMIC_PAPER, FORUM, BLOG, TAXONOMY_DEFINITION, TRUST_LENS_DEFINITION. Domain extractors register their own, e.g. JOURNAL, REDDIT_POST, HACKERNEWS_THREAD, MASTODON_THREAD, GITHUB_REPO / GITHUB_GIST / GITHUB_PAGES, WIKIDATA_API, NUMISTA_API_COIN / NUMISTA_API_ISSUER, NOMISMA_API. Use --journal for the JOURNAL shortcut.
+* `--source-type TEXT`: Override the source_type (normally auto-detected from the extension / URL / content; you rarely need this). Core values (particles.core.schema.SourceType): WEB_PAGE, PDF, CSV, CONVERSATION, DATA_EXPORT, LOCAL_FILE, LOCAL_MARKDOWN, ACADEMIC_PAPER, FORUM, BLOG, TAXONOMY_DEFINITION, TRUST_LENS_DEFINITION. Domain extractors register their own, e.g. JOURNAL, REDDIT_POST, HACKERNEWS_THREAD, MASTODON_THREAD, GITHUB_REPO / GITHUB_GIST / GITHUB_PAGES, WIKIDATA_API, NUMISTA_API_COIN / NUMISTA_API_ISSUER, NOMISMA_API. Use --journal for the JOURNAL shortcut.
 * `--journal`: Mark this deposit as a personal JOURNAL so the journal-aware extractor handles it (reifies feelings/opinions and emits the NARRATIVE graph). Shorthand for --source-type JOURNAL; an explicit --source-type wins.
 * `--tags TEXT`: Comma-separated tags
-* `--date TEXT`: Record this content's authorship date as content_published_at (ISO YYYY-MM-DD). Overrides the leading-date and file-mtime auto-detection. Local-file deposits only — ignored with a warning for URLs.
+* `--date TEXT`: Record this content's authorship date as content_published_at (ISO YYYY-MM-DD). Overrides the leading-date and file-mtime auto-detection. Local-file deposits only; ignored with a warning for URLs.
 * `--split-by-date`: Split a multi-entry local file at standalone date-line boundaries into N corpus entries, each with its own content_published_at (a journal / changelog / daily-log that concatenates many dated entries). Opt-in; default off leaves today's one-file-one-entry behaviour unchanged. Local files only; mutually exclusive with --date. A file that is not actually multi-entry deposits as a single entry.
-* `--follow-post-links / --no-follow-post-links`: Follow the post's primary URL for link-shaped sources (Reddit / HN / Mastodon link cards). When unspecified, the extractor's default applies — Reddit / HN / Mastodon default to True, everything else to False.
-* `--follow-comment-links / --no-follow-comment-links`: Reserved-but-deferred. Passing --follow-comment-links emits a warning and proceeds as if False — comment-link following is captured § Deferred and will land in a follow-up release.
-* `--mutability TEXT`: Mutability class: STABLE | MUTABLE | APPEND_ONLY | EPHEMERAL. Local files default to STABLE. MUTABLE means a new snapshot retires the generation of beliefs it replaces — the right class for a rule file like AGENTS.md that is edited in place. Local deposits only.
+* `--follow-post-links / --no-follow-post-links`: Follow the post's primary URL for link-shaped sources (Reddit / HN / Mastodon link cards). When unspecified, the extractor's default applies: Reddit / HN / Mastodon default to True, everything else to False.
+* `--follow-comment-links / --no-follow-comment-links`: Reserved-but-deferred. Passing --follow-comment-links emits a warning and proceeds as if False. Comment-link following is captured § Deferred and will land in a follow-up release.
+* `--mutability TEXT`: Mutability class: STABLE | MUTABLE | APPEND_ONLY | EPHEMERAL. Local files default to STABLE. MUTABLE means a new snapshot retires the generation of beliefs it replaces, the right class for a rule file like AGENTS.md that is edited in place. Local deposits only.
 * `--fetch-policy TEXT`: Re-fetch policy: LAZY | NEVER. Local files default to NEVER (frozen at deposit). LAZY opts the file into the refresh ladder, so `particles corpus refresh` and the nightly consolidation pass re-check it against disk. Pair with --mutability MUTABLE. Local deposits only.
 * `-v, --verbose`: Show importer + fetch INFO logs
 * `--debug`: Show URL parsing, request URLs, auth state, and DEBUG logs
@@ -151,20 +151,21 @@ $ particles query [OPTIONS] [QUESTION]
 * `--tag TEXT`: Filter by taxonomy tag (subtree-expanded; repeatable)
 * `--include-ancestors`: Also match particles tagged with a broader ancestor of each --tag (up-expansion over taxonomy parent links)
 * `--show-particles`: Print retrieved particles with scores before the answer
-* `--contestedness`: Show per-result contestedness — the max−min spread of effective confidence across your policy set (local + adopted lenses). Absent when fewer than two policies are configured.
+* `--show-source`: After the answer, print the source passage behind each of the top hits, labelled exact (hash-verified chunk), located (best term overlap; not verified), or whole source. Display only: never affects ranking. `particles particle source <id>` does the same for one belief.
+* `--contestedness`: Show per-result contestedness: the max−min spread of effective confidence across your policy set (local + adopted lenses). Absent when fewer than two policies are configured.
 * `--include-document-meta`: Include DOCUMENT_META particles (claims about a source's own structure)
-* `--include-non-asserted`: Include non-asserted particles — a document's rejected / superseded / deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL)
+* `--include-non-asserted`: Include non-asserted particles: a document's rejected / superseded / deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL)
 * `--assertion-modality TEXT`: Filter to one modality: FALSIFIABLE, EVALUATIVE, EXPERIENTIAL, or CONSTITUTIVE. Omit to return every modality.
 * `--store TEXT`: Federate the query across these store handles (repeatable). Omit to query the default store. The first handle is the viewer whose trust policy ranks the merged results.
-* `--predicate TEXT`: Filter to claims whose predicate term equals this string (case-insensitive, exact — a CURIE and its expanded IRI are different strings; discover terms with --predicates).
-* `--object-eq TEXT`: Filter to claims whose object equals this value (typed when both sides normalize — numbers and ISO dates — else case-insensitive text).
+* `--predicate TEXT`: Filter to claims whose predicate term equals this string (case-insensitive, exact: a CURIE and its expanded IRI are different strings; discover terms with --predicates).
+* `--object-eq TEXT`: Filter to claims whose object equals this value (typed when both sides normalize, i.e. numbers and ISO dates; else case-insensitive text).
 * `--object-gt TEXT`: Filter to claims whose object is greater than this number or ISO date. Claims whose object would not normalize are excluded and the exclusion count disclosed.
 * `--object-lt TEXT`: Filter to claims whose object is less than this number or ISO date (same normalization and disclosure as --object-gt).
 * `--object-contains TEXT`: Filter to claims whose object contains this substring (case-insensitive; works on every term kind).
 * `--count`: Deterministic aggregate: the number of matching claims with their effective-confidence distribution. No question, no LLM call.
 * `--group-by TEXT`: Deterministic aggregate: bucket matching claims by 'subject', 'predicate', or 'object' with per-bucket counts and confidence distribution. No question, no LLM call.
 * `--min-effective-confidence FLOAT`: Explicit confidence floor for the aggregate modes; excluded rows are disclosed. There is no default floor.
-* `--predicates`: List the distinct predicate terms with kind and claim count — the vocabulary the exact-string --predicate filter matches against.
+* `--predicates`: List the distinct predicate terms with kind and claim count: the vocabulary the exact-string --predicate filter matches against.
 * `--as-of TEXT`: Answer as of this past instant (ISO-8601; a bare date means the start of that day, UTC): what did the store believe at T, and why did it stop believing it? Retired hits carry their supersession crossing; retirements the store cannot date are excluded with a disclosure line. A future instant is rejected.
 * `--help`: Show this message and exit.
 
@@ -238,17 +239,17 @@ $ particles reindex [OPTIONS]
 
 * `--entry-ids TEXT`: Comma-separated entry IDs (full or unambiguous prefix); omit for auto. Combines with --extractor-version / --extractor-id / --provider-model by intersection: only the named entries that also match the filter are reindexed, and any that don't are reported.
 * `--extractor-version TEXT`: Old extractor version to replace
-* `--extractor-id TEXT`: Extractor name (e.g. github-repo-extractor) — re-extract all of its particles regardless of version. Useful when a shared upstream change (e.g. a prompt revision in general.py) affects delegating extractors.
-* `--provider-model TEXT`: "<provider>:<model>" pairing (e.g. openai:gpt-5.6-luna) — re-extract every particle that pairing produced. The handle for undoing an uncalibrated provider swap. Matched exactly, and the scope unit is the snapshot, so a snapshot with a model-mixed population is re-extracted whole. Particles with no recorded pairing never match.
-* `--no-failed / --no-no-failed`: Skip FAILED snapshot entries. Applies to auto-discovery only — --entry-ids resolves each entry to its latest COMPLETE snapshot.  [default: no-no-failed]
-* `--dry-run`: Print the work plan — entries / snapshots / particles in scope, with per-snapshot counts and any known-missing blobs — and exit without extracting: zero LLM calls, zero writes.
+* `--extractor-id TEXT`: Extractor name (e.g. github-repo-extractor): re-extract all of its particles regardless of version. Useful when a shared upstream change (e.g. a prompt revision in general.py) affects delegating extractors.
+* `--provider-model TEXT`: "<provider>:<model>" pairing (e.g. openai:gpt-5.6-luna): re-extract every particle that pairing produced. The handle for undoing an uncalibrated provider swap. Matched exactly, and the scope unit is the snapshot, so a snapshot with a model-mixed population is re-extracted whole. Particles with no recorded pairing never match.
+* `--no-failed / --no-no-failed`: Skip FAILED snapshot entries. Applies to auto-discovery only; --entry-ids resolves each entry to its latest COMPLETE snapshot.  [default: no-no-failed]
+* `--dry-run`: Print the work plan (entries / snapshots / particles in scope, with per-snapshot counts and any known-missing blobs) and exit without extracting: zero LLM calls, zero writes.
 * `--format [human|json]`: Output format: a short human summary (default), or the full JSON result envelope including the per-snapshot plan.  [default: human]
 * `-v, --verbose`: Print scope size and per-entry progress while reindexing.
 * `--help`: Show this message and exit.
 
 ## `particles reconcile`
 
-Demote superseded claims across corpus entries (document-supersession sweep).
+Demote superseded claims across corpus entries (supersession sweeps).
 
 **Usage**:
 
@@ -258,6 +259,7 @@ $ particles reconcile [OPTIONS]
 
 **Options**:
 
+* `--updates`: Run the same-subject update sweep instead of the document-supersession sweep: retire values a later claim from the same source lineage replaced.
 * `--dry-run`: Report what would be demoted without mutating the store.
 * `-v, --verbose`: Print scope size and per-demotion progress.
 * `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
@@ -269,7 +271,7 @@ $ particles reconcile [OPTIONS]
 Show the extraction quality dashboard.
 
 Displays calibration source distribution, corpus snapshot status,
-and subject coverage metrics. No LLM calls — instant read from the DB.
+and subject coverage metrics. No LLM calls, just an instant read from the DB.
 For full structural and semantic diagnostics use: particles lint
 
 **Usage**:
@@ -332,19 +334,19 @@ $ particles export [OPTIONS] FORMAT [OUTPUT]
 * `--subjects TEXT`: Wiki: comma-separated canonical subject names to limit the export to
 * `--dry-run`: Wiki: report cache hits + regen count + token estimate without writing or calling the LLM
 * `--with-synthesis`: Obsidian/Logseq: splice LLM-synthesised prose articles into per-subject notes. Requires ANTHROPIC_API_KEY. Shares the synthesis cache with the wiki exporter, so running multiple synthesising exporters pays LLM cost once per subject.
-* `--without-synthesis`: Wiki: render every article as the deterministic structured listing — no LLM call, no ANTHROPIC_API_KEY, reproducible output. Bypasses the synthesis cache so existing LLM articles are replaced.
-* `--include-non-asserted`: Include non-asserted particles — a document's rejected / superseded / deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL). Excluded from the rendered surface by default; the round-trippable `interchange` export always keeps them.
-* `--subject TEXT`: Graph: render one Subject's neighbourhood — a subject id or an exact (case-insensitive) canonical name / alias. Scope is mandatory for the graph exporter — pass exactly one of --subject or --query; a whole-store render does not exist.
-* `--query TEXT`: Graph: render one query's retrieval set — the picture of the knowledge a query consults (top graph.query_top_k hits + their subjects). Mutually exclusive with --subject.
-* `--inconsistency TEXT`: Graph: render one contradiction's evidence — the INCONSISTENCY particle (full id or unique prefix) as the anchor, its two disputant beliefs with their true statuses, their subjects and sources. Mutually exclusive with the other scopes.
+* `--without-synthesis`: Wiki: render every article as the deterministic structured listing: no LLM call, no ANTHROPIC_API_KEY, reproducible output. Bypasses the synthesis cache so existing LLM articles are replaced.
+* `--include-non-asserted`: Include non-asserted particles: a document's rejected / superseded / deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL). Excluded from the rendered surface by default; the round-trippable `interchange` export always keeps them.
+* `--subject TEXT`: Graph: render one Subject's neighbourhood, given as a subject id or an exact (case-insensitive) canonical name / alias. Scope is mandatory for the graph exporter: pass exactly one of --subject or --query; a whole-store render does not exist.
+* `--query TEXT`: Graph: render one query's retrieval set, the picture of the knowledge a query consults (top graph.query_top_k hits + their subjects). Mutually exclusive with --subject.
+* `--inconsistency TEXT`: Graph: render one contradiction's evidence: the INCONSISTENCY particle (full id or unique prefix) as the anchor, its two disputant beliefs with their true statuses, their subjects and sources. Mutually exclusive with the other scopes.
 * `--manifest TEXT`: Graph: with --section, render a projection manifest section's deterministic selection.
 * `--section TEXT`: Graph: the manifest section's region id or exact title (with --manifest).
 * `--hops INTEGER`: Graph: neighbourhood radius for --subject scope (clamped to graph.max_hops)  [default: 1]
 * `--history`: Graph: include retired supersession-chain ancestors as ghosts (dashed, with the successor chain in the panel); the page gets a client-side history toggle
 * `--as-of TEXT`: Graph: render the graph as believed at this ISO-8601 instant (single-instant lens; undatable retirements are excluded fail-closed and disclosed). Two exports at two instants make the static belief-history demo.
 * `--max-nodes INTEGER`: Graph: per-run node cap (clamped to graph.max_nodes; truncation is disclosed)
-* `--database-id TEXT`: Notion: the target database id to sync subjects into for this run (overrides config.notion.database_id). Share that database with your integration first. The NOTION_API_KEY token is read from the environment — never passed as a flag.
-* `--no-update-blocks`: Notion: create-only — write a page's particle blocks once and never rewrite the managed block range on re-sync, preserving hand-edits. Default behaviour owns the managed range and overwrites it so re-sync is idempotent.
+* `--database-id TEXT`: Notion: the target database id to sync subjects into for this run (overrides config.notion.database_id). Share that database with your integration first. The NOTION_API_KEY token is read from the environment, never passed as a flag.
+* `--no-update-blocks`: Notion: create-only. Write a page's particle blocks once and never rewrite the managed block range on re-sync, preserving hand-edits. Default behaviour owns the managed range and overwrites it so re-sync is idempotent.
 * `--help`: Show this message and exit.
 
 ## `particles project`
@@ -354,11 +356,11 @@ Render (or drift-check) a documentation projection.
     particles project docs/projection/readme.yaml README.md
     particles project docs/projection/readme.yaml --without-synthesis
     particles project docs/projection/readme.yaml --check   # CI drift gate
-    # splice every declared region of the README in one pass:
+    # Splice every declared region of the README in one pass:
     particles project docs/projection/readme.yaml --splice-all
-    # re-roll a single sentinel region:
+    # Re-roll a single sentinel region:
     particles project docs/projection/readme.yaml README.md --splice what-is
-    # refresh the committed drift-gate bundle:
+    # Refresh the committed drift-gate bundle:
     particles project docs/projection/readme.yaml --export-corpus
 
 **Usage**:
@@ -374,9 +376,9 @@ $ particles project [OPTIONS] MANIFEST [OUTPUT]
 
 **Options**:
 
-* `--without-synthesis`: Render the deterministic structured listing — no LLM call, no ANTHROPIC_API_KEY, reproducible output. The drift gate uses this mode.
+* `--without-synthesis`: Render the deterministic structured listing: no LLM call, no ANTHROPIC_API_KEY, reproducible output. The drift gate uses this mode.
 * `--check`: Drift gate: regenerate the deterministic snapshot and exit non-zero if it differs from the committed `<name>.snapshot.md`. Selection + structure are gated; LLM prose drift is advisory. No API key required.
-* `--splice REGION`: Block-splice mode: write the rendered body *between* the `<!-- BEGIN/END PROJECTED: REGION -->` sentinels in the existing output file, preserving everything outside them, instead of overwriting the whole file. The output file must already carry the sentinel pair for REGION. On a manifest with per-section `region:` bindings, renders only that region's section — the single-region re-roll path.
+* `--splice REGION`: Block-splice mode: write the rendered body *between* the `<!-- BEGIN/END PROJECTED: REGION -->` sentinels in the existing output file, preserving everything outside them, instead of overwriting the whole file. The output file must already carry the sentinel pair for REGION. On a manifest with per-section `region:` bindings, renders only that region's section, the single-region re-roll path.
 * `--splice-all`: Multi-region block-splice: render every section that declares a `region:` and splice each body into its own sentinel pair in the output file, in one pass. Every derived section must declare a region.
 * `--export-corpus`: Write the manifest's sibling `<name>.corpus.jsonl` gate bundle: exactly the particles the manifest's deterministic selection requires, encoded as interchange units the drift gate's ephemeral restore consumes. No render is performed.
 * `--verbose`: Per-section progress logging.
@@ -400,10 +402,10 @@ $ particles audit [OPTIONS] [PATH]
 
 * `--transcripts PATH`: Opt-in: also harvest session transcripts (*.jsonl) from DIR, newest first, capped at audit.transcript_max_entries (--max-entries overrides).
 * `--max-entries INTEGER`: Cap harvested entries (default: audit.transcript_max_entries for transcripts; unlimited for memory files).
-* `--estimate`: Print the extraction cost estimate and exit — no deposit, no LLM call.
+* `--estimate`: Print the extraction cost estimate and exit: no deposit, no LLM call.
 * `--yes`: Skip the cost-confirmation prompt.
 * `--judge`: LLM-judge duplicate pairs (verified duplicates) instead of REPORT-mode candidates.
-* `--scope TEXT`: Semantic-finding scope (contradiction probe + duplicate scan): 'harvested' (default with PATH — headline counts only pairs touching this harvest's beliefs; the store-wide duplicate total is still disclosed) or 'store' (the whole store; the re-audit default).
+* `--scope TEXT`: Semantic-finding scope (contradiction probe + duplicate scan): 'harvested' (default with PATH; headline counts only pairs touching this harvest's beliefs; the store-wide duplicate total is still disclosed) or 'store' (the whole store; the re-audit default).
 * `--output PATH`: Also write the Markdown report to FILE.
 * `--format TEXT`: Terminal format: markdown (default) or json.  [default: markdown]
 * `--store TEXT`: Audit a named store (default: the default store).  [default: default]
@@ -418,7 +420,7 @@ Annotate particles with a structured (subject-predicate-object) claim.
 The annotation is derived from `content` and is never an assertion: this
 verb cannot change a claim, its confidence, or its provenance. Particles
 extracted since landed are annotated at extraction time for free;
-this pass is for the ones that predate it, and it pays one LLM call each —
+this pass is for the ones that predate it, and it pays one LLM call each,
 hence the rate limit and the resumable batch cap.
 
 Particles whose prose has no honest triple are *skipped*, permanently and
@@ -432,7 +434,7 @@ $ particles structure [OPTIONS]
 
 **Options**:
 
-* `--limit INTEGER`: Max particles to annotate this run (default: structured_claim.backfill_batch_limit). Use 0 for the whole backlog in one run — safe, because the pass commits as it goes.
+* `--limit INTEGER`: Max particles to annotate this run (default: structured_claim.backfill_batch_limit). Use 0 for the whole backlog in one run; that is safe, because the pass commits as it goes.
 * `--rate-limit-per-minute INTEGER`: Max structurizer calls per minute (default: structured_claim.backfill_rate_limit_per_minute); 0 disables the delay.
 * `--structurizer-version TEXT`: Regenerate annotations stamped with a version OTHER than this one, instead of annotating unannotated particles (mirrors `reindex --extractor-version`).
 * `--dry-run`: Report the whole backlog (not the batch cap), the runs it implies, and current coverage; write nothing.
@@ -482,7 +484,7 @@ $ particles subjects [OPTIONS] [ACTION] [REST]...
 
 ## `particles benchmark`
 
-Whole-pipeline system benchmarks — distinct from the per-extractor `particles extractor benchmark*` verbs.
+Whole-pipeline system benchmarks, distinct from the per-extractor `particles extractor benchmark*` verbs.
 
 **Usage**:
 
@@ -496,21 +498,49 @@ $ particles benchmark [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `memory`: Run the LongMemEval agent-memory benchmark...
+* `observer`: The two-project observer fixture — zero...
+* `memory`: The LongMemEval agent-memory benchmark...
+* `rot`: The memory-rot benchmark.
+* `relevance-floor`: The relevance-floor benchmark: how often...
 
-### `particles benchmark memory`
+### `particles benchmark observer`
 
-Run the LongMemEval agent-memory benchmark.
+The two-project observer fixture — zero LLM calls.
 
-Reports four conditions in two labeled families: retrieval-stage
-Recall@k / Precision@k (provenance-scored), and end-to-end QA accuracy
-for qa_particles, qa_full_context (baseline), and qa_no_memory
-(baseline) under one pinned answer model.
+Two repositories' memory files, sharing generic subjects, evolve over
+`--days` and are harvested into one scratch store through the real
+pipeline with scripted extraction and a scripted contradiction probe.
+Each day, every line a project currently states is checked through that
+project's observer: in view, or not — and if not, which mechanism retired
+it (cross-project supersession, the generation cascade, or a surviving
+particle attested only by the other project) and whether the winner is in
+view. Report-only; the only number the default flip is decided
+against.
 
 **Usage**:
 
 ```console
-$ particles benchmark memory [OPTIONS]
+$ particles benchmark observer [OPTIONS]
+```
+
+**Options**:
+
+* `--seed INTEGER`: World seed; repeat for several worlds (default: 1–8).
+* `--days INTEGER RANGE`: Simulated days per world.  [default: 14; x>=2]
+* `--output PATH`: Write the report here.
+* `--format TEXT`: Output format: "markdown" (default) or "json".  [default: markdown]
+* `--store-dir PATH`: Keep the per-seed scratch stores under this directory.
+* `--arm [lines|chunked]`: How extraction reaches the store: `lines` re-emits every line (duplicate suppression); `chunked` sends two lines per chunk through carry-forward.  [default: lines]
+* `--help`: Show this message and exit.
+
+### `particles benchmark memory`
+
+The LongMemEval agent-memory benchmark. The bare verb runs it; `rejudge` re-scores a saved report under the current judge protocol.
+
+**Usage**:
+
+```console
+$ particles benchmark memory [OPTIONS] COMMAND [ARGS]...
 ```
 
 **Options**:
@@ -519,25 +549,187 @@ $ particles benchmark memory [OPTIONS]
 * `--all`: Run every question in the variant (mutually exclusive with --limit)
 * `--variant [oracle|s|m]`: LongMemEval variant: oracle | s | m (default: benchmark_memory.variant)
 * `--types TEXT`: Comma-separated question-type filter (e.g. 'multi-session,knowledge-update')
-* `--estimate`: Print the projected LLM call count + token volume and exit — no LLM call.
+* `--estimate`: Print the projected LLM call count + token volume and exit: no LLM call.
 * `--yes`: Skip the cost-confirmation prompt.
 * `--output PATH`: Write the rendered report to FILE as well as stdout.
 * `--format [table|json]`: Output format  [default: table]
 * `--store-dir PATH`: Directory for the per-question scratch stores (kept after the run; default: a deleted temp dir)
-* `--dataset-file PATH`: Local LongMemEval-format JSON file (skips the pinned download — used by the checked-in fixture and pre-verified copies)
-* `--context-budget INTEGER RANGE`: QA-at-budget clamp: cap condition ii's particle context at ~N tokens (rank order; baselines unclamped). Recorded on the run tuple — compare only against a matching run.  [x>=1]
-* `--top-k INTEGER RANGE`: Retrieval depth for condition i and the qa_particles context (default: benchmark_memory.top_k). Recorded on the run tuple — a top_k sweep is a sweep of this flag against one fixed store set.  [x>=1]
-* `--qa / --no-qa`: Run the end-to-end QA family (conditions ii-iv). --no-qa reports the retrieval stage alone and makes NO LLM call at all once the stores exist — the free tier for a retrieval-only ablation arm. The three QA rows then render `not run`.  [default: qa]
-* `--consolidation`: Ablation: run the dream cycle's pass list (reconcile, census, utility, abstraction) on each scratch store between extract and retrieve — the controlled instrument. LLM-priced (reconcile probes, contradiction probes); recorded on the run tuple. Mutually exclusive with --abstraction, which the cycle runs itself.
+* `--dataset-file PATH`: Local LongMemEval-format JSON file (skips the pinned download; used by the checked-in fixture and pre-verified copies)
+* `--context-budget INTEGER RANGE`: QA-at-budget clamp: cap condition ii's particle context at ~N tokens (rank order; baselines unclamped). Recorded on the run tuple; compare only against a matching run.  [x>=1]
+* `--top-k INTEGER RANGE`: Retrieval depth for condition i and the qa_particles context (default: benchmark_memory.top_k). Recorded on the run tuple; a top_k sweep is a sweep of this flag against one fixed store set.  [x>=1]
+* `--qa / --no-qa`: Run the end-to-end QA family (conditions ii-iv). --no-qa reports the retrieval stage alone and makes NO LLM call at all once the stores exist: the free tier for a retrieval-only ablation arm. The three QA rows then render `not run`.  [default: qa]
+* `--consolidation`: Ablation: run the dream cycle's pass list (reconcile, census, utility, abstraction) on each scratch store between extract and retrieve: the controlled instrument. LLM-priced (reconcile probes, contradiction probes); recorded on the run tuple. Mutually exclusive with --abstraction, which the cycle runs itself.
 * `--dedup-judge`: Ablation: run the co-evidential LLM judge in APPLY mode on each scratch store before retrieval, linking PARAPHRASE pairs CO_EVIDENTIAL so the ranker collapses them inside top-k. LLM-priced (one judged cluster per Subject); recorded on the run tuple.
 * `--reuse-stores`: Replay the scratch stores an earlier --store-dir run persisted instead of depositing and extracting again: zero write-time LLM calls. Requires --store-dir, and refuses unless that set's write-side tuple (dataset, selection, extraction + embedding model, write-time reconciliation knobs) matches this run's.
 * `--abstraction`: Ablation: run the abstraction-promotion pass (auto mode, age gate 0) on each scratch store between extract and retrieve. Recorded on the run tuple.
-* `--concurrency INTEGER RANGE`: Run up to N questions at once (each owns its scratch store; the report is identical to a sequential run's). Practical ceiling is your API rate tier — past ~4-8 the extra parallelism becomes 429 retries, not speed.  [default: 1; x>=1]
+* `--concurrency INTEGER RANGE`: Run up to N questions at once (each owns its scratch store; the report is identical to a sequential run's). Practical ceiling is your API rate tier; past ~4-8 the extra parallelism becomes 429 retries, not speed.  [default: 1; x>=1]
 * `--fresh`: Discard this experiment's checkpoint and start over. Runs are checkpointed per completed question by default, so an interrupted run resumes (and a completed run replays free) when re-invoked with identical knobs.
-* `--pooled`: Dispatch each question's haystack extractions as one pooled Message Batches job — roughly halves the bill on a batch-eligible provider at the cost of latency (a batch's floor is one poll interval). Same model, prompt, and budget, so the report is comparable to an unpooled run's; degrades to sequential calls when llm.batch is off.
-* `--batch-qa`: Submit the QA answer + judge calls (conditions ii-iv) as Message Batches jobs — one answer batch and one judge batch per condition, all at 50% price — instead of one sequential call per question. The sibling of --pooled for the answerer/judge (the two compose); same model/prompt/budget, so the report is comparable. Off by default (a batch's floor is one poll interval — the right trade for a paid run, the wrong one for a small/interactive run); degrades to sequential calls when llm.batch is off.
-* `--memory [particles|chunks|notes]`: The memory under test: particles (the store — default), or a COMPARATOR memory over the same questions, answer scaffold, judge and retrieval scoring: chunks (raw-transcript RAG, no write-time LLM call) or notes (LLM-written session notes by the extraction model). The report's selection.memory names which ran.  [default: particles]
+* `--pooled`: Dispatch each question's haystack extractions as one pooled Message Batches job. This roughly halves the bill on a batch-eligible provider at the cost of latency (a batch's floor is one poll interval). Same model, prompt, and budget, so the report is comparable to an unpooled run's; degrades to sequential calls when llm.batch is off.
+* `--batch-qa`: Submit the QA answer + judge calls (conditions ii-iv) as Message Batches jobs, one answer batch and one judge batch per condition, all at 50% price, instead of one sequential call per question. The sibling of --pooled for the answerer/judge (the two compose); same model/prompt/budget, so the report is comparable. Off by default (a batch's floor is one poll interval: the right trade for a paid run, the wrong one for a small/interactive run); degrades to sequential calls when llm.batch is off.
+* `--memory [particles|chunks|notes]`: The memory under test: particles (the store; the default), or a COMPARATOR memory over the same questions, answer scaffold, judge and retrieval scoring: chunks (raw-transcript RAG, no write-time LLM call) or notes (LLM-written session notes by the extraction model). The report's selection.memory names which ran.  [default: particles]
 * `--baselines / --no-baselines`: Run the qa_full_context / qa_no_memory baseline conditions. --no-baselines is for a comparator run reusing the particles run's baseline columns (same tuple ⇒ same calls); they render `not run`.  [default: baselines]
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `rejudge`: Re-score a saved report's stored answers...
+
+#### `particles benchmark memory rejudge`
+
+Re-score a saved report's stored answers under the current judge.
+
+Re-runs only the judge call (`llm.benchmark`, under the configured
+`benchmark_memory.judge_protocol`) over each QA row's recorded answer;
+no answer call is made, so the full-context baseline is not re-paid and
+the answers being judged do not change. Rows with no stored answer stay
+excluded, with the count disclosed. The output names the source report
+and both judge tuples in its first quality note.
+
+**Usage**:
+
+```console
+$ particles benchmark memory rejudge [OPTIONS] REPORT
+```
+
+**Arguments**:
+
+* `REPORT`: A saved `benchmark memory --format json` report whose QA rows carry the answering model's replies (written by v1.141.1 or later).  [required]
+
+**Options**:
+
+* `--output PATH`: Write the re-judged report here as JSON: a complete report of record (retrieval stage copied, QA conditions re-scored, provenance in the first quality note), regardless of --format.  [required]
+* `--format [table|json]`: What to print on stdout: the table, or the JSON.  [default: table]
+* `--dataset-file PATH`: Local LongMemEval-format JSON file for the report's variant (default: the pinned download for the variant and revision the report records). The judge prompt needs each question's text and reference answer, which the report does not carry.
+* `--yes`: Skip the cost-confirmation prompt.
+* `--help`: Show this message and exit.
+
+### `particles benchmark rot`
+
+The memory-rot benchmark. The bare verb runs it; `rescore` re-classifies a saved report under the current scorer.
+
+**Usage**:
+
+```console
+$ particles benchmark rot [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--arm [oracle|probe|live]`: Perception arm: oracle (scripted extraction + scripted §6.6 probe; zero LLM calls, deterministic), probe (scripted extraction, live contradiction probe), or live (the general extractor — the product).  [default: oracle]
+* `--seed INTEGER`: World seed; repeat for several worlds (default: benchmark_rot.seeds).
+* `--days INTEGER RANGE`: Simulated world length (default: benchmark_rot.days).  [x>=30]
+* `--top-k INTEGER RANGE`: Probe top-k (default: benchmark_rot.top_k).  [x>=1]
+* `--trust-policy / --no-trust-policy`: Write the domain rule demoting the untrusted source channel (the operator's policy). --no-trust-policy measures the neutral-when-silent default instead.  [default: trust-policy]
+* `--estimate`: Print the projected LLM calls and cost, then exit.
+* `-y, --yes`: Skip the confirmation above the call threshold.
+* `-o, --output PATH`: Also write the rendered report to this path.
+* `--format [table|json]`: table (default) or json (the report of record).  [default: table]
+* `--store-dir PATH`: Keep each world's scratch store (and its blobs) here for inspection.
+* `--cache-dir PATH`: Persist the paid arms' extraction results here, so a re-run that changes only candidacy or the ladder pays probes alone. The key includes the extractor, the resolved model and the SDK version, so a prompt or model change is a miss, never a silent replay.
+* `--attribute TEXT`: Stamp this author id on every session, which is what a multi-store needs before the attribution rule lets an update supersede.
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `rescore`: Re-classify a saved rot report under the...
+
+#### `particles benchmark rot rescore`
+
+Re-classify a saved rot report under the current scorer.
+
+Free: retrieval is taken as recorded — no store, encoder, or LLM call. The
+output is a complete report of record with ``selection.scorer_version`` set
+to what ran and a first note naming the source and both versions.
+
+**Usage**:
+
+```console
+$ particles benchmark rot rescore [OPTIONS] REPORT
+```
+
+**Arguments**:
+
+* `REPORT`: A saved rot report (--format json output).  [required]
+
+**Options**:
+
+* `-o, --output PATH`: Where to write the re-scored report (JSON).  [required]
+* `--format [table|json]`: What to print: table (default) or json.  [default: table]
+* `--help`: Show this message and exit.
+
+### `particles benchmark relevance-floor`
+
+The relevance-floor benchmark: how often the query gate refuses an answerable question, on real questions. `harvest` builds the private held-out set; the bare verb replays it (free) and, with --judge, scores it; `resweep` re-renders a saved report over any floor list.
+
+**Usage**:
+
+```console
+$ particles benchmark relevance-floor [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--heldout PATH`: Held-out JSONL from `harvest` (default: benchmark_relevance_floor.heldout_path).
+* `--store TEXT`: Store handle to replay against (default: the default store).
+* `--top-k INTEGER RANGE`: Retrieval depth (default: benchmark_relevance_floor.top_k). The floor reads the maximum cosine over the rendered top-k, so this is on the run tuple.  [1<=x<=200]
+* `--limit INTEGER RANGE`: Replay a seeded sample of N questions, stratified by source.  [x>=1]
+* `--judge`: Also run the LLM-priced stage: answer every question with the gate disabled, then judge the answer grounded-and-useful. Estimate-gated.
+* `--estimate`: With --judge: run the free replay, print the projection, and exit before any LLM call.
+* `-y, --yes`: Skip the confirmation above the call threshold.
+* `-o, --output PATH`: Also write the rendered report to this path.
+* `--format [table|json]`: table (default; aggregate-only, no question text) or json (the report of record; carries question and answer text).  [default: table]
+* `--replay-from FILE`: Reuse the free replay recorded in a saved JSON report instead of re-running it (the replay is free but slow on a large store). Refused unless top_k and the encoder match and it covers every question asked for.
+* `--checkpoint PATH`: Judged-stage checkpoint file (default: beside the held-out set), so an interrupted run never re-pays a finished question.
+* `--allow-in-repo`: Permit a --format json --output inside a git work tree.
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `harvest`: Build the private held-out question set...
+* `resweep`: Re-sweep a saved report over a floor list...
+
+#### `particles benchmark relevance-floor harvest`
+
+Build the private held-out question set from agent transcripts.
+
+Pure parsing: no store, encoder, or LLM call. Secrets are redacted before a
+question is kept. Prints a census only, never a question.
+
+**Usage**:
+
+```console
+$ particles benchmark relevance-floor harvest [OPTIONS]
+```
+
+**Options**:
+
+* `--transcripts PATH`: Directory of agent transcripts (*.jsonl), searched recursively (default: benchmark_relevance_floor.transcripts_dir).
+* `-o, --output PATH`: Held-out JSONL to write (default: benchmark_relevance_floor.heldout_path).
+* `--prompts / --no-prompts`: Also harvest question-shaped sentences the operator typed to the agent: a proxy source, reported apart. --no-prompts keeps explicit memory queries only.  [default: prompts]
+* `--allow-in-repo`: Permit an --output inside a git work tree.
+* `--help`: Show this message and exit.
+
+#### `particles benchmark relevance-floor resweep`
+
+Re-sweep a saved report over a floor list and print the aggregate table.
+
+Free: the cosines and labels are taken as recorded (no store, encoder, or
+LLM call). This is also how a private JSON report of record becomes the
+publishable table, which carries no question text.
+
+**Usage**:
+
+```console
+$ particles benchmark relevance-floor resweep [OPTIONS] REPORT
+```
+
+**Arguments**:
+
+* `REPORT`: A saved report (--format json output).  [required]
+
+**Options**:
+
+* `--floor FLOAT`: A floor to evaluate; repeat for several (default: benchmark_relevance_floor.floors).
 * `--help`: Show this message and exit.
 
 ## `particles config`
@@ -579,7 +771,7 @@ $ particles config validate [OPTIONS]
 
 ## `particles conformance`
 
-Conformance Profile checks (behavioural ground truth).
+Conformance Profile checks, the behavioural ground truth.
 
 **Usage**:
 
@@ -644,7 +836,7 @@ $ particles corpus [OPTIONS] COMMAND [ARGS]...
 
 * `list`: List all deposited corpus entries.
 * `show`: Show details, extracted particles, and...
-* `cat`: Dump a snapshot's stored content — the...
+* `cat`: Dump a snapshot's stored content: the...
 * `delete`: Delete a corpus entry, its snapshots, and...
 * `retract`: Retract every live particle from a source,...
 * `prune-orphans`: Sweep dangling rows left by older deletes...
@@ -689,7 +881,7 @@ $ particles corpus show [OPTIONS] ENTRY_ID
 
 ### `particles corpus cat`
 
-Dump a snapshot's stored content — the exact bytes the extractor saw.
+Dump a snapshot's stored content: the exact bytes the extractor saw.
 
 Accepts a snapshot ID or a corpus-entry ID (prefix OK); an entry resolves to
 its most-recent snapshot. By default renders the same text the extractor
@@ -790,7 +982,7 @@ mtime and then its SHA-256 against the latest snapshot. A changed file gets
 a new PENDING snapshot; ``particles extract --all-pending`` (or tonight's
 consolidation run) turns that into current beliefs.
 
-This is the on-demand form of consolidation pass 0.5 — the scheduled cycle
+This is the on-demand form of consolidation pass 0.5; the scheduled cycle
 runs the same sweep nightly.
 
 **Usage**:
@@ -806,7 +998,7 @@ $ particles corpus refresh [OPTIONS] [ENTRY_ID]
 **Options**:
 
 * `--force`: Tier 3: re-check regardless of fetch_policy and the per-source-type re-fetch floor. The escape hatch for a content change that preserved the file's mtime.
-* `--backfill-cascade`: Instead of re-checking sources, apply the generation cascade to MUTABLE entries whose snapshots already moved — demoting ACTIVE particles anchored to a superseded snapshot. Stores that predate the change carry a backlog of these; the forward-looking cascade only fires on newly-extracted snapshots.
+* `--backfill-cascade`: Instead of re-checking sources, apply the generation cascade to MUTABLE entries whose snapshots already moved, demoting ACTIVE particles anchored to a superseded snapshot. Stores that predate the change carry a backlog of these; the forward-looking cascade only fires on newly-extracted snapshots.
 * `-y, --yes`: Skip the confirmation prompt
 * `-v, --verbose`: Verbose logging
 * `--help`: Show this message and exit.
@@ -815,7 +1007,7 @@ $ particles corpus refresh [OPTIONS] [ENTRY_ID]
 
 Audit every blob the store references; optionally re-home the strays.
 
-Read-only by default and exhaustive — the operator-invoked sibling of the
+Read-only by default and exhaustive: the operator-invoked sibling of the
 sampled probe ``config validate`` runs. Reports three disjoint counts:
 **present** in the resolved blob dir, **found elsewhere** under a
 ``--search`` root, and **missing**.
@@ -836,7 +1028,7 @@ $ particles corpus fsck [OPTIONS]
 
 **Options**:
 
-* `--search PATH`: Also look for strays under this blob root — the directory holding the two-character shards (repeatable). Nothing is inferred: the audit tells you what is missing so you can point --search at where you think it went.
+* `--search PATH`: Also look for strays under this blob root, the directory holding the two-character shards (repeatable). Nothing is inferred: the audit tells you what is missing so you can point --search at where you think it went.
 * `--re-home`: Copy digest-verified strays found under --search into the blob dir.
 * `--dry-run`: Report what --re-home would copy, without copying.
 * `--help`: Show this message and exit.
@@ -890,7 +1082,7 @@ $ particles corpus links list [OPTIONS] [ENTRY_ID]
 Suggest undeposited URLs the corpus frequently cites.
 
 Ranks URLs mentioned across the corpus but not yet deposited, by
-trust-weighted distinct-source diversity × recency. Suggestion-only —
+trust-weighted distinct-source diversity × recency. Suggestion-only:
 nothing is fetched or crawled. Deposit one with ``particles deposit <url>``;
 silence one with ``particles corpus links dismiss <url>``.
 
@@ -932,7 +1124,7 @@ $ particles corpus links dismiss [OPTIONS] URL
 
 ## `particles curate`
 
-Bus-stop editing — the finite, leverage-ranked curation queue.
+Bus-stop editing: the finite, leverage-ranked curation queue.
 
 **Usage**:
 
@@ -945,7 +1137,7 @@ $ particles curate [OPTIONS] COMMAND [ARGS]...
 * `-n, --limit INTEGER`: Cap the cards shown (default: curation.session_size).
 * `-k, --kind TEXT`: Restrict to one card kind (e.g. stale, contested).
 * `--semantic`: Run the LLM-assisted finders (semantic contradiction).
-* `--refresh`: Rebuild the card collection before showing it. Slow — the finders re-run store-wide. Run this once on a store with no collection yet; the nightly `memory consolidate` does it for you after that.
+* `--refresh`: Rebuild the card collection before showing it. Slow: the finders re-run store-wide. Run this once on a store with no collection yet; the nightly `memory consolidate` does it for you after that.
 * `--no-snapshot`: Bypass the persisted collection entirely and run the finders for this invocation without caching the result.
 * `--verbose`
 * `--debug`
@@ -1004,7 +1196,7 @@ Unifies the bind with the fail-closed gate: HOST sets
 is refused before the socket opens.
 
 With ``--daemon`` (or ``daemon.enabled``) the process also schedules its own
-background work in the FastAPI lifespan — the rider on the
+background work in the FastAPI lifespan, the rider on the
 external-scheduler contract. Without it, this command behaves exactly as it
 always has.
 
@@ -1112,18 +1304,20 @@ $ particles extractor [OPTIONS] COMMAND [ARGS]...
 
 Run an extractor against the conformance fixture corpus.
 
-Scores the fixtures the production registry routes to this extractor
-. ``--all-accepted`` widens the run to every fixture the
-extractor would take if handed it — for the fallback that is the
-whole corpus, so the result is a deliberate probe, not the extractor's
+Scores the fixtures the production registry routes to this extractor.
+``--all-accepted`` widens the run to every fixture the
+extractor would take if handed it (for the fallback that is the
+whole corpus), so the result is a deliberate probe, not the extractor's
 conformance score, and it never updates the stored conformance verdict.
 
-Phase 1 (current): report-only. Exit code 0 unless --fail-on is given.
-Exit code 1 indicates the contract failed (a REQUIRED field missing, or a
-FAIL-severity diversity rule violated); --fail-on warn additionally treats
-RECOMMENDED warnings as fatal. An ADVISORY diversity finding (
-`uncertainty_nature` is the one shipped today) is reported and never
-affects the exit code.
+Phase 1 (current): report-only, in that no merge or registration is gated
+on the result. The exit code still reflects it: under the default
+--fail-on error, exit code 1 means the contract failed (a REQUIRED field
+short of 100%, including every REQUIRED field when no fixture is scored,
+or a FAIL-severity diversity rule violated on a REQUIRED field);
+--fail-on warn additionally treats RECOMMENDED warnings as fatal. An
+ADVISORY diversity finding (`uncertainty_nature` is the one
+shipped today) is reported and never affects the exit code.
 
 **Usage**:
 
@@ -1210,7 +1404,7 @@ $ particles extractor trust-set [OPTIONS] EXTRACTOR_ID WEIGHT
 Run extraction-quality benchmarks against an extractor.
 
 Discovers every suite under --suites-dir that this extractor is the
-production routing choice for — the registry ladder, read back
+production routing choice for: the registry ladder, read back
 through ``select_extractor``, so the fallback extractor no
 longer inherits every domain suite. ``--suite`` runs a named suite
 regardless of routing. Emits one report per suite, and persists each
@@ -1220,7 +1414,7 @@ With --fail-on set, exits non-zero when any suite's named metric
 crosses the threshold.
 
 ``--runs N`` repeats each suite N times and reports each metric's mean,
-range and standard deviation instead of a single point estimate — the
+range and standard deviation instead of a single point estimate: the
 error bars a provider comparison needs. Every pass persists
 its own report file, so the series is still one run per JSON envelope.
 ``--fail-on`` is evaluated against the **mean** across runs.
@@ -1259,7 +1453,7 @@ Reports per-modality precision/recall, the dangerous **false-non-FALSIFIABLE
 rate** the journal extractor's inverted default raises, and the
 whole-entry **narrative-emission rate**. Discovers every modality
 suite under --suites-dir the extractor is the production routing choice
-for (or runs only --suite). Report-only and **integration-tier** — it drives the
+for (or runs only --suite). Report-only and **integration-tier**: it drives the
 extractor's LLM call, so it needs ANTHROPIC_API_KEY.
 
 **Usage**:
@@ -1277,7 +1471,7 @@ $ particles extractor benchmark-modality [OPTIONS] EXTRACTOR_ID
 * `--suite TEXT`: Run only the modality suite with this suite_id (default: every suite the extractor is the routing choice for)
 * `--suites-dir PATH`: Override modality-suite directory (default: tests/benchmark/modality)
 * `--judge [embedding|llm]`: Claim-alignment judge: embedding cosine (default) or LLM-judge  [default: embedding]
-* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80 — journal claims are reified paraphrases of their gold labels)  [default: 0.65; 0.0<=x<=1.0]
+* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80; journal claims are reified paraphrases of their gold labels)  [default: 0.65; 0.0<=x<=1.0]
 * `--format [table|json]`: Output format  [default: table]
 * `--help`: Show this message and exit.
 
@@ -1285,14 +1479,14 @@ $ particles extractor benchmark-modality [OPTIONS] EXTRACTOR_ID
 
 Measure claim-polarity classification quality.
 
-Reports the dangerous **wrong-`DECLINED` rate** — a real current decision
+Reports the dangerous **wrong-`DECLINED` rate**, a real current decision
 (ASSERTED) wrongly classified DECLINED and thereby silently hidden from the
 default surface (the headline, the README-projection-trust risk;
-cap. 1) — plus its superset the wrong-hidden rate and per-polarity
+cap. 1), plus its superset the wrong-hidden rate and per-polarity
 precision/recall. Discovers every polarity suite under --suites-dir the
 extractor is the production routing choice for (or runs only
 --suite). Report-only and
-**integration-tier** — it drives the extractor's LLM call, so it needs
+**integration-tier**: it drives the extractor's LLM call, so it needs
 ANTHROPIC_API_KEY.
 
 **Usage**:
@@ -1310,7 +1504,7 @@ $ particles extractor benchmark-polarity [OPTIONS] EXTRACTOR_ID
 * `--suite TEXT`: Run only the polarity suite with this suite_id (default: every suite the extractor is the routing choice for)
 * `--suites-dir PATH`: Override polarity-suite directory (default: tests/benchmark/polarity)
 * `--judge [embedding|llm]`: Claim-alignment judge: embedding cosine (default) or LLM-judge  [default: embedding]
-* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80 — the general extractor emits near-paraphrases of its gold labels)  [default: 0.65; 0.0<=x<=1.0]
+* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80; the general extractor emits near-paraphrases of its gold labels)  [default: 0.65; 0.0<=x<=1.0]
 * `--format [table|json]`: Output format  [default: table]
 * `--help`: Show this message and exit.
 
@@ -1318,14 +1512,14 @@ $ particles extractor benchmark-polarity [OPTIONS] EXTRACTOR_ID
 
 Measure event-anchored-validity quality.
 
-Reports the dangerous **wrong-expiry rate** — of the aligned claims whose
+Reports the dangerous **wrong-expiry rate**: of the aligned claims whose
 gold is durable (no boundary), the fraction the extractor wrongly assigned a
 ``valid_until`` and thereby set up for silent retirement by the §9.3
-staleness lint (the headline, the over-eager-expiry risk) — plus existence
+staleness lint (the headline, the over-eager-expiry risk). Also reports existence
 precision/recall of correct date-bounded extraction and date accuracy.
 Discovers every validity suite under --suites-dir the extractor is the
 production routing choice for (or runs only --suite). Report-only
-and **integration-tier** — it drives the extractor's LLM call, so it needs
+and **integration-tier**: it drives the extractor's LLM call, so it needs
 ANTHROPIC_API_KEY.
 
 **Usage**:
@@ -1343,7 +1537,7 @@ $ particles extractor benchmark-validity [OPTIONS] EXTRACTOR_ID
 * `--suite TEXT`: Run only the validity suite with this suite_id (default: every suite the extractor is the routing choice for)
 * `--suites-dir PATH`: Override validity-suite directory (default: tests/benchmark/validity)
 * `--judge [embedding|llm]`: Claim-alignment judge: embedding cosine (default) or LLM-judge  [default: embedding]
-* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80 — the general extractor emits near-paraphrases of its gold labels)  [default: 0.65; 0.0<=x<=1.0]
+* `--threshold FLOAT RANGE`: Cosine floor for aligning an emitted claim to a gold label (looser than the content harness's 0.80; the general extractor emits near-paraphrases of its gold labels)  [default: 0.65; 0.0<=x<=1.0]
 * `--format [table|json]`: Output format  [default: table]
 * `--help`: Show this message and exit.
 
@@ -1379,23 +1573,23 @@ $ particles extractor benchmark-compare [OPTIONS]
 
 Fit a temperature-scaling calibration for an extractor.
 
-Runs every applicable **calibration** suite — `tests/benchmark/calibration/`,
+Runs every applicable **calibration** suite (`tests/benchmark/calibration/`,
 a sibling of the §13.3 `suites/` directory whose gold sets are deliberately
-partial — collects (raw_confidence, correct) pairs from
+partial), collects (raw_confidence, correct) pairs from
 emitted-vs-matched, fits a single T via NLL minimisation, and persists the
 result on the extractor record. Subsequent particles produced by this
 extractor carry calibration_source=CALIBRATED_BENCHMARK and a
 temperature-scaled confidence value. Pre-existing particles are
-unaffected — operators who want retroactive application should run
+unaffected; operators who want retroactive application should run
 `particles reindex --extractor-id <id>`.
 
-The fit is refused rather than persisted when it cannot mean anything
-: degenerate labels, a temperature on an
+The fit is refused rather than persisted when it cannot mean anything:
+degenerate labels, a temperature on an
 optimizer bound, fewer than two distinct movable confidences, or a
 calibration that does not reduce calibration error.
 
 Unlike `extractor benchmark`, this verb defaults to the **LLM** equivalence
-judge — see `_extractor_calibrate` for why the calibration label
+judge; see `_extractor_calibrate` for why the calibration label
 cannot afford the embedding judge's paraphrase misses.
 
 **Usage**:
@@ -1416,6 +1610,8 @@ $ particles extractor calibrate [OPTIONS] EXTRACTOR_ID
 * `--judge [embedding|llm]`: Equivalence judge for the calibration label: LLM-judge (default) or embedding cosine  [default: llm]
 * `--dry-run / --no-dry-run`: Fit and print but do not persist the calibration record  [default: no-dry-run]
 * `--regenerate / --no-regenerate`: Overwrite an existing calibration; without it, an extractor that already has one exits 1  [default: no-regenerate]
+* `--runs INTEGER RANGE`: Fit over the pooled pairs from N independent passes instead of one. A single pass is a noisy estimator (measured T spread 1.86-2.60 against a pooled 2.15), so N>1 persists the centre of the distribution rather than a draw from it. Small N is not enough: ~13 passes was the measured requirement on that suite, and a pooled fit over 3 was still refused. Costs N× the LLM calls  [default: 1; x>=1]
+* `-y, --yes`: Pre-confirm the cost gate for a pooled fit (--runs N)
 * `--help`: Show this message and exit.
 
 ### `particles extractor calibrations`
@@ -1452,15 +1648,15 @@ $ particles extractor calibrations [OPTIONS] EXTRACTOR_ID
 Retire one stored calibration record.
 
 The counterpart to `extractor calibrate`. Before this verb a stored
-calibration could only be *replaced* — by re-fitting under the same
-pairing — so a record fitted against a model no longer reachable (a local
+calibration could only be *replaced*, by re-fitting under the same
+pairing, so a record fitted against a model no longer reachable (a local
 endpoint since torn down) could not be retired at all without standing
 that model back up.
 
 Removing a record returns that pairing to `calibration_source=
 EXTRACTOR_DIRECT`, the documented fallback for an uncalibrated pairing.
-Particles already in the store keep the confidence they were minted with
-; run `particles reindex --extractor-id <id>` to re-mint them.
+Particles already in the store keep the confidence they were minted with;
+run `particles reindex --extractor-id <id>` to re-mint them.
 
 **Usage**:
 
@@ -1591,9 +1787,9 @@ $ particles import [OPTIONS] COMMAND [ARGS]...
 Walk a Markdown vault and deposit every ``.md`` file as ``LOCAL_MARKDOWN``.
 
 Recursively walks ``vault_dir`` (skipping any path under a ``_`` or ``.``
-component — Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
+component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
 and registers each Markdown file in the corpus. Re-running on the same
-vault is idempotent — existing ``content_hash`` deduplication means
+vault is idempotent: existing ``content_hash`` deduplication means
 unchanged files are not re-deposited.
 
 Typical onboarding workflow:
@@ -1626,7 +1822,7 @@ Walk a project tree and deposit every source file as ``PYTHON_SOURCE``.
 
 Recursively walks ``project_dir`` for source files (``.py`` by default; see
 ``import_project.extensions``), skipping dot-prefixed components and the
-configured build/cache directories (``import_project.ignore_dirs``) — but
+configured build/cache directories (``import_project.ignore_dirs``), but
 keeping underscore-prefixed module files (``__init__.py`` / ``_shared.py``).
 Re-running on the same tree is idempotent: ``content_hash`` deduplication
 means only changed files get a new snapshot.
@@ -1666,7 +1862,7 @@ provenance its frontmatter carries restored: the ``source:`` / ``url:`` URL
 becomes the entry's ``uri_r`` (fragment-stripped, **not** fetched), the
 ``published:`` date becomes ``content_published_at`` (below an
 explicit operator date), the frontmatter ``tags:`` merge with ``--tags``, and
-the source type is ``WEB_PAGE`` — so a clipping is trustable, decayable, and
+the source type is ``WEB_PAGE``, so a clipping is trustable, decayable, and
 queryable as the web page it is, unlike the same folder run through
 ``import vault``. The frontmatter-stripped **body** is the deposited content.
 A capture whose header is absent / malformed falls back to a plain
@@ -1702,22 +1898,38 @@ Deposit a reference memory-server ``memory.jsonl`` for migration.
 
 Brings an existing ``@modelcontextprotocol/server-memory`` graph across:
 entities become Subjects, observations become single-subject particles, and
-relations become two-subject particles — the same encoding
+relations become two-subject particles, the same encoding
 ``particles memory serve`` reads, so a migrated graph is visible
 through the façade immediately.
 
 The export is deposited **verbatim** as an ``MCP_MEMORY_EXPORT`` entry
 (``STABLE`` / ``NEVER``: a dump is a record of what was seen, not a live
 handle), and every particle points back at it by line number. Nothing is
-attributed to the incumbent store itself — the SDK never fetched it and
+attributed to the incumbent store itself: the SDK never fetched it and
 cannot re-verify it, so provenance names the artifact it actually holds.
 Re-running is idempotent (content-hash dedup).
+
+One thing does not come across: an entity with no observations that no
+relation names. A store holds a name only through something believed about
+it, so there is nothing to attach it to. The verb lists those entities when
+it runs; an observation-less entity that *is* a relation endpoint migrates,
+with its type.
 
 Migrated beliefs are deliberately low-confidence: they are second-hand, and
 the incumbent's own scores are preserved as tags rather than becoming
 confidence values. Raise them with ``particles trust set`` once you vouch
 for the source, not by editing the import floor.
 
+Run it with ``--dry-run`` first. That parses the export and runs the same
+mapping the import runs, then prints what it would produce: entities to
+Subjects, records to particles, everything the mapping drops (including
+the entities that will not migrate, by name), and a sample. It
+opens no store and deposits nothing, so it is safe on a store you care
+about and needs no ``particles db init``. Its counts are what the export
+contributes: on a store that already holds part of it, Subjects re-attach
+and identical claims dedup, so the real import writes no more than this.
+
+    particles import mcp-memory ~/.mcp/memory.jsonl --dry-run
     particles import mcp-memory ~/.mcp/memory.jsonl
     particles extract --all-pending
     particles lint
@@ -1736,6 +1948,9 @@ $ particles import mcp-memory [OPTIONS] EXPORT_PATH
 
 * `--deposited-by TEXT`: Agent or operator ID performing the import.  [default: operator]
 * `--tags TEXT`: Comma-separated tags added to the corpus entry.
+* `--dry-run`: Report what the import would produce (counts, what is dropped, a sample) without depositing or writing anything.
+* `--sample INTEGER RANGE`: With --dry-run: how many mapped records to show.  [default: 5; x>=0]
+* `--json`: With --dry-run: emit the report as JSON instead of text.
 * `--debug`: Show DEBUG-level logs from deposit.
 * `--help`: Show this message and exit.
 
@@ -1783,7 +1998,7 @@ $ particles inbox process [OPTIONS]
 Continuously poll the inbox file. Ctrl-C to stop.
 
 Uses mtime to skip the file read when nothing has changed since
-the last poll — cheap enough to leave running in a terminal tab.
+the last poll, cheap enough to leave running in a terminal tab.
 
 **Usage**:
 
@@ -1847,8 +2062,8 @@ $ particles init claude-code [OPTIONS]
 * `--dry-run`: Print the resulting files without writing anything.
 * `--command TEXT`: Override the hook command base (default: the absolute path of the running `particles` console script).
 * `--no-audit`: Skip the first-run memory-audit hand-off.
-* `--skills / --no-skills`: Also install the shipped agent-onboarding skill files into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on — an agent that has the tools but not the guidance is the gap these close.  [default: skills]
-* `--json`: Emit a machine-readable result on stdout — what was created, what was merged, and what is left for the human — so an agent can run the installer and report the outcome instead of scraping human-formatted output. Implies --no-audit: the audit hand-off is interactive, and the result names it under next_steps.
+* `--skills / --no-skills`: Also install the shipped agent-onboarding skill files into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on: an agent that has the tools but not the guidance is the gap these close.  [default: skills]
+* `--json`: Emit a machine-readable result on stdout (what was created, what was merged, and what is left for the human) so an agent can run the installer and report the outcome instead of scraping human-formatted output. Implies --no-audit: the audit hand-off is interactive, and the result names it under next_steps.
 * `--help`: Show this message and exit.
 
 ## `particles interchange`
@@ -1965,8 +2180,8 @@ $ particles links add [OPTIONS] PARTICLE_A PARTICLE_B
 
 **Arguments**:
 
-* `PARTICLE_A`: Particle A ID (prefix OK — ≥ 8 chars)  [required]
-* `PARTICLE_B`: Particle B ID (prefix OK — ≥ 8 chars)  [required]
+* `PARTICLE_A`: Particle A ID (prefix OK, ≥ 8 chars)  [required]
+* `PARTICLE_B`: Particle B ID (prefix OK, ≥ 8 chars)  [required]
 
 **Options**:
 
@@ -1986,8 +2201,8 @@ $ particles links remove [OPTIONS] PARTICLE_A PARTICLE_B
 
 **Arguments**:
 
-* `PARTICLE_A`: Particle A ID (prefix OK — ≥ 8 chars)  [required]
-* `PARTICLE_B`: Particle B ID (prefix OK — ≥ 8 chars)  [required]
+* `PARTICLE_A`: Particle A ID (prefix OK, ≥ 8 chars)  [required]
+* `PARTICLE_B`: Particle B ID (prefix OK, ≥ 8 chars)  [required]
 
 **Options**:
 
@@ -2006,7 +2221,7 @@ $ particles links list [OPTIONS] PARTICLE_ID
 
 **Arguments**:
 
-* `PARTICLE_ID`: Particle ID (prefix OK — ≥ 8 chars)  [required]
+* `PARTICLE_ID`: Particle ID (prefix OK, ≥ 8 chars)  [required]
 
 **Options**:
 
@@ -2038,9 +2253,9 @@ $ particles links suggest [OPTIONS]
 
 Merge identical-content duplicate beliefs into one survivor.
 
-Exact content equality only — the same normalized key extract-time
+Exact content equality only, the same normalized key extract-time
 suppression uses (whitespace and trailing punctuation absorbed, wording and
-case preserved) — so no similarity threshold and no LLM call.
+case preserved), so no similarity threshold and no LLM call.
 Redundant copies are linked CO_EVIDENTIAL to the survivor and superseded;
 nothing is ever deleted and the survivor is never mutated.
 
@@ -2104,17 +2319,21 @@ $ particles mcp [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `serve`: Run the read-only Particles MCP server...
+* `serve`: Run the Particles MCP server over stdio.
 * `tools`: Print the registered MCP tool surface...
 * `resources`: Print the registered MCP resource surface...
 
 ### `particles mcp serve`
 
-Run the read-only Particles MCP server over stdio.
+Run the Particles MCP server over stdio.
 
 Typical install path on the operator's machine::
 
-    claude mcp add particles -- uv run particles mcp serve
+    claude mcp add particles -- uv run particles mcp serve --project-observer cwd
+
+`--project-observer cwd` is a launch flag, not configuration, on purpose:
+`config.yaml` is shared by every MCP client on the machine, and a client
+started from your home directory should not be bound to it.
 
 **Usage**:
 
@@ -2124,6 +2343,7 @@ $ particles mcp serve [OPTIONS]
 
 **Options**:
 
+* `--project-observer cwd`: Bind this server to the project of its working directory (the only value is `cwd`): reads see global beliefs plus that project's, and writes are attributed to it. Omit for the store-wide server.
 * `--help`: Show this message and exit.
 
 ### `particles mcp tools`
@@ -2131,7 +2351,7 @@ $ particles mcp serve [OPTIONS]
 Print the registered MCP tool surface (name, description, input schema).
 
 Used to verify the contract without spawning an MCP client. The JSON
-output is what ``tests/mcp/tool-schema.json`` should match — drift
+output is what ``tests/mcp/tool-schema.json`` should match; drift
 here means an ``operations/`` signature changed and the MCP surface
 needs review.
 
@@ -2153,7 +2373,7 @@ Print the registered MCP resource surface (digest).
 The sibling of ``particles mcp tools`` for the *resources* primitive: the
 ``particles://digest/{store}`` template plus any concrete per-store digests
 listed for the write-enabled / opted-in memory stores. The JSON output is
-what ``tests/mcp/resource-schema.json`` should match — drift here means the
+what ``tests/mcp/resource-schema.json`` should match; drift here means the
 resource contract MCP clients see has changed.
 
 **Usage**:
@@ -2184,11 +2404,13 @@ $ particles memory [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `rebuild-utility`: Re-mine harvested session transcripts into...
-* `useful`: Mark a belief useful — the explicit...
+* `useful`: Mark a belief useful: the explicit utility...
+* `rescope`: Bring a store's project keys up to date,...
+* `widen`: Put a belief in view for every project...
 * `sweep-rank-lift`: Sweep the usefulness rank-lift and report...
 * `consolidate`: Run the scheduled consolidation cycle (ADR...
 * `serve`: Serve the reference memory-server...
-* `tools`: Print the façade's tool surface — name,...
+* `tools`: Print the façade's tool surface: name,...
 * `sweep-owner-lift`: Sweep the owner-relevance rank-lift and...
 
 ### `particles memory rebuild-utility`
@@ -2212,18 +2434,18 @@ $ particles memory rebuild-utility [OPTIONS]
 
 ### `particles memory useful`
 
-Mark a belief useful — the explicit utility gesture.
+Mark a belief useful: the explicit utility gesture.
 
 Use this for the beliefs the transcript miner cannot see: prohibitions
 ("never do X") and design stances, which you comply with by *not* acting and
 which therefore leave no tool-call trace. One press is worth
 `utility.explicit_weight` mined events, because the miner fires once per
-session while you fire once — and it is capped at one credit per belief per
+session while you fire once. It is capped at one credit per belief per
 day, so pressing twice is recorded but not double-counted.
 
 This lifts the belief in the projection and digest **ranking only**. It never
 touches the stored confidence, never claims the belief is *true*, and can
-only promote — for "still true", the gesture is
+only promote. For "still true", the gesture is
 `particles curate apply affirm`.
 
 **Usage**:
@@ -2246,14 +2468,80 @@ $ particles memory useful [OPTIONS] PARTICLE_ID
 * `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
 * `--help`: Show this message and exit.
 
+### `particles memory rescope`
+
+Bring a store's project keys up to date, so a project observer can read it.
+
+A belief is *in view* for a project when one of its sources was harvested
+there, which is read from the `project:` tag on the source's corpus entry.
+Older versions stamped a per-worktree name, or nothing at all. This verb
+adds the project's real key beside whatever an entry already carries — it
+never removes a tag, and running it twice changes nothing.
+
+It reports the two things you need to see: harvested entries it could not
+attribute (in view for **no** project until you `--assign` them or pass
+`--default-key`), and entries whose every key names a project that no longer
+exists. `particles init claude-code` runs it for you. Until it has run once,
+`claude_code.observer_scope: project` stays store-wide and says so.
+
+**Usage**:
+
+```console
+$ particles memory rescope [OPTIONS]
+```
+
+**Options**:
+
+* `--assign ENTRY_ID KEY`: Give one corpus entry a project key, then stop. Refuses a global entry.
+* `--default-key KEY`: Give this key to every harvested entry that is still unattributed afterwards. On a one-project machine this is the one flag you need; `.` means the project of the current directory.
+* `--dry-run`: Report what would change; write nothing.
+* `--store TEXT`: Store handle.  [default: default]
+* `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
+* `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
+* `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
+* `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
+* `--help`: Show this message and exit.
+
+### `particles memory widen`
+
+Put a belief in view for every project.
+
+"This rule I learned in one project is how I work everywhere" is your
+judgement, so it is yours to record. The belief and its sources are not
+touched: the widening is a standing statement the read lens consults, and
+`--revoke` withdraws it. There is deliberately no agent-facing way to do
+this — an agent that could widen its own belief could put it in front of
+every future session.
+
+**Usage**:
+
+```console
+$ particles memory widen [OPTIONS] ID
+```
+
+**Arguments**:
+
+* `ID`: The belief (full UUID, unique prefix, or `p-xxxxxxxx`); with --entry, a corpus entry id.  [required]
+
+**Options**:
+
+* `--entry`: ID is a corpus entry: widen every belief sourced from it.
+* `--revoke`: Take a widening back.
+* `--store TEXT`: Store handle.  [default: default]
+* `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
+* `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
+* `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
+* `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
+* `--help`: Show this message and exit.
+
 ### `particles memory sweep-rank-lift`
 
 Sweep the usefulness rank-lift and report its admissible band.
 
 Read-only: no writes, no LLM calls, no embeddings. `λ`
-(`utility.default.rank_lift`) is deliberately **not** auto-fitted
-measured every candidate closed form and found none defensible, because no
-label says which belief *should* occupy a head slot. This is the harness
+(`utility.default.rank_lift`) is deliberately **not** auto-fitted: every
+candidate closed form was measured and none found defensible,
+because no label says which belief *should* occupy a head slot. This is the harness
 that makes setting it by hand a single command instead of a research
 project: name the beliefs that ought to reach the head with `--target`, and
 the sweep reports where they land, how many head slots hold distinct
@@ -2269,11 +2557,11 @@ $ particles memory sweep-rank-lift [OPTIONS]
 **Options**:
 
 * `--store TEXT`: Store handle to sweep.  [default: default]
-* `--target TEXT`: Particle id of a belief you assert ought to reach the head; repeatable. Full UUID, a unique id prefix, or the `p-xxxxxxxx` digest display form; resolved against ACTIVE beliefs, and an id that matches none (or more than one) is an error rather than a silent rank-0. This is the judgment a fit cannot supply — without any, only head diversity constrains the band.
-* `--head INTEGER`: A rendered head size N to evaluate; repeatable. Defaults to the digest's mcp.recall.digest_max_beliefs. Pass every N you actually render — the band is a property of the surface, not the store.
+* `--target TEXT`: Particle id of a belief you assert ought to reach the head; repeatable. Full UUID, a unique id prefix, or the `p-xxxxxxxx` digest display form; resolved against ACTIVE beliefs, and an id that matches none (or more than one) is an error rather than a silent rank-0. This is the judgment a fit cannot supply; without any, only head diversity constrains the band.
+* `--head INTEGER`: A rendered head size N to evaluate; repeatable. Defaults to the digest's mcp.recall.digest_max_beliefs. Pass every N you actually render; the band is a property of the surface, not the store.
 * `--grid-max FLOAT`: Largest lambda to evaluate.  [default: 0.12]
 * `--grid-steps INTEGER`: Non-zero grid points; band edges resolve to one step.  [default: 120]
-* `--distinct-ratio FLOAT`: Fraction of head slots that must hold distinct content. Not 1.0 — that is unsatisfiable at large N on any store with over-extraction.  [default: 0.95]
+* `--distinct-ratio FLOAT`: Fraction of head slots that must hold distinct content. Not 1.0; that is unsatisfiable at large N on any store with over-extraction.  [default: 0.95]
 * `--format TEXT`: Output format: markdown (default) or json.  [default: markdown]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
@@ -2285,9 +2573,9 @@ $ particles memory sweep-rank-lift [OPTIONS]
 
 Run the scheduled consolidation cycle: the memory dream cycle.
 
-Exit codes (cron observability): 0 — success, including disclosed
-structural-only runs and --if-due / lock skips; 1 — one or more passes
-failed (run record written); 2 — the cycle could not start.
+Exit codes (cron observability): 0 means success, including disclosed
+structural-only runs and --if-due / lock skips; 1 means one or more passes
+failed (run record written); 2 means the cycle could not start.
 
 **Usage**:
 
@@ -2298,9 +2586,9 @@ $ particles memory consolidate [OPTIONS]
 **Options**:
 
 * `--store TEXT`: Store handle to consolidate (default: the default store).  [default: default]
-* `--if-due`: Exit 0 without running unless the last successful run is older than consolidation.min_interval_hours — makes over-scheduling harmless.
+* `--if-due`: Exit 0 without running unless the last successful run is older than consolidation.min_interval_hours; makes over-scheduling harmless.
 * `--structural-only`: Skip all LLM passes (disclosed in the report and the run record).
-* `--scope TEXT`: Semantic-pass scope: 'delta' (default — particles changed since the previous run's watermark) or 'store' (the whole store, still capped).  [default: delta]
+* `--scope TEXT`: Semantic-pass scope: 'delta' (default; particles changed since the previous run's watermark) or 'store' (the whole store, still capped).  [default: delta]
 * `--output PATH`: Also write the run report as Markdown to FILE.
 * `--format TEXT`: Terminal format: markdown (default) or json.  [default: markdown]
 * `-v, --verbose`
@@ -2339,7 +2627,7 @@ $ particles memory serve [OPTIONS]
 
 ### `particles memory tools`
 
-Print the façade's tool surface — name, title, schemas, annotations.
+Print the façade's tool surface: name, title, schemas, annotations.
 
 The debugging sibling of ``particles mcp tools``, and the generator for
 ``tests/mcp/memory-tool-schema.json``. That golden is what turns a parity
@@ -2365,7 +2653,7 @@ Sweep the owner-relevance rank-lift and report its band.
 
 Read-only: no writes, no LLM calls, no embeddings. `ω`
 (`owner_lens.rank_lift`) is store-specific and deliberately ships `0.0`
-(inert) — this is the harness for choosing it. Unlike the utility lift, `ω`
+(inert); this is the harness for choosing it. Unlike the utility lift, `ω`
 multiplies a flat 0/1 indicator, so it acts as a *threshold* over the whole
 viewer cohort: below it nothing moves, above it every belief about the
 viewer arrives in the head at once. The report is therefore keyed on the
@@ -2382,7 +2670,7 @@ $ particles memory sweep-owner-lift [OPTIONS]
 **Options**:
 
 * `--store TEXT`: Store handle to sweep.  [default: default]
-* `--target TEXT`: Particle id of a belief that must STAY in the head; repeatable. Pass the beliefs your utility lift was calibrated to surface — the third criterion is that adding aboutness does not push them out. Same id forms as `sweep-rank-lift`.
+* `--target TEXT`: Particle id of a belief that must STAY in the head; repeatable. Pass the beliefs your utility lift was calibrated to surface; the third criterion is that adding aboutness does not push them out. Same id forms as `sweep-rank-lift`.
 * `--head INTEGER`: A rendered head size N to evaluate; repeatable. Defaults to the digest's mcp.recall.digest_max_beliefs.
 * `--grid-max FLOAT`: Largest omega to evaluate.  [default: 0.12]
 * `--grid-steps INTEGER`: Non-zero grid points; band edges resolve to one step.  [default: 120]
@@ -2412,6 +2700,7 @@ $ particles particle [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `show`: Show one particle's content, status,...
+* `source`: Show the source passage a particle was...
 * `narrative`: Show a NARRATIVE particle's constituents...
 * `tag`: Add taxonomy tags to a particle.
 * `untag`: Remove taxonomy tags from a particle (ADR...
@@ -2430,7 +2719,33 @@ $ particles particle show [OPTIONS] PARTICLE_ID
 
 **Arguments**:
 
-* `PARTICLE_ID`: Particle ID (prefix OK — first 8 chars)  [required]
+* `PARTICLE_ID`: Particle ID (prefix OK, first 8 chars)  [required]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+### `particles particle source`
+
+Show the source passage a particle was extracted from.
+
+Re-derives the passage from the stored snapshot, reading nothing from the
+original location. The match line says how it was found: ``exact`` is the
+chunk the extractor saw, verified by its recorded hash; ``located`` is the
+paragraph sharing the most terms with the belief (short documents record
+no chunk hash, so this is the usual result for them) and is a reading aid,
+not verification; ``whole source`` means no passage stood out. Metadata is
+written to stderr, so stdout carries only the passage text.
+
+**Usage**:
+
+```console
+$ particles particle source [OPTIONS] PARTICLE_ID
+```
+
+**Arguments**:
+
+* `PARTICLE_ID`: Particle ID (prefix OK, first 8 chars)  [required]
 
 **Options**:
 
@@ -2441,7 +2756,7 @@ $ particles particle show [OPTIONS] PARTICLE_ID
 Show a NARRATIVE particle's constituents in SEQUENCE_IN order.
 
 With ``--synthesize``, render the narrative as one cited prose article by
-traversing its SEQUENCE_IN chain — the same synthesis engine the
+traversing its SEQUENCE_IN chain. This is the same synthesis engine the
 wiki/Obsidian exporters use, here scoped to a single narrative.
 
 **Usage**:
@@ -2452,7 +2767,7 @@ $ particles particle narrative [OPTIONS] PARTICLE_ID
 
 **Arguments**:
 
-* `PARTICLE_ID`: NARRATIVE particle ID (prefix OK — ≥ 8 chars)  [required]
+* `PARTICLE_ID`: NARRATIVE particle ID (prefix OK, ≥ 8 chars)  [required]
 
 **Options**:
 
@@ -2510,9 +2825,10 @@ The narrow escape hatch beside the cross-asserter guardrail:
 session may mutate in order to fix one row. This retires exactly one.
 
 ACTIVE → RETRACTED with reason ``EXPLICIT_RETRACTION``, routed through
-``update_particle_status`` so the ``retired_at`` stamp and the ``PARTICLE_RETRACTED`` event (carrying ``--reason``) are both
+``update_particle_status`` so the ``retired_at`` stamp and the
+``PARTICLE_RETRACTED`` event (carrying ``--reason``) are both
 written. An operator-asserted (HUMAN_REVIEW) belief is still not retractable
-this way — revising one is Review's job. Run ``particles lint`` afterwards to
+this way; revising one is Review's job. Run ``particles lint`` afterwards to
 cascade ``PROVENANCE_STALE`` to anything that depended on it.
 
 **Usage**:
@@ -2523,7 +2839,7 @@ $ particles particle retract [OPTIONS] PARTICLE_ID
 
 **Arguments**:
 
-* `PARTICLE_ID`: Particle ID (prefix OK — first 8 chars)  [required]
+* `PARTICLE_ID`: Particle ID (prefix OK, first 8 chars)  [required]
 
 **Options**:
 

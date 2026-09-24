@@ -28,7 +28,8 @@ Events are keyed on ``(particle_id, session_id)`` so re-mining a session is
 idempotent (the corpus is the harvest state; no side-car
 high-water mark to drift). The explicit channel reuses that same natural key by
 synthesising :func:`explicit_credit_key` — ``explicit:<actor>:<date>`` — which
-is what bounds it to **one credit per belief per principal per day**. :func:`get_reinforcement_scores` reads the event ages and channels and
+is what bounds it to **one credit per belief per principal per day**.
+:func:`get_reinforcement_scores` reads the event ages and channels and
 returns the weighted reinforcement count (``core.scoring.utility``) the
 query-time :class:`~particles.operations.query.utility_policy.UtilityPolicy`
 turns into an additive rank-lift.

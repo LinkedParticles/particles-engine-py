@@ -262,7 +262,7 @@ def subjects_cmd(
             typer.echo(f"  Detached from {detached} particle(s).")
 
     elif action in ("gc", "prune-empty"):
-        #: sweep every phantom subject (zero ACTIVE CLAIM
+        # : sweep every phantom subject (zero ACTIVE CLAIM
         # particles, the same definition as `list --phantoms-only` and the
         # `delete` guard). Useful after split/merge churn leaves stragglers.
         pruned, detached = run(_gc_phantom_subjects(dry_run=dry_run))
@@ -278,7 +278,7 @@ def subjects_cmd(
             typer.echo(f"  Detached from {detached} non-active particle(s).")
 
     elif action == "set-class":
-        #: operator override of the resolver's Nomisma class.
+        # : operator override of the resolver's Nomisma class.
         if len(args) < 2:
             typer.echo(
                 "Usage: subjects set-class SUBJECT_ID CLASS (e.g. nmo:NumismaticObject)",

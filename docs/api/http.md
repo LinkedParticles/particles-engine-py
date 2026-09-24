@@ -1,7 +1,7 @@
 # HTTP API (OpenAPI)
 
 The Particles FastAPI server exposes every operation as a typed HTTP
-endpoint. The schema below is the **canonical 1.0.0 contract** — every
+endpoint. The schema below is the **canonical 1.0.0 contract**: every
 shipped endpoint, request/response model, and error response is
 described here.
 
@@ -9,7 +9,7 @@ The snapshot is committed at
 [`artifacts/openapi.json`](https://github.com/LinkedParticles/particles-engine-py/blob/main/artifacts/openapi.json)
 and regenerated on every commit by `scripts/gen_openapi.py`. A snapshot
 test (`tests/test_openapi_snapshot.py`) fails CI when the committed
-schema disagrees with the live server — drift between code and contract
+schema disagrees with the live server, so drift between code and contract
 is impossible by construction.
 
 For live exploration against a running server, hit `/docs` (Swagger UI)

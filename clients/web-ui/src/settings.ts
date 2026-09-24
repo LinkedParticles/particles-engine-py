@@ -9,7 +9,8 @@
  * time, with a loud early failure when missing or rejected.
  *
  * The base URL defaults to "" = same-origin. Because §2 serves the PWA from the
- * engine's `/app` mount, the operator reaches the app only through the * channel in the first place, and same-origin calls need no explicit base URL.
+ * engine's `/app` mount, the operator reaches the app only through the
+ * channel in the first place, and same-origin calls need no explicit base URL.
  */
 import type { EngineSettings } from "./api";
 

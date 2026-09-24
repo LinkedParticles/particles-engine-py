@@ -12,7 +12,7 @@ For each subject name extracted by the LLM, resolve to a canonical Subject:
   5. Bare local Subject — create with extracted name; can be enriched later
 
 The hardcoded Wikidata path and ``_NAMESPACE_PATTERNS`` regex list now live in
-``particles/extraction/authorities/`` as registered ``SubjectAuthority``
+``particles/ingest/authorities/`` as registered ``SubjectAuthority``
 plugins. This module owns the cascade and **every write** (insert /
 alias-merge / cache); authorities only recognize and resolve.
 """
@@ -36,13 +36,24 @@ from particles.ingest.authorities import (
 from particles.store import subject_cache
 from particles.store.subject_cache import CacheEntry
 from particles.store.subject_store import (
+    add_aliases,
     find_by_external_ref,
     find_by_name,
     insert_subject,
+    persona_alias_guard,
     split_subject,
 )
 
 log = logging.getLogger(__name__)
+
+#: Actor on the ``SUBJECT_ALIASED`` event a recorded persona form carries.
+PERSONA_FOLD_ACTOR = "persona-fold"
+
+#: Persona forms some *other* Subject already answers to, per store — skipped
+#: by :func:`_record_persona_alias`, and remembered so a split store does not
+#: pay a name lookup on every mention of the speaker. Process-local: a form
+#: freed later (a merge, a rename) is recorded after the next restart.
+_persona_forms_held_elsewhere: set[str] = set()
 
 
 def clear_cache() -> None:
@@ -55,6 +66,7 @@ def clear_cache() -> None:
     limiters.
     """
     subject_cache.clear()
+    _persona_forms_held_elsewhere.clear()
     from particles.ingest.authorities import clear_authorities
 
     clear_authorities()
@@ -91,6 +103,86 @@ async def _merge_alias_into(session: AsyncSession, subject: Subject, name: str) 
         await session.flush()
 
 
+def _persona_canonical(name: str, source_type: str | None) -> str:
+    """Fold a conversational source's persona aliases onto one name.
+
+    "user", "the user", "the speaker", "I" are the same person in a chat
+    transcript, but each surface form minted its own Subject, which split that
+    person's beliefs into groups that never reconciled against each other. The
+    fold is a *resolution* rule: it changes which Subject a new claim binds to,
+    never an existing binding.
+    """
+    cfg = get_config().subjects
+    if source_type is None or source_type not in cfg.persona_source_types:
+        return name
+    if name.strip().casefold() in {a.casefold() for a in cfg.persona_aliases}:
+        return cfg.persona_canonical_name
+    return name
+
+
+async def _find_local(session: AsyncSession, name: str, source_type: str | None) -> Subject | None:
+    """The local name/alias lookup of a path that binds a particle to the result.
+
+    ``name`` is already folded. Outside a persona source type a persona form
+    never resolves through the persona Subject's recorded aliases
+    (:func:`~particles.store.subject_store.persona_alias_guard`).
+    """
+    return await find_by_name(session, name, skip_aliases_of=persona_alias_guard(name, source_type))
+
+
+async def find_existing_subject(
+    session: AsyncSession, name: str, *, source_type: str | None
+) -> Subject | None:
+    """Resolve ``name`` to an *existing* Subject exactly as the write path would, read-only.
+
+    The one seam for a caller that must agree with :func:`resolve_subject`
+    about a name before (or without) resolving it — the §6.6 precompute is the
+    reference caller. It applies the persona fold and the persona-alias scope,
+    and stops where ``resolve_subject`` would start writing: no live authority,
+    no mint, no alias recorded. A name resolved by two paths must be folded and
+    scoped by both; routing both through here is what keeps that
+    true by construction.
+    """
+    return await _find_local(session, _persona_canonical(name, source_type), source_type)
+
+
+async def _record_persona_alias(session: AsyncSession, subject: Subject, form: str) -> Subject:
+    """Record a folded surface form as an alias of the persona Subject.
+
+    Without it the fold leaves no trace: ``find_by_name("user")`` returns
+    ``None`` on a store whose every conversational claim is about "the user",
+    and each caller resolving a subject by name has to remember to fold.
+    Recording the form once makes every such lookup resolve it and
+    shows the fold to an operator reading ``subjects show``.
+
+    It stays a resolution rule. No particle–Subject binding is touched, and a
+    form some other Subject already answers to — a "User" split off before the
+    fold existed — is skipped, so the write never changes what a name resolved
+    to before it; it only answers a name that resolved to nothing. Runs on
+    every fold, not only on the mint, so a store folded before this existed
+    heals form by form as it keeps ingesting, inside the write lock and
+    disclosed by a ``SUBJECT_ALIASED`` event — never at read time.
+    """
+    folded = form.casefold()
+    if folded in {subject.canonical_name.casefold(), *(a.casefold() for a in subject.aliases)}:
+        return subject
+    held_key = subject_cache.make_key(session, folded)
+    if held_key in _persona_forms_held_elsewhere:
+        return subject
+    holder = await find_by_name(session, form)
+    if holder is not None and holder.id != subject.id:
+        _persona_forms_held_elsewhere.add(held_key)
+        log.info(
+            "Persona form %r already names subject %s; not recorded as an alias of %r",
+            form,
+            holder.id,
+            subject.canonical_name,
+        )
+        return subject
+    updated, _ = await add_aliases(session, subject.id, [form], actor=PERSONA_FOLD_ACTOR)
+    return updated
+
+
 async def resolve_subject(
     session: AsyncSession,
     name: str,
@@ -100,6 +192,25 @@ async def resolve_subject(
     source_type: str | None = None,
 ) -> Subject:
     """Resolve a subject name to a canonical Subject, creating one if needed."""
+    folded = _persona_canonical(name, source_type)
+    subject = await _resolve(session, folded, asserted_by, particle_content, source_type)
+    if folded == name:
+        return subject
+    recorded = await _record_persona_alias(session, subject, name.strip())
+    if recorded is not subject:
+        # ``add_aliases`` cleared the resolution cache; re-seat this one.
+        subject_cache.cache_set(subject_cache.make_key(session, folded), recorded)
+    return recorded
+
+
+async def _resolve(
+    session: AsyncSession,
+    name: str,
+    asserted_by: str,
+    particle_content: str | None,
+    source_type: str | None,
+) -> Subject:
+    """The resolution cascade for an already-folded ``name``."""
     cache_key = subject_cache.make_key(session, name)
 
     # Check in-memory cache first (avoids repeat DB + API calls for same name)
@@ -108,7 +219,7 @@ async def resolve_subject(
         return cached.subject
 
     # Step 1: local alias index
-    existing = await find_by_name(session, name)
+    existing = await _find_local(session, name, source_type)
     if existing:
         subject_cache.cache_set(cache_key, existing)
         log.debug("Subject resolved locally: %r → %s", name, existing.id)
@@ -194,7 +305,7 @@ async def resolve_subject(
                 session, res.external_ref.namespace, res.external_ref.id
             )
             if dup is None and resolved_name.lower() != name.lower():
-                dup = await find_by_name(session, resolved_name)
+                dup = await _find_local(session, resolved_name, source_type)
             if dup is not None:
                 await _merge_alias_into(session, dup, name)
                 subject_cache.cache_set(cache_key, dup)

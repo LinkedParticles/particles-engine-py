@@ -2,8 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Numista importer (Engine layer; moved from particles.extraction.numista.importer
-).
+"""Numista importer (Engine layer; moved from particles.extraction.numista.importer).
 
 ``NumistaImporter`` dispatches on URL pattern: individual coin URLs go through
 the Numista API (requires ``NUMISTA_API_KEY``), catalogue listing URLs are

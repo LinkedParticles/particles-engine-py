@@ -749,7 +749,7 @@ class TestHtmlArtifact:
 
 class TestCliUsageErrors:
     """Exporter usage errors reach the operator as one clean stderr line
-     with exit code 2 — never a traceback."""
+    with exit code 2 — never a traceback."""
 
     def test_unknown_subject_is_a_clean_cli_error(self, cli_db: Path, tmp_path: Path) -> None:
         from typer.testing import CliRunner

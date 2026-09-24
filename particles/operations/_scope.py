@@ -9,7 +9,8 @@ candidate pair when **at least one side** traces to a harvested entry. On a
 populated store that admission rule lets coincidental (harvested ↔ unrelated
 store particle) cross-pairs out-compete the (harvested ↔ harvested) pairs a
 memory audit is actually about whenever a budget binds — the
-``audit.max_contradiction_probes`` cap, or an LLM-judge pass cut short by the circuit breaker (owner dogfood 2026-07-11).
+``audit.max_contradiction_probes`` cap, or an LLM-judge pass cut short by the
+circuit breaker (owner dogfood 2026-07-11).
 
 ``pair_scope_tier`` is the shared fix: it classifies a pair into the two-tier
 priority both consumers order their candidates by — intra-scope pairs first,

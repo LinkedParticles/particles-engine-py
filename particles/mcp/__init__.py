@@ -14,6 +14,7 @@ transitions) defer to a separate Phase B ADR that designs the audit
 trail + confirmation prompt + cost-control story.
 """
 
+from particles.mcp.observer import bind_project
 from particles.mcp.server import build_server, main
 
-__all__ = ["build_server", "main"]
+__all__ = ["bind_project", "build_server", "main"]

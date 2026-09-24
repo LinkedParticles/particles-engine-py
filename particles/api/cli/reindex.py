@@ -34,13 +34,13 @@ def reindex_cmd(
     extractor_version: str | None = typer.Option(None, help="Old extractor version to replace"),
     extractor_id: str | None = typer.Option(
         None,
-        help="Extractor name (e.g. github-repo-extractor) — re-extract all of its "
+        help="Extractor name (e.g. github-repo-extractor): re-extract all of its "
         "particles regardless of version. Useful when a shared upstream change "
         "(e.g. a prompt revision in general.py) affects delegating extractors.",
     ),
     provider_model: str | None = typer.Option(
         None,
-        help='"<provider>:<model>" pairing (e.g. openai:gpt-5.6-luna) — re-extract '
+        help='"<provider>:<model>" pairing (e.g. openai:gpt-5.6-luna): re-extract '
         "every particle that pairing produced. The handle for undoing an "
         "uncalibrated provider swap. Matched exactly, and the scope unit is the "
         "snapshot, so a snapshot with a model-mixed population is re-extracted "
@@ -48,14 +48,14 @@ def reindex_cmd(
     ),
     no_failed: bool = typer.Option(
         False,
-        help="Skip FAILED snapshot entries. Applies to auto-discovery only — "
+        help="Skip FAILED snapshot entries. Applies to auto-discovery only; "
         "--entry-ids resolves each entry to its latest COMPLETE snapshot.",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Print the work plan — entries / snapshots / particles in scope, "
-        "with per-snapshot counts and any known-missing blobs — and exit "
+        help="Print the work plan (entries / snapshots / particles in scope, "
+        "with per-snapshot counts and any known-missing blobs) and exit "
         "without extracting: zero LLM calls, zero writes.",
     ),
     output_format: _ReindexFormat = typer.Option(

@@ -32,7 +32,13 @@ changed in a way that's not backwards-compatible. The operator path:
    relations, source_trust_statements, extractor records) and
    resets every snapshot's `extraction_status` to `PENDING`. The
    corpus itself is preserved. The command confirms before dropping.
-4. **Re-extract** with `particles extract --all-pending`.
+4. **Re-extract** with `particles extract --all-pending`. For a `MUTABLE`
+   source with several snapshots (a memory or rule file edited over time),
+   only the newest is re-extracted, so the rebuilt store holds the same
+   current beliefs but not the `PROVENANCE_STALE` history of each
+   intermediate version. Set `extraction.collapse_superseded_pending: false`
+   before re-extracting if you want that history rebuilt, at one LLM call per
+   version. See [Mutable local sources](mutable-local-sources.md#only-the-newest-pending-version-is-extracted).
 
 The "scrap-and-re-extract" path is what `--force` exists for. It's
 the supported migration mechanism between schema major versions

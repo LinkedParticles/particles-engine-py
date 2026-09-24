@@ -324,6 +324,7 @@ class TestPassComposition:
             "refresh",
             "extract",
             "reconcile",
+            "reconcile_updates",
             "census",
             "curation",
             "utility",
@@ -814,6 +815,7 @@ class TestRunRecord:
             "refresh",
             "extract",
             "reconcile",
+            "reconcile_updates",
             "census",
             "curation",
             "utility",
@@ -1260,6 +1262,74 @@ class TestPassExtractPooled:
         assert extracted == 1
         assert report.pending_extracted == 1
         assert report.pending_failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pass_extract_collapses_before_it_lists(
+        self, monkeypatch: pytest.MonkeyPatch, db_session: AsyncSession
+    ) -> None:
+        """three edits of one MUTABLE file are one night's one extraction.
+
+        Without the collapse, oldest-first plus one snapshot per entry per pooled
+        run drains such an entry over three nights, each extracting a generation
+        the file no longer holds.
+        """
+        from particles.config import get_config
+        from particles.core.schema import (
+            CorpusEntry,
+            ExtractionStatus,
+            FetchPolicy,
+            Mutability,
+            Snapshot,
+            WarcRecordType,
+        )
+        from particles.corpus.deposit import save_blob, sha256
+        from particles.corpus.store import CorpusEntryRow, SnapshotRow
+        from particles.operations import extract as extract_mod
+        from particles.operations.consolidation import _census_payload
+
+        get_config().consolidation.extract_batching = False
+        entry = CorpusEntry(
+            entry_id=str(uuid.uuid4()),
+            source_type="LOCAL_MARKDOWN",
+            uri_r="file:///tmp/MEMORY.md",
+            mutability=Mutability.MUTABLE,
+            fetch_policy=FetchPolicy.NEVER,
+            deposited_by="test",
+        )
+        db_session.add(CorpusEntryRow.from_model(entry))
+        snapshot_ids: list[str] = []
+        for age in (3, 2, 1):
+            content = f"edit {age}".encode()
+            snap = Snapshot(
+                snapshot_id=str(uuid.uuid4()),
+                captured_at=datetime.now(UTC) - timedelta(days=age),
+                content_hash=sha256(content),
+                archive_path=save_blob(content, sha256(content)),
+                extraction_status=ExtractionStatus.PENDING,
+                warc_record_type=WarcRecordType.RESPONSE,
+            )
+            db_session.add(SnapshotRow.from_model(snap, entry.entry_id))
+            snapshot_ids.append(snap.snapshot_id)
+        await db_session.commit()
+
+        calls: list[tuple[str, Any]] = []
+
+        async def fake_extract(
+            session: Any, entry_id: str, snapshot_id: str, **kwargs: Any
+        ) -> list[Any]:
+            calls.append((snapshot_id, kwargs.get("skip_if_superseded")))
+            return []
+
+        monkeypatch.setattr(extract_mod, "extract_snapshot", fake_extract)
+
+        report = ConsolidationReport()
+        extracted = await consolidation_mod._pass_extract(db_session, report)
+
+        assert calls == [(snapshot_ids[-1], True)]
+        assert extracted == 1
+        assert report.pending_collapsed == 2
+        assert report.pending_total == 1  # the collapsed generations were never owed
+        assert _census_payload(report)["pending_collapsed"] == 2
 
     @pytest.mark.asyncio
     async def test_extract_batching_false_restores_the_serial_loop(

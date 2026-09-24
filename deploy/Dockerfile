@@ -96,8 +96,17 @@ RUN pip install --no-cache-dir "uv==0.9.7"
 # whatever the index served that minute, which is not a publishable artifact.
 ARG VERSION=""
 RUN test -n "$VERSION" || { echo "builder-pypi requires --build-arg VERSION=<released version>" >&2; exit 1; }
+# --torch-backend cpu: the index-path twin of pyproject's `[tool.uv.sources]`
+# torch routing, which a `uv pip install` of the released wheel
+# never sees. uv sends only the PyTorch-ecosystem packages (torch, triton, …)
+# to https://download.pytorch.org/whl/cpu and resolves everything else from
+# PyPI — no index-strategy fallthrough lets another package come from the
+# torch index. Without it this stage bakes PyPI's default Linux torch and its
+# ~3 GB CUDA closure into an image with no GPU. The CPU index
+# carries both x86_64 and aarch64 Linux wheels, so both platforms resolve.
 RUN uv venv /opt/venv \
- && uv pip install --python /opt/venv/bin/python "linkedparticles==${VERSION}"
+ && uv pip install --python /opt/venv/bin/python --torch-backend cpu \
+    "linkedparticles==${VERSION}"
 
 # Same bake as builder-tree (kept in step by tests/test_publish_export.py):
 # predictable cold start, air-gap friendly.

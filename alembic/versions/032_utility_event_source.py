@@ -5,7 +5,8 @@
 """Utility-event channel discriminator — the explicit operator gesture.
 
 A second producer is added to ``utility_events``: an explicit operator
-usefulness gesture (``particles memory useful <id>``), which exists because the action-miner is structurally blind to prohibitive and stance guidelines
+usefulness gesture (``particles memory useful <id>``), which exists because the
+action-miner is structurally blind to prohibitive and stance guidelines
 — compliance with "never do X" is the *absence* of a tool call.
 
 Three changes on ``utility_events``:

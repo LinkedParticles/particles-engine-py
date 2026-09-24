@@ -30,7 +30,7 @@ class ExporterPlugin(Protocol):
     **Optional credential declaration.** An API-target exporter may
     set a class attribute ``REQUIRES_SECRET: str`` naming the env var holding the
     secret it needs (e.g. ``"NOTION_API_KEY"``) — a *declaration*, not the value.
-    It is deliberately **not** a required Protocol member: the five shipped
+    It is deliberately **not** a required Protocol member: the six shipped
     filesystem exporters do not set it, and :func:`required_secret` reads it with
     ``getattr(exporter, "REQUIRES_SECRET", None)`` so the contract stays purely
     additive. The registry/CLI pre-flight uses it to verify the env var is

@@ -1,7 +1,7 @@
 # Extraction
 
 Extractors convert corpus blobs into candidate particles (Client layer). The
-Engine-side ingest pipeline (`particles.ingest`) reconciles them —
+Engine-side ingest pipeline (`particles.ingest`) reconciles them,
 applying conflict resolution and writing to the store.
 
 ## Pipeline

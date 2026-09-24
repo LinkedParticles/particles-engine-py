@@ -149,7 +149,7 @@ async def _extract_all_pending(agent_id: str) -> None:
         reset_stale_in_progress,
     )
     from particles.llm import AccountLevelLLMError, get_client
-    from particles.operations.extract import extract_snapshot
+    from particles.operations.extract import collapse_superseded_pending, extract_snapshot
     from particles.operations.version_guard import assert_store_schema_current
 
     # Fail fast if ANTHROPIC_API_KEY is unset — otherwise we'd run through every
@@ -182,6 +182,16 @@ async def _extract_all_pending(agent_id: str) -> None:
             f"Reset {len(stale)} stale IN_PROGRESS snapshot(s) to PENDING "
             f"(older than {threshold_minutes:g} min)."
         )
+
+    # a MUTABLE source edited N times since the last pass has N
+    # pending snapshots; only the newest is worth a call. Runs before the
+    # listing so the skipped generations never appear in it, and is never
+    # silent — the operator sees what was not extracted and why.
+    async with session_scope() as session:
+        collapse = await collapse_superseded_pending(session)
+    collapse_line = collapse.summary()
+    if collapse_line:
+        typer.echo(collapse_line)
 
     async with session_scope() as session:
         result = await session.execute(
@@ -228,6 +238,7 @@ async def _extract_all_pending(agent_id: str) -> None:
                     page_stats_out=page_stats,
                     carry_forward_ids_out=carry_forward_ids,
                     suppressed_ids_out=suppressed_ids,
+                    skip_if_superseded=True,
                 )
                 await session.commit()
                 # Merge ADR-0057 carry-forward count and the existing

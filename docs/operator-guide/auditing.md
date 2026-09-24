@@ -3,7 +3,7 @@
 Particles keeps an **append-only operator event log**: every
 deliberate operator decision that changes what the knowledge base asserts, how
 an entity is identified, or how a source is trusted is recorded as an immutable
-event — *who, when, why, and which records it touched*.
+event: *who, when, why, and which records it touched*.
 
 This is the durable answer to questions the per-record state can't give you on
 its own: *"why was this source retracted? what merged into this subject? what's
@@ -36,11 +36,11 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | *(system-emitted)* §6.6 trust resolution drops a candidate | `CONFLICT_CANDIDATE_DROPPED` |
 
 Read-only and pipeline commands (`query`, `lint`, `extract`, `reindex`,
-`export`, `deposit`) do **not** log — they have their own provenance. One
+`export`, `deposit`) do **not** log; they have their own provenance. One
 deliberate exception: when the §6.6 ladder's
 `SUPERSEDED_BY_EXISTING` verdict drops a freshly extracted candidate in favour
 of a strictly higher-trust existing claim, the candidate is never persisted, so
-the event log is the *only* durable record of it — the
+the event log is the *only* durable record of it. The
 `CONFLICT_CANDIDATE_DROPPED` event carries the candidate excerpt, the verdict,
 and the winning particle id. An empty event list for a record otherwise
 honestly means *no operator action touched it*.
@@ -81,10 +81,10 @@ GET /events/{event_id}
 The read-only `events_list` and `event_show` tools expose the same data to an
 agent, so an assistant can introspect the audit trail in its loop.
 
-## A source was retracted — what now?
+## A source was retracted: what now?
 
 When a publisher *retracts* an article you've deposited, you want your derived
-claims marked `RETRACTED` **without** erasing the source — the question *"what
+claims marked `RETRACTED` **without** erasing the source: the question *"what
 did we believe before the retraction?"* must stay answerable. Use
 `corpus retract`, **not** `corpus delete`:
 
@@ -105,18 +105,18 @@ the source to `RETRACTED` with reason `SOURCE_RETRACTED`, records a
 ids, and **leaves the corpus entry, its snapshots, and the particles intact**.
 It is idempotent (a second run finds nothing live) and skips particles that are
 already `SUPERSEDED` / `PROVENANCE_STALE` / `RETRACTED`. It does *not* itself
-cascade — the follow-up `particles lint` flags downstream particles
+cascade; the follow-up `particles lint` flags downstream particles
 `PROVENANCE_STALE`.
 
 Reach for `corpus delete` only when the source should be erased entirely (a
-privacy request or a mistaken deposit) — that path destroys the audit trail by
+privacy request or a mistaken deposit); that path destroys the audit trail by
 design.
 
-## One belief went stale — retiring just that one
+## One belief went stale: retiring just that one
 
 `corpus retract` is the right tool when a *source* is bad. When one claim out of
-a source's dozen has gone stale — a memory file whose other notes are still true,
-an extracted rule that a later edit reversed — it is far too broad, and flipping
+a source's dozen has gone stale (a memory file whose other notes are still true,
+an extracted rule that a later edit reversed) it is far too broad, and flipping
 `mcp.write.allow_cross_asserter` to let an agent reach the row is worse: a
 standing grant widening what every future agent session may mutate, to fix one
 belief. `particles particle retract` is the narrow instrument:
@@ -136,7 +136,7 @@ particles particle retract 20a27e4a --reason "Superseded by the AGENTS.md rule f
 --dry-run: nothing written.
 ```
 
-Drop `--dry-run` to apply it. The target is printed and confirmed first — you
+Drop `--dry-run` to apply it. The target is printed and confirmed first: you
 identified it by eight characters, so see what you are about to retire; `--yes`
 skips the prompt for scripted use.
 
@@ -145,7 +145,8 @@ Retracted 20a27e4a… (EXPLICIT_RETRACTION); reason recorded.
 Run `particles lint` to cascade PROVENANCE_STALE to dependents.
 ```
 
-The belief becomes `RETRACTED` with reason `EXPLICIT_RETRACTION`, carries the `retired_at` stamp, and lands in the log under its own actor:
+The belief becomes `RETRACTED` with reason `EXPLICIT_RETRACTION`, carries the
+`retired_at` stamp, and lands in the log under its own actor:
 
 ```
 2026-07-25 00:30  dc6e4ea1…  PARTICLE_RETRACTED  by cli:particle-retract
@@ -156,7 +157,8 @@ The belief becomes `RETRACTED` with reason `EXPLICIT_RETRACTION`, carries the `r
 Three properties worth knowing:
 
 - **It runs under *operator* authority, not agent policy.** It works with no
-  store MCP-write-enabled and `allow_cross_asserter` left `false` — the guardrail governs what *agents* may mutate and is untouched. The CLI is your
+  store MCP-write-enabled and `allow_cross_asserter` left `false`; the
+  guardrail governs what *agents* may mutate and is untouched. The CLI is your
   own hands on your own store.
 - **An operator-asserted belief is still refused.** A particle whose confidence
   came from `HUMAN_REVIEW` is not retractable this way; revising one is
@@ -170,7 +172,7 @@ The confirmation prompt is the guard.
 
 ## Notes
 
-- The log is **append-only** — there is no edit or delete path.
+- The log is **append-only**: there is no edit or delete path.
 - `actor` records the interface entry-point (the CLI verb today); it becomes
   the authenticated principal when multi-user lands.
 - Growth is unbounded by design; a retention/compaction policy is a future

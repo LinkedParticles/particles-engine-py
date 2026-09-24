@@ -13,7 +13,8 @@ shape it is meant to catch rather than passing trivially.
 The three contracts, each guarding a different layering regression:
 
 1. ``forbidden`` — the Client substrate (the genuinely store-free surface: what
-   a downstream needs to produce a candidate particle without a graph) must never import the Engine. Since it asserts
+   a downstream needs to produce a candidate particle without a graph)
+   must never import the Engine. Since it asserts
    ``particles.extraction`` and ``particles.conformance`` wholesale — a new
    domain extractor is covered automatically; its importer lives in ``ingest``,
    never in ``extraction``. Keep ``CLIENT_SUBSTRATE`` / ``ENGINE`` below and the

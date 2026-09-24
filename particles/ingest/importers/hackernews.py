@@ -2,8 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hacker News importer (Engine layer; moved from particles.extraction.hackernews
-).
+"""Hacker News importer (Engine layer; moved from particles.extraction.hackernews).
 
 Accepts ``news.ycombinator.com/item?id=N`` and the raw Firebase API URL
 ``hacker-news.firebaseio.com/v0/item/N.json``. Walks the comment tree via the

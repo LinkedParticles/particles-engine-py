@@ -70,13 +70,15 @@ async def _check_staleness(session: AsyncSession, fix: bool) -> list[LintFinding
 async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> list[LintFinding]:
     """Find ACTIVE particles whose provenance chain includes RETRACTED/SUPERSEDED particles.
 
-    Deliberately **one-hop** (each particle's own refs only) — for the consolidation DAG this is the memoization boundary: when a premise changes,
+    Deliberately **one-hop** (each particle's own refs only) — for the
+    consolidation DAG this is the memoization boundary: when a premise changes,
     only its direct dependents are flagged; further propagation happens only if
     revalidation actually supersedes a level (§5).
 
     Derived particles (``calibration_source == DERIVED``) get a
     ``DERIVED_REVALIDATION`` finding instead of ``RETRACTION_CASCADE``, and the
-    ``--fix`` transition to PROVENANCE_STALE is **not** applied: the keep-ACTIVE-and-discount contract keeps a still-plausible abstraction
+    ``--fix`` transition to PROVENANCE_STALE is **not** applied: the
+    keep-ACTIVE-and-discount contract keeps a still-plausible abstraction
     visible (its effective confidence discounted at read time) until the dream
     cycle's revalidation ladder repairs or retires it.
     """
@@ -166,7 +168,8 @@ async def _check_recency_staleness(session: AsyncSession) -> list[LintFinding]:
 
     For each ACTIVE particle, resolve its source provenance — the snapshot
     carries ``content_published_at`` and the corpus entry carries the
-    ``source_type`` the decay curve is keyed on — compute the ``recency_factor``, and flag when ``1 - recency_factor`` reaches
+    ``source_type`` the decay curve is keyed on — compute the
+    ``recency_factor``, and flag when ``1 - recency_factor`` reaches
     ``lint.recency_decay_threshold``. Particles whose source type has no decay
     config (``recency_factor == 1.0``) or that carry no publication date never
     fire.

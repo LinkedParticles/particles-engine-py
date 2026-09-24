@@ -94,8 +94,15 @@ async def _db_init_force() -> None:
             await session.execute(delete(table))
         # Snapshots survive but their extraction_status was COMPLETE / FAILED /
         # IN_PROGRESS before — reset to PENDING so --all-pending picks them up.
+        # The collapse mark goes with them: it records a decision
+        # made against the store being wiped, and a row left PENDING *and*
+        # marked would be skipped by every bulk pass forever. The next pass
+        # re-derives which generations are superseded.
         await session.execute(
-            update(SnapshotRow).values(extraction_status=ExtractionStatus.PENDING.value)
+            update(SnapshotRow).values(
+                extraction_status=ExtractionStatus.PENDING.value,
+                superseded_by_snapshot_id=None,
+            )
         )
         await session.commit()
 

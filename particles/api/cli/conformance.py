@@ -5,7 +5,7 @@
 """conformance verb — check this implementation against the Conformance Profile.
 
 ``particles conformance check`` loads ``artifacts/conformance/profile.yaml``
- plus the referenced similarity vectors and reports a per-level
+plus the referenced similarity vectors and reports a per-level
 PASS / FAIL / SKIPPED verdict: L2 recomputes the deterministic test vectors via
 the SDK's own functions; L3 embeds the similarity vectors under the live profile
 and checks bands + top-k membership. ``particles conformance show`` prints the
@@ -21,7 +21,7 @@ import typer
 from particles.api.cli import app
 
 conformance_app = typer.Typer(
-    help="Conformance Profile checks (behavioural ground truth).",
+    help="Conformance Profile checks, the behavioural ground truth.",
     no_args_is_help=True,
 )
 app.add_typer(conformance_app, name="conformance")

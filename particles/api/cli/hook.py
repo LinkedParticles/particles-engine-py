@@ -48,12 +48,17 @@ import typer
 from particles.api.cli import app
 from particles.api.cli._claude_code import (
     append_hook_log,
+    claude_project_slug,
     distill_transcript,
     filter_memory_file_for_deposit,
     hook_log_path,
+    observer_project_for,
     projection_enabled,
     read_hook_log_tail,
     redact_secrets,
+    repository_root,
+    resolve_session_project,
+    stray_memory_dirs,
     truncate_on_line_boundary,
 )
 from particles.api.cli._memory_projection import DigestDecision
@@ -215,7 +220,12 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
     else:
         from particles.api.client import get_backend
 
-        digest = await get_backend().digest(store)
+        # under `claude_code.observer_scope: project` the session
+        # reads the store through its own project; otherwise the whole store.
+        observer = observer_project_for(resolve_session_project(payload).key)
+        if observer is not None:
+            record["observer_project"] = observer
+        digest = await get_backend().digest(store, observer)
 
     max_bytes = get_config().claude_code.digest_max_bytes
     digest = truncate_on_line_boundary(digest, max_bytes)
@@ -233,7 +243,8 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
 async def _digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision:
     """The double-occupancy freshness check (implemented).
 
-    Reads the projected region's sources trailer (``<!-- sources: … -->``) from the MEMORY.md the harness will load, computes the live
+    Reads the projected region's sources trailer (``<!-- sources: … -->``)
+    from the MEMORY.md the harness will load, computes the live
     selection fingerprint, and returns ``skip`` on a match (the loaded file
     *is* the current view), the difference-only push on a mismatch, and the
     full digest whenever the projection is disabled for the store or the
@@ -276,7 +287,13 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
 
     session_id = str(payload.get("session_id") or "")
     transcript_path = Path(str(payload.get("transcript_path") or ""))
-    project = transcript_path.parent.name if transcript_path.name else ""
+    # The project is the repository the session's auto-memory is keyed on, not
+    # the directory its transcript sits in — in a linked worktree those differ,
+    # and the transcript's directory holds no memory Claude Code reads.
+    session_project = resolve_session_project(payload)
+    project = session_project.key
+    record["project"] = project
+    record["project_resolved_from"] = session_project.resolved_from
 
     deposited: list[tuple[str, str]] = []  # (entry_id, snapshot_id) of NEW snapshots
     unchanged = 0
@@ -290,8 +307,8 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
             else:
                 deposited.append((outcome.entry_id, outcome.snapshot_id))
 
-    # (b) Changed memory files beside the transcript (§3b).
-    memory_dir = transcript_path.parent / "memory" if transcript_path.name else None
+    # (b) Changed memory files in the project's memory directory (§3b).
+    memory_dir = session_project.memory_dir
     memory_md_text: str | None = None
     if memory_dir is not None and memory_dir.is_dir():
         harvested, skipped, memory_md_text = await _harvest_memory_files(store, memory_dir, project)
@@ -303,7 +320,7 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
     # lines folded out of MEMORY.md on a *previous* cycle land here, so the
     # archive is harvested level-triggered like everything else.
     if projection_enabled():
-        outcome = await _harvest_archive(store, project)
+        outcome = await _harvest_archive(store, memory_dir, project)
         if outcome is not None:
             if outcome.unchanged:
                 unchanged += 1
@@ -415,7 +432,8 @@ async def _harvest_memory_files(
 ) -> tuple[list[tuple[str, str]], int, str | None]:
     """Deposit each memory-file ``*.md`` (LOCAL_MARKDOWN / MUTABLE, §3b).
 
-    Content passes through :func:`filter_memory_file_for_deposit` — the sentinel strip (pristine projected regions never reach the
+    Content passes through :func:`filter_memory_file_for_deposit` — the
+    sentinel strip (pristine projected regions never reach the
     corpus; a dirtied region rides along as authored input). Unchanged files
     are content-hash no-ops. Also returns the **raw** (pre-strip) text of the
     top-level ``MEMORY.md``, if present: the projection cycle refuses to
@@ -433,7 +451,7 @@ async def _harvest_memory_files(
         raw = md.read_text(encoding="utf-8", errors="replace")
         if md.parent == memory_dir and md.name == "MEMORY.md":
             memory_md_text = raw
-        text = filter_memory_file_for_deposit(raw)
+        text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir)
         if not text.strip():
             continue
         mtime = datetime.fromtimestamp(md.stat().st_mtime, tz=UTC)
@@ -468,12 +486,21 @@ async def _harvest_memory_files(
     return harvested, skipped, memory_md_text
 
 
-async def _harvest_archive(store: str, project: str) -> TextDepositOutcome | None:
-    """Deposit the fold-and-archive file (APPEND_ONLY — it only grows)."""
+async def _harvest_archive(
+    store: str, memory_dir: Path | None, project: str
+) -> TextDepositOutcome | None:
+    """Deposit this project's fold-and-archive file (APPEND_ONLY).
+
+    The archive is per project: lines folded out of one
+    project's ``MEMORY.md`` are harvested under that project's key, not under
+    whichever project happened to deposit a shared file first.
+    """
     from particles.api.cli._claude_code import memory_archive_path
     from particles.api.client import get_backend
 
-    archive = memory_archive_path()
+    if memory_dir is None:
+        return None
+    archive = memory_archive_path(memory_dir)
     if not archive.is_file():
         return None
     text = archive.read_text(encoding="utf-8", errors="replace")
@@ -631,8 +658,71 @@ def _run_doctor(store: str) -> bool:
     for line in blob_lines:
         typer.echo(f"  {line}")
 
+    for line in _check_memory_dirs():
+        typer.echo(f"  {line}")
+
+    for line in _check_observer_scope(store):
+        typer.echo(f"  {line}")
+
     typer.echo("  ✓ Store resolves and is initialized from this directory.")
     return True
+
+
+def _check_observer_scope(store: str) -> list[str]:
+    """Report what a session here reads: the whole store, or its project's view.
+
+    The one non-obvious state is worth a line of its own: ``project`` is set but
+    the store has never been rescoped, so the surfaces are still store-wide.
+    Reported, never fatal.
+    """
+    from particles.db import session_scope
+    from particles.operations.query.observer_scope import lens_may_engage
+
+    mode = get_config().claude_code.observer_scope
+    if mode != "project":
+        return [f"observer scope: {mode} (every session sees the whole store)"]
+
+    async def _probe() -> bool:
+        async with session_scope(store) as session:
+            return await lens_may_engage(session)
+
+    try:
+        rescoped = asyncio.run(_probe())
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
+        return [f"observer scope: project (could not check the store: {exc})"]
+    if rescoped:
+        return ["observer scope: project (a session sees global beliefs plus its project's)"]
+    return [
+        "observer scope: project, but NOT in effect — this store has not been rescoped.",
+        f"                Run `particles memory rescope --store {store}` (it only adds tags).",
+    ]
+
+
+def _check_memory_dirs() -> list[str]:
+    """Report which memory directory a session here writes to, and any strays.
+
+    A linked worktree's sessions key their memory on the main checkout, so the
+    directory beside their transcripts is never read by Claude Code; older
+    versions had the projection create one there anyway. Reported,
+    never fatal, and never deleted: the files are small, and removing a user's
+    file is not this verb's call.
+    """
+    cwd = Path.cwd()
+    projects_root = Path.home() / ".claude" / "projects"
+    key = claude_project_slug(repository_root(cwd))
+    memory_dir = projects_root / key / "memory"
+    state = "exists" if memory_dir.is_dir() else "not created yet"
+    lines = [f"memory dir:     {memory_dir} ({state})"]
+    if claude_project_slug(cwd) != key:
+        lines.append("                (a session here shares its repository's memory directory)")
+    strays = stray_memory_dirs(projects_root)
+    if strays:
+        lines.append(
+            f"stray memory:   {len(strays)} director{'y' if len(strays) == 1 else 'ies'} "
+            "Claude Code never reads (created for linked worktrees; safe to delete):"
+        )
+        lines.extend(f"                {stray}" for stray in strays)
+    return lines
 
 
 def _check_blobs(store: str) -> list[str]:

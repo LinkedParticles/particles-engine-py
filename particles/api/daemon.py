@@ -37,7 +37,7 @@ lifespan and by ``engine serve``). It keeps its Engine imports deferred inside
 the task bodies so importing it stays cheap, and it never imports the CLI — the
 pass-6 projection tail is *injected* by ``engine serve`` through
 :func:`set_projection_runner_factory`, mirroring how the consolidation design
- has the Surface
+has the Surface
 inject that callback into the Engine operation.
 """
 
@@ -385,8 +385,8 @@ def start_daemon() -> bool:
     ``daemon.enabled`` is false — which is the default, and is what keeps a plain
     ``engine serve`` byte-identical to its earlier behaviour.
 
-    Which watchers run is *derived from configuration*, not from extra switches
-    : the inbox watcher is active whenever ``inbox.file_path``
+    Which watchers run is *derived from configuration*, not from extra switches:
+    the inbox watcher is active whenever ``inbox.file_path``
     resolves, the web-clipper watcher whenever ``daemon.web_clipper_dir`` is set.
     An inactive watcher says so in the log, so "why isn't my inbox draining?"
     is answered at startup rather than by silence.

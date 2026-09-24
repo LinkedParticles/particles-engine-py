@@ -2461,7 +2461,7 @@
     "Question 6b168ec8: notes writer failed on 1 of 50 session(s); those sessions are absent from the memory",
     "Question 2c63a862: notes writer failed on 1 of 54 session(s); those sessions are absent from the memory",
     "Question gpt4_5438fa52: notes writer failed on 1 of 50 session(s); those sessions are absent from the memory",
-    "Checkpoint: restored 78 previously completed question(s); outcomes accumulate in /Users/jeff/.particles/benchmark/longmemeval/checkpoints/memory-run-9783a8ed41ee09ca.jsonl.",
+    "Checkpoint: restored 78 previously completed question(s); outcomes accumulate in ~/.particles/benchmark/longmemeval/checkpoints/memory-run-9783a8ed41ee09ca.jsonl.",
     "Notes writer (anthropic:claude-sonnet-5): 3450 unique session note(s) written, 0 cache replay(s), 4 failure(s).",
     "Comparator run (memory=notes): qa_full_context / qa_no_memory were not run — under an identical tuple they are the same calls as the particles run's; reuse those columns and say so."
   ],

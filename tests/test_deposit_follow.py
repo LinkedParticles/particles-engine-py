@@ -334,7 +334,8 @@ class TestDepositFollowIntegration:
     async def test_follow_comment_links_true_warns_and_noops(
         self, db_session: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """``--follow-comment-links`` is reserved-but-deferred: passing True emits a warning and proceeds as if False."""
+        """``--follow-comment-links`` is reserved-but-deferred:
+        passing True emits a warning and proceeds as if False."""
         import logging
 
         from particles.corpus.deposit import deposit_url

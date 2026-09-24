@@ -94,6 +94,7 @@ from particles.operations.query import query
 from particles.operations.reconcile import reconcile_supersession
 from particles.operations.reindex import ReindexPlan, reindex
 from particles.operations.review import list_inconsistencies, resolve
+from particles.operations.source_passage import SourcePassage, hydrate_source_passage
 from particles.store.event_store import OperatorEvent
 
 log = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Particles API",
     version=__version__,
-    description="Python SDK for the Particles epistemic knowledge standard — Core Loop.",
+    description="Python SDK for the Particles epistemic knowledge standard: Core Loop.",
     lifespan=lifespan,
 )
 
@@ -150,8 +151,8 @@ async def _log_requests(
     """Interim request observability ahead of the OpenTelemetry work.
 
     uvicorn's access log only fires on *response*, so a request that hangs
-    (e.g. blocked on a SQLite write lock held by a concurrent writer
-) leaves no trace. Logging arrival makes a stuck request visible,
+    (e.g. blocked on a SQLite write lock held by a concurrent writer)
+    leaves no trace. Logging arrival makes a stuck request visible,
     and the ``database is locked`` branch records write-lock contention
     explicitly. This is a stopgap the OTel tracing work is expected to subsume.
     """
@@ -248,7 +249,7 @@ class ErrorResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Liveness probe response — returned only when the server is healthy."""
+    """Liveness probe response, returned only when the server is healthy."""
 
     status: str
     version: str
@@ -279,7 +280,7 @@ class ReindexResponse(BaseModel):
     post-reindex lint pass produced (empty dict when lint was skipped
     because ``scope`` was 0). ``plan`` is the upfront work plan computed
     before extraction, per-snapshot detail included (dry and live runs
-    alike — the missing-blob list must survive into the envelope because
+    alike: the missing-blob list must survive into the envelope because
     the CLI's human rendering caps it)."""
 
     scope: int
@@ -300,7 +301,7 @@ class ReconcileResponse(BaseModel):
     ``demoted`` the count transitioned ACTIVE → PROVENANCE_STALE /
     DOCUMENT_SUPERSEDED. ``demotions`` is the per-demotion audit list (winner /
     loser / entries / similarity). ``enabled`` / ``single_trust_order`` echo the
-    v1 gates — a ``False`` on either means the sweep was a no-op."""
+    v1 gates; a ``False`` on either means the sweep was a no-op."""
 
     enabled: bool
     single_trust_order: bool
@@ -337,8 +338,8 @@ async def health() -> HealthResponse:
 
     In daemon mode the response also carries the background tasks'
     state, and ``status`` becomes ``"degraded"`` once any of them has crashed.
-    The process is still serving requests, so this stays a 200 — the API must
-    not take itself down because a scheduled tick died — but the disclosure is
+    The process is still serving requests, so this stays a 200 (the API must
+    not take itself down because a scheduled tick died), but the disclosure is
     machine-readable for an operator alert or a readiness gate.
 
     ``built_at`` is present only when the artifact stamped itself (the
@@ -361,7 +362,7 @@ async def health() -> HealthResponse:
 
 @app.get("/quality", response_model=QualityReport)
 async def quality_dashboard(session: SessionDep, _auth: ReadAuthDep) -> QualityReport:
-    """Extraction quality dashboard — calibration distribution, corpus status, subject coverage."""
+    """Extraction quality dashboard: calibration distribution, corpus status, subject coverage."""
     return await get_quality_report(session)
 
 
@@ -415,16 +416,16 @@ async def get_curation_queue(
     """Return the bus-stop-editing curation queue (HTTP mirror of `curate`).
 
     Composes the existing read diagnostics (lint, links/corpus-links suggest, the
-    contested digest, quality) into one leverage-ranked, snooze-filtered worklist
-    — no new detection logic. ``limit`` overrides ``curation.session_size`` for
+    contested digest, quality) into one leverage-ranked, snooze-filtered worklist;
+    no new detection logic. ``limit`` overrides ``curation.session_size`` for
     one call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,
     ``contested``); ``semantic`` runs the LLM-assisted finders (defaults to
     ``curation.semantic``). 400 on an unknown ``kind``.
 
     Served from the persisted collection, which the nightly
     consolidation cycle or ``POST /curation/rebuild`` writes. A store with no
-    collection yet is served **live** — correct, but as slow as it was before
-    the persisted-collection cutover — and labelled ``source:
+    collection yet is served **live** (correct, but as slow as it was before
+    the persisted-collection cutover) and labelled ``source:
     live``; this route never writes the cache, so a GET stays a read.
     ``no_snapshot=true`` forces that live path
     for one request. The response carries the staleness stamp; see
@@ -485,7 +486,7 @@ async def rebuild_curation_endpoint(
 ) -> CurationRebuildResponse:
     """Rebuild the persisted curation collection store-wide.
 
-    **Synchronous and slow by design** — it runs every finder over the whole
+    **Synchronous and slow by design**: it runs every finder over the whole
     store (minutes on a large one). It is not how the queue becomes fast; the
     nightly consolidation cycle is. This is the operator's escape hatch when they
     need the queue to reflect right now, and the web UI already has an honest
@@ -515,7 +516,7 @@ async def rebuild_curation_endpoint(
 
 class CurationAffirmRequest(BaseModel):
     """Affirm a belief still holds: records ``BELIEF_AFFIRMED``,
-    suppressing the belief's card. Does NOT touch confidence — first-class
+    suppressing the belief's card. Does NOT touch confidence; first-class
     corroboration is vouch."""
 
     particle_id: str
@@ -566,7 +567,7 @@ async def curation_affirm_endpoint(
 class MemoryUsefulRequest(BaseModel):
     """Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits
     the belief on the explicit utility channel. Does NOT touch confidence and does
-    NOT claim the belief is true — it lifts the belief in the projection / digest
+    NOT claim the belief is true; it lifts the belief in the projection / digest
     ranking only. For "still true", use ``/curation/affirm``."""
 
     particle_id: str
@@ -576,7 +577,7 @@ class MemoryUsefulRequest(BaseModel):
 class MemoryUsefulResponse(BaseModel):
     """Outcome of an explicit usefulness gesture.
 
-    ``counted`` is False when this principal already credited this belief today —
+    ``counted`` is False when this principal already credited this belief today,
     the rate bound. The event is recorded either way."""
 
     event_id: str
@@ -592,7 +593,7 @@ async def memory_useful_endpoint(
     """Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).
 
     The explicit second utility channel, for the belief class the transcript
-    miner cannot observe — prohibitions and design stances, complied
+    miner cannot observe: prohibitions and design stances, complied
     with by *not* acting. Promotion-only and projection-only. 403 when belief
     writes are disabled (``mcp.write.enabled_stores`` default-deny)."""
     from particles.operations.utility_feedback import (
@@ -664,8 +665,7 @@ class DepositUrlRequest(BaseModel):
     tags: list[str] = []
     # deposit-time link-follow opt-in; None ⇒ the extractor's default
     # (Reddit / HN / Mastodon default True, everything else False). Exposed over
-    # HTTP so the thin client's `deposit --follow-post-links` reaches the engine
-    #.
+    # HTTP so the thin client's `deposit --follow-post-links` reaches the engine.
     follow_post_links: bool | None = None
     follow_comment_links: bool | None = None
 
@@ -910,7 +910,7 @@ class CorpusRetractRequest(BaseModel):
 
 class CorpusRetractResponse(BaseModel):
     """Outcome of a corpus retraction. ``retracted_ids`` are the particles
-    actually retracted, or — when ``dry_run`` is true — the ones that *would*
+    actually retracted, or, when ``dry_run`` is true, the ones that *would*
     be. ``skipped`` maps each non-live status to how many particles were left
     untouched. The corpus entry and its snapshots are always preserved."""
 
@@ -1059,6 +1059,27 @@ async def get_containing_narratives(
     return await get_narratives_containing(session, particle_id)
 
 
+@app.get(
+    "/particles/{particle_id}/source",
+    response_model=SourcePassage,
+    responses=_ERR404,
+)
+async def get_particle_source(
+    particle_id: str, session: SessionDep, _auth: ReadAuthDep
+) -> SourcePassage:
+    """Return the source passage behind a particle, with how it was found.
+
+    ``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),
+    ``LOCATED`` (best term-overlap paragraph — a reading aid, not
+    verification), ``WHOLE`` (the snapshot text), or ``UNAVAILABLE`` with a
+    ``note``. Display only: never a ranking input. 404 if the particle does
+    not exist."""
+    passage = await hydrate_source_passage(session, particle_id)
+    if passage is None:
+        raise HTTPException(status_code=404, detail="Particle not found")
+    return passage
+
+
 class NarrativeArticleResponse(BaseModel):
     """A NARRATIVE rendered as one cited prose article.
 
@@ -1117,8 +1138,8 @@ async def run_query(
     similarity over ACTIVE particles, generates a natural-language
     answer with citations.
 
-    Rate-limited per client (``api.rate_limit_per_minute``; security review F6)
-    — this drives a paid embedding + completion per request. Bearer-gated
+    Rate-limited per client (``api.rate_limit_per_minute``; security review F6):
+    this drives a paid embedding + completion per request. Bearer-gated
     regardless of ``api.require_auth_for_reads`` (security review F2): the paid
     Anthropic completion runs on the operator's ``ANTHROPIC_API_KEY``, so an open
     ``/query`` is an unbounded-spend vector. The dev-key loopback skip keeps it
@@ -1162,16 +1183,17 @@ async def get_graph(
     as_of: datetime | None = None,
     max_nodes: Annotated[int | None, Query(ge=1)] = None,
     store: str = DEFAULT_STORE,
+    observer_project: Annotated[str | None, Query(min_length=1)] = None,
 ) -> GraphData:
     """One scoped epistemic subgraph: the same ``GraphData`` the
     static ``export graph`` artifact embeds, computed fresh per request.
 
-    Scope is mandatory (the anti-hairball invariant — a whole-store render does
+    Scope is mandatory (the anti-hairball invariant: a whole-store render does
     not exist): ``scope=subject`` needs ``subject_id``, ``scope=query`` needs
     ``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's
     evidence: the INCONSISTENCY anchor, its disputants, their
     subjects), ``scope=projection`` needs ``manifest`` + ``section`` (a
-    manifest section's deterministic selection — the manifest path is
+    manifest section's deterministic selection; the manifest path is
     resolved on the engine host, which the bearer gate makes operator-equivalent
     access); anything else is 422. ``subject_id`` accepts a subject id or an
     exact (case-insensitive) canonical name / alias; ``inconsistency_id``
@@ -1179,12 +1201,13 @@ async def get_graph(
     the resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the
     ``graph.*`` caps; ``as_of`` renders the graph as believed at T;
     ``history`` adds supersession-chain ghosts; ``store`` selects the target
-    store (404 on an unknown handle).
+    store (404 on an unknown handle). ``observer_project`` reads the
+    subject, query and projection scopes through a project observer;
+    the inconsistency scope addresses its evidence by id and is never filtered.
 
     Bearer-gated regardless of ``api.require_auth_for_reads`` and rate-limited
     (same posture as ``/query``): the query scope drives a paid embedding per
-    request. All epistemics are computed server-side — clients only render
-    ."""
+    request. All epistemics are computed server-side; clients only render."""
     given = {
         "subject_id": subject_id,
         "q": q,
@@ -1218,6 +1241,7 @@ async def get_graph(
                 history=history,
                 as_of=as_of,
                 max_nodes=max_nodes,
+                observer_project=observer_project,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
@@ -1254,7 +1278,7 @@ async def run_lint_endpoint(
 ) -> LintReport:
     """Run the lint pipeline. Returns the structured findings report.
 
-    ``fix`` defaults to ``False`` — pass ``fix: true`` to
+    ``fix`` defaults to ``False``; pass ``fix: true`` to
     apply structural status transitions (STALENESS, RETRACTION_CASCADE,
     CORPUS_LINK_INTEGRITY)."""
     # Rate-limit only the semantic path (security review F6): it drives the paid
@@ -1272,7 +1296,7 @@ async def run_lint_endpoint(
 
 @app.get("/lint/report", response_model=LintReport)
 async def get_lint_report(session: SessionDep, _auth: ReadAuthDep) -> LintReport:
-    """Return the structural-only lint report — no LLM call, no mutations."""
+    """Return the structural-only lint report: no LLM call, no mutations."""
     return await run_lint(session, fix=False, semantic=False)
 
 
@@ -1366,7 +1390,7 @@ async def run_corpus_links_suggest(
 ) -> DepositSuggestReport:
     """Rank undeposited but frequently-cited URLs as deposit suggestions.
 
-    Mirrors ``particles corpus links suggest``. Read-only — nothing is fetched
+    Mirrors ``particles corpus links suggest``. Read-only: nothing is fetched
     or deposited."""
     from particles.operations.deposit_suggest import suggest_deposits
 
@@ -1453,10 +1477,10 @@ class ReindexRequest(BaseModel):
     """Reindex options. ``entry_ids=None`` reindexes every stale /
     failed snapshot; ``extractor_version`` (when set) restricts to
     particles emitted by that extractor version (used after an
-    extractor upgrade). The particle-selecting fields —
-    ``extractor_version`` / ``extractor_id`` / ``provider_model`` — union
-    with each other and intersect with ``entry_ids`` when both are sent
-    , so naming entries can only narrow the scope."""
+    extractor upgrade). The particle-selecting fields
+    (``extractor_version`` / ``extractor_id`` / ``provider_model``) union
+    with each other and intersect with ``entry_ids`` when both are sent,
+    so naming entries can only narrow the scope."""
 
     entry_ids: list[str] | None = None
     extractor_version: str | None = None
@@ -1534,9 +1558,9 @@ async def list_subjects(
 ) -> list[Subject]:
     """List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);
     an omitted ``limit`` returns the first ``storage.max_page_size`` and any
-    ``limit`` is clamped to that cap (security review F5 — formerly unbounded).
+    ``limit`` is clamped to that cap (security review F5; formerly unbounded).
     ``order=degree`` sorts by descending ACTIVE-particle link count instead
-    (most-connected first — e.g. the web UI's Browse seed)."""
+    (most-connected first, e.g. the web UI's Browse seed)."""
     from particles.store.subject_store import list_all_subjects
 
     return await list_all_subjects(session, limit=_bounded_limit(limit), offset=offset, order=order)
@@ -1586,7 +1610,7 @@ async def get_particles_for_subject(
 
     ``limit``/``offset`` paginate over the linked particle IDs; an omitted
     ``limit`` returns up to ``storage.max_page_size`` and any ``limit`` is
-    clamped to it (security review F5 — formerly returned every linked
+    clamped to it (security review F5; formerly returned every linked
     particle)."""
     from particles.store.particle_store import get_particle
     from particles.store.subject_store import get_particles_for_subject as _get
@@ -1656,7 +1680,7 @@ async def create_subject(req: CreateSubjectRequest, session: SessionDep, _auth: 
 class SplitSubjectRequest(BaseModel):
     """Re-bind some particles off a source Subject onto a new one.
 
-    Supply the new Subject's identity via ``new_external_id`` (authoritative —
+    Supply the new Subject's identity via ``new_external_id`` (authoritative:
     metadata pulled directly from the identifier, e.g. ``wikidata:Q30297735``)
     or ``new_name`` (canonicalised via the resolver). ``particle_ids`` lists the
     particles to move off the source."""
@@ -1793,13 +1817,15 @@ async def list_particles_endpoint(
     subject_id: str | None = None,
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
+    observer_project: Annotated[str | None, Query(min_length=1)] = None,
 ) -> list[Particle]:
     """List particles, optionally filtered by status / subject (HTTP mirror of the
     MCP ``particles_list`` tool). Newest first; no embeddings.
 
     ``limit`` defaults to 50 and is clamped to ``storage.max_page_size`` (F5).
-    400 on an unknown ``status``."""
-    from particles.store.particle_store import list_particles_filtered
+    400 on an unknown ``status``. ``observer_project`` lists only what is in
+    view for that project observer, paged after the predicate."""
+    from particles.operations.query.observer_scope import list_particles_in_view
 
     status_enum: Status | None = None
     if status is not None:
@@ -1810,12 +1836,13 @@ async def list_particles_endpoint(
             raise HTTPException(
                 status_code=400, detail=f"Unknown status {status!r}. Allowed: {allowed}."
             ) from exc
-    return await list_particles_filtered(
+    return await list_particles_in_view(
         session,
         status=status_enum,
         subject_id=subject_id,
         limit=_bounded_limit(limit, default=50),
         offset=offset,
+        observer_project=observer_project,
     )
 
 
@@ -1825,11 +1852,13 @@ async def search_particles_by_fingerprint(
     session: SessionDep,
     _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
+    observer_project: Annotated[str | None, Query(min_length=1)] = None,
 ) -> list[Particle]:
     """List particles sharing a context fingerprint (HTTP mirror of the
     MCP ``particle_search`` tool). ``fingerprint`` is a full 64-char SHA-256 hex
     or a prefix (≥ 8 chars; validated in-handler → 400). ``limit`` defaults to 50
-    and is clamped to ``storage.max_page_size`` (F5)."""
+    and is clamped to ``storage.max_page_size`` (F5). ``observer_project`` keeps
+    only what is in view for that project observer."""
     from sqlalchemy import select
 
     from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
@@ -1848,8 +1877,14 @@ async def search_particles_by_fingerprint(
         stmt = select(ParticleRow).where(
             ParticleRow.context_fingerprint.like(f"{escape_like_pattern(fp)}%", escape=LIKE_ESCAPE)
         )
-    result = await session.execute(stmt.limit(_bounded_limit(limit, default=50)))
-    return [row.to_model() for row in result.scalars()]
+    bounded = _bounded_limit(limit, default=50)
+    if observer_project is None:
+        result = await session.execute(stmt.limit(bounded))
+        return [row.to_model() for row in result.scalars()]
+    from particles.operations.query.observer_scope import in_view
+
+    found = [row.to_model() for row in (await session.execute(stmt)).scalars()]
+    return (await in_view(session, found, observer_project))[:bounded]
 
 
 @app.get("/particles/contested", response_model=dict[str, str])
@@ -1863,7 +1898,7 @@ async def particle_contested_backrefs(session: SessionDep, _auth: ReadAuthDep) -
 
 
 class ContestedBadgesRequest(BaseModel):
-    """The ids to compose badges for — POST because the list can be long."""
+    """The ids to compose badges for; POST because the list can be long."""
 
     particle_ids: list[str] = Field(default_factory=list)
 
@@ -1879,7 +1914,7 @@ async def particle_contested_badges(
     The one composer for every recall surface: the routed MCP
     ``particles_list`` tool used to hand-roll a one-basis badge of its own,
     which made the listing disagree with ``query`` on the same server. Keyed by
-    id and **sparse** — an id no available basis fired on (or one that does not
+    id and **sparse**: an id no available basis fired on (or one that does not
     exist) is simply absent, exactly as ``/particles/contested`` omits an
     uncontested belief. 400 above ``storage.max_page_size`` ids (F5)."""
     from particles.operations.query.contested import compute_contested_badges
@@ -1926,21 +1961,27 @@ class DigestResponse(BaseModel):
 
 
 @app.get("/digest/{store}", response_model=DigestResponse, responses=_ERR404)
-async def get_digest_endpoint(store: str, _auth: AuthDep) -> DigestResponse:
+async def get_digest_endpoint(
+    store: str,
+    _auth: AuthDep,
+    project: Annotated[str | None, Query(min_length=1)] = None,
+) -> DigestResponse:
     """Render the session-start memory digest for a store.
 
     Read-only, zero LLM/embeddings, rendered fresh. 404 if the store handle is
-    not configured on this engine. ``build_digest`` manages its own per-store
-    session, so this handler takes no ``SessionDep``.
+    not configured on this engine. ``project`` reads the store through that
+    project observer, evaluated against this engine's own sources.
+    ``build_digest`` manages its own per-store session, so this handler takes no
+    ``SessionDep``.
 
     Bearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest
     is the provenance-ranked roll-up of the full belief store, including
-    contested beliefs — confidential operator context. The dev-key loopback
+    contested beliefs, which is confidential operator context. The dev-key loopback
     skip keeps it open for local development."""
     from particles.operations.digest import build_digest
 
     try:
-        markdown = await build_digest(store)
+        markdown = await build_digest(store, project)
     except (KeyError, ValueError) as exc:
         # db.py raises KeyError for an unknown store handle.
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
@@ -2258,7 +2299,7 @@ def _require_belief_writes_enabled() -> str:
 
 class ParticleAssertRequest(BaseModel):
     """Assert one belief (flagship). Trust-/status-/identity-bearing
-    fields are constructed server-side (§4a) — only the claim, its subjects,
+    fields are constructed server-side (§4a); only the claim, its subjects,
     self-reported confidence, and provenance are caller-supplied."""
 
     content: str
@@ -2268,13 +2309,20 @@ class ParticleAssertRequest(BaseModel):
     corpus_entry_id: str | None = None
     uncertainty_nature: str = "EPISTEMIC"
     tags: list[str] | None = None
+    # the project a project-bound agent surface asserts as. Set by
+    # that surface (the MCP server's launch binding), not by the agent. With it,
+    # the belief's deposited excerpt carries the key, and a ``corpus_entry_id``
+    # that is not one of that project's sources is refused (400).
+    project_key: str | None = None
 
 
 class ParticleSupersedeRequest(ParticleAssertRequest):
     """Revise a belief: ``supersedes_id`` is retired to SUPERSEDED, then a
-    successor is asserted."""
+    successor is asserted. ``reason`` is optional on this
+    agent-attributed path and, when given, is recorded on the audit event."""
 
     supersedes_id: str
+    reason: str | None = None
 
 
 class ParticleRetractRequest(BaseModel):
@@ -2299,8 +2347,10 @@ async def particle_assert_endpoint(
     """Assert a belief through the §6.6 ladder (HTTP mirror of MCP ``particle_assert``).
 
     A confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus
-    mode) — a first-class result, not an error. 400 on a granularity / provenance
-    violation; 403 when belief writes are disabled."""
+    mode), a first-class result, not an error; so does re-asserting a claim an
+    operator or reviewer retired (it is held for review), and
+    ``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a
+    granularity / provenance violation; 403 when belief writes are disabled."""
     store = _require_belief_writes_enabled()
     try:
         result = await assert_belief(
@@ -2313,6 +2363,7 @@ async def particle_assert_endpoint(
             corpus_entry_id=req.corpus_entry_id,
             uncertainty_nature=req.uncertainty_nature,
             tags=req.tags,
+            project_key=req.project_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2340,6 +2391,8 @@ async def particle_supersede_endpoint(
             corpus_entry_id=req.corpus_entry_id,
             uncertainty_nature=req.uncertainty_nature,
             tags=req.tags,
+            reason=req.reason,
+            project_key=req.project_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2389,6 +2442,7 @@ class OperatorSupersedeRequest(BaseModel):
     content: str
     subject_names: list[str]
     confidence: float
+    reason: str
     source_excerpt: str | None = None
     corpus_entry_id: str | None = None
     uncertainty_nature: str = "EPISTEMIC"
@@ -2410,7 +2464,8 @@ async def operator_supersede_endpoint(
 
     The "edit" gesture finally working on the extracted beliefs that fill a
     curation queue. Skips only the ownership check; the HUMAN_REVIEW guard and
-    ACTIVE-status check still apply. 400 on a guard / granularity violation; 403
+    ACTIVE-status check still apply. ``reason`` is required and recorded on the
+    audit event. 400 on a guard / granularity violation or an empty reason; 403
     when curation writes are disabled."""
     store = _require_belief_writes_enabled()
     try:
@@ -2427,6 +2482,7 @@ async def operator_supersede_endpoint(
             tags=req.tags,
             operator=True,
             actor="http:/particles/{id}/supersede",
+            reason=req.reason,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2444,7 +2500,7 @@ async def operator_retract_endpoint(
 ) -> ParticleRetractEndpointResponse:
     """Operator-retract any belief, incl. an extracted one.
 
-    Retract one extraction-/operator-sourced belief by id — the per-particle
+    Retract one extraction-/operator-sourced belief by id: the per-particle
     retract a curation card needs (vs the blunt per-source
     ``POST /corpus/{id}/retract``). Skips only the ownership check; the
     HUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard
@@ -2478,7 +2534,7 @@ class ParticleSubjectAssignRequest(BaseModel):
     """Assign a subject to an orphan particle. Resolution accepts an
     explicit ``subject_id`` (link a Subject the operator picked) OR a
     ``subject_name`` run through the standard resolver (local → Wikidata →
-    bare-local) — provide exactly one."""
+    bare-local). Provide exactly one."""
 
     subject_id: str | None = None
     subject_name: str | None = None
@@ -2492,7 +2548,7 @@ async def assign_subject_endpoint(
 
     Supersedes the orphan with a successor that has the same content + the
     resolved subject(s), carrying over the predecessor's confidence record,
-    extractor_ref, and source — it is the same extracted claim with a corrected
+    extractor_ref, and source; it is the same extracted claim with a corrected
     linkage. 400 on a bad resolution / guard violation; 403 when writes are
     disabled."""
     store = _require_belief_writes_enabled()

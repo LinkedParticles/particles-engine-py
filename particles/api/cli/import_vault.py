@@ -24,8 +24,10 @@ registered on the Typer app is the plain word ``import``.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -35,6 +37,9 @@ from particles.api.cli._progress import progress_line
 from particles.api.client import get_backend
 from particles.core.schema import SourceType
 from particles.db import session_scope
+
+if TYPE_CHECKING:
+    from particles.extraction.migration_preview import MigrationPreview
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +56,8 @@ def _refuse_in_remote_mode(verb: str) -> None:
     """Refuse a local-only ``import`` verb when configured for a remote engine.
 
     ``import vault`` / ``import project`` walk the **client's** filesystem and
-    open a local ``session_scope()`` directly — they have no engine endpoint
-    . In remote mode (``engine.base_url`` set ⇒ ``HttpBackend``) that
+    open a local ``session_scope()`` directly — they have no engine endpoint.
+    In remote mode (``engine.base_url`` set ⇒ ``HttpBackend``) that
     local DB is *not* the canonical engine store, so the verb would write to the
     wrong place — or, on a thin client that never ran ``db init``, fail with the
     confusing generic "Database tables not found …" instead of being told the
@@ -149,9 +154,9 @@ def import_vault_cmd(
     """Walk a Markdown vault and deposit every ``.md`` file as ``LOCAL_MARKDOWN``.
 
     Recursively walks ``vault_dir`` (skipping any path under a ``_`` or ``.``
-    component — Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
+    component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
     and registers each Markdown file in the corpus. Re-running on the same
-    vault is idempotent — existing ``content_hash`` deduplication means
+    vault is idempotent: existing ``content_hash`` deduplication means
     unchanged files are not re-deposited.
 
     Typical onboarding workflow:
@@ -235,7 +240,7 @@ def import_project_cmd(
 
     Recursively walks ``project_dir`` for source files (``.py`` by default; see
     ``import_project.extensions``), skipping dot-prefixed components and the
-    configured build/cache directories (``import_project.ignore_dirs``) — but
+    configured build/cache directories (``import_project.ignore_dirs``), but
     keeping underscore-prefixed module files (``__init__.py`` / ``_shared.py``).
     Re-running on the same tree is idempotent: ``content_hash`` deduplication
     means only changed files get a new snapshot.
@@ -320,7 +325,7 @@ def import_web_clipper_cmd(
     becomes the entry's ``uri_r`` (fragment-stripped, **not** fetched), the
     ``published:`` date becomes ``content_published_at`` (below an
     explicit operator date), the frontmatter ``tags:`` merge with ``--tags``, and
-    the source type is ``WEB_PAGE`` — so a clipping is trustable, decayable, and
+    the source type is ``WEB_PAGE``, so a clipping is trustable, decayable, and
     queryable as the web page it is, unlike the same folder run through
     ``import vault``. The frontmatter-stripped **body** is the deposited content.
     A capture whose header is absent / malformed falls back to a plain
@@ -376,44 +381,170 @@ def import_mcp_memory_cmd(
         "operator", help="Agent or operator ID performing the import."
     ),
     tags: str | None = typer.Option(None, help="Comma-separated tags added to the corpus entry."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Report what the import would produce (counts, what is dropped, a sample) "
+            "without depositing or writing anything."
+        ),
+    ),
+    sample: int = typer.Option(
+        5, "--sample", min=0, help="With --dry-run: how many mapped records to show."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="With --dry-run: emit the report as JSON instead of text."
+    ),
     debug: bool = typer.Option(False, "--debug", help="Show DEBUG-level logs from deposit."),
 ) -> None:
     """Deposit a reference memory-server ``memory.jsonl`` for migration.
 
     Brings an existing ``@modelcontextprotocol/server-memory`` graph across:
     entities become Subjects, observations become single-subject particles, and
-    relations become two-subject particles — the same encoding
+    relations become two-subject particles, the same encoding
     ``particles memory serve`` reads, so a migrated graph is visible
     through the façade immediately.
 
     The export is deposited **verbatim** as an ``MCP_MEMORY_EXPORT`` entry
     (``STABLE`` / ``NEVER``: a dump is a record of what was seen, not a live
     handle), and every particle points back at it by line number. Nothing is
-    attributed to the incumbent store itself — the SDK never fetched it and
+    attributed to the incumbent store itself: the SDK never fetched it and
     cannot re-verify it, so provenance names the artifact it actually holds.
     Re-running is idempotent (content-hash dedup).
+
+    One thing does not come across: an entity with no observations that no
+    relation names. A store holds a name only through something believed about
+    it, so there is nothing to attach it to. The verb lists those entities when
+    it runs; an observation-less entity that *is* a relation endpoint migrates,
+    with its type.
 
     Migrated beliefs are deliberately low-confidence: they are second-hand, and
     the incumbent's own scores are preserved as tags rather than becoming
     confidence values. Raise them with ``particles trust set`` once you vouch
     for the source, not by editing the import floor.
 
+    Run it with ``--dry-run`` first. That parses the export and runs the same
+    mapping the import runs, then prints what it would produce: entities to
+    Subjects, records to particles, everything the mapping drops (including
+    the entities that will not migrate, by name), and a sample. It
+    opens no store and deposits nothing, so it is safe on a store you care
+    about and needs no ``particles db init``. Its counts are what the export
+    contributes: on a store that already holds part of it, Subjects re-attach
+    and identical claims dedup, so the real import writes no more than this.
+
     \b
+        particles import mcp-memory ~/.mcp/memory.jsonl --dry-run
         particles import mcp-memory ~/.mcp/memory.jsonl
         particles extract --all-pending
         particles lint
     """
-    _refuse_in_remote_mode("mcp-memory")
+    if json_out and not dry_run:
+        typer.echo("Error: --json applies to the --dry-run report.", err=True)
+        raise typer.Exit(2)
     configure_logging(False, debug)
+    if dry_run:
+        # Before the remote-mode refusal on purpose: the report is computed from
+        # the client's file by Client-layer code and reaches no store, local or
+        # remote, so there is nothing for remote mode to get wrong.
+        from particles.extraction.mcp_memory import preview_memory_export
+
+        preview = preview_memory_export(
+            export_path.read_bytes(), deposited_by=deposited_by, sample_size=sample
+        )
+        if json_out:
+            typer.echo(json.dumps(preview.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            for line in _render_migration_preview(preview, export_path):
+                typer.echo(line)
+        if not preview.particles:
+            raise typer.Exit(1)
+        return
+    _refuse_in_remote_mode("mcp-memory")
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
     entry_id, _snapshot_id = run(_import_mcp_memory(export_path, deposited_by, tag_list))
     typer.echo(f"Deposited {export_path} as corpus entry {entry_id}.")
+    # Said here, at the door, rather than only as a quality note on a later
+    # `extract`: an entity nothing is believed about is the one thing this verb
+    # leaves behind, and the user should learn that before relying on the
+    # migrated graph. The parser is Client-side and store-free, so
+    # reading the export twice costs nothing.
+    for line in _unmigrated_entity_lines(export_path):
+        typer.echo(line)
     typer.echo(
         "Migrated beliefs are second-hand: they carry calibration source IMPORTED and a low "
         "import-floor confidence, and the source store's own scores do not carry over. "
         "Use `particles trust set` to raise the whole export once you vouch for it."
     )
     typer.echo("Next: `particles extract --all-pending` to turn the export into particles.")
+
+
+def _render_migration_preview(preview: MigrationPreview, export_path: Path) -> list[str]:
+    """Render a migration dry-run report as text.
+
+    Written against the format-independent report shape, not against one
+    incumbent, so the next ``import <incumbent>`` verb reuses it unchanged.
+    """
+    floor = ", ".join(f"{value:g}" for value in preview.confidence_values) or "n/a"
+    calibration = ", ".join(preview.calibration_sources) or "n/a"
+    lines = [
+        f"Dry run: nothing was deposited or written. Report for {export_path}",
+        "",
+        "In the export:",
+        *(f"  {count:>7}  {kind}" for kind, count in preview.records.items()),
+        "",
+        "The import would produce (at most; an existing store re-attaches and dedups):",
+        f"  {preview.subjects:>7}  Subjects",
+        f"  {preview.particles:>7}  particles  "
+        f"({preview.single_subject_particles} about one Subject, "
+        f"{preview.multi_subject_particles} linking several)",
+        f"           confidence {floor}, calibration source {calibration}",
+    ]
+    if preview.entities_without_records:
+        kept = len(preview.entities_without_records) - len(preview.entities_lost)
+        lines += [
+            "",
+            f"Entities with no observations: {len(preview.entities_without_records)}. "
+            "They produce no particle.",
+            f"  {len(preview.entities_lost):>7}  would NOT survive the import"
+            + (f": {_name_list(preview.entities_lost)}" if preview.entities_lost else ""),
+            f"  {kept:>7}  survive as a relation endpoint, with their entity type",
+        ]
+    lines += ["", "Dropped from the particles, preserved in the export:"]
+    lines += [f"  - {note}" for note in preview.dropped] or ["  (nothing)"]
+    if preview.sample:
+        lines += ["", f"Sample ({len(preview.sample)} of {preview.particles}):"]
+        lines += [
+            f"  [{item.location or '?'}] {' + '.join(item.subjects)}: {item.content}"
+            for item in preview.sample
+        ]
+    if preview.particles:
+        lines += ["", "Next: run again without --dry-run, then `particles extract --all-pending`."]
+    else:
+        lines += ["", "Nothing in this export would become a particle."]
+    return lines
+
+
+def _name_list(names: list[str], limit: int = 10) -> str:
+    shown = ", ".join(names[:limit])
+    return shown if len(names) <= limit else f"{shown}, and {len(names) - limit} more"
+
+
+def _unmigrated_entity_lines(export_path: Path) -> list[str]:
+    """The export's observation-less entities, as the lines the verb prints."""
+    from particles.extraction.mcp_memory import (
+        empty_entity_notes,
+        empty_entity_report,
+        parse_memory_jsonl,
+    )
+
+    report = empty_entity_report(parse_memory_jsonl(export_path.read_bytes()))
+    lines = [f"Note: {note}" for note in empty_entity_notes(report)]
+    if report.dropped:
+        lines.append(
+            "      To keep one, recreate it after the swap with the memory server's "
+            "`create_entities` tool (it accepts an empty `observations` list)."
+        )
+    return lines
 
 
 async def _import_mcp_memory(

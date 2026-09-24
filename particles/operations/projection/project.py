@@ -76,8 +76,8 @@ class SelectPinError(ValueError):
     particle** (retracted, superseded, or never existed): a pin that points at
     nothing is an author mistake, not silent doc drift, so the projection fails
     loudly rather than render a section quietly missing its pinned claim. The
-    message names the offending id and section — mirroring :class:`SpliceError`
-     — so an operator can re-pin the successor id or widen the cage.
+    message names the offending id and section — mirroring :class:`SpliceError`—
+    so an operator can re-pin the successor id or widen the cage.
 
     A stale ``select.deny`` id, by contrast, is only a warning (its exclusion is
     already satisfied), never this error.
@@ -111,6 +111,7 @@ async def _select_section_particles(
     section: DerivedSection,
     *,
     use_embeddings: bool,
+    observer_project: str | None = None,
 ) -> list[Selected]:
     """Select a derived section's candidate particles under the current-truth filter.
 
@@ -160,6 +161,9 @@ async def _select_section_particles(
             # Current-truth filter — pinned, not caller-tunable.
             include_non_asserted=False,
             include_document_meta=False,
+            # a region spliced into one project's file is read through
+            # that project's observer; None renders the store-wide view.
+            observer_project=observer_project,
         )
         # the projection is a projection/digest-path consumer, so the
         # usefulness factor is folded into ranking *inside* `retrieve_ranked`,
@@ -308,7 +312,8 @@ async def select_section_particles(
     :func:`_select_section_particles`.
 
     Defaults to the deterministic, key-free ranking (``use_embeddings=False``)
-    — the same selection the drift gate snapshots. Consumed by the ``scope=projection`` graph render (``operations.graph_view``), which must
+    — the same selection the drift gate snapshots. Consumed by the
+    ``scope=projection`` graph render (``operations.graph_view``), which must
     stay reproducible without an API key.
     """
     return await _select_section_particles(session, section, use_embeddings=use_embeddings)
@@ -319,8 +324,8 @@ async def required_particle_ids(session: AsyncSession, manifest: DocManifest) ->
 
     The union of each derived section's deterministic, key-free selection
     (``use_embeddings=False``) — i.e. the particles this projection's prose
-    *depends on*. Feeds the ``projection_blocking`` curation signal
-    : a card whose belief is in this set is worth tending first,
+    *depends on*. Feeds the ``projection_blocking`` curation signal:
+    a card whose belief is in this set is worth tending first,
     because fixing it changes a generated doc. Mechanical blocks bind no
     particles and are skipped.
     """
@@ -463,8 +468,8 @@ def _apply_budget(
     Rank-order truncation: while the assembled body exceeds ``max_lines`` /
     ``max_bytes``, the globally lowest-effective-confidence **bullet** entry
     (deterministic id tie-break, matching the selection's rank order) is
-    dropped and the body re-assembled. ``select.allow`` pins are exempt
-    ; prose sections and mechanical blocks are never truncated —
+    dropped and the body re-assembled. ``select.allow`` pins are exempt;
+    prose sections and mechanical blocks are never truncated —
     if the budget still cannot be met once every droppable bullet is gone, the
     over-budget body is returned with a warning rather than corrupting prose.
     """
@@ -752,8 +757,13 @@ async def project_splice_body(
     *,
     base_dir: Path,
     synthesize: bool,
+    observer_project: str | None = None,
 ) -> ProjectionResult:
     """Render a manifest's *body* for splicing into a sentinel region.
+
+    ``observer_project`` selects every derived section through that
+    project observer — the ``MEMORY.md`` region of one project is that
+    project's view of the store.
 
     Like :func:`project_document` but tailored for the block-splice write mode:
     it omits the document banner (the host file is hand-authored) and, for a
@@ -783,6 +793,7 @@ async def project_splice_body(
             synthesize=synthesize,
             header=header,
             backrefs=backrefs,
+            observer_project=observer_project,
         )
         any_synth = any_synth or used
         parts.append(part)
@@ -802,6 +813,7 @@ async def _derived_section_part(
     synthesize: bool,
     header: str,
     backrefs: dict[str, str] | None,
+    observer_project: str | None = None,
 ) -> tuple[str | _BulletSectionPart, bool, dict[str, str] | None]:
     """Render one derived section for a splice body.
 
@@ -813,7 +825,10 @@ async def _derived_section_part(
     """
     bullets = section.render == "bullets"
     particles = await _select_section_particles(
-        session, section, use_embeddings=synthesize and not bullets
+        session,
+        section,
+        use_embeddings=synthesize and not bullets,
+        observer_project=observer_project,
     )
     if bullets:
         if backrefs is None:

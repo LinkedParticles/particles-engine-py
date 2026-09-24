@@ -39,9 +39,12 @@ from particles.api.cli._claude_code import (
     filter_memory_file_for_deposit,
     projection_enabled,
     redact_secrets,
+    stray_memory_dirs,
+    transcript_project_key,
 )
 from particles.api.cli._logging import configure_logging
 from particles.config import get_config
+from particles.core.observer_scope import project_tag
 from particles.db import session_scope
 from particles.secrets import get_anthropic_api_key_optional
 
@@ -77,7 +80,7 @@ def audit_cmd(
     estimate: bool = typer.Option(
         False,
         "--estimate",
-        help="Print the extraction cost estimate and exit — no deposit, no LLM call.",
+        help="Print the extraction cost estimate and exit: no deposit, no LLM call.",
     ),
     yes: bool = typer.Option(False, "--yes", help="Skip the cost-confirmation prompt."),
     judge: bool = typer.Option(
@@ -90,7 +93,7 @@ def audit_cmd(
         "--scope",
         help=(
             "Semantic-finding scope (contradiction probe + duplicate scan): "
-            "'harvested' (default with PATH — headline counts only pairs touching this "
+            "'harvested' (default with PATH; headline counts only pairs touching this "
             "harvest's beliefs; the store-wide duplicate total is still disclosed) or "
             "'store' (the whole store; the re-audit default)."
         ),
@@ -174,16 +177,27 @@ def _make_progress_renderer() -> Callable[[AuditProgress], None]:
     return _render
 
 
-def run_first_run_audit(store: str) -> None:
+def run_first_run_audit(store: str, only_memory_dir: Path | None = None) -> None:
     """The ``init claude-code`` closing step.
 
     Audits every Claude Code memory directory under ``~/.claude/projects/``
-    into the freshly registered store, with the same estimate/confirm gate as
-    the standalone verb. Raises ``typer.Exit`` on refusal/abort — the caller
-    (init) catches it so a declined audit never fails the install.
+    into the freshly registered store — or, for a ``--project`` install, only
+    ``only_memory_dir``, that project's own — with the same
+    estimate/confirm gate as the standalone verb. Raises ``typer.Exit`` on
+    refusal/abort — the caller (init) catches it so a declined audit never fails
+    the install.
     """
     root = Path.home() / ".claude" / "projects"
-    dirs = sorted(p for p in root.glob("*/memory") if p.is_dir()) if root.is_dir() else []
+    # Linked worktrees' memory directories are this SDK's own stray output,
+    # never Claude Code's; auditing them would ingest the projection.
+    strays = set(stray_memory_dirs(root))
+    dirs = (
+        sorted(p for p in root.glob("*/memory") if p.is_dir() and p not in strays)
+        if root.is_dir()
+        else []
+    )
+    if only_memory_dir is not None:
+        dirs = [d for d in dirs if d == only_memory_dir]
     if not dirs:
         typer.echo(
             "\nFirst-run memory audit: no memory directories found under "
@@ -243,12 +257,18 @@ def _project_tag(memory_dir: Path) -> list[str]:
     return []
 
 
-def _plan_memory_file(md: Path, tags: list[str]) -> _PlannedDeposit | None:
+def _plan_memory_file(
+    md: Path, tags: list[str], memory_dir: Path | None = None
+) -> _PlannedDeposit | None:
     """Filter + shape one memory-file deposit.
 
     ``content_published_at`` uses the canonical date ladder (leading date
     line › file mtime) rather than bare mtime, so a dated memory file carries
     its content date and the age-discount lens sees the real age.
+
+    ``memory_dir`` is the memory directory ``md`` was found under, so its
+    projected region is compared with that project's own render; a
+    file audited by bare path has none.
     """
     # The precedence ladder deposit_file uses; imported from its home
     # module (the audit harvests via deposit_text_versioned, which takes the
@@ -256,7 +276,7 @@ def _plan_memory_file(md: Path, tags: list[str]) -> _PlannedDeposit | None:
     from particles.corpus.deposit import _resolve_content_published_at
 
     raw = md.read_text(encoding="utf-8", errors="replace")
-    text = filter_memory_file_for_deposit(raw)
+    text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir)
     if not text.strip():
         return None
     return _PlannedDeposit(
@@ -280,7 +300,14 @@ def _plan_transcript(jsonl: Path) -> _PlannedDeposit | None:
         text=redact_secrets(text),
         source_type="CONVERSATION",
         mutability="APPEND_ONLY",
-        tags=["claude-code", f"session:{session_id}", "audit"],
+        # The same project key the SessionEnd hook stamps, so a transcript
+        # audited before any hook saw it is attributed too.
+        tags=[
+            "claude-code",
+            f"session:{session_id}",
+            "audit",
+            project_tag(transcript_project_key(jsonl)),
+        ],
         content_published_at=None,
     )
 
@@ -298,11 +325,11 @@ def build_harvest_plan(
     """
     plan = _HarvestPlan()
 
-    memory_files: list[tuple[Path, list[str]]] = []
+    memory_files: list[tuple[Path, list[str], Path | None]] = []
     for path in paths:
         if path.is_dir():
             tags = ["claude-code", "memory-file", *_project_tag(path)]
-            memory_files.extend((md, tags) for md in sorted(path.rglob("*.md")))
+            memory_files.extend((md, tags, path) for md in sorted(path.rglob("*.md")))
             memory_md = path / "MEMORY.md"
             plan.memory_dirs.append(
                 (
@@ -318,12 +345,12 @@ def build_harvest_plan(
                 plan.deposits.append(planned)
                 plan.transcripts += 1
         else:
-            memory_files.append((path, ["claude-code", "memory-file"]))
+            memory_files.append((path, ["claude-code", "memory-file"], None))
 
     if max_entries is not None:
         memory_files = memory_files[:max_entries]
-    for md, tags in memory_files:
-        planned = _plan_memory_file(md, tags)
+    for md, tags, memory_dir in memory_files:
+        planned = _plan_memory_file(md, tags, memory_dir)
         if planned is not None:
             plan.deposits.append(planned)
             plan.memory_files += 1

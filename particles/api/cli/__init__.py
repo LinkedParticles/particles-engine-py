@@ -43,7 +43,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 app = typer.Typer(
     name="particles",
-    help="Particles SDK — epistemic knowledge management for AI agents (v0.3 Core).",
+    help="Particles SDK: epistemic knowledge management for AI agents (v0.3 Core).",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
@@ -302,7 +302,7 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """Particles SDK — epistemic knowledge management for AI agents (v0.3 Core)."""
+    """Particles SDK: epistemic knowledge management for AI agents (v0.3 Core)."""
 
 
 # ---------------------------------------------------------------------------

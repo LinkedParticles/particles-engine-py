@@ -43,9 +43,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.duplicate_key import content_hash, duplicate_key
 from particles.core.schema import Particle, is_truth_apt
 from particles.core.stance import holder_from_properties
+from particles.core.status import Status, StatusReason
 from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
-from particles.store.particle_store import get_active_particles_by_content_hashes
+from particles.store.particle_store import (
+    get_active_particles_by_content_hashes,
+    get_particles_by_content_hashes_and_state,
+)
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +142,80 @@ async def build_duplicate_index(
     hashes = [content_hash(c) for c in contents]
     rows = await get_active_particles_by_content_hashes(session, hashes)
     return DuplicateIndex(rows, exclude_ids=exclude_ids)
+
+
+# the retirements that encode a *judgment about the value* — a
+# person (or a review-derived policy acting on a person's judgment) decided
+# this claim should not be believed as stated. A re-emitted twin of any of
+# these is quarantined for review rather than re-minted ACTIVE.
+#
+# Deliberately NOT in this set, because each encodes something other than a
+# verdict on the value: SOURCE_RETRACTED (the *source* was withdrawn — another
+# source making the same claim is new evidence), SUPERSEDED_BY_REINDEX and
+# DOCUMENT_SUPERSEDED (a newer generation replaced it), DUPLICATE_MERGED (an
+# identical copy folded away — the claim is still ACTIVE elsewhere),
+# VALIDITY_EXPIRED (time, not judgment), and the trust-differential demotions
+# TRUST_DEMOTED / LOWER_TRUST_SOURCE (a policy about sources, not a verdict on
+# the claim). CONFLICT_PENDING is handled separately below: it is a hold
+# awaiting judgment, not a judgment.
+JUDGMENT_RETIREMENTS: tuple[tuple[Status, StatusReason], ...] = (
+    (Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION),
+    (Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION),
+    (Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED),
+)
+
+# A twin already sitting in quarantine (an ordinary §6.6 loser, or an earlier
+# hold). Re-encountering it appends the new observation to the held
+# row rather than opening a second hold — what makes a repeated reindex of an
+# unchanged source idempotent instead of a wrapper per run.
+PENDING_HOLD: tuple[tuple[Status, StatusReason], ...] = (
+    (Status.PROVENANCE_STALE, StatusReason.CONFLICT_PENDING),
+)
+
+
+def is_judgment_retired(particle: Particle) -> bool:
+    """True when the particle left ACTIVE by a judgment about its value."""
+    return (particle.status, particle.status_reason) in JUDGMENT_RETIREMENTS
+
+
+def is_pending_hold(particle: Particle) -> bool:
+    """True for a quarantined row awaiting review."""
+    return (particle.status, particle.status_reason) in PENDING_HOLD
+
+
+async def build_retired_value_index(
+    session: AsyncSession,
+    contents: Sequence[str],
+    *,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> DuplicateIndex:
+    """Load the retired-value index for a pass in one indexed probe.
+
+    Registers, under the exact-duplicate identity key, every judgment-retired twin
+    (:data:`JUDGMENT_RETIREMENTS`) and every pending hold (:data:`PENDING_HOLD`)
+    of some candidate. Pending holds are registered **first** so that, where
+    both exist for one key, a re-emitted candidate lands on the open hold (one
+    review lifts everything) rather than opening a second one.
+
+    Consulted *after* the ACTIVE index: a claim that is currently believed
+    somewhere absorbs the observation before any retired twin is
+    considered — the value is not in dispute if the store holds it ACTIVE.
+    """
+    hashes = [content_hash(c) for c in contents]
+    pending = await get_particles_by_content_hashes_and_state(session, hashes, PENDING_HOLD)
+    retired = await get_particles_by_content_hashes_and_state(session, hashes, JUDGMENT_RETIREMENTS)
+    return DuplicateIndex([*pending, *retired], exclude_ids=exclude_ids)
+
+
+def retired_value_note(quarantined: int, absorbed: int) -> str:
+    """The disclosure line for an extraction pass's quality notes."""
+    return (
+        f"RETIRED_VALUE_QUARANTINED: {quarantined} candidate(s) re-asserted a claim an "
+        f"operator or reviewer had retired; each was stored quarantined "
+        f"(CONFLICT_PENDING) behind an INCONSISTENCY record for review instead of "
+        f"re-entering ACTIVE, and {absorbed} further observation(s) were recorded on a "
+        f"hold already awaiting review"
+    )
 
 
 def suppression_note(count: int) -> str:

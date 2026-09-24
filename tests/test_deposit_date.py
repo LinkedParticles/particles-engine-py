@@ -9,7 +9,8 @@ Covers the pure leading-date detector, the precedence resolver
 stamps `content_published_at` on the snapshot, and the CLI `--date` validation.
 
 Also covers the date-line splitter (`split_file_by_date` + the
-`_parse_date_line` / `_segment_by_date_lines` primitives it shares with the leading-date detector) and the `deposit --split-by-date` CLI flag.
+`_parse_date_line` / `_segment_by_date_lines` primitives it shares with the
+leading-date detector) and the `deposit --split-by-date` CLI flag.
 """
 
 from __future__ import annotations

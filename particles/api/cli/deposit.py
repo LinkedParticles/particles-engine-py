@@ -44,7 +44,7 @@ def deposit_cmd(
         None,
         "--text",
         help=(
-            "Deposit a literal string instead of a file or URL — "
+            "Deposit a literal string instead of a file or URL. This is "
             "the CLI half of the MCP `deposit_text` tool, so you no longer have "
             "to write a temp file to record one note. Mutually exclusive with a "
             "source argument. `particles deposit -` reads the same content from "
@@ -57,7 +57,7 @@ def deposit_cmd(
         None,
         help=(
             "Override the source_type (normally auto-detected from the "
-            "extension / URL / content — you rarely need this). Core values "
+            "extension / URL / content; you rarely need this). Core values "
             "(particles.core.schema.SourceType): WEB_PAGE, PDF, CSV, "
             "CONVERSATION, DATA_EXPORT, LOCAL_FILE, LOCAL_MARKDOWN, "
             "ACADEMIC_PAPER, FORUM, BLOG, TAXONOMY_DEFINITION, "
@@ -85,7 +85,7 @@ def deposit_cmd(
         help=(
             "Record this content's authorship date as "
             "content_published_at (ISO YYYY-MM-DD). Overrides the leading-date "
-            "and file-mtime auto-detection. Local-file deposits only — ignored "
+            "and file-mtime auto-detection. Local-file deposits only; ignored "
             "with a warning for URLs."
         ),
     ),
@@ -108,7 +108,7 @@ def deposit_cmd(
         help=(
             "Follow the post's primary URL for link-shaped sources "
             "(Reddit / HN / Mastodon link cards). When unspecified, the "
-            "extractor's default applies — Reddit / HN / Mastodon default to "
+            "extractor's default applies: Reddit / HN / Mastodon default to "
             "True, everything else to False."
         ),
     ),
@@ -117,7 +117,7 @@ def deposit_cmd(
         "--follow-comment-links/--no-follow-comment-links",
         help=(
             "Reserved-but-deferred. Passing --follow-comment-links "
-            "emits a warning and proceeds as if False — comment-link "
+            "emits a warning and proceeds as if False. Comment-link "
             "following is captured § Deferred and will land in a "
             "follow-up release."
         ),
@@ -128,7 +128,7 @@ def deposit_cmd(
         help=(
             "Mutability class: STABLE | MUTABLE | APPEND_ONLY | EPHEMERAL. "
             "Local files default to STABLE. MUTABLE means a new snapshot retires the "
-            "generation of beliefs it replaces — the right class for a "
+            "generation of beliefs it replaces, the right class for a "
             "rule file like AGENTS.md that is edited in place. Local deposits only."
         ),
     ),

@@ -31,7 +31,7 @@ app.add_typer(particle_app, name="particle")
 
 @particle_app.command("show")
 def particle_show_cmd(
-    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK — first 8 chars)"),
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, first 8 chars)"),
 ) -> None:
     """Show one particle's content, status, confidence, subjects, and source URL."""
     run(_particle_show(particle_id))
@@ -170,20 +170,60 @@ async def _render_particle_detail(session: AsyncSession, particle: Particle) -> 
             typer.echo(f"  {i}. {member.id[:8]}…  {preview}")
 
 
+@particle_app.command("source")
+def particle_source_cmd(
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, first 8 chars)"),
+) -> None:
+    """Show the source passage a particle was extracted from.
+
+    Re-derives the passage from the stored snapshot, reading nothing from the
+    original location. The match line says how it was found: ``exact`` is the
+    chunk the extractor saw, verified by its recorded hash; ``located`` is the
+    paragraph sharing the most terms with the belief (short documents record
+    no chunk hash, so this is the usual result for them) and is a reading aid,
+    not verification; ``whole source`` means no passage stood out. Metadata is
+    written to stderr, so stdout carries only the passage text.
+    """
+    run(_particle_source(particle_id))
+
+
+async def _particle_source(id_prefix: str) -> None:
+    from particles.api.cli._id_norm import normalise_particle_id
+    from particles.api.cli._source_passage import header_lines
+    from particles.api.client import get_backend
+
+    backend = get_backend()
+    norm = normalise_particle_id(id_prefix)
+    # Prefix resolution is local-only, as for ``particle show``.
+    if not backend.remote:
+        async with session_scope() as session:
+            norm = await _resolve_show_prefix(session, norm, id_prefix)
+
+    passage = await backend.particle_source(norm)
+    if passage is None:
+        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        raise typer.Exit(1)
+    for line in header_lines(passage):
+        typer.echo(line, err=True)
+    if not passage.text:
+        raise typer.Exit(1)
+    typer.echo("", err=True)
+    typer.echo(passage.text)
+
+
 @particle_app.command("narrative")
 def particle_narrative_cmd(
-    particle_id: str = typer.Argument(..., help="NARRATIVE particle ID (prefix OK — ≥ 8 chars)"),
+    particle_id: str = typer.Argument(..., help="NARRATIVE particle ID (prefix OK, ≥ 8 chars)"),
     synthesize: bool = typer.Option(
         False,
         "--synthesize",
-        help="Render the narrative as one cited prose article instead "
-        "of listing its constituents.",
+        help="Render the narrative as one cited prose article instead of listing its constituents.",
     ),
 ) -> None:
     """Show a NARRATIVE particle's constituents in SEQUENCE_IN order.
 
     With ``--synthesize``, render the narrative as one cited prose article by
-    traversing its SEQUENCE_IN chain — the same synthesis engine the
+    traversing its SEQUENCE_IN chain. This is the same synthesis engine the
     wiki/Obsidian exporters use, here scoped to a single narrative.
     """
     run(_particle_narrative(particle_id, synthesize=synthesize))
@@ -377,7 +417,7 @@ async def _particle_untag(id_prefix: str, tags: list[str]) -> None:
 
 @particle_app.command("retract")
 def particle_retract_cmd(
-    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK — first 8 chars)"),
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, first 8 chars)"),
     reason: str = typer.Option(
         ..., "--reason", help="Why this belief is being retired; recorded in the event log"
     ),
@@ -392,9 +432,10 @@ def particle_retract_cmd(
     session may mutate in order to fix one row. This retires exactly one.
 
     ACTIVE → RETRACTED with reason ``EXPLICIT_RETRACTION``, routed through
-    ``update_particle_status`` so the ``retired_at`` stamp and the ``PARTICLE_RETRACTED`` event (carrying ``--reason``) are both
+    ``update_particle_status`` so the ``retired_at`` stamp and the
+    ``PARTICLE_RETRACTED`` event (carrying ``--reason``) are both
     written. An operator-asserted (HUMAN_REVIEW) belief is still not retractable
-    this way — revising one is Review's job. Run ``particles lint`` afterwards to
+    this way; revising one is Review's job. Run ``particles lint`` afterwards to
     cascade ``PROVENANCE_STALE`` to anything that depended on it.
     """
     if not reason.strip():

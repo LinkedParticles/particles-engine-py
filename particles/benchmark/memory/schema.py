@@ -69,11 +69,23 @@ ABSTENTION_SUFFIX = "_abs"
 #: mistake behind a word that implies nobody was at fault.
 QA_EXCLUSION_BUDGET = "budget"
 QA_EXCLUSION_INFRA = "infra"
-QA_EXCLUSION_KINDS: tuple[str, ...] = (QA_EXCLUSION_BUDGET, QA_EXCLUSION_INFRA)
+#: A third kind that only a **re-judge** (:mod:`.rejudge`) can produce: the
+#: source report carried no answer text for the row, so there was nothing to
+#: re-score. Either the row was already excluded at answer time, or the run
+#: was made with ``benchmark.record_claim_text`` off. Disclosed under its own
+#: label because it means neither "the cap was too low" nor "the API
+#: flaked" — it means the source file cannot support a re-judge of that row.
+QA_EXCLUSION_UNRECORDED = "unrecorded"
+QA_EXCLUSION_KINDS: tuple[str, ...] = (
+    QA_EXCLUSION_BUDGET,
+    QA_EXCLUSION_INFRA,
+    QA_EXCLUSION_UNRECORDED,
+)
 
 _EXCLUSION_LABELS: dict[str, str] = {
     QA_EXCLUSION_BUDGET: "output-budget (no text block within max_tokens)",
     QA_EXCLUSION_INFRA: "infra (still failing after retries)",
+    QA_EXCLUSION_UNRECORDED: "unrecorded (no stored answer to re-judge)",
 }
 
 
@@ -96,7 +108,8 @@ class MemorySession(BaseModel):
     """One timestamped user–assistant haystack session.
 
     Maps to exactly one ``CONVERSATION`` corpus deposit (zero
-    format adaptation — this is the same material shape the harvester deposits).
+    format adaptation — this is the same material shape the
+    harvester deposits).
     """
 
     session_id: str
@@ -185,6 +198,26 @@ class RunSelection(BaseModel):
     # manifest's write-side tuple is what a reader needs to place this arm.
     stores_reused: bool = False
     reused_from: dict[str, str] | None = None
+    # Version of the shared answer scaffold (the system turn conditions ii–iv
+    # all use; ``benchmark_memory.answer_scaffold``). Part of the tuple: the
+    # scaffold moves every QA column at once, so two runs are comparable only
+    # when it matches. Defaults to 1 so a report written before the knob
+    # existed (the inaugural 2026-08-16 table) loads as the text it ran under.
+    answer_scaffold: int = 1
+    # Version of the judge-prompt protocol (``benchmark_memory.judge_protocol``):
+    # 1 is the paraphrase the inaugural table was scored under, 2 the official
+    # autoeval templates verbatim. Same comparability rule and same default
+    # as ``answer_scaffold``: a pre-knob report loads as the protocol it was
+    # actually judged under.
+    judge_protocol: int = 1
+    # How the qa_particles context rendered each claim's subjects
+    # (``benchmark_memory.subject_rendering``): "uuids" (the resolved ids, what
+    # every published table through 1.146.5 used), "names" (canonical_name), or
+    # "none". It changes the text of every qa_particles context and therefore
+    # the read budget, so it binds comparability the same way the scaffold
+    # does. Defaults to "uuids" so a report written before the knob existed
+    # loads as the rendering it actually ran under.
+    subject_rendering: str = "uuids"
     # Snapshot of the pipeline thresholds in effect for the run.
     thresholds: dict[str, float] = Field(default_factory=dict)
     # The memory under test: ``particles`` (the store) or one of the
@@ -265,6 +298,24 @@ class QaQuestionResult(BaseModel):
     ~115k-token ``qa_full_context`` baseline is far likelier to fail than the
     tiny ``qa_no_memory`` call, so a shared failure rate lands asymmetrically
     on the very baseline this harness must not bury.
+
+    ``answer`` and ``verdict`` are the answering model's reply and the judge's
+    raw verdict text — the audit half of the row. Without them a report of
+    record could say a question was marked wrong and give a reviewer no way
+    to see what was said or why the judge disagreed, short of re-paying for
+    the run (the extractor benchmark closed the same gap with
+    ``emitted_claims``). Both are ``None`` when
+    ``benchmark.record_claim_text`` is off — the text is suppressed at
+    production, so no run file or checkpoint ever holds it — and ``answer``
+    stays set on an excluded row whose judge call failed, since the answer
+    did exist. ``context_particle_ids`` (the ``qa_particles`` slot only; empty
+    for the baselines and the comparator memories, which retrieve no
+    particles) lists the ids of the particles that formed the context block,
+    in rank order and after the ``context_budget_tokens`` clamp, so a wrong
+    answer can be traced to whether the answer-bearing claim was in front of
+    the model or never retrieved. Ids, not text, so they are recorded
+    regardless of the flag; they resolve in a store kept with
+    ``--keep-stores``.
     """
 
     question_id: str
@@ -273,6 +324,9 @@ class QaQuestionResult(BaseModel):
     abstention: bool = False
     #: One of :data:`QA_EXCLUSION_KINDS` when ``correct`` is ``None``.
     excluded: str | None = None
+    answer: str | None = None
+    verdict: str | None = None
+    context_particle_ids: list[str] = Field(default_factory=list)
 
 
 class QaConditionMetrics(BaseModel):
@@ -300,13 +354,17 @@ class QaConditionMetrics(BaseModel):
     excluded_budget: int = 0
     #: Excluded: the call still failed after the configured retries.
     excluded_infra: int = 0
+    #: Excluded: a re-judge found no stored answer on the source row
+    #: (:data:`QA_EXCLUSION_UNRECORDED`). Always 0 on a report the runner
+    #: wrote directly.
+    excluded_unrecorded: int = 0
     accuracy_by_type: dict[str, float] = Field(default_factory=dict)
     per_question: list[QaQuestionResult] = Field(default_factory=list)
 
     @property
     def excluded(self) -> int:
-        """Calls excluded from the accuracy denominator, both causes."""
-        return self.excluded_budget + self.excluded_infra
+        """Calls excluded from the accuracy denominator, every cause."""
+        return self.excluded_budget + self.excluded_infra + self.excluded_unrecorded
 
 
 class MemoryBenchmarkReport(BaseModel):
@@ -385,6 +443,7 @@ def _excluded_lines(metrics: QaConditionMetrics) -> list[str]:
         for kind, count in (
             (QA_EXCLUSION_BUDGET, metrics.excluded_budget),
             (QA_EXCLUSION_INFRA, metrics.excluded_infra),
+            (QA_EXCLUSION_UNRECORDED, metrics.excluded_unrecorded),
         )
         if count
     ]
@@ -434,6 +493,12 @@ def render_report_table(report: MemoryBenchmarkReport) -> str:
         knobs.append("consolidation cycle ON")
     if report.selection.dedup_judge:
         knobs.append("dedup judge ON (APPLY)")
+    if report.selection.answer_scaffold != 1:
+        knobs.append(f"answer scaffold v{report.selection.answer_scaffold}")
+    if report.selection.judge_protocol != 1:
+        knobs.append(f"judge protocol v{report.selection.judge_protocol} (official templates)")
+    if report.selection.subject_rendering != "uuids":
+        knobs.append(f"subject rendering: {report.selection.subject_rendering}")
     if report.selection.stores_reused:
         # Not a knob on the pipeline but on the *provenance of the store* —
         # rendered in the same line because it constrains comparability the

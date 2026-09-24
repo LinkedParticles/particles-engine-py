@@ -51,7 +51,8 @@ class JsonlExporter:
                 below this threshold before writing (cross-exporter contract).
             include_non_asserted (bool, default False): keep non-asserted
                 particles — a document's rejected / superseded / deferred /
-                counterfactual prose (polarity DECLINED / HYPOTHETICAL). Excluded from the default surface; set True to keep.
+                counterfactual prose (polarity DECLINED / HYPOTHETICAL).
+                Excluded from the default surface; set True to keep.
         """
         if output is None:
             raise ValueError("JsonlExporter requires an output file path")

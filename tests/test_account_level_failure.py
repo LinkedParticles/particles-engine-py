@@ -11,7 +11,8 @@ same billing 400 hundreds of lines deep. The key was *present*, so the existing
 fail-fast guard (which only covers a missing key) did not fire, and the
 extraction seam classified the billing error as a per-call transient.
 
-The predicate that distinguishes the two already existed for the circuit breaker, but it lived in the Engine (``operations/_llm``) where the
+The predicate that distinguishes the two already existed for the
+circuit breaker, but it lived in the Engine (``operations/_llm``) where the
 Client-layer extraction seam could not reach it.
 """
 

@@ -639,7 +639,8 @@ async def test_gated_readme_reproduces_via_restore(tmp_path: Path) -> None:
     Mirrors ``scripts/projection_drift.py``: restore the committed
     ``readme.corpus.jsonl`` into a fresh store (with extractor trust records, so
     effective confidence reproduces), then the deterministic ``check_drift``
-    matches the committed ``readme.snapshot.md`` — including the region-trailer check against the shipped ``README.md``. The ``select.allow``
+    matches the committed ``readme.snapshot.md`` — including the
+    region-trailer check against the shipped ``README.md``. The ``select.allow``
     pins resolve only because restore preserved the origin ids —
     fingerprint-reconciling import would re-id and break the pins.
     """

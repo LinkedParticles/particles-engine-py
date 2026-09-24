@@ -30,8 +30,8 @@ app.add_typer(links_app, name="links")
 
 @links_app.command("add")
 def links_add_cmd(
-    particle_a: str = typer.Argument(..., help="Particle A ID (prefix OK — ≥ 8 chars)"),
-    particle_b: str = typer.Argument(..., help="Particle B ID (prefix OK — ≥ 8 chars)"),
+    particle_a: str = typer.Argument(..., help="Particle A ID (prefix OK, ≥ 8 chars)"),
+    particle_b: str = typer.Argument(..., help="Particle B ID (prefix OK, ≥ 8 chars)"),
     relation_type: str = typer.Option(
         "co-evidential",
         "--type",
@@ -52,8 +52,8 @@ def links_add_cmd(
 
 @links_app.command("remove")
 def links_remove_cmd(
-    particle_a: str = typer.Argument(..., help="Particle A ID (prefix OK — ≥ 8 chars)"),
-    particle_b: str = typer.Argument(..., help="Particle B ID (prefix OK — ≥ 8 chars)"),
+    particle_a: str = typer.Argument(..., help="Particle A ID (prefix OK, ≥ 8 chars)"),
+    particle_b: str = typer.Argument(..., help="Particle B ID (prefix OK, ≥ 8 chars)"),
     relation_type: str = typer.Option(
         "co-evidential",
         "--type",
@@ -66,7 +66,7 @@ def links_remove_cmd(
 
 @links_app.command("list")
 def links_list_cmd(
-    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK — ≥ 8 chars)"),
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, ≥ 8 chars)"),
     kind: str | None = typer.Option(
         None,
         "--kind",
@@ -148,9 +148,9 @@ def links_dedup_cmd(
 ) -> None:
     """Merge identical-content duplicate beliefs into one survivor.
 
-    Exact content equality only — the same normalized key extract-time
+    Exact content equality only, the same normalized key extract-time
     suppression uses (whitespace and trailing punctuation absorbed, wording and
-    case preserved) — so no similarity threshold and no LLM call.
+    case preserved), so no similarity threshold and no LLM call.
     Redundant copies are linked CO_EVIDENTIAL to the survivor and superseded;
     nothing is ever deleted and the survivor is never mutated.
     """

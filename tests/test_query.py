@@ -1071,3 +1071,155 @@ async def test_query_with_an_encoder_reports_no_degradation(db_session: object) 
 
     assert result.ranking_degraded is None
     assert not result.answer.startswith("[Semantic ranking unavailable")
+
+
+class _ScriptedAnswerProvider:
+    """A ``query_response`` provider that records every budget it was asked for.
+
+    The port is the seam (``override_providers``), not the Anthropic
+    SDK mock: what this exercises is the *retry ladder's* arithmetic — which
+    ``max_tokens`` each attempt carries and how many attempts happen — which is
+    invisible below the port. Nothing here asserts on model wording.
+    """
+
+    def __init__(self, *, empty_replies: int, reply: str = "Pluto is a dwarf planet.") -> None:
+        self._empty_replies = empty_replies
+        self._reply = reply
+        self.budgets: list[int] = []
+
+    @property
+    def provider_model(self) -> str:
+        return "scripted:answer"
+
+    async def complete(self, prompt: str, *, max_tokens: int, **opts: object) -> str:
+        from particles.llm import EmptyCompletionError
+
+        self.budgets.append(max_tokens)
+        if len(self.budgets) <= self._empty_replies:
+            raise EmptyCompletionError(
+                f"Anthropic response carried no text block "
+                f"(stop_reason=max_tokens, max_tokens={max_tokens})"
+            )
+        return self._reply
+
+
+class _FailingAnswerProvider:
+    """A ``query_response`` provider whose call fails outright (billing/network)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def provider_model(self) -> str:
+        return "scripted:failing"
+
+    async def complete(self, prompt: str, *, max_tokens: int, **opts: object) -> str:
+        from particles.llm import CompletionError
+
+        self.calls += 1
+        raise CompletionError("Your credit balance is too low to access the Anthropic API.")
+
+
+async def _query_with_answer_provider(session: object, provider: object) -> object:
+    """Run one semantic query with ``query_response`` routed to ``provider``."""
+    import numpy as np
+
+    from particles import embeddings as ep
+    from particles.llm import override_providers
+    from particles.operations.query import query
+    from particles.store.particle_store import insert_particle
+
+    p = _make_active_particle("Pluto was reclassified as a dwarf planet.", 0.9)
+    emb = (np.ones(4, dtype=np.float32) / np.linalg.norm(np.ones(4))).tolist()
+    await insert_particle(session, p, emb)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    mock_model = MagicMock()
+    mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
+    original_model = ep._embedding_model
+    ep.set_embedding_model(mock_model)
+    try:
+        with override_providers({"query_response": provider}):  # type: ignore[dict-item]
+            return await query(session, QueryRequest(question="Is Pluto a planet?", top_k=5))  # type: ignore[arg-type]
+    finally:
+        ep.set_embedding_model(original_model)
+
+
+@pytest.mark.asyncio
+async def test_query_budget_failure_retries_once_at_a_larger_cap(db_session: object) -> None:
+    """An empty first reply is re-issued at the larger budget, and answers.
+
+    The measured failure: an extended-thinking model spends the whole
+    ``max_tokens`` allowance thinking and returns no text block, so the user
+    gets a belief listing where an answer was available. Retrying at the *same*
+    budget would only reproduce it — a larger budget is a different call.
+    """
+    from particles.config import get_config
+
+    provider = _ScriptedAnswerProvider(empty_replies=1)
+    result = await _query_with_answer_provider(db_session, provider)
+
+    cfg = get_config().query
+    assert provider.budgets == [cfg.answer_max_tokens, cfg.answer_retry_max_tokens]
+    # The user gets the answer, not the degraded listing, and nothing is disclosed
+    # because nothing was degraded.
+    assert result.answer == "Pluto is a dwarf planet."  # type: ignore[attr-defined]
+    assert result.answer_generation_error is None  # type: ignore[attr-defined]
+    assert result.answer_generation_error_cause is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_query_budget_failure_past_the_retry_types_the_cause_budget(
+    db_session: object,
+) -> None:
+    """Two empty replies exhaust the ladder: disclosed, and typed ``BUDGET``."""
+    from particles.core.schema import AnswerFailureCause
+
+    provider = _ScriptedAnswerProvider(empty_replies=2)
+    result = await _query_with_answer_provider(db_session, provider)
+
+    assert len(provider.budgets) == 2  # retried exactly once, never in a loop
+    assert result.answer_generation_error is not None  # type: ignore[attr-defined]
+    # The typed half is what a program reads — a benchmark excluding unscoreable
+    # answers, or a UI choosing what to advise — where the string only serves a
+    # human.
+    assert result.answer_generation_error_cause is AnswerFailureCause.BUDGET  # type: ignore[attr-defined]
+    assert result.answer.startswith("[Answer generation unavailable:")  # type: ignore[attr-defined]
+    assert "• Pluto was reclassified as a dwarf planet." in result.answer  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_query_provider_failure_is_not_retried_and_types_provider(
+    db_session: object,
+) -> None:
+    """A billing/network failure degrades immediately — retrying only bills twice."""
+    from particles.core.schema import AnswerFailureCause
+
+    provider = _FailingAnswerProvider()
+    result = await _query_with_answer_provider(db_session, provider)
+
+    assert provider.calls == 1
+    assert result.answer_generation_error_cause is AnswerFailureCause.PROVIDER  # type: ignore[attr-defined]
+    assert "credit balance" in result.answer_generation_error  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_query_answer_retry_can_be_disabled(db_session: object) -> None:
+    """``query.answer_retry_max_tokens: 0`` restores the single-attempt behaviour."""
+    from particles.config import get_config
+    from particles.core.schema import AnswerFailureCause
+
+    # Mutate the live singleton rather than reloading it: ``reset_config()``
+    # fires the registered reset hooks, which dispose the session-scoped engine
+    # this test is still holding open.
+    cfg = get_config()
+    original = cfg.query.answer_retry_max_tokens
+    cfg.query.answer_retry_max_tokens = 0
+    provider = _ScriptedAnswerProvider(empty_replies=1)
+    try:
+        result = await _query_with_answer_provider(db_session, provider)
+    finally:
+        cfg.query.answer_retry_max_tokens = original
+
+    assert len(provider.budgets) == 1
+    assert result.answer_generation_error_cause is AnswerFailureCause.BUDGET  # type: ignore[attr-defined]

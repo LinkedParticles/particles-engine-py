@@ -623,23 +623,38 @@ class TestPublishedReportsStillLoad:
     paid run: nothing in this suite re-runs the benchmark.
     """
 
-    REPORTS = sorted((Path(__file__).parent.parent / "docs" / "benchmarks").glob("*.json"))
+    # LongMemEval reports only: ``docs/benchmarks/`` also holds other
+    # harnesses' reports of record (the rot report, pinned in
+    # ``tests/test_benchmark_rot.py``), which are not this model.
+    REPORTS = sorted(
+        (Path(__file__).parent.parent / "docs" / "benchmarks").glob("longmemeval-*.json")
+    )
 
     def test_the_published_reports_are_committed(self) -> None:
         assert self.REPORTS, "no published report JSONs found"
 
     def test_each_published_report_still_validates(self) -> None:
         for path in self.REPORTS:
-            report = MemoryBenchmarkReport.model_validate_json(path.read_text())
+            raw = path.read_text()
+            report = MemoryBenchmarkReport.model_validate_json(raw)
             assert report.selection.variant
             for condition in QA_CONDITIONS:
                 metrics = getattr(report, condition)
                 if metrics is None:
                     continue
-                # A pre-correction report has no exclusion fields; they must
-                # default to zero rather than fail validation.
-                assert metrics.excluded == 0, f"{path.name}:{condition}"
-                assert all(row.correct is not None for row in metrics.per_question)
+                label = f"{path.name}:{condition}"
+                if '"excluded_budget"' not in raw:
+                    # A pre-correction report has no exclusion fields; they
+                    # must default to zero rather than fail validation.
+                    assert metrics.excluded == 0, label
+                # A report written after the correction may carry exclusions
+                # natively; they must be the unscored rows and nothing else.
+                excluded_rows = [row for row in metrics.per_question if row.excluded is not None]
+                assert metrics.excluded == len(excluded_rows), label
+                assert all(row.correct is None for row in excluded_rows), label
+                assert all(
+                    row.correct is not None for row in metrics.per_question if row.excluded is None
+                ), label
 
     def test_no_published_accuracy_moved(self) -> None:
         """Recomputing each rate under the new denominator reproduces it.
@@ -702,6 +717,67 @@ class TestContextWindowPreflight:
         rendered = render_context_window_check(check)
         assert "DOES NOT FIT" in rendered
         assert "m variant" in rendered
+
+    def test_window_check_counts_at_the_answer_models_chars_per_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The verdict is only honest at the answer model's own factor.
+
+        ~480k chars fits a 200k window at the 4-chars/token scalar and does
+        not at 2 chars/token — a new-tokenizer model with no per-model entry
+        gets the first verdict while the second is the true one.
+        """
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        answer_model = get_config().llm.for_purpose("benchmark_answer").model
+        question = self._fat_question("q1", session_chars=120_000)
+
+        monkeypatch.setattr(cfg, "chars_per_token_by_model", {})
+        monkeypatch.setattr(cfg, "chars_per_token", 4.0)
+        scalar = check_context_window([question], variant="s")
+        assert scalar.fits
+        assert scalar.chars_per_token is not None
+        assert scalar.chars_per_token.value == 4.0
+        assert not scalar.chars_per_token.per_model
+        assert scalar.chars_per_token.source == "chars_per_token"
+        text = render_context_window_check(scalar)
+        assert "counted at ~4.00 chars/token" in text
+        assert f"scalar fallback for {answer_model}, no per-model entry" in text
+        assert text.endswith("— fits")
+
+        monkeypatch.setattr(cfg, "chars_per_token_by_model", {answer_model: 2.0})
+        per_model = check_context_window([question], variant="s")
+        assert not per_model.fits
+        assert per_model.largest_prompt_tokens == pytest.approx(
+            scalar.largest_prompt_tokens * 2, rel=0.01
+        )
+        assert per_model.chars_per_token is not None
+        assert per_model.chars_per_token.per_model
+        assert per_model.chars_per_token.source == f"chars_per_token_by_model[{answer_model}]"
+        text = render_context_window_check(per_model)
+        assert "counted at ~2.00 chars/token" in text
+        assert f"per-model entry for {answer_model}" in text
+        assert "DOES NOT FIT" in text
+
+    def test_window_check_factor_is_keyed_on_the_answer_model_not_extraction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import ProviderSelection, get_config
+
+        cfg = get_config().benchmark_memory
+        monkeypatch.setattr(
+            get_config().llm, "benchmark_answer", ProviderSelection(model="answer-model")
+        )
+        extraction_model = get_config().llm.for_purpose("extraction").model
+        monkeypatch.setattr(
+            cfg, "chars_per_token_by_model", {extraction_model: 1.0, "answer-model": 8.0}
+        )
+        check = check_context_window([self._fat_question("q1", session_chars=120_000)], variant="s")
+        assert check.chars_per_token is not None
+        assert check.chars_per_token.model == "answer-model"
+        assert check.chars_per_token.value == 8.0
+        assert check.fits
 
     def test_window_comes_from_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from particles.config import get_config
@@ -1025,6 +1101,277 @@ class TestEstimate:
         assert "LLM call" in text
         assert "tokens" in text
 
+    def test_output_tokens_projected_from_per_call_assumptions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output = calls × the configured per-call assumption, per side and in total.
+
+        Output is the larger half of an extraction run's bill (the 2026-09
+        survey measured ~6.7k output per Sonnet 5 extraction call against
+        ~3.9k input); an input-only projection under-estimated the inaugural
+        run by nearly half.
+        """
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 1000)
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_answer_call", 10)
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_judge_call", 1)
+        est = estimate_run([_question()])
+        assert est.estimated_extraction_calls == 2
+        assert est.estimated_write_output_tokens == 2 * 1000
+        assert est.estimated_answer_output_tokens == 3 * 10
+        assert est.estimated_judge_output_tokens == 3 * 1
+        assert est.estimated_output_tokens == 2000 + 30 + 3
+        assert est.output_assumptions == {"extraction": 1000, "answer": 10, "judge": 1}
+        # The input-side field is unchanged in meaning: still ~4 chars/token
+        # over the session bytes, still the write side + the full-context
+        # baseline's re-read.
+        assert est.estimated_tokens > 0
+        text = render_estimate(est)
+        assert "Output tokens: ~2,033 projected" in text
+        assert "assuming 1,000 / 10 / 1 output tokens per extraction / answer / judge call" in text
+
+    def test_reuse_stores_projects_zero_write_output(self) -> None:
+        """A replayed store extracts nothing, so its write-side output is zero too."""
+        est = estimate_run([_question()], reuse_stores=True)
+        assert est.estimated_extraction_calls == 0
+        assert est.estimated_write_output_tokens == 0
+        assert est.estimated_output_tokens == (
+            est.estimated_answer_output_tokens + est.estimated_judge_output_tokens
+        )
+        assert [c.name for c in est.cost_components] == ["answer", "judge"]
+
+    def test_no_price_configured_prints_the_model_not_a_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The price map ships empty: prices go stale, so no dollar figure is compiled in."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().benchmark_memory, "price_per_mtok", {})
+        est = estimate_run([_question()])
+        model = get_config().llm.for_purpose("extraction").model
+        assert est.estimated_cost_usd is None
+        assert model in est.unpriced_models
+        assert all(c.cost_usd is None for c in est.cost_components)
+        text = render_estimate(est)
+        assert f"no price configured for {model}" in text
+        assert "US$" not in text
+
+    def test_priced_projection_applies_the_batch_discount_per_side(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import TokenPrice, get_config
+
+        cfg = get_config().benchmark_memory
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 1000)
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_answer_call", 100)
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_judge_call", 10)
+        monkeypatch.setattr(cfg, "batch_discount", 0.5)
+        # Every purpose resolves to llm.default under stock config; price it.
+        model = get_config().llm.default.model
+        monkeypatch.setattr(cfg, "price_per_mtok", {model: TokenPrice(input=2.0, output=10.0)})
+        monkeypatch.setattr(get_config().llm.batch, "enabled", True)
+
+        full = estimate_run([_question()])
+        assert full.unpriced_models == []
+        assert full.estimated_cost_usd is not None
+        by_name = {c.name: c for c in full.cost_components}
+        write = by_name["write (extraction / notes)"]
+        assert write.model == model and not write.batched
+        assert write.cost_usd == pytest.approx(
+            write.input_tokens * 2.0 / 1e6 + write.output_tokens * 10.0 / 1e6
+        )
+        assert full.estimated_cost_usd == pytest.approx(
+            sum(c.cost_usd or 0.0 for c in full.cost_components)
+        )
+
+        # --pooled halves the write side only; --batch-qa halves the QA side only.
+        pooled = estimate_run([_question()], pooled=True)
+        pooled_by = {c.name: c for c in pooled.cost_components}
+        assert pooled_by["write (extraction / notes)"].batched
+        assert not pooled_by["answer"].batched and not pooled_by["judge"].batched
+        assert pooled_by["write (extraction / notes)"].cost_usd == pytest.approx(
+            (write.cost_usd or 0.0) * 0.5
+        )
+        both = estimate_run([_question()], pooled=True, batch_qa=True)
+        assert all(c.batched for c in both.cost_components)
+        assert both.estimated_cost_usd == pytest.approx((full.estimated_cost_usd or 0.0) * 0.5)
+        text = render_estimate(both)
+        assert f"Cost: ~US${both.estimated_cost_usd:,.2f}" in text
+        assert f"({model}, batch)" in text
+
+        # With llm.batch off the runner degrades to sequential calls, so no discount.
+        monkeypatch.setattr(get_config().llm.batch, "enabled", False)
+        degraded = estimate_run([_question()], pooled=True, batch_qa=True)
+        assert not any(c.batched for c in degraded.cost_components)
+        assert degraded.estimated_cost_usd == pytest.approx(full.estimated_cost_usd or 0.0)
+
+    def test_provider_qualified_price_key_wins_over_bare_model_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import TokenPrice, get_config
+
+        cfg = get_config().benchmark_memory
+        sel = get_config().llm.for_purpose("extraction")
+        monkeypatch.setattr(
+            cfg,
+            "price_per_mtok",
+            {
+                sel.model: TokenPrice(input=100.0, output=100.0),
+                f"{sel.provider}:{sel.model}": TokenPrice(input=0.0, output=0.0),
+            },
+        )
+        est = estimate_run([_question()], qa=False)
+        assert est.estimated_cost_usd == 0.0
+        # A partial price map is not a partial total: an unpriced judge or
+        # answer model blanks the figure rather than under-reporting it.
+        monkeypatch.setattr(get_config().llm, "benchmark", type(sel)(model="unpriced-judge"))
+        est = estimate_run([_question()])
+        assert est.estimated_cost_usd is None
+        assert est.unpriced_models == ["unpriced-judge"]
+
+    def test_extraction_output_per_model_entry_wins_over_the_scalar(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An arm routed to a model with its own figure is priced at that figure.
+
+        The 2026-09 survey measured ~3.6k output per claude-haiku-4-5
+        extraction call against ~6.7k on claude-sonnet-5; the scalar alone
+        over-estimates the Haiku write side ~1.9x.
+        """
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        sel = get_config().llm.for_purpose("extraction")
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 6_700)
+        monkeypatch.setattr(
+            cfg, "estimate_output_tokens_per_extraction_call_by_model", {sel.model: 3_600}
+        )
+        est = estimate_run([_question()], qa=False)
+        assert est.estimated_extraction_calls == 2
+        assert est.output_assumptions["extraction"] == 3_600
+        assert est.estimated_write_output_tokens == 2 * 3_600
+        src = est.assumption_sources["extraction_output"]
+        assert src.per_model and src.model == sel.model and src.value == 3_600
+        assert src.source == f"estimate_output_tokens_per_extraction_call_by_model[{sel.model}]"
+        text = render_estimate(est)
+        assert "assuming 3,600 /" in text
+        assert f"the extraction figure is the per-model entry for {sel.model}" in text
+
+        # Same key convention as price_per_mtok: provider-qualified wins over
+        # the bare id, and an entry of 0 is an entry (membership, not truthiness).
+        monkeypatch.setattr(
+            cfg,
+            "estimate_output_tokens_per_extraction_call_by_model",
+            {sel.model: 3_600, f"{sel.provider}:{sel.model}": 0},
+        )
+        est = estimate_run([_question()], qa=False)
+        assert est.output_assumptions["extraction"] == 0
+        assert est.estimated_write_output_tokens == 0
+        assert est.assumption_sources["extraction_output"].source == (
+            f"estimate_output_tokens_per_extraction_call_by_model[{sel.provider}:{sel.model}]"
+        )
+
+    def test_extraction_output_falls_back_to_the_scalar_and_says_so(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        sel = get_config().llm.for_purpose("extraction")
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 6_700)
+        monkeypatch.setattr(
+            cfg, "estimate_output_tokens_per_extraction_call_by_model", {"some-other-model": 1}
+        )
+        est = estimate_run([_question()], qa=False)
+        assert est.output_assumptions["extraction"] == 6_700
+        src = est.assumption_sources["extraction_output"]
+        assert not src.per_model
+        assert src.source == "estimate_output_tokens_per_extraction_call"
+        text = render_estimate(est)
+        assert (
+            f"the extraction figure is the scalar fallback for {sel.model}, no per-model entry"
+            in text
+        )
+
+    def test_chars_per_token_is_per_model_and_per_side(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Write side keyed on the extraction model, answer side on the answer model.
+
+        claude-sonnet-5 tokenizes at ~1.369x claude-sonnet-4-6 (2026-09 survey),
+        so its input projection at the 4-chars/token scalar runs ~37 % low.
+        """
+        from particles.config import ProviderSelection, get_config
+
+        cfg = get_config().benchmark_memory
+        monkeypatch.setattr(cfg, "chars_per_token", 4.0)
+        monkeypatch.setattr(cfg, "chars_per_token_by_model", {})
+        monkeypatch.setattr(
+            get_config().llm, "benchmark_answer", ProviderSelection(model="answer-model")
+        )
+        extraction_model = get_config().llm.for_purpose("extraction").model
+
+        # One question, two distinct sessions: the haystack the full-context
+        # baseline re-reads is exactly the unique-session byte total.
+        base = estimate_run([_question()])
+        chars = base.total_session_chars
+        assert base.estimated_tokens == chars // 4 + chars // 4
+        for key in ("write_chars_per_token", "answer_chars_per_token"):
+            src = base.assumption_sources[key]
+            assert not src.per_model and src.value == 4.0 and src.source == "chars_per_token"
+        assert base.assumption_sources["write_chars_per_token"].model == extraction_model
+        assert base.assumption_sources["answer_chars_per_token"].model == "answer-model"
+        text = render_estimate(base)
+        assert (
+            f"~4.00 chars/token on the write side (scalar fallback for {extraction_model}, "
+            f"no per-model entry) and ~4.00 on the answer side (scalar fallback for "
+            f"answer-model, no per-model entry)"
+        ) in text
+
+        monkeypatch.setattr(
+            cfg, "chars_per_token_by_model", {extraction_model: 2.0, "answer-model": 8.0}
+        )
+        est = estimate_run([_question()])
+        assert est.estimated_tokens == chars // 2 + chars // 8
+        write = est.assumption_sources["write_chars_per_token"]
+        answer = est.assumption_sources["answer_chars_per_token"]
+        assert write.per_model and write.value == 2.0
+        assert write.source == f"chars_per_token_by_model[{extraction_model}]"
+        assert answer.per_model and answer.value == 8.0
+        assert answer.source == "chars_per_token_by_model[answer-model]"
+        by_name = {c.name: c for c in est.cost_components}
+        assert by_name["write (extraction / notes)"].input_tokens == chars // 2
+        assert by_name["answer"].input_tokens == chars // 8
+        text = render_estimate(est)
+        assert (
+            f"~2.00 chars/token on the write side (per-model entry for {extraction_model}) "
+            f"and ~8.00 on the answer side (per-model entry for answer-model)"
+        ) in text
+
+        # A fractional scalar fallback is honoured too (the survey's Sonnet 5
+        # figure is 4 / 1.369 ≈ 2.92).
+        monkeypatch.setattr(cfg, "chars_per_token_by_model", {})
+        monkeypatch.setattr(cfg, "chars_per_token", 2.92)
+        est = estimate_run([_question()])
+        assert est.estimated_tokens == int(chars / 2.92) + int(chars / 2.92)
+
+    def test_per_model_mappings_reject_non_positive_factors(self) -> None:
+        from pydantic import ValidationError
+
+        from particles.config import MemoryBenchmarkConfig
+
+        with pytest.raises(ValidationError, match="chars_per_token_by_model"):
+            MemoryBenchmarkConfig(chars_per_token_by_model={"m": 0.0})
+        with pytest.raises(ValidationError, match="estimate_output_tokens_per_extraction_call"):
+            MemoryBenchmarkConfig(estimate_output_tokens_per_extraction_call_by_model={"m": -1})
+        ok = MemoryBenchmarkConfig(
+            chars_per_token_by_model={"m": 2.92},
+            estimate_output_tokens_per_extraction_call_by_model={"m": 0},
+        )
+        assert ok.chars_per_token_by_model["m"] == 2.92
+
 
 # ---------------------------------------------------------------------------
 # Judge prompts
@@ -1033,16 +1380,61 @@ class TestEstimate:
 
 class TestJudgePrompt:
     def test_abstention_prompt_scores_declining(self) -> None:
+        """Protocol 2 (default): the official abstention template, verbatim.
+
+        The official prompt hands the judge the gold *explanation* and says a
+        response that offers other information while denying the asked fact
+        still counts — the two things protocol 1 dropped, which is why it
+        marked "only mentions a cat named Luna, not a hamster" as not
+        abstaining.
+        """
         q = _question(qid="q-9_abs", evidence=[])
         prompt = judge_prompt(q, "I don't have that information.")
-        assert "abstain" in prompt.lower()
+        assert "unanswerable" in prompt
+        assert "some other information is given but the asked information is not" in prompt
+        assert q.answer is not None and f"Explanation: {q.answer}" in prompt
         assert "yes or no" in prompt.lower()
 
-    def test_knowledge_update_prompt_requires_latest_state(self) -> None:
+    def test_knowledge_update_prompt_accepts_previous_alongside_updated(self) -> None:
         q = _question(qtype="knowledge-update")
         prompt = judge_prompt(q, "Lisbon")
-        assert "LATEST" in prompt
-        assert q.answer is not None and q.answer in prompt
+        assert "some previous information along with an updated answer" in prompt
+        assert q.answer is not None and f"Correct Answer: {q.answer}" in prompt
+
+    def test_preference_prompt_names_the_rubric(self) -> None:
+        q = _question(qtype="single-session-preference")
+        prompt = judge_prompt(q, "Try a rooftop pool.")
+        assert "Rubric:" in prompt
+        assert "does not need to reflect all the points in the rubric" in prompt
+
+    def test_temporal_prompt_keeps_off_by_one_leniency(self) -> None:
+        q = _question(qtype="temporal-reasoning")
+        assert "do not penalize off-by-one errors" in judge_prompt(q, "18 days")
+
+    def test_protocol_1_is_the_inaugural_paraphrase(self, monkeypatch: Any) -> None:
+        """v1 stays selectable so the published table remains reproducible."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().benchmark_memory, "judge_protocol", 1)
+        q = _question(qid="q-9_abs", evidence=[])
+        assert "correctly abstain" in judge_prompt(q, "I don't know.")
+        q2 = _question(qtype="knowledge-update")
+        assert "LATEST" in judge_prompt(q2, "Lisbon")
+
+    def test_official_templates_are_verbatim(self) -> None:
+        """Pin the byte-exact official wording — a paraphrase is what v1 was."""
+        from particles.benchmark.memory import runner as runner_mod
+
+        assert runner_mod._OFFICIAL_JUDGE_ABSTENTION.startswith(
+            "I will give you an unanswerable question, an explanation, and a response from a model."
+        )
+        assert runner_mod._OFFICIAL_JUDGE_GENERIC.endswith(
+            "Model Response: {}\n\nIs the model response correct? Answer yes or no only."
+        )
+        # The official generic/temporal templates carry a trailing space before
+        # the first blank line; keeping it is what "verbatim" means.
+        assert "answer no. \n\nQuestion" in runner_mod._OFFICIAL_JUDGE_GENERIC
+        assert "answer no. \n\nQuestion" not in runner_mod._OFFICIAL_JUDGE_KNOWLEDGE_UPDATE
 
 
 # ---------------------------------------------------------------------------
@@ -1467,7 +1859,8 @@ class TestRunnerOrchestration:
         """``pooled=True`` fans a question's extractions out under one CompletionPool.
 
         Every deposit must still be extracted exactly once, each call must
-        carry the same pool instance (one Message Batches job per question), and the retrieval report must be identical to the serial
+        carry the same pool instance (one Message Batches job per question),
+        and the retrieval report must be identical to the serial
         path's — pooled dispatch changes price and latency, never the
         measurement.
         """
@@ -1858,7 +2251,7 @@ class TestBatchQA:
         # prompt is self-contained (no system).
         for call in many.call_args_list:
             if call.args[0] == "benchmark_answer":
-                assert all(r.system == runner_mod._ANSWER_SYSTEM for r in call.args[1])
+                assert all(r.system == runner_mod._answer_system() for r in call.args[1])
             else:
                 assert all(r.system is None for r in call.args[1])
         for condition in QA_CONDITIONS:
@@ -2333,6 +2726,228 @@ class TestConcurrency:
         assert caching.hits == 2
 
 
+class TestQaAuditTrail:
+    """The per-question audit half of the QA rows (the ``emitted_claims`` move, one harness over).
+
+    ``correct`` alone made post-hoc failure review impossible from a saved
+    report: a reviewer could see *that* the judge marked a question wrong,
+    never what the model said or why. Each row now carries the answer text,
+    the judge's raw verdict, and — for the memory-under-test slot — the ids
+    of the particles that formed the context block, so a miss can be traced
+    to retrieval (claim never in front of the model) or to answering (it was).
+    """
+
+    def _run_kwargs(self, tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+        kwargs: dict[str, Any] = dict(
+            variant="oracle",
+            dataset_revision="rev-test",
+            selection_seed=13,
+            selection_limit=1,
+            questions_total=1,
+            work_dir=tmp_path / "work",
+            keep_stores=True,
+            checkpoint_dir=tmp_path / "ckpt",
+        )
+        return {**kwargs, **overrides}
+
+    def _patch_qa(self, question: MemoryQuestion, monkeypatch: pytest.MonkeyPatch) -> None:
+        TestRunnerOrchestration()._patches(question, monkeypatch)
+        monkeypatch.setattr(runner_mod, "get_provider", lambda purpose: _provider())
+        # Distinct text per purpose, so a row's ``answer`` and ``verdict``
+        # cannot be satisfied by the same string landing in both.
+        monkeypatch.setattr(
+            runner_mod,
+            "complete",
+            AsyncMock(
+                side_effect=lambda purpose, *a, **k: (
+                    "the answer was 42" if purpose == "benchmark_answer" else "yes, correct"
+                )
+            ),
+        )
+
+    @staticmethod
+    def _checkpoint_outcomes(tmp_path: Path) -> list[dict[str, Any]]:
+        ckpt = next((tmp_path / "ckpt").glob("memory-run-*.jsonl"))
+        lines = [json.loads(line) for line in ckpt.read_text().splitlines() if line.strip()]
+        return [line["outcome"] for line in lines[1:]]  # skip the header
+
+    @pytest.mark.asyncio
+    async def test_rows_carry_answer_verdict_and_context_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        question = _question()
+        self._patch_qa(question, monkeypatch)
+
+        report = await run_memory_benchmark([question], **self._run_kwargs(tmp_path))
+
+        for condition in QA_CONDITIONS:
+            metrics = getattr(report, condition)
+            assert metrics is not None, condition
+            (row,) = metrics.per_question
+            assert row.correct is True
+            assert row.answer == "the answer was 42"
+            assert row.verdict == "yes, correct"
+        # The retrieved particles, in rank order, on the memory-under-test
+        # slot only — the baselines saw the haystack or nothing.
+        assert report.qa_particles is not None
+        assert report.qa_particles.per_question[0].context_particle_ids == ["p1", "p2"]
+        assert report.qa_full_context is not None
+        assert report.qa_full_context.per_question[0].context_particle_ids == []
+        assert report.qa_no_memory is not None
+        assert report.qa_no_memory.per_question[0].context_particle_ids == []
+
+        # ...and the checkpoint holds the same trail, so a restored outcome
+        # is as reviewable as a freshly paid one.
+        (outcome,) = self._checkpoint_outcomes(tmp_path)
+        assert outcome["qa_answers"] == dict.fromkeys(QA_CONDITIONS, "the answer was 42")
+        assert outcome["qa_verdicts"] == dict.fromkeys(QA_CONDITIONS, "yes, correct")
+        assert outcome["context_particle_ids"] == ["p1", "p2"]
+
+    @pytest.mark.asyncio
+    async def test_record_claim_text_off_suppresses_text_but_keeps_ids(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The private-corpus switch: an answer quotes the corpus; an id does not.
+
+        Suppressed at production, so the checkpoint JSONL never holds the
+        text either — no downstream sink has to remember to scrub.
+        """
+        from particles.config import reset_config
+
+        question = _question()
+        self._patch_qa(question, monkeypatch)
+        monkeypatch.setenv("BENCHMARK_RECORD_CLAIM_TEXT", "false")
+        reset_config()
+        try:
+            report = await run_memory_benchmark([question], **self._run_kwargs(tmp_path))
+        finally:
+            monkeypatch.delenv("BENCHMARK_RECORD_CLAIM_TEXT")
+            reset_config()
+
+        for condition in QA_CONDITIONS:
+            metrics = getattr(report, condition)
+            assert metrics is not None, condition
+            (row,) = metrics.per_question
+            assert row.correct is True  # the verdict is still scored
+            assert row.answer is None
+            assert row.verdict is None
+        assert report.qa_particles is not None
+        assert report.qa_particles.per_question[0].context_particle_ids == ["p1", "p2"]
+        ckpt_text = next((tmp_path / "ckpt").glob("memory-run-*.jsonl")).read_text()
+        assert "the answer was 42" not in ckpt_text
+        assert "yes, correct" not in ckpt_text
+
+    @pytest.mark.asyncio
+    async def test_excluded_judge_keeps_the_answer_on_the_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An answer that exists is recorded even when the judge produced nothing."""
+        _no_backoff(monkeypatch)
+        question = _question()
+        self._patch_qa(question, monkeypatch)
+
+        async def _complete(purpose: str, prompt: str, **kw: Any) -> str:
+            if purpose == "benchmark":
+                raise RuntimeError("judge overloaded")
+            return "the answer was 42"
+
+        monkeypatch.setattr(runner_mod, "complete", AsyncMock(side_effect=_complete))
+
+        report = await run_memory_benchmark([question], **self._run_kwargs(tmp_path))
+
+        for condition in QA_CONDITIONS:
+            metrics = getattr(report, condition)
+            assert metrics is not None, condition
+            (row,) = metrics.per_question
+            assert row.correct is None
+            assert row.excluded == QA_EXCLUSION_INFRA
+            assert row.answer == "the answer was 42"
+            assert row.verdict is None
+
+    @pytest.mark.asyncio
+    async def test_batch_qa_path_records_the_same_trail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--batch-qa`` changes dispatch, not what the row records."""
+        question = _question()
+        TestRunnerOrchestration()._patches(question, monkeypatch)
+        monkeypatch.setattr(runner_mod, "get_provider", lambda purpose: _provider())
+
+        async def _many(purpose: str, requests: list[Any], **kw: Any) -> list[str | None]:
+            reply = "the answer was 42" if purpose == "benchmark_answer" else "no"
+            return [reply] * len(requests)
+
+        monkeypatch.setattr(runner_mod, "complete_many", AsyncMock(side_effect=_many))
+
+        report = await run_memory_benchmark([question], **self._run_kwargs(tmp_path, batch_qa=True))
+
+        for condition in QA_CONDITIONS:
+            metrics = getattr(report, condition)
+            assert metrics is not None, condition
+            (row,) = metrics.per_question
+            assert row.correct is False
+            assert row.answer == "the answer was 42"
+            assert row.verdict == "no"
+        assert report.qa_particles is not None
+        assert report.qa_particles.per_question[0].context_particle_ids == ["p1", "p2"]
+        (outcome,) = self._checkpoint_outcomes(tmp_path)
+        assert outcome["qa_verdicts"] == dict.fromkeys(QA_CONDITIONS, "no")
+
+    @pytest.mark.asyncio
+    async def test_pre_audit_checkpoint_restores_with_empty_trail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A checkpoint written before these fields existed still restores.
+
+        Same contract as ``qa_excluded``: new optional fields, so no paid
+        outcome became unrestorable — the restored rows carry the verdict and
+        an empty trail rather than forcing a re-run to get the text.
+        """
+        question = _question()
+        self._patch_qa(question, monkeypatch)
+        first = await run_memory_benchmark([question], **self._run_kwargs(tmp_path))
+        ckpt = next((tmp_path / "ckpt").glob("memory-run-*.jsonl"))
+        header, *rows = ckpt.read_text().splitlines()
+        stripped = []
+        for raw in rows:
+            line = json.loads(raw)
+            for key in ("qa_answers", "qa_verdicts", "context_particle_ids"):
+                line["outcome"].pop(key)
+            stripped.append(json.dumps(line))
+        ckpt.write_text("\n".join([header, *stripped]) + "\n")
+
+        boom = AsyncMock(side_effect=AssertionError("re-spend detected"))
+        monkeypatch.setattr(runner_mod, "complete", boom)
+        monkeypatch.setattr(runner_mod, "retrieve_ranked", boom)
+        second = await run_memory_benchmark(
+            [question], **self._run_kwargs(tmp_path, work_dir=tmp_path / "w2")
+        )
+
+        for condition in QA_CONDITIONS:
+            first_m, second_m = getattr(first, condition), getattr(second, condition)
+            assert first_m is not None and second_m is not None
+            assert second_m.accuracy == first_m.accuracy
+            (row,) = second_m.per_question
+            assert row.correct is True
+            assert row.answer is None
+            assert row.verdict is None
+            assert row.context_particle_ids == []
+        boom.assert_not_called()
+
+    def test_context_ids_follow_the_budget_clamp(self) -> None:
+        """The ids are the clamped prefix — exactly the lines the model saw."""
+        from particles.benchmark.memory.runner import _particles_context_lines
+
+        particles = [
+            TestAblationKnobs()._particle(f"claim number {i} " + "x" * 80) for i in range(10)
+        ]
+        full = _particles_context_lines(particles, {})
+        assert [pid for pid, _ in full] == [p.id for p in particles]
+        clamped = _particles_context_lines(particles, {}, budget_tokens=30)
+        assert 0 < len(clamped) < len(full)
+        assert [pid for pid, _ in clamped] == [p.id for p in particles[: len(clamped)]]
+
+
 class TestCheckpointing:
     """Question-level checkpoints: interruptible runs, free replay, knob isolation."""
 
@@ -2629,6 +3244,32 @@ class TestPdr0488AblationWiring:
         finally:
             del cfg.sources["CONVERSATION"]
 
+    def test_a_live_decay_rule_discloses_the_factors_it_produced(self) -> None:
+        """A swamped rule is the inert rule's mirror image, and as silent.
+
+        Decay runs at wall-clock against haystacks dated years earlier, so a
+        short half-life zeroes every factor and the arm measures the absence
+        of the confidence term. Two half-lives a factor of three apart gave
+        identical tables before the run said so.
+        """
+        from particles.benchmark.memory.runner import decay_reference_note
+        from particles.config import SourceDecayConfig, get_config
+
+        question = _question()
+        assert decay_reference_note([question]) is None  # stock config: no rule
+
+        cfg = get_config().content_age_decay
+        cfg.sources["CONVERSATION"] = SourceDecayConfig(half_life_days=30.0, floor=0.0)
+        try:
+            swamped = decay_reference_note([question])
+            cfg.sources["CONVERSATION"] = SourceDecayConfig(half_life_days=1e6, floor=0.0)
+            healthy = decay_reference_note([question])
+        finally:
+            del cfg.sources["CONVERSATION"]
+        assert swamped is not None and "similarity-only" in swamped
+        assert "wall-clock" in swamped
+        assert healthy is not None and "similarity-only" not in healthy
+
     def test_run_selection_records_the_new_knobs(self) -> None:
         from particles.benchmark.memory.schema import RunSelection
 
@@ -2703,11 +3344,149 @@ class TestPdr0488AblationWiring:
         assert off != key(dedup_judge=True)
         assert off != key(reuse_stores=True)
         assert off != key(top_k=50)
+        assert off != key(answer_scaffold=2)
+        assert off != key(judge_protocol=2)
+        assert off != key(subject_rendering="names")
+        assert off != key(subject_rendering="none")
+        assert key(subject_rendering="names") != key(subject_rendering="none")
         # Compatibility: the default key gains no new members, so every
         # checkpoint paid for before still restores.
         assert "consolidation" not in off
         assert "dedup_judge" not in off
         assert "reuse_stores" not in off
+        assert "answer_scaffold" not in off
+        assert "judge_protocol" not in off
+        assert "subject_rendering" not in off
+        assert "read_side_knobs" not in off
+
+    def test_checkpoint_key_separates_config_overlay_arms(self) -> None:
+        """The cap and decay arms have no flag, so the key reads them from config.
+
+        Without this a cap-on arm run after a control at the same ``top_k``
+        restores every one of the control's outcomes and reports "the cap
+        changes nothing" when the cap never ran.
+        """
+        from particles.benchmark.memory.runner import (
+            _read_side_ablation_knobs,
+            _run_checkpoint_key,
+        )
+        from particles.config import SourceDecayConfig, get_config
+
+        def key() -> dict[str, object]:
+            return _run_checkpoint_key(
+                dataset_revision="rev",
+                variant="s",
+                top_k=10,
+                context_budget=None,
+                abstraction=False,
+                qa=False,
+                extraction_model_id="x",
+                embedding_model_id="e",
+                answer_model_id="a",
+                judge_model_id="j",
+                read_side_knobs=_read_side_ablation_knobs(),
+            )
+
+        assert _read_side_ablation_knobs() == {}
+        control = key()
+        assert "read_side_knobs" not in control
+
+        cfg = get_config()
+        cfg.confidence.uncalibrated_cap.enabled = True
+        try:
+            cap_on = key()
+        finally:
+            cfg.confidence.uncalibrated_cap.enabled = False
+        cfg.content_age_decay.sources["CONVERSATION"] = SourceDecayConfig(
+            half_life_days=90.0, floor=0.0
+        )
+        try:
+            decay_90 = key()
+            cfg.content_age_decay.sources["CONVERSATION"] = SourceDecayConfig(
+                half_life_days=30.0, floor=0.0
+            )
+            decay_30 = key()
+        finally:
+            del cfg.content_age_decay.sources["CONVERSATION"]
+
+        assert (
+            len({json.dumps(k, sort_keys=True) for k in (control, cap_on, decay_90, decay_30)}) == 4
+        )
+        assert key() == control
+
+    def test_answer_scaffold_is_versioned_and_recorded(self, monkeypatch: Any) -> None:
+        """The scaffold text follows the config knob; v1 stays reproducible.
+
+        A scaffold change moves every QA column at once, so the version must
+        be selectable (to reproduce an older table), recorded on the run
+        tuple, and rendered as an ablation knob. A report written before the
+        knob existed loads as v1 — the text it actually ran under.
+        """
+        from particles.benchmark.memory import runner as runner_mod
+        from particles.benchmark.memory.schema import RunSelection
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        assert cfg.answer_scaffold == 2
+        assert runner_mod._answer_system() == runner_mod._ANSWER_SYSTEM_V2
+        assert "Recommendation or advice questions" in runner_mod._answer_system()
+        # Type-blind: the product never sees a question-type label.
+        for label in ("single-session", "multi-session", "temporal-reasoning", "knowledge-update"):
+            assert label not in runner_mod._answer_system()
+        monkeypatch.setattr(cfg, "answer_scaffold", 1)
+        assert runner_mod._answer_system() == runner_mod._ANSWER_SYSTEM_V1
+        # Pre-knob reports deserialize as v1.
+        legacy = RunSelection(dataset_revision="rev", variant="s", sample_seed=13)
+        assert legacy.answer_scaffold == 1
+
+    def test_subject_rendering_selects_the_context_line_shape(self, monkeypatch: Any) -> None:
+        """The three renderings, and the default the nine-run ablation settled on.
+
+        The subjects field is the only part of a qa_particles line that can be
+        written three ways, and a UUID spends context on something the answering
+        model cannot use. Three repeats per rendering found no accuracy
+        difference distinguishable from sampling, so the default took the 33.6%
+        saving. It is `names` and not the cheaper `none` because the context is
+        *specified* as claim text + subjects + dates: rendering the subject
+        readably is a correction, removing the field is a redefinition.
+        """
+        from particles.benchmark.memory import runner as runner_mod
+        from particles.benchmark.memory.schema import RunSelection
+        from particles.config import get_config
+
+        cfg = get_config().benchmark_memory
+        assert cfg.subject_rendering == "names"
+        # The REPORT default stays "uuids" regardless, so a report written
+        # before the knob existed still loads as the rendering it ran under.
+        legacy = RunSelection(dataset_revision="rev", variant="s", sample_seed=13)
+        assert legacy.subject_rendering == "uuids"
+
+        sid = "06ecbc82-55d3-4161-91cb-f1a0160d2ac8"
+        p = _particle("p1", "The user volunteers at a refugee non-profit.")
+        p = p.model_copy(update={"subject_ids": [sid]})
+        names = {sid: "the user"}
+
+        def render(mode: str, mapping: dict[str, str] | None = names) -> str:
+            lines = runner_mod._particles_context_lines([p], {}, None, mapping, mode)
+            return lines[0][1]
+
+        assert render("uuids") == f"- [undated] {p.content} (subjects: {sid})"
+        assert render("names") == f"- [undated] {p.content} (subjects: the user)"
+        assert render("none") == f"- [undated] {p.content}"
+        # An unresolvable id degrades to the id rather than dropping the
+        # subject or raising: a partially-resolvable store still renders.
+        assert sid in render("names", {})
+        # The clamp still counts the rendered line, so a cheaper rendering
+        # fits more particles into the same budget rather than silently
+        # keeping the same ones.
+        many = [p] * 12
+        for mode in ("uuids", "names", "none"):
+            kept = runner_mod._particles_context_lines(many, {}, 100, names, mode)
+            assert kept, mode
+            assert all(len(line) > 0 for _, line in kept)
+        assert len(runner_mod._particles_context_lines(many, {}, 100, names, "none")) > len(
+            runner_mod._particles_context_lines(many, {}, 100, names, "uuids")
+        )
 
     def test_estimate_zeroes_the_write_side_on_reuse(self) -> None:
         """A replayed store makes no write-time call — the projection must say so.
@@ -2750,6 +3529,24 @@ class TestPdr0488AblationWiring:
         )
         est = estimate_run([question], qa=False, reuse_stores=True)
         assert est.estimated_llm_calls == 0
+
+    def test_consolidation_bound_sums_every_probe_bearing_pass(self) -> None:
+        """A pass left out of the bound spends around the confirm gate.
+
+        The same-subject update sweep joined the cycle after the bound was
+        written and was not added to it: up to ``max_update_probes`` per store
+        that the projection an operator approves never mentioned.
+        """
+        from particles.config import get_config
+
+        cfg = get_config()
+        est = estimate_run([_question()], qa=False, reuse_stores=True, consolidation=True)
+        assert est.estimated_pass_calls == (
+            cfg.consolidation.max_reconcile_probes
+            + cfg.consolidation.max_update_probes
+            + cfg.audit.max_contradiction_probes
+        )
+        assert cfg.consolidation.max_update_probes > 0
 
 
 class TestStoreReuseManifest:
@@ -2803,6 +3600,32 @@ class TestStoreReuseManifest:
         write_stores_manifest(tmp_path, self._write_side(), ["q1"])
         with pytest.raises(StoreReuseError, match="different write-side tuple"):
             load_stores_manifest(tmp_path, self._write_side(sample_seed="99"), ["q1"])
+
+    def test_accepts_a_subset_replay(self, tmp_path: Path) -> None:
+        """``--limit 5 --reuse-stores`` is the documented cost probe; it must run.
+
+        Every question owns its store, so narrowing the selection changes no
+        population. The waiver is for listed questions only: one the manifest
+        never prepared is still a refusal, whatever its store file says.
+        """
+        from particles.benchmark.memory.runner import (
+            StoreReuseError,
+            load_stores_manifest,
+            write_stores_manifest,
+        )
+
+        for qid in ("q1", "q2", "q3"):
+            (tmp_path / f"{qid}.db").touch()
+        write_stores_manifest(tmp_path, self._write_side(), ["q1", "q2"])
+
+        narrowed = self._write_side(question_limit="1", question_types="multi-session")
+        load_stores_manifest(tmp_path, narrowed, ["q2"])
+        with pytest.raises(StoreReuseError, match="different write-side tuple"):
+            load_stores_manifest(tmp_path, narrowed, ["q3"])
+        with pytest.raises(StoreReuseError, match="different write-side tuple"):
+            load_stores_manifest(
+                tmp_path, self._write_side(question_limit="1", sample_seed="99"), ["q2"]
+            )
 
     def test_refuses_a_short_store_set(self, tmp_path: Path) -> None:
         """An interrupted preparing run leaves a partial set — say so, don't half-run."""
@@ -3014,10 +3837,19 @@ class TestAblationPassesRun:
         assert prepared.selection.stores_reused is False
         assert (tmp_path / runner_mod.STORES_MANIFEST).exists()
 
+        # The stub deposit reports every session as changed, which is what the
+        # real one does for a haystack that repeats a session id under two
+        # dates. A replay must not reach it at all: re-depositing re-extracted
+        # 8 sessions on every arm of the inaugural store set.
+        cast(Any, runner_mod.deposit_text_versioned).reset_mock()
+        cast(Any, runner_mod.extract_snapshot).reset_mock()
+
         replayed = await run_memory_benchmark([question], reuse_stores=True, **common)
         assert replayed.selection.stores_reused is True
         assert replayed.selection.reused_from is not None
         assert any("Stores REUSED" in n for n in replayed.quality_notes)
+        cast(Any, runner_mod.deposit_text_versioned).assert_not_awaited()
+        cast(Any, runner_mod.extract_snapshot).assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_reuse_without_store_dir_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3033,3 +3865,405 @@ class TestAblationPassesRun:
                 qa=False,
                 reuse_stores=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Re-judge (particles benchmark memory rejudge)
+# ---------------------------------------------------------------------------
+
+
+def _qa_row(
+    qid: str,
+    *,
+    qtype: str = "single-session-user",
+    correct: bool | None = False,
+    answer: str | None = "an answer",
+    verdict: str | None = "no",
+    excluded: str | None = None,
+    context_ids: list[str] | None = None,
+) -> QaQuestionResult:
+    return QaQuestionResult(
+        question_id=qid,
+        question_type=qtype,
+        correct=correct,
+        abstention=qid.endswith("_abs"),
+        excluded=excluded,
+        answer=answer,
+        verdict=verdict,
+        context_particle_ids=list(context_ids or []),
+    )
+
+
+def _source_report(**selection_overrides: Any) -> MemoryBenchmarkReport:
+    """A saved report as the runner writes it: two conditions, mixed rows.
+
+    ``qa_particles`` carries the four row shapes a re-judge must handle:
+    a scored row with an answer (q1, q2), a row excluded at answer time with
+    no text (q3, infra), a row with the text suppressed and no cause (q4),
+    and a row whose *judge* call failed but whose answer exists (q5, budget).
+    """
+    selection = _selection(
+        judge_protocol=1,
+        judge_model_id="anthropic:old-judge",
+        questions_selected=5,
+        questions_total=5,
+        **selection_overrides,
+    )
+    particles_rows = [
+        _qa_row("q1", answer="Paris", verdict="no", correct=False, context_ids=["p-1", "p-2"]),
+        _qa_row("q2", qtype="knowledge-update", answer="Rome", verdict="yes", correct=True),
+        _qa_row("q3", correct=None, answer=None, verdict=None, excluded=QA_EXCLUSION_INFRA),
+        _qa_row("q4", answer=None, verdict=None, correct=False),
+        _qa_row("q5", correct=None, answer="Oslo", verdict=None, excluded=QA_EXCLUSION_BUDGET),
+    ]
+    return MemoryBenchmarkReport(
+        selection=selection,
+        retrieval_stage=RetrievalStageMetrics(
+            questions=1,
+            mean_recall_at_k=0.5,
+            mean_precision_at_k=0.25,
+            recall_by_type={"single-session-user": 0.5},
+            per_question=[
+                RetrievalQuestionResult(
+                    question_id="q1",
+                    question_type="single-session-user",
+                    evidence_sessions=2,
+                    evidence_sessions_hit=1,
+                    particles_retrieved=4,
+                    recall_at_k=0.5,
+                    precision_at_k=0.25,
+                )
+            ],
+        ),
+        qa_particles=QaConditionMetrics(
+            condition="qa_particles",
+            model_id="anthropic:test-answer",
+            questions=3,
+            accuracy=1 / 3,
+            excluded_infra=1,
+            excluded_budget=1,
+            accuracy_by_type={"single-session-user": 0.0, "knowledge-update": 1.0},
+            per_question=particles_rows,
+        ),
+        qa_full_context=QaConditionMetrics(
+            condition="qa_full_context",
+            model_id="anthropic:test-answer",
+            questions=1,
+            accuracy=0.0,
+            per_question=[_qa_row("q1", answer="Lyon", verdict="no", correct=False)],
+        ),
+        qa_no_memory=None,
+        quality_notes=["Candidate cache: 5 unique session extraction(s), 0 cache replay(s)."],
+    )
+
+
+def _dataset() -> list[MemoryQuestion]:
+    return [
+        _question("q1"),
+        _question("q2", qtype="knowledge-update"),
+        _question("q3"),
+        _question("q4"),
+        _question("q5"),
+        _question("q9-unused"),
+    ]
+
+
+class TestRejudge:
+    """Re-score a saved report's stored answers under the current judge.
+
+    The judge stage is separable from the answer stage since v1.141.1 (the
+    answer is on the row) and v1.141.7 (the judge prompt is versioned); the
+    re-judge re-runs *only* the judge call and writes a complete report of
+    record — retrieval copied, QA recomputed, provenance in the file.
+    """
+
+    def _patches(self, monkeypatch: pytest.MonkeyPatch, judge: Any = "yes") -> AsyncMock:
+        from particles.benchmark.memory import rejudge as rejudge_mod
+        from particles.config import get_config
+
+        _no_backoff(monkeypatch)
+        monkeypatch.setattr(get_config().benchmark_memory, "judge_protocol", 2)
+        monkeypatch.setattr(
+            rejudge_mod, "get_provider", lambda purpose: _provider("anthropic:new-judge")
+        )
+        complete = (
+            AsyncMock(side_effect=judge) if callable(judge) else AsyncMock(return_value=judge)
+        )
+        # ``_scored_call`` lives in the runner and calls the runner's binding.
+        monkeypatch.setattr(runner_mod, "complete", complete)
+        return complete
+
+    @pytest.mark.asyncio
+    async def test_rescored_report_recomputes_accuracy_and_keeps_exclusions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.benchmark.memory.rejudge import rejudge_report
+
+        complete = self._patches(monkeypatch)
+        source = _source_report()
+        out = await rejudge_report(source, _dataset(), source_path="/runs/src.json")
+
+        # Only the judge ran: one call per stored answer (q1, q2, q5 + the
+        # full-context q1), each carrying the stored answer, never an answer
+        # prompt.
+        assert complete.await_count == 4
+        prompts = [call.args[1] for call in complete.await_args_list]
+        assert any("Paris" in p for p in prompts)
+        assert any("Oslo" in p for p in prompts)
+        assert all(call.args[0] == "benchmark" for call in complete.await_args_list)
+
+        qp = out.qa_particles
+        assert qp is not None
+        assert qp.condition == "qa_particles"
+        assert qp.model_id == "anthropic:test-answer"  # the answer model is unchanged
+        assert qp.questions == 3  # q1, q2, q5 got verdicts; q3 / q4 stay excluded
+        assert qp.accuracy == 1.0
+        assert qp.accuracy_by_type == {"single-session-user": 1.0, "knowledge-update": 1.0}
+        assert qp.excluded_infra == 1
+        assert qp.excluded_budget == 0  # q5's answer existed, so it was judged
+        assert qp.excluded_unrecorded == 1  # q4: text suppressed, no cause
+        rows = {r.question_id: r for r in qp.per_question}
+        assert rows["q1"].correct is True
+        assert rows["q1"].verdict == "yes"
+        assert rows["q1"].answer == "Paris"
+        assert rows["q1"].context_particle_ids == ["p-1", "p-2"]
+        assert rows["q3"].correct is None and rows["q3"].excluded == QA_EXCLUSION_INFRA
+        assert rows["q4"].correct is None and rows["q4"].excluded == "unrecorded"
+        assert rows["q5"].correct is True and rows["q5"].excluded is None
+
+        fc = out.qa_full_context
+        assert fc is not None
+        assert fc.questions == 1 and fc.accuracy == 1.0
+        assert out.qa_no_memory is None  # a condition the source did not run stays not run
+
+        # Retrieval stage copied unchanged; the tuple names the new judge.
+        assert out.retrieval_stage == source.retrieval_stage
+        assert out.selection.judge_protocol == 2
+        assert out.selection.judge_model_id == "anthropic:new-judge"
+        assert out.selection.answer_model_id == source.selection.answer_model_id
+        assert out.selection.extraction_model_id == source.selection.extraction_model_id
+        assert out.benchmark == source.benchmark
+
+    @pytest.mark.asyncio
+    async def test_provenance_note_names_source_and_both_judge_tuples(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.benchmark.memory.rejudge import rejudge_report
+
+        self._patches(monkeypatch)
+        source = _source_report()
+        out = await rejudge_report(source, _dataset(), source_path="/runs/src.json")
+
+        note = out.quality_notes[0]
+        assert note.startswith("Re-judged from /runs/src.json")
+        assert "protocol 2 by anthropic:new-judge" in note
+        assert "protocol 1 by anthropic:old-judge" in note
+        assert "anthropic:test-answer" in note
+        assert "2 row(s) had no stored answer" in note
+        assert "1 excluded at answer time, 1 with the answer text unrecorded" in note
+        assert "1 row(s) whose original judge call produced no verdict" in note
+        # The source's own notes ride along, verbatim and labelled as such.
+        assert source.quality_notes[0] in out.quality_notes
+        assert any(n.startswith("Source report quality notes follow") for n in out.quality_notes)
+        # ...and the renderer discloses the new exclusion kind by name.
+        rendered = render_report_table(out)
+        assert "unrecorded (no stored answer to re-judge)" in rendered
+        assert "q4: no verdict (unrecorded)" in rendered
+        assert "judge protocol v2" in rendered
+
+    @pytest.mark.asyncio
+    async def test_no_stored_answers_refuses_before_any_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.benchmark.memory.rejudge import RejudgeError, rejudge_report
+
+        complete = self._patches(monkeypatch)
+        source = _source_report()
+        for metrics in (source.qa_particles, source.qa_full_context):
+            assert metrics is not None
+            for row in metrics.per_question:
+                row.answer = None
+        with pytest.raises(RejudgeError, match="no stored answers"):
+            await rejudge_report(source, _dataset(), source_path="src.json")
+        complete.assert_not_awaited()
+
+        with pytest.raises(RejudgeError, match="no stored answers"):
+            await rejudge_report(
+                MemoryBenchmarkReport(selection=_selection()), _dataset(), source_path="x"
+            )
+
+    @pytest.mark.asyncio
+    async def test_dataset_must_cover_the_report(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.benchmark.memory.rejudge import RejudgeError, rejudge_report
+
+        complete = self._patches(monkeypatch)
+        with pytest.raises(RejudgeError, match=r"does not contain 2 question\(s\).*q4, q5"):
+            await rejudge_report(_source_report(), _dataset()[:3], source_path="src.json")
+        complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_judge_model_drift_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.benchmark.memory import rejudge as rejudge_mod
+        from particles.benchmark.memory.rejudge import rejudge_report
+
+        self._patches(monkeypatch)
+        judges = iter(["anthropic:judge-a", "anthropic:judge-b", "anthropic:judge-b"])
+        monkeypatch.setattr(rejudge_mod, "get_provider", lambda purpose: _provider(next(judges)))
+        with pytest.raises(SameModelViolation, match="Judge-model mismatch"):
+            await rejudge_report(_source_report(), _dataset(), source_path="src.json")
+
+    @pytest.mark.asyncio
+    async def test_failed_judge_call_is_excluded_with_the_answer_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.benchmark.memory.rejudge import rejudge_report
+
+        def judge(purpose: str, prompt: str, **kwargs: Any) -> str:
+            if "Rome" in prompt:
+                raise RuntimeError("overloaded")
+            return "yes"
+
+        self._patches(monkeypatch, judge=judge)
+        out = await rejudge_report(_source_report(), _dataset(), source_path="src.json")
+        qp = out.qa_particles
+        assert qp is not None
+        rows = {r.question_id: r for r in qp.per_question}
+        assert rows["q2"].correct is None
+        assert rows["q2"].excluded == QA_EXCLUSION_INFRA
+        assert rows["q2"].answer == "Rome"  # the answer did exist
+        assert qp.questions == 2 and qp.excluded_infra == 2
+        assert any(
+            "q2 [qa_particles]: judge call produced no verdict" in n for n in out.quality_notes
+        )
+
+    @pytest.mark.asyncio
+    async def test_record_claim_text_off_suppresses_only_the_new_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.benchmark.memory.rejudge import rejudge_report
+        from particles.config import get_config
+
+        self._patches(monkeypatch)
+        monkeypatch.setattr(get_config().benchmark, "record_claim_text", False)
+        out = await rejudge_report(_source_report(), _dataset(), source_path="src.json")
+        qp = out.qa_particles
+        assert qp is not None
+        rows = {r.question_id: r for r in qp.per_question}
+        assert rows["q1"].correct is True
+        assert rows["q1"].verdict is None
+        assert rows["q1"].answer == "Paris"  # recorded under the source's policy; kept
+
+    def test_stored_answer_count(self) -> None:
+        from particles.benchmark.memory.rejudge import stored_answer_count
+
+        assert stored_answer_count(_source_report()) == 4
+        assert stored_answer_count(MemoryBenchmarkReport(selection=_selection())) == 0
+
+
+class TestBlobIsolation:
+    """Deposits never write the operator's configured blob dir (report-only rule).
+
+    A scratch store isolates the SQLite rows, but ``save_blob`` resolves
+    ``storage.blob_dir`` against the *configured* store — so without
+    :func:`runner_mod.isolated_blob_dir` every haystack session a run deposits
+    lands in the operator's real ``corpus_blobs``. The deposit here is the real
+    one; only extraction and retrieval are stubbed.
+    """
+
+    @pytest.fixture
+    def operator_blobs(self, tmp_path: Path) -> Path:
+        from particles.config import get_config
+
+        path = tmp_path / "operator_blobs"
+        path.mkdir()
+        get_config().storage.blob_dir = str(path)
+        return path
+
+    def _patches(self, monkeypatch: pytest.MonkeyPatch, deposit: Any) -> None:
+        monkeypatch.setattr(runner_mod, "deposit_text_versioned", deposit)
+        monkeypatch.setattr(runner_mod, "extract_snapshot", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner_mod, "select_extractor", lambda source_type: _StubExtractor())
+        monkeypatch.setattr(runner_mod, "retrieve_ranked", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner_mod, "load_source_rows", AsyncMock(return_value={}))
+
+    async def _run(self, work_dir: Path, *, keep_stores: bool) -> MemoryBenchmarkReport:
+        return await run_memory_benchmark(
+            [_question()],
+            variant="oracle",
+            dataset_revision="rev-test",
+            selection_seed=13,
+            selection_limit=None,
+            questions_total=1,
+            work_dir=work_dir,
+            keep_stores=keep_stores,
+            qa=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_kept_store_set_carries_its_blobs(
+        self, tmp_path: Path, operator_blobs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.corpus.deposit import deposit_text_versioned
+
+        self._patches(monkeypatch, deposit_text_versioned)
+        work_dir = tmp_path / "stores"
+
+        report = await self._run(work_dir, keep_stores=True)
+
+        assert report.retrieval_stage.questions == 1
+        assert list(operator_blobs.rglob("*")) == []
+        assert get_config().storage.blob_dir == str(operator_blobs)
+        # Both sessions' blobs sit beside the kept stores, so a --reuse-stores
+        # replay reads its snapshots from where the preparing run wrote them.
+        kept = [p for p in (work_dir / runner_mod.BLOB_SUBDIR).rglob("*") if p.is_file()]
+        assert len(kept) == 2
+
+    @pytest.mark.asyncio
+    async def test_unkept_caller_work_dir_drops_its_blobs(
+        self, tmp_path: Path, operator_blobs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.corpus.deposit import deposit_text_versioned
+
+        self._patches(monkeypatch, deposit_text_versioned)
+        work_dir = tmp_path / "scratch"
+
+        await self._run(work_dir, keep_stores=False)
+
+        assert list(operator_blobs.rglob("*")) == []
+        assert not (work_dir / runner_mod.BLOB_SUBDIR).exists()
+
+    @pytest.mark.asyncio
+    async def test_blob_dir_restored_when_run_aborts(
+        self, tmp_path: Path, operator_blobs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.corpus.deposit import deposit_text_versioned
+
+        seen: list[str] = []
+
+        async def deposit_then_abort(session: Any, **kw: Any) -> Any:
+            await deposit_text_versioned(session, **kw)
+            seen.append(get_config().storage.blob_dir)
+            # SameModelViolation is the one error that aborts the whole run.
+            raise SameModelViolation("pinned model drifted")
+
+        self._patches(monkeypatch, deposit_then_abort)
+
+        with pytest.raises(SameModelViolation):
+            await self._run(tmp_path / "stores", keep_stores=True)
+
+        assert seen and all(Path(d).is_relative_to(tmp_path / "stores") for d in seen)
+        assert list(operator_blobs.rglob("*")) == []
+        assert get_config().storage.blob_dir == str(operator_blobs)
+
+    def test_isolated_blob_dir_restores_on_exception(self, tmp_path: Path) -> None:
+        from particles.config import get_config
+
+        storage = get_config().storage
+        prior = storage.blob_dir
+        with pytest.raises(RuntimeError), runner_mod.isolated_blob_dir(tmp_path) as blob_dir:
+            assert blob_dir.is_absolute()
+            assert storage.blob_dir == str(tmp_path.resolve() / runner_mod.BLOB_SUBDIR)
+            raise RuntimeError("boom")
+        assert storage.blob_dir == prior

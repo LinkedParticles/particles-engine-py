@@ -9,14 +9,42 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
-from particles.api.client import get_backend
+from particles.api.client import Backend, get_backend
 from particles.core.schema import (
+    AnswerFailureCause,
     AssertionModality,
     AudienceHint,
     QueryRequest,
     QueryResponse,
     StructuralGroupBy,
 )
+
+#: Per-cause operator advice for a failed answer call. The provider's own
+#: message names *what* broke; these name what the operator can do about it,
+#: which differs enough between the two classes that collapsing them into one
+#: banner sent operators looking for a network fault when the real cause was
+#: their own token cap.
+_ANSWER_FAILURE_ADVICE: dict[AnswerFailureCause, str] = {
+    AnswerFailureCause.BUDGET: (
+        "The model returned no text within its token budget — an "
+        "extended-thinking model spends thinking tokens from the same "
+        "allowance. Raise query.answer_max_tokens (and "
+        "query.answer_retry_max_tokens, already tried once)."
+    ),
+    AnswerFailureCause.PROVIDER: (
+        "The provider call itself failed (billing, network, or a refusal) — "
+        "this is not a token-budget problem."
+    ),
+}
+
+
+def _answer_failure_lines(result: QueryResponse) -> list[str]:
+    """The stderr disclosure for an answer that degraded to the listing."""
+    lines = [f"⚠  Answer generation failed: {result.answer_generation_error}"]
+    cause = result.answer_generation_error_cause
+    if cause is not None:
+        lines.append(f"   {cause.value}: {_ANSWER_FAILURE_ADVICE[cause]}")
+    return lines
 
 
 @app.command("query")
@@ -46,10 +74,18 @@ def query_cmd(
     show_particles: bool = typer.Option(
         False, "--show-particles", help="Print retrieved particles with scores before the answer"
     ),
+    show_source: bool = typer.Option(
+        False,
+        "--show-source",
+        help="After the answer, print the source passage behind each of the top "
+        "hits, labelled exact (hash-verified chunk), located (best term overlap; "
+        "not verified), or whole source. Display only: never affects ranking. "
+        "`particles particle source <id>` does the same for one belief.",
+    ),
     contestedness: bool = typer.Option(
         False,
         "--contestedness",
-        help="Show per-result contestedness — the max−min spread of effective "
+        help="Show per-result contestedness: the max−min spread of effective "
         "confidence across your policy set (local + adopted lenses). "
         "Absent when fewer than two policies are configured.",
     ),
@@ -61,7 +97,7 @@ def query_cmd(
     include_non_asserted: bool = typer.Option(
         False,
         "--include-non-asserted",
-        help="Include non-asserted particles — a document's rejected / superseded / "
+        help="Include non-asserted particles: a document's rejected / superseded / "
         "deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL)",
     ),
     assertion_modality: str | None = typer.Option(
@@ -81,14 +117,14 @@ def query_cmd(
         None,
         "--predicate",
         help="Filter to claims whose predicate term equals this string "
-        "(case-insensitive, exact — a CURIE and its expanded IRI are different "
+        "(case-insensitive, exact: a CURIE and its expanded IRI are different "
         "strings; discover terms with --predicates).",
     ),
     object_eq: str | None = typer.Option(
         None,
         "--object-eq",
         help="Filter to claims whose object equals this value (typed when both "
-        "sides normalize — numbers and ISO dates — else case-insensitive text).",
+        "sides normalize, i.e. numbers and ISO dates; else case-insensitive text).",
     ),
     object_gt: str | None = typer.Option(
         None,
@@ -131,7 +167,7 @@ def query_cmd(
     predicates: bool = typer.Option(
         False,
         "--predicates",
-        help="List the distinct predicate terms with kind and claim count — "
+        help="List the distinct predicate terms with kind and claim count: "
         "the vocabulary the exact-string --predicate filter matches against.",
     ),
     as_of: str | None = typer.Option(
@@ -219,11 +255,18 @@ def query_cmd(
         # --object-gt/--object-lt bound.
         typer.echo(f"Invalid query request: {exc}", err=True)
         raise typer.Exit(1) from None
+    if store and show_source:
+        # Hydration reads one store's corpus; federated hits span several.
+        typer.echo(
+            "--show-source is not available with --store federation; run "
+            "`particles particle source <id>` against the store holding the hit.",
+            err=True,
+        )
+        raise typer.Exit(1)
     if store:
         if backend.remote:
             typer.echo(
-                "--store federation runs locally and is not available against a "
-                "remote engine.",
+                "--store federation runs locally and is not available against a remote engine.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -234,6 +277,8 @@ def query_cmd(
         result = run(backend.query(req))
     if req.is_structural_mode:
         _render_structural(result, req)
+        if show_source:
+            _render_sources(backend, result)
         return
     # a refusal (the deterministic below-floor answer, or the §4
     # responder-declared one) promises its nearest beliefs "listed for
@@ -287,10 +332,8 @@ def query_cmd(
     if result.answer_generation_error:
         # Disclosed degradation (warnings to stderr): the "answer"
         # below is the deterministic fallback listing, not generated prose.
-        typer.echo(
-            f"⚠  Answer generation failed: {result.answer_generation_error}",
-            err=True,
-        )
+        for line in _answer_failure_lines(result):
+            typer.echo(line, err=True)
     typer.echo(result.answer)
     # on a claim-prefiltered semantic query, the coverage
     # footer + the gt/lt non-normalizable disclosure ride below the answer.
@@ -343,6 +386,37 @@ def query_cmd(
             f"\n⚠  Coverage gap: {len(result.coverage_gaps)} entries not yet extracted.",
             err=True,
         )
+    if show_source:
+        _render_sources(backend, result)
+
+
+def _render_sources(backend: Backend, result: QueryResponse) -> None:
+    """Print the source passage behind each of the top hits (``--show-source``).
+
+    Runs after the response is final, over its already-ranked particles, so the
+    hydrated text cannot influence what was retrieved or how it was ordered.
+    """
+    from particles.api.cli._source_passage import header_lines
+    from particles.config import get_config
+    from particles.operations.source_passage import SourcePassage
+
+    hits = result.particles[: get_config().source_passage.query_show_limit]
+    if not hits:
+        return
+
+    async def _hydrate() -> list[SourcePassage | None]:
+        return [await backend.particle_source(p.id) for p in hits]
+
+    typer.echo(f"\nSources behind the top {len(hits)} of {len(result.particles)} hit(s):")
+    for p, passage in zip(hits, run(_hydrate()), strict=True):
+        typer.echo(f"\n▸ p-{p.id[:8]}  {p.content[:80]}")
+        if passage is None:
+            typer.echo("  Match:     unavailable")
+            continue
+        for line in header_lines(passage):
+            typer.echo(f"  {line}")
+        for text_line in passage.text.splitlines():
+            typer.echo(f"  │ {text_line}")
 
 
 def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
@@ -400,10 +474,8 @@ def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
     if result.ranking_degraded:
         typer.echo(f"⚠  {result.ranking_degraded}", err=True)
     if result.answer_generation_error:
-        typer.echo(
-            f"⚠  Answer generation failed: {result.answer_generation_error}",
-            err=True,
-        )
+        for line in _answer_failure_lines(result):
+            typer.echo(line, err=True)
     typer.echo(result.answer)
     if result.claim_coverage is not None:
         typer.echo(coverage_line(result.claim_coverage))

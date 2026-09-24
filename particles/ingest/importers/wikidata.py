@@ -2,8 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Wikidata importer (Engine layer; moved from particles.extraction.wikidata
-).
+"""Wikidata importer (Engine layer; moved from particles.extraction.wikidata).
 
 Imports Wikidata entity URLs by fetching the Wikibase REST API.
 The Client-safe URL regex, REST base, and source-type constant stay in

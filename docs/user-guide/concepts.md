@@ -2,7 +2,7 @@
 
 Particles stores knowledge as atomic claims rather than prose: every
 record is one statement carrying its own source, confidence, and
-lifecycle status. Nothing is edited in place — corrections supersede,
+lifecycle status. Nothing is edited in place: corrections supersede,
 retractions cascade, and disagreements between sources become visible
 records you can review. Trust and staleness are applied when you
 query, never written into the stored claim.
@@ -15,23 +15,23 @@ the rest of the guide assumes you've seen them.
 The minimal unit of knowledge: one natural-language claim plus its
 structured metadata envelope. Every particle carries:
 
-- **content** — the claim itself, written as a single sentence.
-- **subjects** — the canonical entities the claim is about.
-- **confidence** — a stated likelihood (0.0–1.0), immutable once
+- **content**: the claim itself, written as a single sentence.
+- **subjects**: the canonical entities the claim is about.
+- **confidence**: a stated likelihood (0.0–1.0), immutable once
   asserted. See [confidence](#confidence) below.
-- **provenance** — which corpus entry the claim was extracted from.
-- **uncertainty_nature** — `EPISTEMIC` (incomplete knowledge) vs
+- **provenance**: which corpus entry the claim was extracted from.
+- **uncertainty_nature**: `EPISTEMIC` (incomplete knowledge) vs
   `ALEATORY` (inherent randomness). PSUM terminology.
-- **status** — `ACTIVE` / `SUPERSEDED` / `RETRACTED` / `INCONSISTENCY` /
+- **status**: `ACTIVE` / `SUPERSEDED` / `RETRACTED` / `INCONSISTENCY` /
   `PROVENANCE_STALE`. See [status](#status).
-- **extractor_ref** — which extractor produced it (used for trust
+- **extractor_ref**: which extractor produced it (used for trust
   weighting).
-- **structured_claim** *(optional)* — the same claim rendered as one
+- **structured_claim** *(optional)*: the same claim rendered as one
   subject-predicate-object triple, derived from `content` by tooling and
   stamped with what produced it. It is an *annotation*, not an assertion:
   it can be regenerated at any time and never affects the claim, its
-  confidence, or its provenance. Many particles have none, permanently —
-  some prose has no honest triple. See
+  confidence, or its provenance. Many particles have none, permanently,
+  because some prose has no honest triple. See
   [operator guide → structured claims](../operator-guide/structured-claims.md).
 
 For the full schema see the [technical
@@ -63,7 +63,7 @@ entities into one, the fix is
 | `INCONSISTENCY` | Contradicts another particle; needs operator review |
 | `PROVENANCE_STALE` | The corpus entry it was extracted from has new content; needs re-extraction |
 
-Transitions go through `status.validate_transition()` — operators
+Transitions go through `status.validate_transition()`; operators
 don't poke `status` directly. Every retirement is dated, so you can ask
 what the store believed *before* a status changed: see
 [As-of time travel](as-of.md). Getting `INCONSISTENCY` and
@@ -74,13 +74,13 @@ what the store believed *before* a status changed: see
 
 The SDK separates two quantities:
 
-- **`confidence.value`** — the extractor's confidence as calibrated at
+- **`confidence.value`**: the extractor's confidence as calibrated at
   creation time. **Immutable.** When the extractor carries an active
   temperature-scaling calibration, the scaled value is what
   gets stored, stamped `calibration_source: CALIBRATED_BENCHMARK` with
   a `calibration_ref` audit trail; otherwise the raw self-reported
   value is stored as `EXTRACTOR_DIRECT`.
-- **`effective_confidence`** — `confidence.value` × extractor trust
+- **`effective_confidence`**: `confidence.value` × extractor trust
   weight × source trust rank × content-age decay. The number queries
   actually rank by. Computed at query time, never stored.
 
@@ -96,7 +96,7 @@ are *rebuildable* from corpus + extractor; the corpus is the
 durable record of "what we saw, when."
 
 Because the corpus is durable and particles are rebuildable, most recovery
-paths re-derive rather than repair — see
+paths re-derive rather than repair; see
 [Operator guide → schema migration](../operator-guide/schema-migration.md)
 for what survives a major bump, and
 [store consolidation](../operator-guide/store-consolidation.md) for merging
@@ -108,10 +108,10 @@ re-read it:
 
 ## Where to go next
 
-- [Querying](querying.md) — how ranking and tag filters work.
-- [As-of time travel](as-of.md) — what the store believed at a past instant.
-- [Exporting](exporting.md) — Obsidian / Anki / wiki shapes.
-- [Graph view](graph-view.md) — the same concepts rendered as a picture:
+- [Querying](querying.md): how ranking and tag filters work.
+- [As-of time travel](as-of.md): what the store believed at a past instant.
+- [Exporting](exporting.md): Obsidian / Anki / wiki shapes.
+- [Graph view](graph-view.md): the same concepts rendered as a picture:
   confidence as opacity, status as line form, contestedness as a badge.
-- [Operator guide → lint and review](../operator-guide/lint-and-review.md) —
+- [Operator guide → lint and review](../operator-guide/lint-and-review.md):
   how to handle INCONSISTENCY and PROVENANCE_STALE.

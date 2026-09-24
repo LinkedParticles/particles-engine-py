@@ -87,7 +87,7 @@ async def maybe_refetch(
     no longer exists.
 
     Dispatches on the URI-R scheme: a ``file://`` entry takes the
-    local tier — ``stat`` then hash, no network — and everything else takes the
+    local tier (``stat`` then hash, no network) and everything else takes the
     HTTP ladder.
     """
     entry_row = await session.get(CorpusEntryRow, entry_id)

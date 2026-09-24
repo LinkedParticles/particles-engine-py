@@ -5,7 +5,8 @@
 """Dream cycle — the scheduled consolidation operation.
 
 ``run_consolidation`` composes the **existing** engine passes in the fixed §3
-order and adds no detection of its own: extract catch-up (capped), the reconcile sweep, one ``collect_cards(semantic=…)`` census pass under
+order and adds no detection of its own: extract catch-up (capped), the
+reconcile sweep, one ``collect_cards(semantic=…)`` census pass under
 the probe cap + the §4 delta scope, the curation-queue
 refresh over the *same* card collection, the utility-mining pass, and
 the projection re-render (injected by the Surface caller — the
@@ -58,7 +59,7 @@ from particles.operations.curation.collect import collect_cards
 from particles.operations.curation.session import _suppressed_keys, build_curation_queue
 from particles.operations.curation.snapshot import collect_and_persist
 from particles.operations.lint import ContradictionProbeControl
-from particles.operations.reconcile import reconcile_supersession
+from particles.operations.reconcile import reconcile_supersession, reconcile_updates
 from particles.operations.utility_mining import mine_session, session_id_from_uri
 from particles.store.curation_snapshot_store import CollectionScope
 from particles.store.event_store import (
@@ -280,10 +281,17 @@ class ConsolidationReport(BaseModel):
     pending_extracted: int = 0
     pending_failed: int = 0
     pending_remaining: int = 0
+    # Superseded generations of MUTABLE entries skipped before the pass listed
+    # its work. Not part of ``pending_total``: they were never owed.
+    pending_collapsed: int = 0
 
     # Pass 2 — reconcile sweep (probe-bearing: one semantic_lint call per
     # candidate pair, capped at consolidation.max_reconcile_probes).
     reconcile_demoted: int = 0
+    # the same-subject update sweep's counters.
+    update_demoted: int = 0
+    update_candidate_pairs: int = 0
+    update_probes_run: int = 0
     reconcile_candidate_pairs: int = 0
     reconcile_probes_run: int = 0
 
@@ -492,7 +500,8 @@ def _semantic_availability(structural_only: bool) -> tuple[bool, str | None]:
     """(available, degradation reason) for the cycle's LLM passes (§6).
 
     Degraded when the operator asked (``--structural-only``), when
-    ``consolidation.semantic`` is off (the §11 demotion switch), when the breaker is open, or when an Anthropic-routed purpose has no key.
+    ``consolidation.semantic`` is off (the §11 demotion switch), when the
+    breaker is open, or when an Anthropic-routed purpose has no key.
     A purpose routed to the local provider needs no Anthropic key.
     """
     if structural_only:
@@ -547,7 +556,8 @@ async def run_consolidation(
     ``lock_path`` overrides the cycle lock's location. The lock exists to stop
     two cycles running against **one store** (§8), so its natural scope is the
     store — the default global path is merely the right answer when there is
-    one. A caller holding many independent stores at once (the benchmark's per-question scratch stores) passes a per-store path; sharing
+    one. A caller holding many independent stores at once (the
+    benchmark's per-question scratch stores) passes a per-store path; sharing
     the global one would make every concurrent store after the first record
     ``skipped``, silently turning a consolidation-on arm into a
     consolidation-off arm.
@@ -648,6 +658,27 @@ async def run_consolidation(
             )
         else:
             await _run_pass(session, report, "reconcile", lambda: _pass_reconcile(session, report))
+
+        # ------------------------------------- pass 2b: update supersession
+        if not semantic_ok:
+            _skip(
+                report,
+                "reconcile_updates",
+                f"update-supersession probes are LLM-priced ({degrade_reason})",
+            )
+        elif not get_config().reconciliation.update_supersession.enabled:
+            _skip(
+                report,
+                "reconcile_updates",
+                "reconciliation.update_supersession.enabled is false",
+            )
+        else:
+            await _run_pass(
+                session,
+                report,
+                "reconcile_updates",
+                lambda: _pass_reconcile_updates(session, report, scope_ids),
+            )
 
         # ------------------------------------------------- pass 3: census
         cards: list[CurationCard] = []
@@ -794,7 +825,8 @@ async def _run_pass(
 
 async def _delta_scope_ids(session: AsyncSession, watermark: datetime) -> frozenset[str]:
     """The §4 delta scope: particles changed since ``watermark`` + particles
-    from corpus entries deposited since, threaded through the at-least-one-side-in-scope seams unchanged."""
+    from corpus entries deposited since, threaded through the
+    at-least-one-side-in-scope seams unchanged."""
     from particles.corpus.store import list_entry_ids_created_since
 
     changed = await get_particle_ids_changed_since(session, watermark)
@@ -880,7 +912,12 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
     # Deferred import: the pipeline pulls the extractor registry / LLM stack;
     # load it only when there is something to extract (AGENTS.md case 2).
     from particles.corpus.store import list_pending_snapshots_oldest_first
-    from particles.operations.extract import extract_snapshot
+    from particles.operations.extract import collapse_superseded_pending, extract_snapshot
+
+    # collapse before listing. Oldest-first plus one snapshot per
+    # entry per pooled run otherwise drains a 35-edit MEMORY.md over 35 nights,
+    # every one of them extracting a generation the file no longer holds.
+    report.pending_collapsed = (await collapse_superseded_pending(session)).snapshots
 
     pending = await list_pending_snapshots_oldest_first(session)
     report.pending_total = len(pending)
@@ -889,7 +926,13 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
         return await _pass_extract_pooled(pending[:cap], report)
     for entry_id, snapshot_id in pending[:cap]:
         try:
-            await extract_snapshot(session, entry_id, snapshot_id, agent_id=report.actor)
+            await extract_snapshot(
+                session,
+                entry_id,
+                snapshot_id,
+                agent_id=report.actor,
+                skip_if_superseded=True,
+            )
             await session.commit()
             report.pending_extracted += 1
         except AccountLevelLLMError as exc:
@@ -970,6 +1013,7 @@ async def _pass_extract_pooled(batch: list[tuple[str, str]], report: Consolidati
                 snapshot_id,
                 agent_id=report.actor,
                 completion_pool=pool,
+                skip_if_superseded=True,
             )
             await task_session.commit()
 
@@ -1026,6 +1070,28 @@ async def _pass_reconcile(session: AsyncSession, report: ConsolidationReport) ->
     return probed if isinstance(probed, int) else 0
 
 
+async def _pass_reconcile_updates(
+    session: AsyncSession,
+    report: ConsolidationReport,
+    scope_ids: frozenset[str] | None,
+) -> int:
+    """Pass 2b: the same-subject update sweep. Idempotent.
+
+    Probe-bearing like pass 2 — one contradiction probe per *qualifying* pair
+    (the sweep pre-filters by lineage and date, so no probe is spent on a pair
+    rung 2.5 could not act on), capped at ``consolidation.max_update_probes``
+    and delta-scoped to the cycle's window.
+    """
+    summary = await reconcile_updates(session, scope_ids=scope_ids)
+    demoted = summary.get("demoted", 0)
+    probed = summary.get("probed", 0)
+    report.update_demoted = demoted if isinstance(demoted, int) else 0
+    report.update_probes_run = probed if isinstance(probed, int) else 0
+    candidates = summary.get("candidate_pairs", 0)
+    report.update_candidate_pairs = candidates if isinstance(candidates, int) else 0
+    return probed if isinstance(probed, int) else 0
+
+
 async def _pass_census(
     session: AsyncSession,
     report: ConsolidationReport,
@@ -1036,7 +1102,8 @@ async def _pass_census(
     """Pass 3: one ``collect_cards`` pass, capped + scoped (§3.3).
 
     The re-audit composition: the probe control carries
-    ``audit.max_contradiction_probes`` and the §4 delta scope; the duplicate partition keeps the store-wide tail count beside the in-scope
+    ``audit.max_contradiction_probes`` and the §4 delta scope; the
+    duplicate partition keeps the store-wide tail count beside the in-scope
     headline. Duplicates run in REPORT mode (unjudged candidates — the audit's
     default; ``--judge`` remains an interactive choice). Granularity probes
     stay off on the card path (via ``collect_cards``).
@@ -1047,8 +1114,8 @@ async def _pass_census(
             max_probes=get_config().audit.max_contradiction_probes,
             scope_particle_ids=scope_ids,
             # The dream cycle runs unattended at 03:30: nobody is
-            # waiting on these probes, so they go out as one half-price batch
-            #. ``particles lint`` and the interactive first-run
+            # waiting on these probes, so they go out as one half-price batch.
+            # ``particles lint`` and the interactive first-run
             # audit leave this off and keep the sequential loop.
             latency_tolerant=True,
         )
@@ -1283,6 +1350,7 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "duplicate_in_scope": report.duplicate_in_scope,
         "pending_backlog": report.pending_remaining,
         "pending_extracted": report.pending_extracted,
+        "pending_collapsed": report.pending_collapsed,
         "refresh_checked": report.refresh_checked,
         "refresh_updated": report.refresh_updated,
         "refresh_missing": report.refresh_missing,
@@ -1443,6 +1511,11 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
         + (
             f" ({report.pending_remaining} remain — next run continues)"
             if report.pending_remaining
+            else ""
+        )
+        + (
+            f"; skipped {report.pending_collapsed} superseded snapshot(s)"
+            if report.pending_collapsed
             else ""
         )
     )

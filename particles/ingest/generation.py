@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import Mutability
+from particles.core.schema import Mutability, ProvenanceRefType
 from particles.core.status import Status, StatusReason
 
 log = logging.getLogger(__name__)
@@ -60,21 +60,33 @@ async def cascade_superseded_generation(
 ) -> list[str]:
     """Demote ACTIVE particles anchored to a superseded snapshot of ``entry_id``.
 
-    A no-op for every entry whose mutability is not ``MUTABLE`` — ``APPEND_ONLY``
-    content is additive by definition, ``STABLE`` never changes, and
-    ``EPHEMERAL`` is not archived — so callers need not pre-filter.
+    A no-op for every entry whose mutability is not ``MUTABLE``, so callers
+    need not pre-filter: ``APPEND_ONLY`` content is additive by definition,
+    ``STABLE`` never changes, and ``EPHEMERAL`` is not archived.
 
     Args:
         entry_id: The corpus entry whose generations are being reconciled.
         current_snapshot_id: The snapshot that has just been extracted. Every
             *other* snapshot of this entry is superseded by it.
-        exclude_ids: Particle ids to leave ACTIVE regardless. Callers pass the carry-forward ids — a carried-forward particle keeps
-            pointing at the snapshot it was originally extracted from
-            (provenance is deliberately not mutated), so without this it would
-            be misread as a stale generation and demoted.
+        exclude_ids: Particle ids to leave ACTIVE regardless. Callers pass the
+            carry-forward ids. A carried-forward particle's
+            provenance edge keeps naming the snapshot it was originally
+            extracted from (the edge is never re-pointed), so without this it
+            would be misread as a stale generation and demoted. A belt since
+            the re-observation is now also on the particle's
+            provenance, which the attestation check below reads.
+
+    A candidate some entry's *current* snapshot still attests is skipped—
+    a claim a live source states is not ``PROVENANCE_STALE``
+    under any reading of that status. The cascade was designed for
+    single-entry particles; a claim folded from several sources
+    retires only when none of them states it any more. "Current" is read as
+    the scope join reads it: this entry's ``current_snapshot_id``, another
+    ``MUTABLE`` entry's latest extracted snapshot, or any snapshot of an entry
+    of another mutability.
 
     Returns:
-        The ids demoted, in query order. Does not commit — the caller owns the
+        The ids demoted, in query order. Does not commit; the caller owns the
         transaction.
     """
     from particles.corpus.store import get_entry
@@ -90,10 +102,14 @@ async def cascade_superseded_generation(
     candidates = await get_active_particle_ids_from_other_snapshots(
         session, entry_id, current_snapshot_id
     )
+    candidates = await _unattested(
+        session,
+        [pid for pid in candidates if pid not in exclude_ids],
+        entry_id=entry_id,
+        current_snapshot_id=current_snapshot_id,
+    )
     demoted: list[str] = []
     for particle_id in candidates:
-        if particle_id in exclude_ids:
-            continue
         await update_particle_status(
             session, particle_id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
         )
@@ -140,8 +156,11 @@ async def backfill_superseded_generations(
     "Latest COMPLETE" rather than "latest" is deliberate: if the newest snapshot
     is still ``PENDING``, the replacement beliefs do not exist yet, and retiring
     the old generation would leave the store with neither.
+    "COMPLETE" here means an extracted RESPONSE snapshot: a REVISIT is COMPLETE
+    too, but it records that the content did not change and carries no beliefs
+    of its own, so it is never the current generation.
 
-    ``dry_run`` counts without writing — it does not write-then-roll-back, so a
+    ``dry_run`` counts without writing (it does not write-then-roll-back), so a
     caller may safely share its session with other work. Does not commit; the
     caller owns the transaction.
     """
@@ -160,7 +179,12 @@ async def backfill_superseded_generations(
             continue
         if dry_run:
             count = len(
-                await get_active_particle_ids_from_other_snapshots(session, entry_id, current)
+                await _unattested(
+                    session,
+                    await get_active_particle_ids_from_other_snapshots(session, entry_id, current),
+                    entry_id=entry_id,
+                    current_snapshot_id=current,
+                )
             )
         else:
             count = len(
@@ -181,3 +205,41 @@ async def backfill_superseded_generations(
             report.entries_affected,
         )
     return report
+
+
+async def _unattested(
+    session: AsyncSession,
+    particle_ids: list[str],
+    *,
+    entry_id: str,
+    current_snapshot_id: str,
+) -> list[str]:
+    """``particle_ids`` that no entry's current snapshot attests, order kept."""
+    if not particle_ids:
+        return []
+    from particles.corpus.store import get_entry_currency
+    from particles.store.observer_scope_join import SourceRef, attests
+    from particles.store.particle_store import get_particles_by_ids
+
+    particles = await get_particles_by_ids(session, particle_ids)
+    refs = {
+        p.id: [
+            SourceRef(r.corpus_entry_id, r.snapshot_id)
+            for r in p.provenance
+            if r.type is ProvenanceRefType.SOURCE
+        ]
+        for p in particles.values()
+    }
+    others = {r.entry_id for rs in refs.values() for r in rs if r.entry_id != entry_id}
+    currency = await get_entry_currency(session, others)
+
+    def attested(pid: str) -> bool:
+        for ref in refs.get(pid, ()):
+            if ref.entry_id == entry_id:
+                if ref.snapshot_id == current_snapshot_id:
+                    return True
+            elif ref.entry_id in currency and attests(ref, currency[ref.entry_id]):
+                return True
+        return False
+
+    return [pid for pid in particle_ids if not attested(pid)]

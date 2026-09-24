@@ -13,8 +13,8 @@ graph:
   ``reconcile_and_insert``, and §6.6 conflict resolution against store state.
 - :mod:`particles.ingest.subject_resolver` — matching a candidate's subject
   name to an existing canonical Subject via the store and live authorities.
-- :mod:`particles.ingest.authorities` — the Subject Authority registry
-  : live external-ID lookup (Wikidata, …), graph-aware.
+- :mod:`particles.ingest.authorities` — the Subject Authority registry:
+  live external-ID lookup (Wikidata, …), graph-aware.
 
 These modules import the Engine freely (store, corpus, db). They are
 deliberately *not* importable from the Client layer — the ``import-linter``

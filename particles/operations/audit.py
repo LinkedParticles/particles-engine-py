@@ -71,7 +71,8 @@ class AuditEstimate(BaseModel):
 
     Mirrors the general extractor's chunking: one LLM call per source at or
     under ``extraction.html_chunk_size`` characters, else one call per chunk,
-    bounded by ``extraction.max_llm_calls_per_source``. The contradiction probes are additional and density-dependent, so they are
+    bounded by ``extraction.max_llm_calls_per_source``. The
+    contradiction probes are additional and density-dependent, so they are
     disclosed in prose rather than counted here.
     """
 
@@ -292,7 +293,8 @@ class AuditProgress:
 
     The extraction phase can take many minutes (one LLM call per pending
     snapshot, plus subject resolution); without feedback the activation-moment
-    audit is indistinguishable from a hang. The same goes for the contradiction probe on a populated store, so it emits per-pair ``probe``
+    audit is indistinguishable from a hang. The same goes for the
+    contradiction probe on a populated store, so it emits per-pair ``probe``
     events (``done``/``total`` over the planned probe set
     — proposed). The Engine emits these events and the Surface renders them —
     the operation itself never prints (AGENTS.md § Code conventions).
@@ -338,8 +340,8 @@ async def run_memory_audit(
     over PENDING snapshots of ``harvested_entry_ids`` (COMPLETE snapshots skip
     — idempotence against the harvest is structural), then the
     ``collect_cards(semantic=...)`` **uncapped and snooze-unfiltered**,
-    leverage scoring to rank exemplars *within* each class, brief attachment
-    , and ``get_quality_report`` for the header.
+    leverage scoring to rank exemplars *within* each class, brief attachment,
+    and ``get_quality_report`` for the header.
 
     ``semantic`` gates the contradiction probe; ``judge`` runs the
     duplicate finder in ``LLM_JUDGE`` mode (default ``REPORT`` — unjudged
@@ -374,7 +376,16 @@ async def run_memory_audit(
         # stack; load it only when there is something to extract (AGENTS.md
         # deferred-import case 2).
         from particles.corpus.store import get_entry, list_snapshots_for_entry
-        from particles.operations.extract import extract_snapshot
+        from particles.operations.extract import collapse_superseded_pending, extract_snapshot
+
+        # a re-run audit over memory files edited since the last
+        # extraction pays for the newest generation of each, not every one.
+        collapse = await collapse_superseded_pending(
+            session, entry_ids=list(dict.fromkeys(harvested_entry_ids))
+        )
+        collapse_line = collapse.summary()
+        if collapse_line:
+            log.info("%s", collapse_line)
 
         pending: list[tuple[str, str, str]] = []  # (entry_id, snapshot_id, label)
         for entry_id in dict.fromkeys(harvested_entry_ids):  # de-dupe, keep order
@@ -392,7 +403,9 @@ async def run_memory_audit(
 
         for index, (entry_id, snapshot_id, label) in enumerate(pending, start=1):
             try:
-                written = await extract_snapshot(session, entry_id, snapshot_id, agent_id=agent_id)
+                written = await extract_snapshot(
+                    session, entry_id, snapshot_id, agent_id=agent_id, skip_if_superseded=True
+                )
                 await session.commit()
                 extracted += 1
                 if on_progress is not None:

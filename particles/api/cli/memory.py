@@ -32,8 +32,8 @@ band per rendered surface. Auto-fitting ``λ`` was declined on measured
 grounds, so the harness ships instead of a fit — the operator supplies the one
 input a fit cannot manufacture.
 
-``serve`` runs the reference memory-server compatibility façade over stdio
- — the drop-in swap for ``@modelcontextprotocol/server-memory``,
+``serve`` runs the reference memory-server compatibility façade over stdio—
+the drop-in swap for ``@modelcontextprotocol/server-memory``,
 backed by the store — and ``tools`` dumps its surface for the parity golden.
 """
 
@@ -67,9 +67,7 @@ if TYPE_CHECKING:
 
     from particles.operations.consolidation import ProjectionRunner
 
-memory_app = typer.Typer(
-    help="Agent-memory maintenance.", no_args_is_help=True
-)
+memory_app = typer.Typer(help="Agent-memory maintenance.", no_args_is_help=True)
 app.add_typer(memory_app, name="memory")
 
 _FORMATS = ("markdown", "json")
@@ -137,18 +135,18 @@ def useful_cmd(
     quiet: bool = QUIET_OPTION,
     progress: bool | None = PROGRESS_OPTION,
 ) -> None:
-    """Mark a belief useful — the explicit utility gesture.
+    """Mark a belief useful: the explicit utility gesture.
 
     Use this for the beliefs the transcript miner cannot see: prohibitions
     ("never do X") and design stances, which you comply with by *not* acting and
     which therefore leave no tool-call trace. One press is worth
     `utility.explicit_weight` mined events, because the miner fires once per
-    session while you fire once — and it is capped at one credit per belief per
+    session while you fire once. It is capped at one credit per belief per
     day, so pressing twice is recorded but not double-counted.
 
     This lifts the belief in the projection and digest **ranking only**. It never
     touches the stored confidence, never claims the belief is *true*, and can
-    only promote — for "still true", the gesture is
+    only promote. For "still true", the gesture is
     `particles curate apply affirm`.
     """
     configure_output(verbose, debug, quiet, progress)
@@ -199,6 +197,205 @@ async def _useful(particle_id: str, *, reason: str | None, store: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@memory_app.command("rescope")
+def rescope_cmd(
+    assign: tuple[str, str] | None = typer.Option(
+        None,
+        "--assign",
+        metavar="ENTRY_ID KEY",
+        help="Give one corpus entry a project key, then stop. Refuses a global entry.",
+    ),
+    default_key: str | None = typer.Option(
+        None,
+        "--default-key",
+        metavar="KEY",
+        help=(
+            "Give this key to every harvested entry that is still unattributed afterwards. "
+            "On a one-project machine this is the one flag you need; `.` means the project "
+            "of the current directory."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change; write nothing."
+    ),
+    store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
+) -> None:
+    """Bring a store's project keys up to date, so a project observer can read it.
+
+    A belief is *in view* for a project when one of its sources was harvested
+    there, which is read from the `project:` tag on the source's corpus entry.
+    Older versions stamped a per-worktree name, or nothing at all. This verb
+    adds the project's real key beside whatever an entry already carries — it
+    never removes a tag, and running it twice changes nothing.
+
+    It reports the two things you need to see: harvested entries it could not
+    attribute (in view for **no** project until you `--assign` them or pass
+    `--default-key`), and entries whose every key names a project that no longer
+    exists. `particles init claude-code` runs it for you. Until it has run once,
+    `claude_code.observer_scope: project` stays store-wide and says so.
+    """
+    configure_output(verbose, debug, quiet, progress)
+    run(_rescope(assign=assign, default_key=default_key, dry_run=dry_run, store=store))
+
+
+def _claude_projects_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def _resolve_key_argument(key: str) -> str:
+    from particles.api.cli._claude_code import claude_project_slug, repository_root
+
+    return claude_project_slug(repository_root(Path.cwd())) if key == "." else key
+
+
+async def _rescope(
+    *, assign: tuple[str, str] | None, default_key: str | None, dry_run: bool, store: str
+) -> None:
+    from particles.api.cli._claude_code import entry_project_key, is_live_project_key
+    from particles.operations.observer_scope import assign_key, rescope
+
+    root = _claude_projects_root()
+    if assign is not None:
+        entry_id, key = assign[0], _resolve_key_argument(assign[1])
+        async with session_scope(store, write=True) as session:
+            try:
+                changed = await assign_key(session, entry_id, key, actor=CLI_ACTOR)
+            except ValueError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+                raise typer.Exit(2) from exc
+            await session.commit()
+        typer.echo(
+            f"Entry {entry_id} now carries project key {key}."
+            if changed
+            else f"Entry {entry_id} already carried project key {key}."
+        )
+        return
+
+    resolved_default = _resolve_key_argument(default_key) if default_key else None
+    async with session_scope(store, write=not dry_run) as session:
+        report = await rescope(
+            session,
+            key_for=lambda _entry_id, uri_r, tags: entry_project_key(uri_r, tags, root),
+            default_key=resolved_default,
+            dry_run=dry_run,
+            actor=CLI_ACTOR,
+        )
+        if not dry_run:
+            await session.commit()
+
+    verb = "would add" if dry_run else "added"
+    typer.echo(
+        f"Rescope of '{store}': examined {report.examined} corpus entries, "
+        f"{verb} {len(report.added)} project key(s)."
+    )
+    for key, count in report.entries_per_key.most_common():
+        if is_live_project_key(key, root):
+            typer.echo(f"  {count:5d}  {key}")
+    orphaned = sorted(
+        entry_id
+        for entry_id, keys in report.keys_by_entry.items()
+        if not any(is_live_project_key(key, root) for key in keys)
+    )
+    if orphaned:
+        typer.echo(
+            f"\n{len(orphaned)} entr{'y' if len(orphaned) == 1 else 'ies'} carry only keys of "
+            "projects that no longer exist, so no session will see their beliefs:"
+        )
+        for entry_id in orphaned[:10]:
+            typer.echo(f"  {entry_id}  ({', '.join(sorted(report.keys_by_entry[entry_id]))})")
+        typer.echo("  Give one a live key with `particles memory rescope --assign ENTRY_ID KEY`.")
+    if report.unattributed:
+        typer.echo(
+            f"\n{len(report.unattributed)} harvested entr"
+            f"{'y is' if len(report.unattributed) == 1 else 'ies are'} unattributed — in view "
+            "store-wide and for no project:"
+        )
+        for entry_id in report.unattributed[:10]:
+            typer.echo(f"  {entry_id}")
+        typer.echo(
+            "  `--assign ENTRY_ID KEY` attributes one; `--default-key KEY` (or `.`) "
+            "attributes them all."
+        )
+    if dry_run:
+        typer.echo("\nDry run: nothing was written.")
+
+
+@memory_app.command("widen")
+def widen_cmd(
+    target_id: str = typer.Argument(
+        ...,
+        metavar="ID",
+        help=(
+            "The belief (full UUID, unique prefix, or `p-xxxxxxxx`); "
+            "with --entry, a corpus entry id."
+        ),
+    ),
+    entry: bool = typer.Option(
+        False, "--entry", help="ID is a corpus entry: widen every belief sourced from it."
+    ),
+    revoke: bool = typer.Option(False, "--revoke", help="Take a widening back."),
+    store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
+) -> None:
+    """Put a belief in view for every project.
+
+    "This rule I learned in one project is how I work everywhere" is your
+    judgement, so it is yours to record. The belief and its sources are not
+    touched: the widening is a standing statement the read lens consults, and
+    `--revoke` withdraws it. There is deliberately no agent-facing way to do
+    this — an agent that could widen its own belief could put it in front of
+    every future session.
+    """
+    configure_output(verbose, debug, quiet, progress)
+    run(_widen(target_id, entry=entry, revoke=revoke, store=store))
+
+
+async def _widen(target_id: str, *, entry: bool, revoke: bool, store: str) -> None:
+    from particles.operations.observer_scope import widen
+    from particles.store.observer_scope_store import ScopeTarget
+
+    async with session_scope(store, write=True) as session:
+        if entry:
+            kind, resolved = ScopeTarget.CORPUS_ENTRY, target_id
+        else:
+            kind = ScopeTarget.PARTICLE
+            resolved = (
+                await _resolve_target_ids(
+                    session,
+                    [target_id],
+                    store=store,
+                    label="ID",
+                    active_only_note="Only ACTIVE beliefs are read through the lens.",
+                )
+            )[0]
+        try:
+            changed = await widen(session, kind, resolved, actor=CLI_ACTOR, revoke=revoke)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        await session.commit()
+    noun = "Entry" if entry else "Belief"
+    if revoke:
+        typer.echo(
+            f"{noun} {resolved} is no longer widened."
+            if changed
+            else f"{noun} {resolved} was not widened."
+        )
+    else:
+        typer.echo(
+            f"{noun} {resolved} is now in view for every project."
+            if changed
+            else f"{noun} {resolved} was already widened."
+        )
+
+
 @memory_app.command("sweep-rank-lift")
 def sweep_rank_lift_cmd(
     store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle to sweep."),
@@ -210,7 +407,7 @@ def sweep_rank_lift_cmd(
             "Full UUID, a unique id prefix, or the `p-xxxxxxxx` digest display form; "
             "resolved against ACTIVE beliefs, and an id that matches none (or more "
             "than one) is an error rather than a silent rank-0. This is the judgment "
-            "a fit cannot supply — without any, only head diversity "
+            "a fit cannot supply; without any, only head diversity "
             "constrains the band."
         ),
     ),
@@ -219,7 +416,7 @@ def sweep_rank_lift_cmd(
         "--head",
         help=(
             "A rendered head size N to evaluate; repeatable. Defaults to the digest's "
-            "mcp.recall.digest_max_beliefs. Pass every N you actually render — the "
+            "mcp.recall.digest_max_beliefs. Pass every N you actually render; the "
             "band is a property of the surface, not the store."
         ),
     ),
@@ -235,7 +432,7 @@ def sweep_rank_lift_cmd(
         DEFAULT_DISTINCT_RATIO,
         "--distinct-ratio",
         help=(
-            "Fraction of head slots that must hold distinct content. Not 1.0 — that "
+            "Fraction of head slots that must hold distinct content. Not 1.0; that "
             "is unsatisfiable at large N on any store with over-extraction."
         ),
     ),
@@ -250,9 +447,9 @@ def sweep_rank_lift_cmd(
     """Sweep the usefulness rank-lift and report its admissible band.
 
     Read-only: no writes, no LLM calls, no embeddings. `λ`
-    (`utility.default.rank_lift`) is deliberately **not** auto-fitted
-    measured every candidate closed form and found none defensible, because no
-    label says which belief *should* occupy a head slot. This is the harness
+    (`utility.default.rank_lift`) is deliberately **not** auto-fitted: every
+    candidate closed form was measured and none found defensible,
+    because no label says which belief *should* occupy a head slot. This is the harness
     that makes setting it by hand a single command instead of a research
     project: name the beliefs that ought to reach the head with `--target`, and
     the sweep reports where they land, how many head slots hold distinct
@@ -478,7 +675,7 @@ def consolidate_cmd(
         "--if-due",
         help=(
             "Exit 0 without running unless the last successful run is older than "
-            "consolidation.min_interval_hours — makes over-scheduling harmless."
+            "consolidation.min_interval_hours; makes over-scheduling harmless."
         ),
     ),
     structural_only: bool = typer.Option(
@@ -490,7 +687,7 @@ def consolidate_cmd(
         "delta",
         "--scope",
         help=(
-            "Semantic-pass scope: 'delta' (default — particles changed since the "
+            "Semantic-pass scope: 'delta' (default; particles changed since the "
             "previous run's watermark) or 'store' (the whole store, still capped)."
         ),
     ),
@@ -505,9 +702,9 @@ def consolidate_cmd(
 ) -> None:
     """Run the scheduled consolidation cycle: the memory dream cycle.
 
-    Exit codes (cron observability): 0 — success, including disclosed
-    structural-only runs and --if-due / lock skips; 1 — one or more passes
-    failed (run record written); 2 — the cycle could not start.
+    Exit codes (cron observability): 0 means success, including disclosed
+    structural-only runs and --if-due / lock skips; 1 means one or more passes
+    failed (run record written); 2 means the cycle could not start.
     """
     configure_logging(verbose, debug)
     if format_ not in _FORMATS:
@@ -602,19 +799,26 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
     The Engine operation cannot import the CLI-side projection helpers (that
     would invert the Surface > Engine layer contract), so the Surface builds
     the callback and injects it. Returns ``(None, <disclosed reason>)`` when
-    the projection is disabled or no Claude Code memory directory exists
-    .
+    the projection is disabled or no Claude Code memory directory exists.
 
     Public because ``engine serve --daemon`` registers it as the daemon's
     projection-runner factory, so a resident daemon renders
     ``MEMORY.md`` exactly as the launchd recipe does.
     """
-    from particles.api.cli._claude_code import projection_enabled
+    from particles.api.cli._claude_code import projection_enabled, stray_memory_dirs
 
     if not projection_enabled():
         return None, "agent_memory.projection.enabled is false"
     root = Path.home() / ".claude" / "projects"
-    memory_dirs = sorted(p for p in root.glob("*/memory") if p.is_dir()) if root.is_dir() else []
+    # A linked worktree's memory directory is this SDK's own stray output, never
+    # Claude Code's: harvesting it re-ingests the projection and rendering into
+    # it reaches no session. `particles hook doctor` lists them.
+    strays = set(stray_memory_dirs(root))
+    memory_dirs = (
+        sorted(p for p in root.glob("*/memory") if p.is_dir() and p not in strays)
+        if root.is_dir()
+        else []
+    )
     if not memory_dirs:
         return None, f"no memory directories under {root}"
 
@@ -627,7 +831,12 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
         from particles.api.cli._memory_projection import run_projection_cycle
         from particles.api.cli.hook import _harvest_memory_files
 
-        telemetry: dict[str, Any] = {"dirs": len(memory_dirs), "harvested": 0, "rendered": 0}
+        telemetry: dict[str, Any] = {
+            "dirs": len(memory_dirs),
+            "stray_dirs_skipped": len(strays),
+            "harvested": 0,
+            "rendered": 0,
+        }
         for memory_dir in memory_dirs:
             project = memory_dir.parent.name
             harvested, _unchanged, memory_md_text = await _harvest_memory_files(
@@ -676,7 +885,7 @@ def memory_tools_cmd(
         "json", "--format", help='Output format: "json" (default) or "text".'
     ),
 ) -> None:
-    """Print the façade's tool surface — name, title, schemas, annotations.
+    """Print the façade's tool surface: name, title, schemas, annotations.
 
     The debugging sibling of ``particles mcp tools``, and the generator for
     ``tests/mcp/memory-tool-schema.json``. That golden is what turns a parity
@@ -709,7 +918,7 @@ def sweep_owner_lift_cmd(
         "--target",
         help=(
             "Particle id of a belief that must STAY in the head; repeatable. Pass the "
-            "beliefs your utility lift was calibrated to surface — the third criterion "
+            "beliefs your utility lift was calibrated to surface; the third criterion "
             " is that adding aboutness does not push them out. Same id "
             "forms as `sweep-rank-lift`."
         ),
@@ -756,7 +965,7 @@ def sweep_owner_lift_cmd(
 
     Read-only: no writes, no LLM calls, no embeddings. `ω`
     (`owner_lens.rank_lift`) is store-specific and deliberately ships `0.0`
-    (inert) — this is the harness for choosing it. Unlike the utility lift, `ω`
+    (inert); this is the harness for choosing it. Unlike the utility lift, `ω`
     multiplies a flat 0/1 indicator, so it acts as a *threshold* over the whole
     viewer cohort: below it nothing moves, above it every belief about the
     viewer arrives in the head at once. The report is therefore keyed on the

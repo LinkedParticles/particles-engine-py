@@ -33,7 +33,10 @@ from particles.extraction.mcp_memory import (
     RELATION_TAG,
     SOURCE_TYPE,
     McpMemoryExtractor,
+    empty_entity_notes,
+    empty_entity_report,
     parse_memory_jsonl,
+    preview_memory_export,
     relation_content,
     relation_from_particle,
     relation_tags,
@@ -248,13 +251,86 @@ async def test_observation_candidates_carry_the_facade_observation_tag() -> None
         assert OBSERVATION_TAG in (candidate.tags or [])
 
 
+# An isolated observation-less entity (``Ghost``) beside one a relation rescues
+# (``Acme``). The two are different losses, which is the whole point of the
+# split below: before it, ``Acme`` migrated with its entityType silently blanked.
+_EMPTY_ENTITY_RECORDS: list[dict] = [
+    {"type": "entity", "name": "John_Smith", "entityType": "person", "observations": ["Tall"]},
+    {"type": "entity", "name": "Acme", "entityType": "organization", "observations": []},
+    {"type": "entity", "name": "Ghost", "entityType": "person", "observations": []},
+    {"type": "relation", "from": "John_Smith", "to": "acme", "relationType": "works_at"},
+]
+
+
 @pytest.mark.asyncio
 async def test_entity_without_observations_produces_no_candidate_but_is_disclosed() -> None:
     result = await _extract(
         _export([{"type": "entity", "name": "Ghost", "entityType": "person", "observations": []}])
     )
     assert not result.candidates
-    assert any("no observations" in note for note in result.quality_notes)
+    (note,) = result.quality_notes
+    assert "no observations" in note
+    assert "will not migrate" in note
+    # Named, not just counted: the user is entitled to know *which* nodes.
+    assert "'Ghost'" in note
+
+
+def test_empty_entity_report_splits_dropped_from_relation_endpoints() -> None:
+    report = empty_entity_report(parse_memory_jsonl(_export(_EMPTY_ENTITY_RECORDS)))
+    assert report.dropped == ["Ghost"]
+    # Matched the way the subject resolver will match it: case-insensitively.
+    assert report.endpoint_only == ["Acme"]
+
+
+def test_empty_entity_report_is_silent_for_an_export_without_empty_entities() -> None:
+    report = empty_entity_report(parse_memory_jsonl(_export()))
+    assert report.dropped == [] and report.endpoint_only == []
+    assert empty_entity_notes(report) == []
+
+
+def test_empty_entity_notes_cap_the_named_list_and_count_the_rest() -> None:
+    records = [
+        {"type": "entity", "name": f"E{i:02d}", "entityType": "x", "observations": []}
+        for i in range(13)
+    ]
+    (note,) = empty_entity_notes(empty_entity_report(parse_memory_jsonl(_export(records))))
+    assert note.startswith("13 entity/entities")
+    assert "'E09'" in note and "'E10'" not in note
+    assert "and 3 more" in note
+
+
+@pytest.mark.asyncio
+async def test_quality_notes_count_only_the_entities_that_truly_vanish() -> None:
+    result = await _extract(_export(_EMPTY_ENTITY_RECORDS))
+    (note,) = result.quality_notes
+    assert note.startswith("1 entity/entities") and "'Ghost'" in note
+    # ``Acme`` migrates whole as a relation endpoint, so it is no loss to disclose.
+    assert "Acme" not in note
+
+
+def test_the_dry_run_and_the_import_name_the_same_lost_entities() -> None:
+    """Two reports of one loss must not disagree, down to the name match."""
+    content = _export(_EMPTY_ENTITY_RECORDS)
+    report = empty_entity_report(parse_memory_jsonl(content))
+    assert preview_memory_export(content).entities_lost == report.dropped == ["Ghost"]
+
+
+@pytest.mark.asyncio
+async def test_relation_candidate_carries_its_endpoints_entity_types() -> None:
+    """An observation-less endpoint is named by no other candidate, so its type rides here."""
+    result = await _extract(_export(_EMPTY_ENTITY_RECORDS))
+    relation = result.candidates[-1]
+    assert relation.subjects == ["John_Smith", "acme"]
+    # Keyed by the name the candidate itself uses, which is what the pipeline zips on.
+    assert relation.subject_classes == {"John_Smith": "person", "acme": "organization"}
+
+
+@pytest.mark.asyncio
+async def test_relation_to_an_undeclared_endpoint_claims_no_type() -> None:
+    result = await _extract(
+        _export([{"type": "relation", "from": "A", "to": "B", "relationType": "knows"}])
+    )
+    assert result.candidates[0].subject_classes == {}
 
 
 @pytest.mark.asyncio
@@ -418,8 +494,114 @@ def test_live_authorities_are_skipped_for_the_export_source_type() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unplaced fields (§4e) and the dry-run preview
+# ---------------------------------------------------------------------------
+
+_MESSY: list[dict] = [
+    *_RECORDS,
+    # Named by a relation below, so it survives as a bare Subject.
+    {"type": "entity", "name": "Acme", "entityType": "organization", "observations": []},
+    # Named by nothing, so it would not survive the import.
+    {"type": "entity", "name": "Orphan", "entityType": "thing", "observations": []},
+    {
+        "type": "relation",
+        "from": "John_Smith",
+        "to": "Acme",
+        "relationType": "advises",
+        "createdAt": "2025-01-01",
+    },
+]
+
+
+def test_parse_counts_fields_the_format_does_not_define() -> None:
+    graph = parse_memory_jsonl(_export(_MESSY))
+    assert graph.unmapped_fields == {"relation.createdAt": 1}
+    assert not parse_memory_jsonl(_export()).unmapped_fields
+
+
+@pytest.mark.asyncio
+async def test_unplaced_fields_are_disclosed_not_mapped() -> None:
+    result = await _extract(_export(_MESSY))
+    assert any("relation.createdAt (1)" in note for note in result.quality_notes)
+    # Disclosed, never laundered into the particle (§4e).
+    assert not any("createdAt" in " ".join(c.tags or []) for c in result.candidates)
+
+
+@pytest.mark.asyncio
+async def test_preview_reports_exactly_what_the_extractor_produces() -> None:
+    """The dry run's whole value: it runs the mapping, it does not imitate it."""
+    content = _export(_MESSY)
+    result = await _extract(content, deposited_by="alice")
+    preview = preview_memory_export(content, deposited_by="alice", sample_size=100)
+
+    assert preview.particles == len(result.candidates)
+    assert preview.dropped == result.quality_notes
+    assert [s.content for s in preview.sample] == [c.content for c in result.candidates]
+    assert preview.subjects == len({n for c in result.candidates for n in c.subjects})
+
+
+def test_preview_counts_the_export_in_its_own_vocabulary() -> None:
+    preview = preview_memory_export(_export(_MESSY))
+    assert preview.records == {"entities": 4, "observations": 3, "relations": 2}
+    assert preview.single_subject_particles == 3
+    assert preview.multi_subject_particles == 2
+    assert preview.source_type == SOURCE_TYPE
+
+
+def test_preview_separates_lost_entities_from_relation_only_ones() -> None:
+    preview = preview_memory_export(_export(_MESSY))
+    assert preview.entities_without_records == ["Acme", "Orphan"]
+    assert preview.entities_lost == ["Orphan"]
+
+
+def test_preview_of_an_unreadable_export_reports_rather_than_raising() -> None:
+    preview = preview_memory_export(b"\xff\xfe not utf-8")
+    assert preview.particles == 0
+    assert any("not valid UTF-8" in note for note in preview.dropped)
+
+
+# ---------------------------------------------------------------------------
 # CLI: `particles import mcp-memory`
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migrated_graph_keeps_an_empty_endpoints_type_and_drops_the_isolated_one(
+    db_session, tmp_path, no_embedding_model
+) -> None:
+    """End to end: deposit → extract → the façade's ``read_graph``.
+
+    This is the claim a migrating user can check for themselves, so it is
+    pinned at the surface they will check it through rather than only at the
+    candidate list.
+    """
+    from particles.core.schema import FetchPolicy, Mutability
+    from particles.corpus.deposit import deposit_file
+    from particles.ingest.pipeline import extract_snapshot
+    from particles.mcp.memory_compat import ops
+
+    export = tmp_path / "memory.jsonl"
+    export.write_bytes(_export(_EMPTY_ENTITY_RECORDS))
+    entry_id, snapshot_id = await deposit_file(
+        db_session,
+        export,
+        deposited_by="test",
+        mutability=Mutability.STABLE,
+        fetch_policy=FetchPolicy.NEVER,
+        source_type=SOURCE_TYPE,
+    )
+    await db_session.commit()
+    await extract_snapshot(db_session, entry_id, snapshot_id)
+    await db_session.commit()
+
+    graph, _notes = await ops.read_graph(db_session)
+    entities = {e["name"].lower(): e for e in graph["entities"]}
+    # The observation-less relation endpoint survives, type intact.
+    assert entities["acme"]["entityType"] == "organization"
+    assert entities["acme"]["observations"] == []
+    # The isolated one does not — the accepted, disclosed loss.
+    assert "ghost" not in entities
+    assert graph["relations"] == [{"from": "John_Smith", "to": "acme", "relationType": "works_at"}]
 
 
 def _strip_ansi(text: str) -> str:
@@ -487,6 +669,39 @@ class TestImportMcpMemoryCli:
         assert "IMPORTED" in output
         assert "particles trust set" in output
 
+    def test_output_names_the_entities_that_will_not_migrate(self, tmp_path, cli_db) -> None:
+        """The loss is announced at the door, before anything is extracted."""
+        from typer.testing import CliRunner
+
+        from particles.api.cli import app
+
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export(_EMPTY_ENTITY_RECORDS))
+
+        result = CliRunner().invoke(
+            app, ["import", "mcp-memory", str(export)], catch_exceptions=False
+        )
+        output = " ".join(_strip_ansi(result.output).split())
+        assert result.exit_code == 0
+        assert "will not migrate" in output
+        assert "'Ghost'" in output
+        assert "create_entities" in output
+
+    def test_output_says_nothing_about_empty_entities_when_there_are_none(
+        self, tmp_path, cli_db
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from particles.api.cli import app
+
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export())
+
+        result = CliRunner().invoke(
+            app, ["import", "mcp-memory", str(export)], catch_exceptions=False
+        )
+        assert "will not migrate" not in _strip_ansi(result.output)
+
     def test_missing_file_exits_nonzero(self, tmp_path, cli_db) -> None:
         from typer.testing import CliRunner
 
@@ -518,6 +733,127 @@ class TestImportMcpMemoryCli:
         try:
             result = CliRunner().invoke(app, ["import", "mcp-memory", str(export)])
             assert result.exit_code != 0
+        finally:
+            monkeypatch.delenv("PARTICLES_ENGINE_BASE_URL", raising=False)
+            reset_config()
+
+
+class TestImportMcpMemoryDryRun:
+    """``--dry-run``: a report, and a guarantee that nothing was touched."""
+
+    def _invoke(self, export, *flags: str):
+        from typer.testing import CliRunner
+
+        from particles.api.cli import app
+
+        return CliRunner().invoke(
+            app, ["import", "mcp-memory", str(export), *flags], catch_exceptions=False
+        )
+
+    def test_touches_neither_the_store_nor_the_corpus(self, tmp_path, monkeypatch) -> None:
+        """No ``cli_db``: the database is never created, so it must never be needed."""
+        from particles.api.cli import import_vault
+        from particles.config import reset_config
+
+        db_path = tmp_path / "never.db"
+        blob_dir = tmp_path / "blobs"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+        monkeypatch.setenv("PARTICLES_BLOB_DIR", str(blob_dir))
+        reset_config()
+
+        def _forbidden(*args: object, **kwargs: object):
+            raise AssertionError("--dry-run reached the store")
+
+        monkeypatch.setattr(import_vault, "session_scope", _forbidden)
+        monkeypatch.setattr(import_vault, "_import_mcp_memory", _forbidden)
+        monkeypatch.setattr("particles.corpus.deposit.deposit_file", _forbidden)
+        monkeypatch.setattr("particles.db.get_engine", _forbidden)
+
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export(_MESSY))
+        before = export.read_bytes()
+
+        result = self._invoke(export, "--dry-run")
+
+        assert result.exit_code == 0, result.output
+        assert not db_path.exists()
+        assert not blob_dir.exists()
+        assert export.read_bytes() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["memory.jsonl"]
+
+    def test_a_dry_run_leaves_an_existing_store_empty(self, tmp_path, cli_db) -> None:
+        import asyncio
+
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export())
+        assert self._invoke(export, "--dry-run").exit_code == 0
+
+        async def _counts() -> tuple[int, int]:
+            from sqlalchemy import func, select
+
+            from particles.corpus.store import list_entries
+            from particles.db import session_scope
+            from particles.store.particle_store import ParticleRow
+
+            async with session_scope() as session:
+                particles = await session.scalar(select(func.count()).select_from(ParticleRow))
+                return len(await list_entries(session)), int(particles or 0)
+
+        assert asyncio.run(_counts()) == (0, 0)
+
+    def test_report_names_counts_losses_and_a_sample(self, tmp_path) -> None:
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export(_MESSY) + b"\nnot json")
+        output = _strip_ansi(self._invoke(export, "--dry-run").output)
+
+        assert "nothing was deposited or written" in output
+        assert "4  entities" in output
+        assert "5  particles" in output
+        assert "Entities with no observations: 2" in output
+        assert "would NOT survive the import: Orphan" in output
+        assert "not valid JSON" in output
+        assert "relation.createdAt" in output
+        assert "Speaks fluent Spanish" in output
+
+    def test_json_report_is_machine_readable(self, tmp_path) -> None:
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export(_MESSY))
+        result = self._invoke(export, "--dry-run", "--json", "--sample", "1")
+
+        payload = json.loads(result.output)
+        assert payload["particles"] == 5
+        assert payload["entities_lost"] == ["Orphan"]
+        assert payload["store_consulted"] is False
+        assert len(payload["sample"]) == 1
+
+    def test_json_without_dry_run_is_a_usage_error(self, tmp_path, cli_db) -> None:
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export())
+        result = self._invoke(export, "--json")
+        assert result.exit_code == 2
+        assert "--dry-run" in result.output
+
+    def test_an_export_that_maps_to_nothing_exits_nonzero(self, tmp_path) -> None:
+        export = tmp_path / "memory.jsonl"
+        export.write_text("not json\n")
+        result = self._invoke(export, "--dry-run")
+        assert result.exit_code == 1
+        assert "Nothing in this export would become a particle" in result.output
+
+    def test_negative_sample_is_rejected(self, tmp_path) -> None:
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export())
+        assert self._invoke(export, "--dry-run", "--sample", "-1").exit_code == 2
+
+    def test_works_in_remote_mode_because_it_reaches_no_store(self, tmp_path, monkeypatch) -> None:
+        from particles.config import reset_config
+
+        export = tmp_path / "memory.jsonl"
+        export.write_bytes(_export())
+        monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://127.0.0.1:8099")
+        reset_config()
+        try:
+            assert self._invoke(export, "--dry-run").exit_code == 0
         finally:
             monkeypatch.delenv("PARTICLES_ENGINE_BASE_URL", raising=False)
             reset_config()

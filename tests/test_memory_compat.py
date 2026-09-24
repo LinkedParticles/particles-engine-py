@@ -4,9 +4,11 @@
 
 """Fidelity suite for the reference memory-server façade.
 
-This is the parity tripwire. It mirrors the reference's own test suite
-(``src/memory/__tests__/knowledge-graph.test.ts``, 42 cases) case-for-case,
-using the reference's own fixture payloads — ``Alice`` / ``Bob`` / ``Charlie`` /
+This is the parity tripwire. It mirrors the behavioural cases of the reference's
+own test suite (``src/memory/__tests__/knowledge-graph.test.ts``,
+``delete-reporting.test.ts`` and ``search-nodes-schema.test.ts``, re-read at the
+reference's ``main`` on 2026-09-20) case-for-case, using the reference's own
+fixture payloads — ``Alice`` / ``Bob`` / ``Charlie`` /
 ``Acme Corp``, and the README's ``John_Smith`` → ``works_at`` → ``Anthropic``.
 
     Fixture payloads reproduced from
@@ -141,6 +143,22 @@ class TestCreateEntities:
         assert created == [BOB]
         assert _names(await _graph(db_session)) == ["Alice", "Bob"]
 
+    async def test_ignores_duplicate_names_within_a_single_batch(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """The first occurrence wins, and the store gains one Subject, not two."""
+        second = {"name": "Alice", "entityType": "person", "observations": ["second"]}
+        created = await _create(db_session, [ALICE, second])
+        assert created == [ALICE]
+        assert (await _graph(db_session))["entities"] == [ALICE]
+
+    async def test_names_match_case_insensitively(self, db_session: Any, facade: Any) -> None:
+        """A disclosed deviation: the reference compares names with ``===``."""
+        await _create(db_session, [ALICE])
+        assert await _create(db_session, [_bare("alice")]) == []
+        assert await _create(db_session, [_bare("BOB"), _bare("bob")]) == [_bare("BOB")]
+        assert _names(await _graph(db_session)) == ["Alice", "BOB"]
+
     async def test_handles_empty_entity_arrays(self, db_session: Any, facade: Any) -> None:
         assert await _create(db_session, []) == []
 
@@ -170,17 +188,57 @@ class TestCreateRelations:
         assert await _relate(db_session, [ALICE_KNOWS_BOB]) == []
         assert len((await _graph(db_session))["relations"]) == 1
 
+    async def test_skips_duplicate_relations_within_a_single_batch(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
+        assert await _relate(db_session, [ALICE_KNOWS_BOB, ALICE_KNOWS_BOB]) == [ALICE_KNOWS_BOB]
+        assert len((await _graph(db_session))["relations"]) == 1
+
+    async def test_rejects_relations_from_non_existent_entities(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [_bare("Alice")])
+        with pytest.raises(ValueError, match="Entity with name Ghost not found"):
+            await _relate(db_session, [{"from": "Ghost", "to": "Alice", "relationType": "knows"}])
+        graph = await _graph(db_session)
+        assert graph["relations"] == []
+        assert _names(graph) == ["Alice"], "a rejected endpoint must not be materialised"
+
+    async def test_rejects_the_whole_batch_for_a_non_existent_target(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """All-or-nothing: the valid relation ahead of the bad one is not written."""
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
+        with pytest.raises(ValueError, match="Entity with name Ghost not found"):
+            await _relate(
+                db_session,
+                [ALICE_KNOWS_BOB, {"from": "Alice", "to": "Ghost", "relationType": "knows"}],
+            )
+        assert (await _graph(db_session))["relations"] == []
+
+    async def test_rejects_a_relation_to_a_deleted_entity(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """A tombstoned Subject still exists in the store, but reads as absent (§6)."""
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
+        await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Bob"])
+        with pytest.raises(ValueError, match="Entity with name Bob not found"):
+            await _relate(db_session, [ALICE_KNOWS_BOB])
+
     async def test_handles_empty_relation_arrays(self, db_session: Any, facade: Any) -> None:
         assert await _relate(db_session, []) == []
 
     async def test_arbitrary_relation_type_round_trips(self, db_session: Any, facade: Any) -> None:
         """Reference relationTypes are free-form; nothing is coerced onto RelationType."""
         weird = {"from": "John_Smith", "to": "Anthropic", "relationType": "works at / for"}
+        await _create(db_session, [_bare("John_Smith"), _bare("Anthropic", "organization")])
         await _relate(db_session, [weird])
         assert (await _graph(db_session))["relations"] == [weird]
 
     async def test_direction_is_preserved(self, db_session: Any, facade: Any) -> None:
         """`particle_subjects` has no ordering column — direction rides the tags."""
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
         await _relate(db_session, [ALICE_KNOWS_BOB])
         relation = (await _graph(db_session))["relations"][0]
         assert relation["from"] == "Alice"
@@ -262,8 +320,22 @@ class TestDeleteEntities:
         self, db_session: Any, facade: Any
     ) -> None:
         await _create(db_session, [_bare("Alice")])
-        await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Nobody"])
+        report = await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Nobody"])
+        assert report == ([], ["Nobody"])
         assert _names(await _graph(db_session)) == ["Alice"]
+
+    async def test_reports_which_names_matched_and_which_did_not(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
+        await _relate(db_session, [ALICE_KNOWS_BOB])
+        report = await ops.delete_entities(
+            db_session, store=DEFAULT_STORE, entity_names=["Alice", "Ghost"]
+        )
+        assert report == (["Alice"], ["Ghost"])
+        graph = await _graph(db_session)
+        assert _names(graph) == ["Bob"]
+        assert graph["relations"] == []
 
     async def test_entity_without_observations_disappears(
         self, db_session: Any, facade: Any
@@ -318,11 +390,43 @@ class TestDeleteObservations:
     async def test_handles_deleting_from_non_existent_entities(
         self, db_session: Any, facade: Any
     ) -> None:
-        await ops.delete_observations(
+        report = await ops.delete_observations(
             db_session,
             store=DEFAULT_STORE,
             deletions=[{"entityName": "Ghost", "observations": ["nope"]}],
         )
+        assert report == (0, 1, ["Ghost"])
+
+    async def test_counts_only_the_observations_that_were_present(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [ALICE])
+        report = await ops.delete_observations(
+            db_session,
+            store=DEFAULT_STORE,
+            deletions=[
+                {
+                    "entityName": "Alice",
+                    "observations": ["works at Acme Corp", "never said this"],
+                }
+            ],
+        )
+        assert report == (1, 2, [])
+
+    async def test_a_repeated_observation_is_requested_twice_and_deleted_once(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """The reference's arithmetic: ``requested`` sums every listed string."""
+        await _create(db_session, [ALICE])
+        report = await ops.delete_observations(
+            db_session,
+            store=DEFAULT_STORE,
+            deletions=[
+                {"entityName": "Alice", "observations": ["works at Acme Corp"]},
+                {"entityName": "Alice", "observations": ["works at Acme Corp"]},
+            ],
+        )
+        assert report == (1, 2, [])
 
     async def test_handles_deleting_absent_observation(self, db_session: Any, facade: Any) -> None:
         await _create(db_session, [ALICE])
@@ -344,13 +448,32 @@ class TestDeleteRelations:
             db_session,
             [ALICE_KNOWS_BOB, {"from": "Alice", "to": "Bob", "relationType": "manages"}],
         )
-        await ops.delete_relations(db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB])
+        report = await ops.delete_relations(
+            db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB]
+        )
+        assert report == (1, 1)
         assert (await _graph(db_session))["relations"] == [
             {"from": "Alice", "to": "Bob", "relationType": "manages"}
         ]
 
     async def test_handles_absent_relation(self, db_session: Any, facade: Any) -> None:
-        await ops.delete_relations(db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB])
+        report = await ops.delete_relations(
+            db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB]
+        )
+        assert report == (0, 1)
+
+    async def test_counts_only_the_relations_that_matched(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
+        await _relate(db_session, [ALICE_KNOWS_BOB])
+        report = await ops.delete_relations(
+            db_session,
+            store=DEFAULT_STORE,
+            relations=[ALICE_KNOWS_BOB, {"from": "Alice", "to": "Bob", "relationType": "likes"}],
+        )
+        assert report == (1, 2)
+        assert (await _graph(db_session))["relations"] == []
 
 
 # -- readGraph ----------------------------------------------------------
@@ -514,6 +637,7 @@ class TestResponseEnvelope:
         assert json.loads(result.content[0].text) == {"entities": [ALICE]}  # type: ignore[union-attr]
 
     async def test_create_relations_envelope(self, db_session: Any, facade: Any) -> None:
+        await _create(db_session, [_bare("Alice"), _bare("Bob")])
         result = await server._dispatch_write(
             db_session, DEFAULT_STORE, "create_relations", {"relations": [ALICE_KNOWS_BOB]}
         )
@@ -544,6 +668,52 @@ class TestResponseEnvelope:
     ) -> None:
         """The reference's text content here is a sentence, NOT the JSON."""
         result = await server._dispatch_write(db_session, DEFAULT_STORE, tool, arguments)
+        assert result.content[0].text == message  # type: ignore[union-attr]
+        assert result.structuredContent == {"success": True, "message": message}
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "message"),
+        [
+            (
+                "delete_entities",
+                {"entityNames": ["Alice", "Ghost", "Nobody"]},
+                "Deleted 1 of 3 entities. Not found: Ghost, Nobody",
+            ),
+            (
+                "delete_observations",
+                {
+                    "deletions": [
+                        {"entityName": "Bob", "observations": ["likes programming", "nope"]},
+                        {"entityName": "Ghost", "observations": ["nope"]},
+                    ]
+                },
+                "Deleted 1 of 3 observations. Entities not found: Ghost",
+            ),
+            (
+                "delete_observations",
+                {"deletions": [{"entityName": "Bob", "observations": ["nope"]}]},
+                "Deleted 0 of 1 observations.",
+            ),
+            (
+                "delete_relations",
+                {
+                    "relations": [
+                        ALICE_KNOWS_BOB,
+                        {"from": "Alice", "to": "Bob", "relationType": "likes"},
+                    ]
+                },
+                "Deleted 1 of 2 relations. The rest matched nothing.",
+            ),
+        ],
+    )
+    async def test_partial_delete_is_reported_not_claimed(
+        self, db_session: Any, facade: Any, tool: str, arguments: dict[str, Any], message: str
+    ) -> None:
+        """Still ``success: true`` and still a bare sentence — but an honest one."""
+        await _create(db_session, [ALICE, BOB])
+        await _relate(db_session, [ALICE_KNOWS_BOB])
+        result = await server._dispatch_write(db_session, DEFAULT_STORE, tool, arguments)
+        assert result.isError is not True
         assert result.content[0].text == message  # type: ignore[union-attr]
         assert result.structuredContent == {"success": True, "message": message}
 
@@ -601,6 +771,20 @@ class TestToolSurface:
             assert "retracts" in by_name[name]
         for name in ("read_graph", "search_nodes", "open_nodes"):
             assert "capped" in by_name[name]
+        assert "case-insensitively" in by_name["create_entities"]
+        assert "name order" in by_name["read_graph"]
+
+    def test_search_query_length_is_bounded_like_the_reference(self) -> None:
+        tools = {t["name"]: t for t in server.tool_surface()}
+        query = tools["search_nodes"]["inputSchema"]["properties"]["query"]  # type: ignore[index]
+        assert query["maxLength"] == 2048
+
+    def test_server_reports_this_package_version(self) -> None:
+        """A recorded deviation: never the SDK's own version by default."""
+        from particles import __version__
+
+        options = server.build_server(DEFAULT_STORE).create_initialization_options()
+        assert options.server_version == __version__
 
     def test_entity_and_relation_schemas_match_the_reference_fields(self) -> None:
         tools = {t["name"]: t for t in server.tool_surface()}

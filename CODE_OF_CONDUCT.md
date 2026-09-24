@@ -60,17 +60,15 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through a
-**private report to the project maintainers via GitHub** — open a private report
+**private report to the project maintainers via GitHub**: open a private report
 on the repository's
 [Security Advisories](https://github.com/LinkedParticles/particles-engine-py/security/advisories/new)
 page, the same confidential channel described in
 [SECURITY.md](SECURITY.md). This routes the report privately to the maintainers
 rather than to a public issue or discussion.
 
-<!-- [maintainers — update contact before opening to contributors]
-     If a dedicated conduct contact address or form is established, replace the
-     GitHub-private-report wording above with it. Until then, the private
-     Security Advisory channel is the canonical confidential route. -->
+If you cannot use GitHub, or would rather not, email the maintainer
+directly at [jeff@gage.org](mailto:jeff@gage.org).
 
 All complaints will be reviewed and investigated promptly and fairly.
 

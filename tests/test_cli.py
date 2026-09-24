@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -808,8 +808,8 @@ class TestCorpus:
         assert result2.exit_code != 0
 
     # -----------------------------------------------------------------------
-    # corpus links list — 0.43.x downstream consumer of corpus_follow_edges
-    #. Before this verb the edges were write-only; §3.9 of the
+    # corpus links list — 0.43.x downstream consumer of corpus_follow_edges.
+    # Before this verb the edges were write-only; §3.9 of the
     # whitepaper claimed "queryable" without anything actually querying them.
     # -----------------------------------------------------------------------
 
@@ -1056,7 +1056,7 @@ class TestSubjects:
         assert "Deleted" in result.output
         assert "Detached from 1 particle" in result.output
 
-    #: `subjects gc` / `prune-empty` phantom sweep.
+    # : `subjects gc` / `prune-empty` phantom sweep.
     def test_gc_sweeps_all_phantom_subjects(self, runner: CliRunner, cli_db: Path) -> None:
         a = _run_async(_add_subject("Phantom A"))
         b = _run_async(_add_subject("Phantom B"))
@@ -1101,7 +1101,7 @@ class TestSubjects:
         assert "Pruned 1 phantom subject(s)" in result.output
         assert runner.invoke(app, ["subjects", "show", sid]).exit_code != 0
 
-    #: `subjects set-class` override.
+    # : `subjects set-class` override.
     def test_set_class_reclassifies_subject(self, runner: CliRunner, cli_db: Path) -> None:
         sid = _run_async(_add_subject("1 Pfennig GDR"))
         result = _invoke(runner, ["subjects", "set-class", sid, "nmo:NumismaticObject"])
@@ -1616,7 +1616,7 @@ class TestExportCommand:
         assert "default_output_path" in result.output
 
 
-#: synthesis-cache list / show / vacuum / evict.
+# : synthesis-cache list / show / vacuum / evict.
 class TestSynthesisCache:
     def test_list_empty(self, runner: CliRunner, cli_db: Path) -> None:
         result = _invoke(runner, ["synthesis-cache", "list"])
@@ -1943,6 +1943,61 @@ class TestExtractCommand:
         result = _invoke(runner, ["extract", "--all-pending"])
         assert result.exit_code == 0
         assert "No PENDING snapshots found (1 COMPLETE)." in result.output
+
+    def test_extract_all_pending_discloses_and_skips_superseded_generations(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """three edits of one MUTABLE file cost one extraction, and the CLI says so."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+        from particles.core.schema import FetchPolicy, Mutability
+        from particles.corpus.deposit import save_blob, sha256
+        from particles.corpus.store import CorpusEntryRow, SnapshotRow
+        from particles.db import session_scope
+
+        entry_id = str(uuid.uuid4())
+        snapshot_ids = [str(uuid.uuid4()) for _ in range(3)]
+
+        async def _seed() -> None:
+            entry = CorpusEntry(
+                entry_id=entry_id,
+                source_type="LOCAL_MARKDOWN",
+                uri_r="file:///tmp/MEMORY.md",
+                mutability=Mutability.MUTABLE,
+                fetch_policy=FetchPolicy.NEVER,
+                deposited_by="test",
+            )
+            async with session_scope() as session:
+                session.add(CorpusEntryRow.from_model(entry))
+                for age, snapshot_id in enumerate(reversed(snapshot_ids)):
+                    content = f"edit {snapshot_id}".encode()
+                    content_hash = sha256(content)
+                    snap = Snapshot(
+                        snapshot_id=snapshot_id,
+                        captured_at=datetime.now(UTC) - timedelta(hours=age),
+                        content_hash=content_hash,
+                        archive_path=save_blob(content, content_hash),
+                        extraction_status=ExtractionStatus.PENDING,
+                        warc_record_type=WarcRecordType.RESPONSE,
+                    )
+                    session.add(SnapshotRow.from_model(snap, entry_id))
+                await session.commit()
+
+        _run_async(_seed())
+        extracted: list[tuple[str, bool]] = []
+
+        async def _fake_extract(_session: Any, _e: str, s_id: str, **kw: Any) -> list[Any]:
+            extracted.append((s_id, bool(kw.get("skip_if_superseded"))))
+            return []
+
+        monkeypatch.setattr("particles.operations.extract.extract_snapshot", _fake_extract)
+        result = _invoke(runner, ["extract", "--all-pending"])
+
+        assert result.exit_code == 0
+        assert "Skipped 2 superseded snapshot(s) across 1 MUTABLE entry" in result.output
+        assert "Extracting 1 pending snapshot(s)" in result.output
+        # Only the newest edit, and the bulk path arms the stale-list guard.
+        assert extracted == [(snapshot_ids[-1], True)]
 
     def test_extract_all_pending_exits_nonzero_when_any_snapshot_fails(
         self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
@@ -2405,6 +2460,31 @@ class TestDbInitForce:
         assert particles == 0
         # … snapshot's extraction_status reset to PENDING for re-extraction.
         assert snap_status == ExtractionStatus.PENDING.value
+
+    def test_force_clears_the_collapse_mark(self, runner: CliRunner, cli_db: Path) -> None:
+        """a row left PENDING *and* marked would be skipped by every bulk pass."""
+        entry_id, snap_id = _run_async(_add_corpus_entry())
+
+        from particles.corpus.store import SnapshotRow
+        from particles.db import session_scope
+
+        async def _mark() -> None:
+            async with session_scope() as session:
+                row = await session.get(SnapshotRow, snap_id)
+                assert row is not None
+                row.superseded_by_snapshot_id = "some-newer-snapshot"
+                await session.commit()
+
+        async def _read() -> tuple[str, str | None]:
+            async with session_scope() as session:
+                row = await session.get(SnapshotRow, snap_id)
+                assert row is not None
+                return row.extraction_status, row.superseded_by_snapshot_id
+
+        _run_async(_mark())
+        result = runner.invoke(app, ["db", "init", "--force"], input="y\n")
+        assert result.exit_code == 0
+        assert _run_async(_read()) == (ExtractionStatus.PENDING.value, None)
 
 
 class TestSubjectsListFilters:

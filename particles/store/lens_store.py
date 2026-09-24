@@ -4,7 +4,8 @@
 
 """SQLAlchemy ORM and repository for trust lenses.
 
-A ``TrustLensDefinition`` arrives as a deposited corpus artefact (the taxonomy pattern); the ``TrustLensExtractor`` hands the parsed model
+A ``TrustLensDefinition`` arrives as a deposited corpus artefact (the
+taxonomy pattern); the ``TrustLensExtractor`` hands the parsed model
 to :func:`materialise_lens` via the sink seam registered at the
 bottom of this module. Adoption is **store state** — one row per adopted lens
 name — so a store's viewpoint survives config reloads and is visible to

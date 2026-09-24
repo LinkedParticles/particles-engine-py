@@ -591,6 +591,52 @@ class TestHookDoctor:
         assert result.exit_code == 0, result.output
         assert "nothing deposited yet" in result.stdout
 
+    def test_reports_the_memory_directory_and_strays(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A linked worktree's stray memory directory is named, never removed."""
+        from particles.api.cli._claude_code import claude_project_slug
+        from tests._claude_projects import make_repo, make_worktree, write_transcript
+
+        repo = make_repo(tmp_path / "src" / "repo")
+        worktree = make_worktree(repo, tmp_path / "src" / "wt")
+        projects = tmp_path / ".claude" / "projects"
+        stray = projects / claude_project_slug(worktree) / "memory"
+        write_transcript(stray.parent / "s.jsonl", str(worktree))
+        stray.mkdir()
+        monkeypatch.chdir(worktree)
+
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+
+        assert result.exit_code == 0, result.output
+        repo_memory = projects / claude_project_slug(repo) / "memory"
+        assert f"memory dir:     {repo_memory} (not created yet)" in result.stdout
+        assert "shares its repository's memory directory" in result.stdout
+        assert "stray memory:   1 directory" in result.stdout
+        assert str(stray) in result.stdout
+        assert stray.is_dir()
+
+    def test_reports_a_project_observer_that_is_not_in_effect_yet(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path
+    ) -> None:
+        """The one silent state: `project` set, store never rescoped."""
+        from particles.config import get_config
+
+        assert "observer scope: store" in runner.invoke(app, ["hook", "doctor"]).stdout
+
+        get_config().claude_code.observer_scope = "project"
+        before = runner.invoke(app, ["hook", "doctor"])
+        assert before.exit_code == 0 and "NOT in effect" in before.stdout
+
+        runner.invoke(app, ["memory", "rescope"])
+        get_config().claude_code.observer_scope = "project"
+        assert "global beliefs plus its project's" in runner.invoke(app, ["hook", "doctor"]).stdout
+
     def test_unreachable_blobs_warn_without_failing(
         self, runner: CliRunner, cli_db: Path, hook_home: Path
     ) -> None:

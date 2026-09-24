@@ -15,14 +15,14 @@
 # comment is the human-readable tag that SHA resolves to. Bump a SHA only
 # deliberately.
 #
-# Scope note — DCO, the docs build, pytest, and the projection drift gate all
-# run. One check is still deferred:
-#   * ruff — the export's citation-strip rewrite still joins a citation wrapped
-#     across a line boundary into an over-length line, a lint + format issue in
-#     the exported copy only. The import-grouping half is fixed (the pyproject
-#     declares isort known-first-party = ["particles"], so `particles.core`
-#     arriving from a separate distribution no longer regroups every import);
-#     the ruff job lands once the reflow is too.
+# Scope note — DCO, the docs build, pytest, the projection drift gate, ruff and
+# REUSE all run. ruff was the last deferred check: the export's citation strip
+# used to join a citation wrapped across a line boundary into one over-length
+# line. The export now keeps line structure, formats the Python files it
+# rewrote with the same pinned ruff this job runs, and refuses to publish a
+# tree either command would fail. (The pyproject also declares `particles` a
+# namespace package and first-party: this tree has no `particles/__init__.py`,
+# and without both, ruff would regroup every import.)
 # `pytest` and the drift gate were both deferred on one dependency — this tree
 # omits the Client substrate, which ships as the separate
 # `linkedparticles-core` distribution, and neither check can import `particles`
@@ -222,6 +222,28 @@ jobs:
           test -f particles/store/particle_store.py
       - name: Build the docs site (strict)
         run: mkdocs build --strict
+
+
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.11"
+          enable-cache: false
+
+      # Pinned, not floated: formatter output is version-specific, and the
+      # upstream export formats this tree with exactly this ruff before it is
+      # published, so a different version can fail on a no-op diff. Needs no
+      # project install.
+      - name: ruff check
+        run: uvx --from 'ruff==0.15.17' ruff check .
+      - name: ruff format --check
+        run: uvx --from 'ruff==0.15.17' ruff format --check .
 
   reuse:
     name: REUSE licensing

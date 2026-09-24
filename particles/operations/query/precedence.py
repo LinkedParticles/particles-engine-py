@@ -11,15 +11,16 @@ reconcile time, so it never reaches here), an open query retrieves
 both incompatible "current" answers with no signal to prefer the later one.
 This module supplies that signal as a **rank-time tie-break**: the conflict's
 recency-loser is demoted in ordering only — its reported
-``effective_confidence`` and stored ``confidence.value`` are untouched
-, and no status changes (``spec_impact: implementation``).
+``effective_confidence`` and stored ``confidence.value`` are untouched,
+and no status changes (``spec_impact: implementation``).
 
 The tie-break is **conflict-gated** (it fires only between particles the
 L-SEM-01 detector confirmed in conflict — never a global reorder)
 and
 **default-safe** (inert outside a detected conflict, and inert when neither side
 exposes a comparable precedence key). It composes multiplicatively in
-``_rank_score`` with the NARRATIVE demotion and the code-symbol demotion.
+``_rank_score`` with the NARRATIVE demotion and the
+code-symbol demotion.
 
 Two halves:
 

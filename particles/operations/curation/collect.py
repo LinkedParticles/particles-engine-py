@@ -74,7 +74,8 @@ async def collect_cards(
     them: its contradiction probe runs semantic while duplicates stay
     ``REPORT`` unless the operator passes ``--judge``.
 
-    ``contradiction_probe`` is passed through to the probe: the audit uses it to cap / scope the probe's LLM cost and
+    ``contradiction_probe`` is passed through to the
+    probe: the audit uses it to cap / scope the probe's LLM cost and
     to read back the candidate-pair census for the "probed X of Y" disclosure.
 
     ``duplicate_scope_ids`` is passed through to the co-evidential

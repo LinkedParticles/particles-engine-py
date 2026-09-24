@@ -1,14 +1,14 @@
 # Citation-signal deposit suggestions
 
-Particles never crawls the web — deposit is operator-driven
+Particles never crawls the web; deposit is operator-driven
 ([how to deposit](../user-guide/getting-started.md#deposit-a-source)). But a
 URL **mentioned repeatedly** across your corpus is a strong curation signal: a
 primary source many of your already-deposited discussions lean on, that the
 corpus itself doesn't contain. Until you deposit it, the database represents
 *hearsay about* that source rather than the source itself.
 
-This surfaces that gap. Every URL mentioned in deposited content — in
-comments and prose, not just a post's primary link — is recorded as a
+This surfaces that gap. Every URL mentioned in deposited content (in
+comments and prose, not just a post's primary link) is recorded as a
 **citation**. The ones you haven't deposited are ranked as suggestions.
 
 ## Seeing the suggestions
@@ -26,7 +26,7 @@ diversity × recency**:
 - **Source trust.** A citation from a source you trust (your trust policy +
   adopted lenses, computed at query time) weighs more than one from a source
   you don't.
-- **Recency.** Recent citations rank above stale ones — but a single old
+- **Recency.** Recent citations rank above stale ones, but a single old
   high-trust citation never disappears, it just sinks.
 
 A URL must be cited by at least `citation_signal.min_distinct_sources` distinct
@@ -53,7 +53,7 @@ When you do, two things reconcile automatically:
 
 Now the corpus holds the primary source. At query time, §6.6 conflict
 resolution and `effective_confidence` prefer the higher-trust primary over the
-hearsay — the database's **accuracy** improves, not just its size.
+hearsay: the database's **accuracy** improves, not just its size.
 
 ## Silencing a suggestion
 
@@ -72,7 +72,7 @@ recorded in the operator event log (`particles events`).
 
 [`particles lint`](lint-and-review.md) emits an INFO finding
 (`UNDEPOSITED_CITED_SOURCE`, "L-CITE-01") for each URL cited by at least
-`citation_signal.lint_min_distinct_sources` distinct sources (default 3 — more
+`citation_signal.lint_min_distinct_sources` distinct sources (default 3, more
 conservative than the verb). It anchors the suggestion to a real grounding gap,
 not URL popularity.
 
@@ -83,8 +83,8 @@ Existing citations and suggestions stay readable; nothing is captured going
 forward. See [Configuration](configuration.md) for the full
 `citation_signal.*` knob set.
 
-!!! note "Suggestion-only — never auto-deposit"
+!!! note "Suggestion-only: never auto-deposit"
     This feature only *surfaces* candidates. It never fetches, crawls, or
-    deposits on its own — depositing is always your explicit action. Opaque
+    deposits on its own; depositing is always your explicit action. Opaque
     link shorteners (`t.co`, `bit.ly`) are kept as-is rather than resolved,
     because following them to their target would be crawling.

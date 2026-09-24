@@ -378,6 +378,69 @@ class TestQualityDashboard:
 
 
 # ---------------------------------------------------------------------------
+# GET /particles/{id}/source — source-passage hydration
+# ---------------------------------------------------------------------------
+
+
+async def _add_sourced_particle(source_text: str, content: str) -> str:
+    from particles.corpus.deposit import deposit_text
+    from particles.db import session_scope
+    from particles.store.particle_store import insert_particle
+
+    async with session_scope() as session:
+        entry_id, snap_id = await deposit_text(session, source_text, source_type="WEB_PAGE")
+        p = Particle(
+            id=str(uuid.uuid4()),
+            content=content,
+            confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            asserted_by="test",
+            asserted_at=datetime.now(UTC),
+            status=Status.ACTIVE,
+            provenance=[
+                ProvenanceRef(
+                    type=ProvenanceRefType.SOURCE, corpus_entry_id=entry_id, snapshot_id=snap_id
+                )
+            ],
+        )
+        await insert_particle(session, p)
+        await session.commit()
+    return p.id
+
+
+class TestParticleSource:
+    def test_unknown_particle_is_404(self, client: TestClient) -> None:
+        resp = client.get(f"/particles/{uuid.uuid4()}/source")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Particle not found"
+
+    def test_envelope_carries_the_passage_and_how_it_was_found(self, client: TestClient) -> None:
+        pid = _run_async(
+            _add_sourced_particle(
+                "Opening remarks.\n\nThe mint opened in 1871 in Berlin.\n\nClosing remarks.",
+                "The mint opened in 1871.",
+            )
+        )
+        resp = client.get(f"/particles/{pid}/source")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["particle_id"] == pid
+        assert body["match"] == "LOCATED"
+        assert body["text"] == "The mint opened in 1871 in Berlin."
+        assert body["locate_overlap"] == 1.0
+        assert body["source_type"] == "WEB_PAGE"
+        assert body["truncated"] is False
+
+    def test_a_particle_without_a_source_is_200_unavailable(self, client: TestClient) -> None:
+        """Absence of a passage is an answer, not an error."""
+        pid = _run_async(_add_active_particle())
+        body = client.get(f"/particles/{pid}/source").json()
+        assert body["match"] == "UNAVAILABLE"
+        assert body["text"] == ""
+        assert body["note"]
+
+
+# ---------------------------------------------------------------------------
 # Curation — GET /curation, the bus-stop-editing queue over HTTP
 # ---------------------------------------------------------------------------
 
@@ -910,7 +973,7 @@ class TestSubjects:
         assert resp.status_code == 200
         assert resp.json() == []
 
-    #: POST /subjects/{id}/split — HTTP mirror of `subjects split`.
+    # : POST /subjects/{id}/split — HTTP mirror of `subjects split`.
     def test_split_relinks_particle_via_external_id(self, client: TestClient) -> None:
         source = _run_async(_add_subject("Conflated Source"))
         pid = _run_async(
@@ -1326,6 +1389,45 @@ class TestMcpReadEndpoints:
     def test_digest_unknown_store_404(self, client: TestClient) -> None:
         assert client.get("/digest/no-such-store").status_code == 404
 
+    def test_the_observer_crosses_the_http_contract(self, client: TestClient) -> None:
+        """a remote engine evaluates the observer against its own sources."""
+        from particles.db import DEFAULT_STORE, session_scope
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        async def _seed() -> tuple[str, str]:
+            async with session_scope(write=True) as session:
+                mine = await belief(
+                    session,
+                    "Project A deploys on Fridays.",
+                    await source(session, "a", project_source_tags("-a")),
+                    context_fingerprint="ab" * 32,
+                )
+                theirs = await belief(
+                    session,
+                    "Project B deploys on Mondays.",
+                    await source(session, "b", project_source_tags("-b")),
+                    context_fingerprint="ab" * 32,
+                )
+                await rescoped(session)
+                await session.commit()
+            return mine.id, theirs.id
+
+        mine, theirs = _run_async(_seed())
+
+        digest = client.get(f"/digest/{DEFAULT_STORE}", params={"project": "-a"}).json()["markdown"]
+        assert "Project A deploys" in digest and "Project B deploys" not in digest
+
+        listed = client.get("/particles", params={"observer_project": "-a"}).json()
+        assert [p["id"] for p in listed] == [mine]
+        assert {p["id"] for p in client.get("/particles").json()} == {mine, theirs}
+
+        found = client.get(
+            "/particles/search", params={"fingerprint": "ab" * 32, "observer_project": "-a"}
+        ).json()
+        assert [p["id"] for p in found] == [mine]
+
+        assert client.get("/particles", params={"observer_project": ""}).status_code == 422
+
 
 async def _insert(p: Particle) -> None:
     from particles.db import session_scope
@@ -1477,6 +1579,7 @@ class TestOperatorCurationWrites:
                 "subject_names": ["X"],
                 "confidence": 0.6,
                 "source_excerpt": "actually x is six",
+                "reason": "recounted",
             },
         )
         assert resp.status_code == 200
@@ -1485,10 +1588,28 @@ class TestOperatorCurationWrites:
         old = client.get(f"/particles/{target.id}").json()
         assert old["status"] == Status.SUPERSEDED.value
 
+    def test_operator_supersede_reason_is_required(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        """the operator path refuses a missing (422) or blank (400) reason."""
+        target = _extracted_particle("X is five.")
+        _run_async(_insert(target))
+        body = {
+            "content": "X is six.",
+            "subject_names": ["X"],
+            "confidence": 0.6,
+            "source_excerpt": "actually x is six",
+        }
+        assert client.post(f"/particles/{target.id}/supersede", json=body).status_code == 422
+        blank = client.post(f"/particles/{target.id}/supersede", json={**body, "reason": " "})
+        assert blank.status_code == 400
+        assert "non-empty reason" in blank.json()["detail"]
+        assert client.get(f"/particles/{target.id}").json()["status"] == Status.ACTIVE.value
+
     def test_operator_supersede_disabled_403(self, client: TestClient) -> None:
         resp = client.post(
             "/particles/some-id/supersede",
-            json={"content": "x", "subject_names": [], "confidence": 0.5},
+            json={"content": "x", "subject_names": [], "confidence": 0.5, "reason": "x"},
         )
         assert resp.status_code == 403
 

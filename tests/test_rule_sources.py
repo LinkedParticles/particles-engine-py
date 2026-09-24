@@ -241,7 +241,8 @@ class TestByteIdentityPrecondition:
     with its projected regions stripped can never match its own
     snapshot hash. Enrolling it makes the next sweep "correct" that by archiving
     the raw file — putting the store's own rendered output into the corpus, the
-    belt-1 violation the rule exists to prevent — and then letting the cascade retire the correctly-filtered generation in its favour.
+    belt-1 violation the rule exists to prevent — and then letting the
+    cascade retire the correctly-filtered generation in its favour.
 
     Caught by executing the operator recipe on a scratch store, not by reading
     the code; and the first diagnosis ("it churns forever") was wrong — the
@@ -489,8 +490,8 @@ def _rule_candidate(rule: str) -> dict[str, Any]:
 
     ``scope`` was absent here until, which parses as ``WORLD`` — so
     this fixture asserted the answer the analysis assumed, and the
-    end-to-end test below stayed green while the live behaviour was broken
-    . A live capture of the same classifier over a real rules
+    end-to-end test below stayed green while the live behaviour was broken.
+    A live capture of the same classifier over a real rules
     document puts a rule at ``CONSTITUTIVE`` / ``DOCUMENT_META``
     (``tests/fixtures/scope/rule-file-agents-md.recorded.json``), which is what
     this now says. The rule still reaches the head because the entry is a

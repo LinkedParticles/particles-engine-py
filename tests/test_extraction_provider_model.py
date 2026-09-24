@@ -153,8 +153,8 @@ async def test_selector_does_not_false_hit_on_a_nesting_pairing(db_session) -> N
     """The regression this design exists to prevent (§2.1).
 
     ``openai:gpt-5.6`` is a *prefix* of ``openai:gpt-5.6-luna``. A substring
-    scope — which is what the two ``extractor_ref``-based reindex helpers do
-     — would sweep in the sibling model the operator is trying to
+    scope — which is what the two ``extractor_ref``-based reindex helpers do—
+    would sweep in the sibling model the operator is trying to
     keep, undoing good particles along with the bad.
     """
     luna = _particle(content="Luna claim.", provider_model=_LUNA)

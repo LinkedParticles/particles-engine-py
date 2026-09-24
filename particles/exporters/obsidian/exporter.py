@@ -7,7 +7,7 @@
 This module holds the thin :class:`ObsidianExporter` class that the
 exporter registry instantiates. The actual rendering work lives in
 :mod:`particles.exporters.obsidian.vault`; the synthesis splice machinery
- is in :mod:`particles.exporters.obsidian.synthesis`;
+is in :mod:`particles.exporters.obsidian.synthesis`;
 text-shaping helpers are in :mod:`particles.exporters.obsidian.format`.
 """
 

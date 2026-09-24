@@ -82,11 +82,13 @@ async def score_cards(
     """Fill each card's ``leverage`` in place.
 
     Loads the signals once for the whole batch (one dependents aggregation, one
-    ACTIVE-particle scan for ages) then scores each card from those — the cost shape (batch-load + in-process math), acceptable at
+    ACTIVE-particle scan for ages) then scores each card from those — the
+    cost shape (batch-load + in-process math), acceptable at
     memory-store scale (is the scaling lever).
 
     ``contested_ids`` is the composed-badge set: the signal
-    widened from "referenced by an open INCONSISTENCY" to all three of the bases, so "contested" means one thing inside this module rather than two.
+    widened from "referenced by an open INCONSISTENCY" to all three of the
+    bases, so "contested" means one thing inside this module rather than two.
     Callers holding the full collection pass :func:`contested_ids_from`, which
     makes the signal free — before this was a second
     ``get_inconsistency_backrefs`` scan on top of the one the finder already

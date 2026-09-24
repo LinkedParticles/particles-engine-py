@@ -1,12 +1,12 @@
 # Store consolidation (merging two divergent local stores)
 
 You run Particles on more than one machine, each with its own local store,
-and the two have **diverged** — different corpus entries, different particles,
+and the two have **diverged**: different corpus entries, different particles,
 different subjects. This page is the validated procedure for folding one store
 into the other so you end up with a single canonical archive.
 
 The running example is the real one this page was written for:
-a **Mac Mini** store (the superset — designate it **canonical**) and a
+a **Mac Mini** store (the superset; designate it **canonical**) and a
 **MacBook Air** store whose unique source material you want to fold in.
 
 !!! danger "Both procedures back up the canonical store first and are reversible"
@@ -14,7 +14,7 @@ a **Mac Mini** store (the superset — designate it **canonical**) and a
     is owner-supervised and needs **both machines available**. Run the
     [backup step](#backup-and-rollback) before any import.
 
-## Which mechanism — decide first
+## Which mechanism: decide first
 
 There are two ways to move knowledge between stores. They are **not**
 equivalent, and the right choice depends on how much you are folding in.
@@ -22,7 +22,7 @@ equivalent, and the right choice depends on how much you are folding in.
 | | **Re-deposit + re-extract** | **Interchange export/import** |
 |---|---|---|
 | What moves | the **source material** (URLs / files) | the **ACTIVE particles + subjects** |
-| Provenance in the canonical store | **valid** — points at real local corpus entries | **orphaned** — points at the *other* store's entry IDs |
+| Provenance in the canonical store | **valid**: points at real local corpus entries | **orphaned**: points at the *other* store's entry IDs |
 | Corpus / blobs | rebuilt locally | **not moved** (provenance dangles) |
 | Trust policy, event log, relations, lenses, non-ACTIVE history | rebuilt / re-run | **dropped** (see below) |
 | Cost | one LLM extraction per re-deposited entry | one LLM reconcile probe per high-similarity collision |
@@ -35,11 +35,12 @@ and a real corpus**. Reach for interchange import only for particles you
 cannot re-derive from a source (e.g. agent/operator beliefs asserted directly
 over the MCP write surface).
 
-## What the interchange bundle carries — and what it drops
+## What the interchange bundle carries, and what it drops
 
 A store-export bundle is a directory of exactly three files: `manifest.json`,
 `particles.jsonl`, and `subjects.jsonl`. It carries **only the knowledge-graph
-core**. Everything else is a deferred bundle member and is **silently dropped** on export.
+core**. Everything else is a deferred bundle member
+and is **silently dropped** on export.
 
 This was validated end-to-end with a scratch export ⇄ import across two
 throwaway SQLite stores (no real data touched). Seeded store **A** held 4
@@ -60,7 +61,7 @@ statement, 2 operator events, 1 CO_EVIDENTIAL relation. After
 Concretely, dropped on every interchange round-trip:
 
 - **Non-ACTIVE particles.** Export is ACTIVE-only. SUPERSEDED, RETRACTED,
-  PROVENANCE_STALE, and **INCONSISTENCY** particles do not travel — you lose
+  PROVENANCE_STALE, and **INCONSISTENCY** particles do not travel; you lose
   the supersession history and the entire contradiction/dispute ledger.
 - **Corpus entries, snapshots, and raw blobs.** The particle's `provenance`
   still carries the **source store's** `corpus_entry_id` / `snapshot_id`, but
@@ -69,30 +70,30 @@ Concretely, dropped on every interchange round-trip:
 - **SourceTrustStatements** (your trust policy).
 - **The operator event log** (the audit trail of retractions, merges, reviews,
   trust changes).
-- **Particle relations** — `CO_EVIDENTIAL` clusters, the `PART_OF` /
+- **Particle relations**: `CO_EVIDENTIAL` clusters, the `PART_OF` /
   `SEQUENCE_IN` edges that reconstruct **narrative** prose, and the
   `ENDORSES` / `DISPUTES` stance edges. NARRATIVE particles travel as
   substrate, but the edges that make them readable do not.
-- **Adopted-lens / viewpoint state** — a store
+- **Adopted-lens / viewpoint state**: a store
   export materialises particles but drops the viewpoint that rendered them.
 
 What **does** survive: the ACTIVE particle substrate (content, the calibrated
 `confidence.value`, uncertainty, provenance *descriptors*, status, tags,
 properties, `context_fingerprint`, `extractor_ref`, contributors,
 `assertion_modality`), and subjects resolved by external reference. Derived
-quantities (`effective_confidence`) are correctly **never** serialized — they
+quantities (`effective_confidence`) are correctly **never** serialized; they
 recompute on import.
 
-## Collision analysis — importing the Air into the populated Mini
+## Collision analysis: importing the Air into the populated Mini
 
 The validated run imported into an **empty** store (clean: 3 imported, 0
-dropped). Importing into the **populated** Mini is different — every imported
+dropped). Importing into the **populated** Mini is different: every imported
 particle runs the §6.6 reconciliation ladder against the Mini's ACTIVE set.
 
-**Particle IDs — no collision.** Import mints a **fresh** UUID for every
+**Particle IDs: no collision.** Import mints a **fresh** UUID for every
 particle; the source UUID rides along as `sourceParticleId` (origin metadata
 only). The validation confirmed the imported particle's ID differs from the
-source. So there is no primary-key clash — but see idempotency below.
+source. So there is no primary-key clash, but see idempotency below.
 
 **No exact-duplicate dedup → import is not idempotent.** Import identity is
 embedding-similarity + §6.6, **not** claim identity. Re-running the same import
@@ -110,21 +111,22 @@ collision). Outcomes per imported particle:
   near-duplicate you may later link or merge).
 - *Similar and contradictory* → resolved by **reconciliation mode** (below).
 
-**Reconciliation mode matters**. The effective
+**Reconciliation mode matters**.
+The effective
 mode for a store is: an explicit `reconciliation.per_store` entry wins;
 otherwise an **MCP-write-enabled store defaults to `multi`**; otherwise the
 global `reconciliation.store_mode` (default `single`).
 
-- `single` — a confirmed contradiction **auto-supersedes**: either the import
+- `single`: a confirmed contradiction **auto-supersedes**: either the import
   demotes an existing Mini particle to PROVENANCE_STALE, or the import itself
   is **dropped** (counted in the import summary's `dropped`) and the drop is
   logged as a `CONFLICT_CANDIDATE_DROPPED` event. Silent for the operator.
-- `multi` — a confirmed contradiction is **quarantined as an INCONSISTENCY**
+- `multi`: a confirmed contradiction is **quarantined as an INCONSISTENCY**
   for you to `review`, and nothing is auto-superseded. If the Mini's `default`
   store is MCP-write-enabled, it is already in `multi`, so expect a review
   queue rather than silent supersession after an import.
 
-**Subject IDs — no UUID collision, but two real merge hazards.** Subjects never
+**Subject IDs: no UUID collision, but two real merge hazards.** Subjects never
 travel by local UUID. Import resolves each ref **external ref → canonical name
 → create bare-local**. The hazards:
 
@@ -132,21 +134,21 @@ travel by local UUID. Import resolves each ref **external ref → canonical name
   Air whose name does not exactly match the Mini's imports as a **new
   duplicate** subject.
 - *Different entities, same name.* Two distinct things that share a canonical
-  name **merge erroneously** — name resolution cannot tell them apart.
+  name **merge erroneously**; name resolution cannot tell them apart.
 - *Same entity, different authorities.* `wikidata:Q42` vs `numista:N123` for
   the same entity **do not merge** (cross-authority `sameAs` is deferred).
 
 Re-deposit + re-extract sidesteps all of this: subjects are re-resolved live
 against the Mini's own subject graph at extraction time.
 
-## Procedure A — re-deposit + re-extract (recommended for the Air's ~21 entries)
+## Procedure A: re-deposit + re-extract (recommended for the Air's ~21 entries)
 
 Run with **both machines available**. Commands are run on each machine's local
 default store.
 
 **0. Back up the canonical (Mini) store.** See [Backup and rollback](#backup-and-rollback).
 
-**1. On the MacBook Air — list its corpus entries.**
+**1. On the MacBook Air, list its corpus entries.**
 
 ```bash
 particles corpus list
@@ -154,7 +156,7 @@ particles corpus list
 
 Note the `SOURCE` column (the URI / file path) for each of the ~21 entries.
 
-**2. On the Mac Mini — list its corpus entries and diff.**
+**2. On the Mac Mini, list its corpus entries and diff.**
 
 ```bash
 particles corpus list > mini-entries.txt
@@ -162,10 +164,10 @@ particles corpus list > mini-entries.txt
 
 Compare the two `SOURCE` lists. The entries present on the Air but **not** on
 the Mini are the unique set to fold in. (There is no built-in cross-store
-corpus diff — compare the URI columns by hand or with `comm`/`diff` on the
+corpus diff; compare the URI columns by hand or with `comm`/`diff` on the
 source columns.)
 
-**3. On the Mac Mini — re-deposit and re-extract each unique source.**
+**3. On the Mac Mini, re-deposit and re-extract each unique source.**
 
 ```bash
 # For each unique source URL or file from step 2:
@@ -183,16 +185,16 @@ Preserve any deposit flags the Air used (e.g. `--journal`, `--tags`,
 **4. Verify.**
 
 ```bash
-particles quality          # counts by status / source — expect the Mini's totals to grow
+particles quality          # counts by status / source; expect the Mini's totals to grow
 particles lint             # no new CORPUS_LINK_GAP (provenance is local and valid)
 ```
 
 **When a source can't be re-fetched.** If an Air entry's URL is dead and you
-have no local file, you cannot re-derive its particles — that is the one case
+have no local file, you cannot re-derive its particles. That is the one case
 to fall back to Procedure B for those specific particles, accepting orphaned
 provenance.
 
-## Procedure B — interchange export/import (when re-derivation is impossible)
+## Procedure B: interchange export/import (when re-derivation is impossible)
 
 Use this only for particles you cannot rebuild from a source. Be aware it
 moves the Air's **entire** ACTIVE set (there is no "export only the unique
@@ -200,7 +202,7 @@ entries" filter), drops everything in the table above, and orphans provenance.
 
 **0. Back up the canonical (Mini) store** ([below](#backup-and-rollback)).
 
-**1. On the MacBook Air — export a bundle.**
+**1. On the MacBook Air, export a bundle.**
 
 ```bash
 particles interchange export -o air-bundle/
@@ -208,10 +210,10 @@ particles interchange export -o air-bundle/
 ```
 
 This writes `air-bundle/{manifest.json,particles.jsonl,subjects.jsonl}`.
-Inspect `manifest.json` — its `counts` should match the Air's ACTIVE-particle
+Inspect `manifest.json`; its `counts` should match the Air's ACTIVE-particle
 and subject totals.
 
-**2. Transfer `air-bundle/` to the Mac Mini** (USB, `scp`, AirDrop — any file
+**2. Transfer `air-bundle/` to the Mac Mini** (USB, `scp`, AirDrop, any file
 copy).
 
 **3. Dry-run into a *scratch copy* of the Mini, not the real store.** There is
@@ -240,12 +242,12 @@ particles interchange import air-bundle/
 **5. Clean up after the import.**
 
 ```bash
-particles lint     # expect CORPUS_LINK_GAP findings — orphaned provenance from the Air
+particles lint     # expect CORPUS_LINK_GAP findings: orphaned provenance from the Air
 particles review   # resolve any INCONSISTENCY particles the import surfaced (multi mode)
 ```
 
 You will **not** recover the Air's trust policy, event log, relations, adopted
-lenses, or non-ACTIVE history — re-establish trust statements and re-link
+lenses, or non-ACTIVE history; re-establish trust statements and re-link
 co-evidential clusters by hand if you need them.
 
 ## Backup and rollback
@@ -253,7 +255,7 @@ co-evidential clusters by hand if you need them.
 A store is a SQLite database file plus a content-addressed blob directory.
 Both must be copied together.
 
-1. **Quiesce the store.** Stop any running engine / CLI / MCP server — SQLite
+1. **Quiesce the store.** Stop any running engine / CLI / MCP server; SQLite
    is single-writer, and you want a consistent copy.
 2. **Copy the database and its WAL sidecars, and the blob directory.** Paths
    come from `config.yaml` (`storage.database_url` and `storage.blob_dir`;
@@ -275,16 +277,16 @@ This is the same durability model as a [schema migration](schema-migration.md):
 the corpus + blobs are the durable record, and particles are rebuildable from
 them.
 
-## Findings — tooling gaps surfaced by this validation
+## Findings: tooling gaps surfaced by this validation
 
 These are limitations the merge runs into. Each is noted with where it belongs
-in the decision register; **no new PDR rows were added by this validation** —
+in the decision register; **no new PDR rows were added by this validation**;
 flagging only.
 
 - **Provenance orphaning on import.** Particles import with provenance pointing
   at the source store's corpus entries, which don't exist in the target →
   `CORPUS_LINK_GAP`. This is a direct consequence of corpus blobs being a
-  deferred bundle member — already tracked.
+  deferred bundle member, already tracked.
   No new PDR needed.
 - **No selective / delta export.** Export is whole-store ACTIVE; there is no
   "only entries not already in the target" or "since timestamp" filter, which
@@ -297,15 +299,15 @@ flagging only.
   duplicates particles (no claim-identity dedup before §6.6), and the only way
   to preview is to import into a throwaway DB copy. This is **not** cleanly
   covered by an existing row and is the strongest candidate for a **new PDR**
-  if a safe, repeatable "merge only what's missing" import workflow is wanted
-  — recommend the owner open one rather than relying on the scratch-copy
+  if a safe, repeatable "merge only what's missing" import workflow is wanted;
+  recommend the owner open one rather than relying on the scratch-copy
   workaround. (Not opened here, per the scope of this validation.)
 
 ## See also
 
-- [Schema migration](schema-migration.md) — `db init --force`, what survives a
+- [Schema migration](schema-migration.md): `db init --force`, what survives a
   major bump (the same corpus-is-durable model).
-- [Lint and review](lint-and-review.md) — resolving the `CORPUS_LINK_GAP` and
+- [Lint and review](lint-and-review.md): resolving the `CORPUS_LINK_GAP` and
   INCONSISTENCY findings an import can surface.
-- [Auditing operator actions](auditing.md) — the event log that interchange
+- [Auditing operator actions](auditing.md): the event log that interchange
   does **not** carry across stores.

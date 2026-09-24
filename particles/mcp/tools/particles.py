@@ -17,6 +17,7 @@ from typing import Any
 
 from particles.core.schema import ContestedBadge
 from particles.core.status import Status
+from particles.mcp.observer import observer_for, scope_disclosure
 
 
 async def particle_show(particle_id: str) -> dict[str, Any]:
@@ -46,6 +47,7 @@ async def particles_list(
     subject_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    all_projects: bool = False,
 ) -> dict[str, Any]:
     """List particles, optionally filtered by status or subject.
 
@@ -68,6 +70,9 @@ async def particles_list(
         offset: Number of particles to skip before returning results
             (default 0). Combine with ``limit`` to page through the
             full set.
+        all_projects: On a server bound to one project, read the whole
+            store instead of that project's view. The result says so. No effect
+            on an unbound server.
 
     Returns:
         Dict with ``particles`` — a list of summary dicts containing
@@ -75,7 +80,7 @@ async def particles_list(
         ``subject_ids``, ``asserted_at``, and ``status_reason``. Each
         entry's ``contested`` key is the id of an open INCONSISTENCY
         referencing it, else null; ``contested_bases``
-         rides beside it with the fired basis labels —
+        rides beside it with the fired basis labels —
         composed by the same composer the ``query`` tool uses, so all
         three bases (stance / divergence / inconsistency) are evaluated
         and the two surfaces on one server always agree. Plus
@@ -101,7 +106,11 @@ async def particles_list(
 
     backend = get_backend()
     particles = await backend.particles_list(
-        status=status, subject_id=subject_id, limit=limit, offset=offset
+        status=status,
+        subject_id=subject_id,
+        limit=limit,
+        offset=offset,
+        observer_project=observer_for(all_projects),
     )
     # contested marker — an open INCONSISTENCY references this id.
     backrefs = await backend.inconsistency_backrefs()
@@ -133,14 +142,20 @@ async def particles_list(
             entry["contested_bases"] = list(badge.bases) if badge is not None else None
         entries.append(entry)
 
-    return {
+    result: dict[str, Any] = {
         "limit": limit,
         "offset": offset,
         "particles": entries,
     }
+    disclosure = scope_disclosure(all_projects)
+    if disclosure is not None:
+        result["observer"] = disclosure
+    return result
 
 
-async def particle_search(fingerprint: str, limit: int = 50) -> dict[str, Any]:
+async def particle_search(
+    fingerprint: str, limit: int = 50, all_projects: bool = False
+) -> dict[str, Any]:
     """List particles sharing a context fingerprint.
 
     Args:
@@ -148,6 +163,9 @@ async def particle_search(fingerprint: str, limit: int = 50) -> dict[str, Any]:
         limit: Maximum particles to return (default 50, capped at 200 to
             keep responses within MCP per-tool-result token caps —
             fingerprint matches share full ``content`` strings).
+        all_projects: On a server bound to one project, read the whole
+            store instead of that project's view. The result says so. No effect
+            on an unbound server.
 
     Returns:
         Dict with ``fingerprint`` (the queried value) and ``particles``
@@ -166,9 +184,15 @@ async def particle_search(fingerprint: str, limit: int = 50) -> dict[str, Any]:
 
     from particles.api.client import get_backend
 
-    rows = await get_backend().particles_by_fingerprint(fp, limit=limit)
+    rows = await get_backend().particles_by_fingerprint(
+        fp, limit=limit, observer_project=observer_for(all_projects)
+    )
 
-    return {
+    found: dict[str, Any] = {
         "fingerprint": fp,
         "particles": [{"id": r.id, "status": r.status.value, "content": r.content} for r in rows],
     }
+    disclosure = scope_disclosure(all_projects)
+    if disclosure is not None:
+        found["observer"] = disclosure
+    return found

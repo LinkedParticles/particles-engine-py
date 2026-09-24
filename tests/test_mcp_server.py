@@ -141,8 +141,8 @@ class TestServerRegistration:
         The MCP description IS the full tool docstring (including its ``Args:``
         block), and the generated input-schema parameters carry no descriptions
         of their own — so the docstring is the only place per-parameter agent
-        documentation can live. This guards the exact silent drift flagged
-        : adding or renaming a parameter without updating the prose now
+        documentation can live. This guards the exact silent drift flagged:
+        adding or renaming a parameter without updating the prose now
         fails CI, where the golden ``tool-schema.json`` snapshot cannot tell a
         stale description from a current one. Covers the read and write surface
         (the latter is registered only when a store is write-enabled).
@@ -920,8 +920,12 @@ class TestDigestResource:
 
         server = build_server()
         templates = await server.list_resource_templates()
-        # The template is always available (a read-only view of any store).
-        assert [t.uriTemplate for t in templates] == ["particles://digest/{store}"]
+        # The templates are always available (a read-only view of any store); the
+        # second reads the same digest through one project's observer.
+        assert [t.uriTemplate for t in templates] == [
+            "particles://digest/{store}",
+            "particles://digest/{store}/{project}",
+        ]
         # Default config lists no stores → no concrete digest resource enumerated.
         assert [str(r.uri) for r in await server.list_resources()] == []
 

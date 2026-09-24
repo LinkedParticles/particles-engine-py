@@ -805,7 +805,7 @@ class TestSpecTierSync:
         import re
 
         line = next(
-            ln for ln in cls._section().splitlines() if ln.startswith(f"- **{tier_label}** —")
+            ln for ln in cls._section().splitlines() if ln.startswith(f"- **{tier_label}**:")
         )
         _, _, tail = line.partition(lead_in)
         assert tail, f"§14.5 {tier_label} bullet lost its {lead_in!r} lead-in"

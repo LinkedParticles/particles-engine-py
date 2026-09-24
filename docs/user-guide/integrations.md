@@ -1,7 +1,7 @@
 # Using Particles from LangChain
 
 Particles ships a thin **LangChain adapter** so a LangChain agent or
-RAG chain can read from — and deposit into — a Particles store without
+RAG chain can read from, and deposit into, a Particles store without
 hand-rolling the HTTP / MCP surface. It lives in `particles.integrations` and is
 gated behind an optional extra:
 
@@ -12,7 +12,7 @@ pip install particles[langchain]   # installs langchain-core>=0.3
 The adapter imports `langchain_core` lazily, so the base install never pays its
 cost; using the adapter without the extra raises an actionable `ImportError`.
 
-## Tools — drop into an agent's toolset
+## Tools: drop into an agent's toolset
 
 `get_langchain_tools()` returns two `StructuredTool`s:
 
@@ -23,22 +23,22 @@ tools = get_langchain_tools()   # [particles_query, particles_deposit]
 agent = create_agent(llm, tools)
 ```
 
-- **`particles_query`** — answers a natural-language question from the store and
+- **`particles_query`**: answers a natural-language question from the store and
   returns the cited prose answer (ranked by effective confidence). Optional
   args: `tags`, `subject_id`, `min_confidence`, `top_k`. It is the same path
   the CLI takes, so [Querying](querying.md) describes exactly what these
   arguments do.
-- **`particles_deposit`** — archives text into the corpus as a new source entry
+- **`particles_deposit`**: archives text into the corpus as a new source entry
   (no belief is asserted) and returns the created entry / snapshot ids.
   Turning that entry into beliefs is a separate
   [extract](getting-started.md#extract-particles) step.
 
-## Retriever — plug into a RAG chain
+## Retriever: plug into a RAG chain
 
 `ParticlesRetriever` is a `BaseRetriever`: each ranked particle becomes one
 `Document` whose `page_content` is the claim text and whose `metadata` carries
 `particle_id`, `effective_confidence`, `confidence`, `subject_ids`, and
-`status` — so a downstream chain can cite and filter on believability.
+`status`, so a downstream chain can cite and filter on believability.
 `confidence` and `effective_confidence` are deliberately different numbers
 ([Concepts → confidence](concepts.md#confidence)); filter on the effective
 one, and tune what feeds it in
@@ -57,5 +57,5 @@ The adapter reaches the engine only through the [remote-engine backend
 seam](../operator-guide/remote-engine.md): with no engine configured it runs
 in-process against your local store; with `engine.base_url` set it talks to a
 remote engine over HTTP, presenting the `PARTICLES_ENGINE_TOKEN` bearer. Whether
-a deposit is allowed is decided by the **engine's** write-enablement — the
+a deposit is allowed is decided by the **engine's** write-enablement; the
 adapter never overrides it.

@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 
+from particles.mcp.observer import observer_for, scope_disclosure
+
 
 async def graph_view(
     subject_id: str | None = None,
@@ -30,6 +32,7 @@ async def graph_view(
     as_of: str | None = None,
     max_nodes: int | None = None,
     store: str = "default",
+    all_projects: bool = False,
 ) -> dict[str, Any]:
     """Render one scoped epistemic subgraph of the particle store.
 
@@ -69,6 +72,9 @@ async def graph_view(
         max_nodes: Per-call node cap (clamped to ``graph.max_nodes``).
         store: Store handle to render from; ``"default"`` is the
             canonical store.
+        all_projects: On a server bound to one project, render from
+            the whole store instead of that project's view. The result says so.
+            No effect on an unbound server.
 
     Returns:
         The ``GraphData`` render as JSON — ``nodes`` (subjects with display
@@ -113,8 +119,12 @@ async def graph_view(
         as_of=as_of_dt,
         max_nodes=max_nodes,
         store=store,
+        observer_project=observer_for(all_projects),
     )
     out = data.model_dump(mode="json")
+    disclosure = scope_disclosure(all_projects)
+    if disclosure is not None:
+        out["observer"] = disclosure
 
     # deep-link the same scope on the unified web
     # UI's #/browse route (né #/graph — the app accepts both) when an engine

@@ -23,6 +23,10 @@ What's covered:
   * repeat runs: the aggregate wrapper's per-metric
     distribution, the untouched §13.3 reports it carries, the cost
     estimate, and the CLI's --runs / --estimate / --yes surface
+  * emitted-claim records: every emission carries its text, stated
+    confidence and judged outcome, so a *saved* report's spurious set is
+    readable without re-running the suite; the id lists beside them keep
+    their shapes and the format-1 envelope is unbumped
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from particles.benchmark.runner import (
     AggregateBenchmarkReport,
     BenchmarkReport,
     CaseResult,
+    ClaimOutcome,
     estimate_benchmark_run,
     graded_pairs,
     render_benchmark_estimate,
@@ -506,6 +511,219 @@ def _required(content: str) -> ExpectedParticle:
         uncertainty_nature=UncertaintyNature.EPISTEMIC,
         required=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Emitted-claim records — what makes a saved report auditable
+# ---------------------------------------------------------------------------
+
+
+class TestEmittedClaims:
+    """A benchmark run never persists to the store, so an emitted particle's
+    uuid resolves to nothing once the process exits. Without the text beside
+    the id, a saved report's ``precision`` cannot be inspected at all — a
+    hallucination and a correct-but-not-in-the-gold-set claim are the same
+    three lines of JSON, and the only recourse is paying for the inference
+    again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_spurious_claims_carry_their_text(self) -> None:
+        """The gap this exists to close: read the claims that matched nothing."""
+        suite = _stub_suite([_required("Mercury is a planet")])
+        extractor = _PartialStub(
+            ["Mercury is a planet"],
+            ["The Sun orbits Jupiter", "Cheese is a mineral"],
+        )
+        report = await run_benchmark(suite, extractor, fixture_dir=Path("."))
+
+        case = report.per_case[0]
+        spurious = [c for c in case.emitted_claims if c.outcome is ClaimOutcome.SPURIOUS]
+        assert {c.content for c in spurious} == {
+            "The Sun orbits Jupiter",
+            "Cheese is a mineral",
+        }
+        # The id list is unchanged beside them, and the two agree.
+        assert {c.particle_id for c in spurious} == set(case.spurious)
+
+    @pytest.mark.asyncio
+    async def test_one_record_per_emission_partitioned_by_outcome(self) -> None:
+        """Every emitted particle appears exactly once, in emission order.
+
+        The three outcomes partition the emitted set, so the record count
+        reconciles with ``emitted_count`` — a claim in no bucket would be an
+        assignment bug, not a fourth state.
+        """
+        suite = _stub_suite([_required("Mercury is a planet")])
+        extractor = _PartialStub(["Mercury is a planet"], ["a spurious claim"])
+        report = await run_benchmark(suite, extractor, fixture_dir=Path("."))
+
+        case = report.per_case[0]
+        assert len(case.emitted_claims) == case.emitted_count == 2
+        assert [c.content for c in case.emitted_claims] == [
+            "Mercury is a planet",
+            "a spurious claim",
+        ]
+        assert [c.outcome for c in case.emitted_claims] == [
+            ClaimOutcome.MATCHED,
+            ClaimOutcome.SPURIOUS,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_matched_claim_names_the_gold_it_matched(self) -> None:
+        """``matched_expected`` is what makes a judge threshold auditable.
+
+        The pre-existing ``matched`` list pairs gold text with an emitted
+        *id*; only this field puts both texts in one record.
+        """
+        suite = _stub_suite([_required("Mercury is a planet")])
+        report = await run_benchmark(
+            suite, _PerfectStub(["Mercury is a planet"]), fixture_dir=Path(".")
+        )
+
+        (claim,) = report.per_case[0].emitted_claims
+        assert claim.outcome is ClaimOutcome.MATCHED
+        assert claim.matched_expected == "Mercury is a planet"
+
+    @pytest.mark.asyncio
+    async def test_confidence_is_the_raw_stated_value(self) -> None:
+        """Recording it per claim is what makes ``calibration_error`` auditable.
+
+        Raw, not scaled: the runner converts candidates with
+        ``calibration=None``, so the number here is what the extractor said.
+        """
+        suite = _stub_suite([_required("Mercury is a planet")])
+        report = await run_benchmark(
+            suite, _PerfectStub(["Mercury is a planet"]), fixture_dir=Path(".")
+        )
+
+        (claim,) = report.per_case[0].emitted_claims
+        assert claim.confidence == 0.95  # _PerfectStub's stated value, unmodified
+        # Same population as ``graded``, which is what `extractor calibrate` fits.
+        assert [
+            (c.confidence, c.outcome is not ClaimOutcome.SPURIOUS)
+            for c in report.per_case[0].emitted_claims
+        ] == report.per_case[0].graded
+
+    @pytest.mark.asyncio
+    async def test_under_confidence_claim_is_its_own_outcome(self) -> None:
+        """Not folded into spurious: it matched semantically, just too timidly."""
+        expected = [
+            ExpectedParticle(
+                content="Mercury is a planet",
+                confidence_min=0.99,  # above the stub's 0.95
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                required=True,
+            )
+        ]
+        report = await run_benchmark(
+            _stub_suite(expected), _PerfectStub(["Mercury is a planet"]), fixture_dir=Path(".")
+        )
+
+        (claim,) = report.per_case[0].emitted_claims
+        assert claim.outcome is ClaimOutcome.UNDER_CONFIDENCE
+        assert claim.matched_expected == "Mercury is a planet"
+
+    @pytest.mark.asyncio
+    async def test_record_claim_text_off_suppresses_extracted_text_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The private-corpus switch: ids, counts and metrics are unaffected.
+
+        Suppression happens at *production*, not at persist time, so no
+        downstream sink has to remember to scrub. Gold text is untouched —
+        the report has always carried it in ``matched`` / ``missed_required``,
+        so redacting it here would imply a protection this does not give.
+        """
+        from particles.config import reset_config
+
+        monkeypatch.setenv("BENCHMARK_RECORD_CLAIM_TEXT", "false")
+        reset_config()
+        try:
+            suite = _stub_suite([_required("Mercury is a planet")])
+            extractor = _PartialStub(["Mercury is a planet"], ["a spurious claim"])
+            report = await run_benchmark(suite, extractor, fixture_dir=Path("."))
+        finally:
+            monkeypatch.delenv("BENCHMARK_RECORD_CLAIM_TEXT")
+            reset_config()
+
+        case = report.per_case[0]
+        assert all(c.content is None for c in case.emitted_claims)
+        # Everything that is not extractor output survives.
+        assert [c.outcome for c in case.emitted_claims] == [
+            ClaimOutcome.MATCHED,
+            ClaimOutcome.SPURIOUS,
+        ]
+        assert {c.particle_id for c in case.emitted_claims} == {
+            *case.spurious,
+            *(pid for _, pid in case.matched),
+        }
+        assert case.emitted_claims[0].matched_expected == "Mercury is a planet"
+        assert report.metrics["precision"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_wikidata_qids_are_not_recorded_as_subject_names(self) -> None:
+        """QIDs are identifiers, not names — they never qualify a claim.
+
+        ``CandidateParticle.subjects`` may carry a QID beside a name
+        (``numista/coin.py`` appends one to issuer subjects). Prefixing a claim
+        with "Q42: …" is not a rendering any gold string will be written as;
+        under the max it could only ever lose, so it is dropped before matching
+        for the same reason a UUID is (D4; PR #504 review, finding 4).
+        """
+
+        class _QidStub:
+            EXTRACTOR_ID = "qid-stub"
+            EXTRACTOR_VERSION = "0.0.1"
+
+            def accepts(self, source_type: str) -> bool:
+                return True
+
+            async def extract(
+                self, snapshot: Snapshot, content: bytes, **kwargs: object
+            ) -> ExtractionResult:
+                return ExtractionResult(
+                    candidates=[
+                        CandidateParticle(
+                            content="The coin was struck in 1961.",
+                            confidence_value=0.9,
+                            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                            subjects=["1 Pfennig GDR", "Q16957", "  "],
+                        )
+                    ]
+                )
+
+        report = await run_benchmark(
+            _stub_suite([_required("The coin was struck in 1961.")]),
+            _QidStub(),
+            fixture_dir=Path("."),
+        )
+        (claim,) = report.per_case[0].emitted_claims
+        assert claim.subjects == ["1 Pfennig GDR"]
+
+    @pytest.mark.asyncio
+    async def test_case_that_raises_contributes_no_records(self) -> None:
+        """A crashed case emitted nothing, so it claims nothing — an empty
+        list rather than a record with a fabricated outcome."""
+
+        class _RaisingStub:
+            EXTRACTOR_ID = "raising-stub"
+            EXTRACTOR_VERSION = "0.0.1"
+
+            def accepts(self, source_type: str) -> bool:
+                return True
+
+            async def extract(
+                self, snapshot: Snapshot, content: bytes, **kwargs: object
+            ) -> ExtractionResult:
+                raise RuntimeError("boom")
+
+        report = await run_benchmark(
+            _stub_suite([_required("Mercury is a planet")]),
+            _RaisingStub(),
+            fixture_dir=Path("."),
+        )
+        assert report.per_case[0].emitted_claims == []
 
 
 class TestSummariseMetric:

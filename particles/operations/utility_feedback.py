@@ -28,7 +28,8 @@ from the log, ``rebuild-utility`` can stay a blunt truncate-and-re-derive —
 :func:`rederive_explicit_credits` is that reconstruction.
 
 The gesture is **operator-only**: there is no MCP tool. An agent
-crediting its own beliefs would close a self-reinforcement loop through the digest it is shown next session, and containment cannot
+crediting its own beliefs would close a self-reinforcement loop through the
+digest it is shown next session, and containment cannot
 reach it — every §6 defence is confidence-shaped, while utility was made an
 *additive* term on top of effective confidence, so no trust multiplier
 attenuates a rank-lift.

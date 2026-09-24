@@ -50,8 +50,8 @@ Adopted by the **web UI**, the **docs site** and the **graph exporter**
 
 - **Name.** *Particles* is the product and the standard. *LinkedParticles* is
   the legal / distribution identity — the GitHub org, the PyPI dists
-  `linkedparticles` / `linkedparticles-core`, the host `linkedparticles.org`
-  . Never "Particls", "LinkedParticles SDK", or a domain suffix.
+  `linkedparticles` / `linkedparticles-core`, the host `linkedparticles.org`.
+  Never "Particls", "LinkedParticles SDK", or a domain suffix.
 - **Mark.** A Subject ring with three particles in orbit — blue (retrieval
   hit), green (ACTIVE), amber (contested) — around a core claim in
   `currentColor`. Same geometry as the existing app icon; the tile variant is

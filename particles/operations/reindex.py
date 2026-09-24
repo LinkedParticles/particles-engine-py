@@ -37,7 +37,7 @@ from particles.corpus.store import (
     list_snapshots_for_entry,
 )
 from particles.observability import traced
-from particles.operations.extract import extract_snapshot
+from particles.operations.extract import collapse_superseded_pending, extract_snapshot
 from particles.operations.lint import run_lint
 from particles.store.particle_store import (
     get_active_particles_for_entry,
@@ -198,8 +198,8 @@ async def reindex(
 ) -> dict[str, object]:
     """Reindex corpus entries.
 
-    The particle-selecting scopes — ``extractor_version``, ``extractor_id``,
-    ``provider_model`` — union with each other and **intersect** with
+    The particle-selecting scopes (``extractor_version``, ``extractor_id``,
+    ``provider_model``) union with each other and **intersect** with
     ``entry_ids`` when both are supplied. See ``_identify_scope``
     for why the combination narrows rather than erroring.
 
@@ -210,11 +210,11 @@ async def reindex(
             a shared upstream (e.g. a prompt change) affects multiple extractors that
             delegate to it but didn't bump their own version.
         include_failed: also reindex entries with FAILED snapshots. Applies to
-            auto-discovery only — named entries resolve to their latest
+            auto-discovery only; named entries resolve to their latest
             *COMPLETE* snapshot, so an explicit scope never contains a FAILED
             one to include or exclude.
         provider_model: re-extract particles stamped with this
-            ``"<provider>:<model>"`` pairing — the handle for
+            ``"<provider>:<model>"`` pairing, the handle for
             undoing an uncalibrated provider swap. Matched exactly; particles
             with no stamp (deterministic extractors, direct assertions, or
             anything minted before the stamp existed) never match.
@@ -224,7 +224,7 @@ async def reindex(
             wires this to ``typer.echo`` when ``--verbose`` is set so the
             operator can see that a long-running reindex isn't stuck.
         dry_run: compute and report the work plan, then return without
-            extracting — zero LLM calls, zero writes (mirrors the Notion
+            extracting: zero LLM calls, zero writes (mirrors the Notion
             exporter's dry-run discipline). The returned summary
             carries the full plan including per-snapshot counts.
         on_plan: optional callback for the upfront work-plan lines (the scope
@@ -232,8 +232,8 @@ async def reindex(
             extraction. Separate from ``progress`` because the plan is meant
             to print unconditionally while per-entry progress stays opt-in.
         on_status: optional callback fired after **each** snapshot completes
-            with a compact position line — ``snapshot 12/89 (entry
-            0a8fb1a9…) — 3 failed`` — so a long run's liveness display can
+            with a compact position line such as ``snapshot 12/89 (entry
+            0a8fb1a9…) — 3 failed``, so a long run's liveness display can
             show how far along it is, not just elapsed time. Distinct from
             ``progress`` (opt-in, one full line per item, appended): the
             status is a single replaceable line the CLI feeds to the
@@ -256,6 +256,7 @@ async def reindex(
         include_failed,
         provider_model,
         progress=progress,
+        dry_run=dry_run,
     )
     # The upfront work plan (2026-08-02 incident): report what the resolved
     # scope will cost — entries, snapshots, supersede-able particles, known
@@ -405,8 +406,8 @@ async def _explicit_entry_scope(
     """Scope for named entries, intersected with any particle-matching flags.
 
     Named entries resolve to their latest COMPLETE snapshot. When a
-    particle-matching flag is *also* supplied the two scopes are **intersected**
-    : before this, the explicit branch returned early and every other
+    particle-matching flag is *also* supplied the two scopes are **intersected**:
+    before this, the explicit branch returned early and every other
     flag was discarded silently, so an operator narrowing by both entry and
     model got the whole entry — wider than asked for, and reindex supersedes.
 
@@ -479,6 +480,7 @@ async def _identify_scope(
     include_failed: bool,
     provider_model: str | None = None,
     progress: Callable[[str], None] | None = None,
+    dry_run: bool = False,
 ) -> list[tuple[str, str]]:
     """Return list of (entry_id, snapshot_id) pairs to reindex."""
     if explicit_entry_ids:
@@ -493,12 +495,25 @@ async def _identify_scope(
 
     scope: list[tuple[str, str]] = []
 
-    # Auto-discover: PENDING and FAILED snapshots
+    # Auto-discover: PENDING and FAILED snapshots. Collapse first:
+    # a FAILED or PENDING generation of a MUTABLE entry that a newer snapshot
+    # has replaced is not worth a retry, and retrying it after the newer one
+    # is COMPLETE would retire the current generation.
     if include_failed:
+        # ``--dry-run`` promises zero writes, so it plans the collapse without
+        # marking and drops the same snapshots from the scope it reports.
+        collapse = await collapse_superseded_pending(session, dry_run=dry_run)
+        if progress is not None:
+            line = collapse.summary()
+            if line:
+                progress(line)
+        skipped = {snapshot_id for _, snapshot_id, _ in collapse.collapsed}
         scope.extend(
-            await list_entry_snapshot_pairs_with_extraction_status(
+            pair
+            for pair in await list_entry_snapshot_pairs_with_extraction_status(
                 session, [ExtractionStatus.FAILED, ExtractionStatus.PENDING]
             )
+            if pair[1] not in skipped
         )
 
     # Auto-discover: particles matching the extractor / provider-model flags
@@ -544,6 +559,11 @@ async def _reindex_snapshot(
         supersede_ids=frozenset(p.id for p in to_supersede),
         carry_forward_ids_out=carry_forward_ids,
         suppressed_ids_out=suppressed_ids,
+        # no reindex scope legitimately names a collapsed snapshot
+        # (named entries resolve to an uncollapsed generation; provenance
+        # scopes name snapshots that have particles), so this only ever skips
+        # one collapsed by another runner after the scope was built.
+        skip_if_superseded=True,
     )
 
     # Carry-forward particles stay ACTIVE under the new snapshot

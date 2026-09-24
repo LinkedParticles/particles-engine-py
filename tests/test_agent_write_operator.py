@@ -180,6 +180,7 @@ class TestOperatorSupersede:
             source_excerpt="the corrected statement",
             operator=True,
             actor="http:/particles/{id}/supersede",
+            reason="the source misread the figure",
         )
         assert result.verdict == "ASSERTED"
         old = await get_particle(db_session, target.id)
@@ -190,6 +191,37 @@ class TestOperatorSupersede:
         # the operator set (NOT carried over).
         assert new.asserted_by == "mcp:test-agent"
         assert new.confidence.calibration_source is CalibrationSource.AGENT_ASSERTED
+        # the why of the revision is on the audit event, as for a
+        # retraction.
+        from particles.store.event_store import OperatorEventType, list_events
+
+        events = await list_events(db_session, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
+        assert len(events) == 1
+        assert events[0].reason == "the source misread the figure"
+
+    @pytest.mark.asyncio
+    async def test_operator_supersede_requires_a_reason(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        """a supersession is a judgment; the operator path must say why."""
+        _enable_writes()
+        target = await _insert_extracted(db_session)
+        for empty in (None, "", "   "):
+            with pytest.raises(ValueError, match="non-empty reason"):
+                await supersede_belief(
+                    db_session,
+                    store=DEFAULT_STORE,
+                    supersedes_id=target.id,
+                    content="A corrected claim.",
+                    subject_names=["X"],
+                    confidence=0.6,
+                    source_excerpt="the corrected statement",
+                    operator=True,
+                    actor="http:/particles/{id}/supersede",
+                    reason=empty,
+                )
+        untouched = await get_particle(db_session, target.id)
+        assert untouched is not None and untouched.status is Status.ACTIVE
 
 
 class TestAssignSubject:

@@ -35,8 +35,10 @@ from particles.core.schema import (
     ParticleType,
 )
 from particles.corpus.store import (
+    list_collapsed_snapshot_ids,
     list_complete_response_snapshots,
     list_entry_status_pairs_with_extraction_status,
+    list_replaced_mutable_snapshot_ids,
 )
 from particles.extraction.property_keys import bare_properties_keys
 from particles.extraction.subject_scope import subject_expected
@@ -122,8 +124,8 @@ async def _check_structured_claim_subjects(session: AsyncSession) -> list[LintFi
     """Flag a structured claim whose subject is not one of the particle's (L-STR-11).
 
     The cheapest available signal that the structurizer hallucinated a subject:
-    the triple makes a statement about an entity the particle is not about
-    . Structural, no LLM.
+    the triple makes a statement about an entity the particle is not about.
+    Structural, no LLM.
 
     A ``None`` ``subject_id`` is deliberately **not** flagged — it records "the
     subject term resolved to no Subject", which is the honest state for a claim
@@ -170,8 +172,8 @@ async def _check_bare_properties_keys(session: AsyncSession) -> list[LintFinding
     the rule was only ever asked of *fresh extractor output*, inside a
     ``particles extractor conform`` run over a fixture — so nothing asked it of a
     store. That gap is why the bare ``polarity`` / ``scope`` keys survived from
-    their introduction to 1.109.0 unnoticed
-    , and it stays
+    their introduction to 1.109.0 unnoticed,
+    and it stays
     open for the three routes that reach a store without a conform run: an
     interchange import, a third-party extractor, and a store predating a
     convention change.
@@ -324,10 +326,22 @@ async def _report_empty_complete_snapshots(session: AsyncSession) -> list[LintFi
     genuinely claim-free source, so the finding recommends re-extraction to
     confirm rather than auto-resetting status. REVISIT snapshots (empty by
     design) are excluded upstream in ``list_complete_response_snapshots``.
+
+    Two more are skipped, because for them "re-extract to confirm"
+    is wrong advice. A **collapsed** snapshot is empty by design. And an empty
+    snapshot of a MUTABLE entry whose replacement generation *is* in the store
+    — a newer, uncollapsed, COMPLETE RESPONSE sibling — could only, if
+    re-extracted, retire that current generation. An empty snapshot whose
+    newer siblings are all FAILED or collapsed is still reported: it may be
+    the entry's best surviving generation.
     """
     findings: list[LintFinding] = []
     produced = await get_snapshot_ids_with_particles(session)
+    collapsed = await list_collapsed_snapshot_ids(session)
+    replaced = await list_replaced_mutable_snapshot_ids(session)
     for entry_id, snapshot_id in await list_complete_response_snapshots(session):
+        if snapshot_id in collapsed or snapshot_id in replaced:
+            continue
         if snapshot_id not in produced:
             findings.append(
                 LintFinding(

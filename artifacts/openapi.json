@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "AgentWriteResult": {
-        "description": "The \u00a76.6 verdict of a belief write \u2014 a first-class result, not an error.\n\n``asserted_particle_id`` is always the *agent's* belief id (the constructed\ncandidate), never the INCONSISTENCY meta-particle's id; on a conflict that\nbelief is the quarantined ``CONFLICT_PENDING`` particle and\n``inconsistency_id`` names the separate INCONSISTENCY record. It is ``None``\nonly on a lower-trust drop (unreachable on a consensus write store).",
+        "description": "The \u00a76.6 verdict of a belief write: a first-class result, not an error.\n\n``asserted_particle_id`` is always the *agent's* belief id (the constructed\ncandidate), never the INCONSISTENCY meta-particle's id; on a conflict that\nbelief is the quarantined ``CONFLICT_PENDING`` particle and\n``inconsistency_id`` names the separate INCONSISTENCY record. It is ``None``\nonly on a lower-trust drop (unreachable on a consensus write store).",
         "properties": {
           "asserted_particle_id": {
             "anyOf": [
@@ -36,6 +36,17 @@
               }
             ],
             "title": "Status"
+          },
+          "superseded_particle_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded Particle Id"
           },
           "verdict": {
             "title": "Verdict",
@@ -94,8 +105,17 @@
         "title": "AggregateBucket",
         "type": "object"
       },
+      "AnswerFailureCause": {
+        "description": "Why NL answer generation failed, for a caller that must tell them apart.\n\n``answer_generation_error`` carries the provider's message, which is the\nactionable part for a human but opaque to a program: a benchmark that\nmust exclude unscoreable calls, or a UI choosing what to advise, cannot\nread a free-text string. The split is the one the memory benchmark\nalready draws between its two exclusion classes (the\n``EmptyCompletionError`` carve, 1.137.1) \u2014 an operator's too-low budget\nmust never be laundered as infrastructure noise, or the other way round.\n\n* ``BUDGET`` \u2014 the model replied HTTP-200 with no text block, having\n  spent the whole ``max_tokens`` allowance before emitting an answer\n  (the extended-thinking failure mode). Deterministic at a fixed\n  budget, so ``query`` has already retried once at\n  ``config.query.answer_retry_max_tokens``; reaching the caller means\n  even that was not enough. The fix is the operator's cap.\n* ``PROVIDER`` \u2014 everything else: billing, network, timeout, a safety\n  refusal, a malformed reply. Not deterministic, and not the\n  operator's budget.",
+        "enum": [
+          "BUDGET",
+          "PROVIDER"
+        ],
+        "title": "AnswerFailureCause",
+        "type": "string"
+      },
       "AsOfNote": {
-        "description": "The supersession crossing for a query hit retired after the as-of instant.\n\nA **response model, not particle substrate** \u2014 computed at read time,\nnever stored. Annotates a hit that was believed at the reference instant T\nbut has since been retired: its current status + reason, the retirement\ninstant, the ladder rung that dated it (so the instant is itself\nauditable), and the replacing belief when one exists.",
+        "description": "The supersession crossing for a query hit retired after the as-of instant.\n\nA **response model, not particle substrate**: computed at read time,\nnever stored. Annotates a hit that was believed at the reference instant T\nbut has since been retired: its current status + reason, the retirement\ninstant, the ladder rung that dated it (so the instant is itself\nauditable), and the replacing belief when one exists.",
         "properties": {
           "basis": {
             "enum": [
@@ -170,7 +190,7 @@
         "type": "object"
       },
       "AssertionModality": {
-        "description": "What *kind* of assertion a particle makes \u2014 its truth-aptness.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The Core\nengine applies truth-semantics \u2014 the \u00a76.4 conflict ladder, L-SEM-01,\nL-IDX-01 \u2014 only to ``FALSIFIABLE`` particles (see :func:`is_truth_apt`);\nthe other modalities co-exist and are never contradiction-checked or\ntrust-arbitrated. Default ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
+        "description": "What *kind* of assertion a particle makes: its truth-aptness.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The Core\nengine applies truth-semantics (the \u00a76.4 conflict ladder, L-SEM-01,\nL-IDX-01) only to ``FALSIFIABLE`` particles (see :func:`is_truth_apt`);\nthe other modalities co-exist and are never contradiction-checked or\ntrust-arbitrated. Default ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
         "enum": [
           "FALSIFIABLE",
           "EVALUATIVE",
@@ -314,7 +334,7 @@
         "type": "object"
       },
       "CanonicalForm": {
-        "description": "Which of the prose/structured pair is the assertion.\n\n``PROSE`` is the default and covers everything the LLM prose extractors\nproduce: ``content`` is the assertion and any :class:`StructuredClaim` is\na derived annotation. ``STRUCTURED`` is the inverse \u2014 the source asserts\nthe triple and ``content`` is verbalised from it \u2014 and is emitted\nper-candidate by the structure-canonical extractors (RDF, the Numista\nfamily) under the rule: ``STRUCTURED`` exactly when\n``content`` is a deterministic rendering of its ``structured_claim`` and\nof no other fact. One extractor may emit both forms.",
+        "description": "Which of the prose/structured pair is the assertion.\n\n``PROSE`` is the default and covers everything the LLM prose extractors\nproduce: ``content`` is the assertion and any :class:`StructuredClaim` is\na derived annotation. ``STRUCTURED`` is the inverse (the source asserts\nthe triple and ``content`` is verbalised from it) and is emitted\nper-candidate by the structure-canonical extractors (RDF, the Numista\nfamily) under the rule: ``STRUCTURED`` exactly when\n``content`` is a deterministic rendering of its ``structured_claim`` and\nof no other fact. One extractor may emit both forms.",
         "enum": [
           "PROSE",
           "STRUCTURED"
@@ -342,7 +362,7 @@
         "type": "string"
       },
       "ClaimCoverage": {
-        "description": "Coverage data for a structural-filter result.\n\nRendered as the footer line \"matched against the N of M ACTIVE particles\ncarrying a structured claim (store coverage P%)\" \u2014 absence of a hit must\nnever be mistaken for absence of a belief. ``not_normalizable_excluded``\nis the disclosure: claims excluded from a gt/lt comparison\nbecause their object would not normalize to a comparable type.",
+        "description": "Coverage data for a structural-filter result.\n\nRendered as the footer line \"matched against the N of M ACTIVE particles\ncarrying a structured claim (store coverage P%)\"; absence of a hit must\nnever be mistaken for absence of a belief. ``not_normalizable_excluded``\nis the disclosure: claims excluded from a gt/lt comparison\nbecause their object would not normalize to a comparable type.",
         "properties": {
           "active_total": {
             "title": "Active Total",
@@ -511,7 +531,7 @@
         "type": "object"
       },
       "ContestedBadge": {
-        "description": "The composed per-claim contested badge (\u00a76.9).\n\nA claim renders *contested* iff at least one of three named bases fires;\nthe badge is a basis-carrying disjunction \u2014 a set of fired basis labels,\nnever a blended scalar \u2014 so every badge names which instrument(s) produced\nit. The three gates: ``stance`` \u2014 \u22651\n``DISPUTES`` position in the\nclaim's query-time stance distribution; ``divergence`` \u2014 the\nclaim's :class:`ContestednessReading` spread is at least\n``contestedness.callout_threshold``; ``inconsistency`` \u2014 an open\nINCONSISTENCY particle references the claim (subsumed as a\nbasis). A claim with no available basis fired carries **no** badge (None in\nthe parallel list), never an explicit \"uncontested\".\n\nInvariants: computed at read time, never stored; MUST NOT feed\n``effective_confidence``, ranking, ``min_confidence`` filtering, or the \u00a76.4\nconflict ladder \u2014 disclosure, not discount. The divergence reading and\nstance distribution are not duplicated here; they remain the existing\nenvelope blocks (the drill-downs).",
+        "description": "The composed per-claim contested badge (\u00a76.9).\n\nA claim renders *contested* iff at least one of three named bases fires;\nthe badge is a basis-carrying disjunction (a set of fired basis labels,\nnever a blended scalar), so every badge names which instrument(s) produced\nit. The three gates: ``stance``, at least one\n``DISPUTES`` position in the\nclaim's query-time stance distribution; ``divergence``, the\nclaim's :class:`ContestednessReading` spread is at least\n``contestedness.callout_threshold``; ``inconsistency``, an open\nINCONSISTENCY particle references the claim (subsumed as a\nbasis). A claim with no available basis fired carries **no** badge (None in\nthe parallel list), never an explicit \"uncontested\".\n\nInvariants: computed at read time, never stored; MUST NOT feed\n``effective_confidence``, ranking, ``min_confidence`` filtering, or the \u00a76.4\nconflict ladder: disclosure, not discount. The divergence reading and\nstance distribution are not duplicated here; they remain the existing\nenvelope blocks (the drill-downs).",
         "properties": {
           "bases": {
             "items": {
@@ -556,7 +576,7 @@
         "type": "object"
       },
       "ContestedBadgesRequest": {
-        "description": "The ids to compose badges for \u2014 POST because the list can be long.",
+        "description": "The ids to compose badges for; POST because the list can be long.",
         "properties": {
           "particle_ids": {
             "items": {
@@ -570,7 +590,7 @@
         "type": "object"
       },
       "ContestednessReading": {
-        "description": "A claim's lens-divergence of effective confidence.\n\n``spread`` is max \u2212 min of ``effective_confidence`` evaluated separately\nunder each policy in the viewer's policy set (the local policy plus each\nadopted lens). It is **disclosure, not discount**: it MUST NOT\nfeed ``effective_confidence``, ranking, ``min_confidence`` filtering, or the\n\u00a76.4 conflict ladder. Computed at read time, never stored. Present only\nwhen the viewer has two or more policies \u2014 a one-policy store\nmints no contestedness, since absence of measurement is not measured\ninvariance.",
+        "description": "A claim's lens-divergence of effective confidence.\n\n``spread`` is max \u2212 min of ``effective_confidence`` evaluated separately\nunder each policy in the viewer's policy set (the local policy plus each\nadopted lens). It is **disclosure, not discount**: it MUST NOT\nfeed ``effective_confidence``, ranking, ``min_confidence`` filtering, or the\n\u00a76.4 conflict ladder. Computed at read time, never stored. Present only\nwhen the viewer has two or more policies; a one-policy store\nmints no contestedness, since absence of measurement is not measured\ninvariance.",
         "properties": {
           "renderings": {
             "items": {
@@ -592,7 +612,7 @@
         "type": "object"
       },
       "ContributorRef": {
-        "description": "One contributor's attributed act on a particle / entry / subject.\n\nExtension D/E: stored and round-tripped, but **Core modules MUST\nNOT branch on it**. ``id`` shares the AUTHOR-scoped ``SourceRef`` namespace\n(``platform:identifier``, \u00a76.5; e.g. ``github:torvalds``) so a per-viewer\n``SourceTrustStatement`` lookup joins on it with no extra\nidentity machinery. It is immutable attribution substrate \u2014 it carries no\nconfidence / trust / endorsement (those are query-time lenses).\n\nAttributes:\n    id: ``platform:identifier`` identity string, canonically normalized (\u00a76.5).\n    role: Open vocabulary. :data:`CONTRIBUTOR_ROLES` is the canonical\n        registry of recommended values \u2014 a new role is added\n        there before any code emits it.\n    at: UTC timestamp of when this contributor performed the act.",
+        "description": "One contributor's attributed act on a particle / entry / subject.\n\nExtension D/E: stored and round-tripped, but **Core modules MUST\nNOT branch on it**. ``id`` shares the AUTHOR-scoped ``SourceRef`` namespace\n(``platform:identifier``, \u00a76.5; e.g. ``github:torvalds``) so a per-viewer\n``SourceTrustStatement`` lookup joins on it with no extra\nidentity machinery. It is immutable attribution substrate; it carries no\nconfidence / trust / endorsement (those are query-time lenses).\n\nAttributes:\n    id: ``platform:identifier`` identity string, canonically normalized (\u00a76.5).\n    role: Open vocabulary. :data:`CONTRIBUTOR_ROLES` is the canonical\n        registry of recommended values; a new role is added\n        there before any code emits it.\n    at: UTC timestamp of when this contributor performed the act.",
         "properties": {
           "at": {
             "format": "date-time",
@@ -789,7 +809,7 @@
         "type": "object"
       },
       "CorpusRetractResponse": {
-        "description": "Outcome of a corpus retraction. ``retracted_ids`` are the particles\nactually retracted, or \u2014 when ``dry_run`` is true \u2014 the ones that *would*\nbe. ``skipped`` maps each non-live status to how many particles were left\nuntouched. The corpus entry and its snapshots are always preserved.",
+        "description": "Outcome of a corpus retraction. ``retracted_ids`` are the particles\nactually retracted, or, when ``dry_run`` is true, the ones that *would*\nbe. ``skipped`` maps each non-live status to how many particles were left\nuntouched. The corpus entry and its snapshots are always preserved.",
         "properties": {
           "dry_run": {
             "title": "Dry Run",
@@ -874,7 +894,7 @@
         "type": "object"
       },
       "CurationAffirmRequest": {
-        "description": "Affirm a belief still holds: records ``BELIEF_AFFIRMED``,\nsuppressing the belief's card. Does NOT touch confidence \u2014 first-class\ncorroboration is vouch.",
+        "description": "Affirm a belief still holds: records ``BELIEF_AFFIRMED``,\nsuppressing the belief's card. Does NOT touch confidence; first-class\ncorroboration is vouch.",
         "properties": {
           "card_key": {
             "anyOf": [
@@ -953,7 +973,7 @@
             "title": "Inconsistency Id"
           },
           "key": {
-            "description": "Stable identity for snooze / affirm filtering.\n\nFinder-output-derived, so the same underlying problem yields the same\nkey across sessions. Serialized into the queue response (a\n``@computed_field``) so a client (PWA / Obsidian) can echo the exact\n``card_key`` back to ``POST /curation/affirm`` / ``snooze`` \u2014\nthe snooze/affirm filter matches on it.",
+            "description": "Stable identity for snooze / affirm filtering.\n\nFinder-output-derived, so the same underlying problem yields the same\nkey across sessions. Serialized into the queue response (a\n``@computed_field``) so a client (PWA / Obsidian) can echo the exact\n``card_key`` back to ``POST /curation/affirm`` / ``snooze``;\nthe snooze/affirm filter matches on it.",
             "readOnly": true,
             "title": "Key",
             "type": "string"
@@ -1592,7 +1612,7 @@
         "type": "object"
       },
       "DuplicateVerdict": {
-        "description": "The LLM judge's read on a duplicate-pair card.\n\nCarried on a ``DUPLICATE_PAIR`` card when the queue ran the duplicate finder\nin ``LLM_JUDGE`` mode (``semantic=True``): the per-pair same-claim\n``verdict`` (``PARAPHRASE`` = same claim, safe to merge; ``DISTINCT`` = not a\nduplicate; ``UNSURE`` = ambiguous) plus its short ``rationale`` when the\ncandidate exposes one. **Advisory** \u2014 it informs the operator's Merge /\nDismiss gesture; it never mutates the store. ``None`` on\nevery non-duplicate card and on duplicate cards built in ``REPORT`` mode\n(``semantic=False`` or the LLM unavailable).",
+        "description": "The LLM judge's read on a duplicate-pair card.\n\nCarried on a ``DUPLICATE_PAIR`` card when the queue ran the duplicate finder\nin ``LLM_JUDGE`` mode (``semantic=True``): the per-pair same-claim\n``verdict`` (``PARAPHRASE`` = same claim, safe to merge; ``DISTINCT`` = not a\nduplicate; ``UNSURE`` = ambiguous) plus its short ``rationale`` when the\ncandidate exposes one. **Advisory**: it informs the operator's Merge /\nDismiss gesture; it never mutates the store. ``None`` on\nevery non-duplicate card and on duplicate cards built in ``REPORT`` mode\n(``semantic=False`` or the LLM unavailable).",
         "properties": {
           "rationale": {
             "anyOf": [
@@ -1630,7 +1650,7 @@
         "type": "object"
       },
       "EventRefKind": {
-        "description": "The kind of record an event ref points at.\n\nThe queryable record types \u2014 extensible alongside :class:`OperatorEventType`.\nAn event with no ref of these kinds (rare) carries its targets in\n``payload`` only.",
+        "description": "The kind of record an event ref points at.\n\nThe queryable record types, extensible alongside :class:`OperatorEventType`.\nAn event with no ref of these kinds (rare) carries its targets in\n``payload`` only.",
         "enum": [
           "particle",
           "subject",
@@ -1710,7 +1730,7 @@
         "type": "string"
       },
       "ExtractorRef": {
-        "description": "Reference to the extractor that produced a particle (\u00a76.2, \u00a714.3).\n\nCore, and the join key into the extractor registry: ``name`` is what trust\nweighting and exporter attribution look up, ``version`` is what\n``reindex --extractor-version`` and the chunk-hash carry-forward scope\non. Absent only for particles asserted directly by an operator or an\nauthorized agent (\u00a79.1a) \u2014 ``Particle.extractor_ref`` is\n``None`` there, never an empty ref.\n\nModelled. It was an untyped ``dict[str, Any]`` through 1.109.x\nwith the two key names stated only in prose, so nothing checked them at\nany of the three validation layers.\n\nThe **runtime substrate** the extractor invoked is *not* recorded here \u2014\nthat is the sibling ``Particle.extraction_provider_model``.\nThis names the code; one extractor version runs under many models.\n\nAttributes:\n    name: Registered extractor id, e.g. ``general-extractor``.\n    version: That extractor's semver version at extraction time; a\n        superseded version is the re-extraction scope (\u00a79.5, \u00a714.3).",
+        "description": "Reference to the extractor that produced a particle (\u00a76.2, \u00a714.3).\n\nCore, and the join key into the extractor registry: ``name`` is what trust\nweighting and exporter attribution look up, ``version`` is what\n``reindex --extractor-version`` and the chunk-hash carry-forward scope\non. Absent only for particles asserted directly by an operator or an\nauthorized agent (\u00a79.1a); ``Particle.extractor_ref`` is\n``None`` there, never an empty ref.\n\nModelled. It was an untyped ``dict[str, Any]`` through 1.109.x\nwith the two key names stated only in prose, so nothing checked them at\nany of the three validation layers.\n\nThe **runtime substrate** the extractor invoked is *not* recorded here;\nthat is the sibling ``Particle.extraction_provider_model``.\nThis names the code; one extractor version runs under many models.\n\nAttributes:\n    name: Registered extractor id, e.g. ``general-extractor``.\n    version: That extractor's semver version at extraction time; a\n        superseded version is the re-extraction scope (\u00a79.5, \u00a714.3).",
         "properties": {
           "name": {
             "minLength": 1,
@@ -1739,7 +1759,7 @@
         "type": "string"
       },
       "GraphCensus": {
-        "description": "Machine-readable render census (disclosure discipline).\n\nCandidate counts are what an uncapped render would have shown; rendered\ncounts are what this render shows. When they differ the human-readable\ndisclosure line names the binding knob \u2014 a capped render is a disclosed\nlower bound, never a silent truncation.",
+        "description": "Machine-readable render census (disclosure discipline).\n\nCandidate counts are what an uncapped render would have shown; rendered\ncounts are what this render shows. When they differ the human-readable\ndisclosure line names the binding knob; a capped render is a disclosed\nlower bound, never a silent truncation.",
         "properties": {
           "candidate_particles": {
             "title": "Candidate Particles",
@@ -1783,7 +1803,7 @@
         "type": "object"
       },
       "GraphData": {
-        "description": "One scoped subgraph render \u2014 the contract shared by the static HTML\nexporter (embedded JSON) and the future ``GET /graph`` endpoint.\n\nNever a whole store: ``scope_type`` + ``scope_ref`` are mandatory, and the\ncensus + ``disclosures`` carry the anti-hairball cap accounting.",
+        "description": "One scoped subgraph render: the contract shared by the static HTML\nexporter (embedded JSON) and the future ``GET /graph`` endpoint.\n\nNever a whole store: ``scope_type`` + ``scope_ref`` are mandatory, and the\ncensus + ``disclosures`` carry the anti-hairball cap accounting.",
         "properties": {
           "as_of": {
             "anyOf": [
@@ -1866,7 +1886,7 @@
         "type": "object"
       },
       "GraphEdge": {
-        "description": "One rendered subject-pair segment of a multi-subject particle.\n\nA particle spanning 3+ in-scope subjects renders as a pairwise clique \u2014\none segment per pair, all sharing ``particle_id`` (clicking any segment\nopens the same particle; the panel discloses the full subject list).",
+        "description": "One rendered subject-pair segment of a multi-subject particle.\n\nA particle spanning 3+ in-scope subjects renders as a pairwise clique:\none segment per pair, all sharing ``particle_id`` (clicking any segment\nopens the same particle; the panel discloses the full subject list).",
         "properties": {
           "particle_id": {
             "title": "Particle Id",
@@ -1952,7 +1972,7 @@
         "type": "object"
       },
       "GraphParticleInfo": {
-        "description": "One particle's epistemics payload in a graph render.\n\nA **view model, not particle substrate** \u2014 every derived quantity here\n(``effective_confidence``, the contested badge, the as-of note, the\nutility score) is computed at render time and never stored.\nRendered as an edge when the particle spans \u22652 in-scope subjects,\nas a node-panel cargo row when it has one.",
+        "description": "One particle's epistemics payload in a graph render.\n\nA **view model, not particle substrate**: every derived quantity here\n(``effective_confidence``, the contested badge, the as-of note, the\nutility score) is computed at render time and never stored.\nRendered as an edge when the particle spans \u22652 in-scope subjects,\nas a node-panel cargo row when it has one.",
         "properties": {
           "as_of_note": {
             "anyOf": [
@@ -2110,7 +2130,7 @@
         "type": "object"
       },
       "HealthResponse": {
-        "description": "Liveness probe response \u2014 returned only when the server is healthy.",
+        "description": "Liveness probe response, returned only when the server is healthy.",
         "properties": {
           "built_at": {
             "anyOf": [
@@ -2402,7 +2422,7 @@
         "type": "object"
       },
       "MemoryUsefulRequest": {
-        "description": "Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits\nthe belief on the explicit utility channel. Does NOT touch confidence and does\nNOT claim the belief is true \u2014 it lifts the belief in the projection / digest\nranking only. For \"still true\", use ``/curation/affirm``.",
+        "description": "Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits\nthe belief on the explicit utility channel. Does NOT touch confidence and does\nNOT claim the belief is true; it lifts the belief in the projection / digest\nranking only. For \"still true\", use ``/curation/affirm``.",
         "properties": {
           "particle_id": {
             "title": "Particle Id",
@@ -2427,7 +2447,7 @@
         "type": "object"
       },
       "MemoryUsefulResponse": {
-        "description": "Outcome of an explicit usefulness gesture.\n\n``counted`` is False when this principal already credited this belief today \u2014\nthe rate bound. The event is recorded either way.",
+        "description": "Outcome of an explicit usefulness gesture.\n\n``counted`` is False when this principal already credited this belief today,\nthe rate bound. The event is recorded either way.",
         "properties": {
           "counted": {
             "title": "Counted",
@@ -2513,6 +2533,45 @@
           "constituents"
         ],
         "title": "NarrativeResponse",
+        "type": "object"
+      },
+      "ObserverScopeNote": {
+        "description": "What reading through a project observer did to one result.\n\nDisclosure only \u2014 it never feeds ranking or confidence. ``engaged`` is\n``False`` when an observer was asked for but the store has not been\nrescoped yet, in which case the read stayed store-wide and says so rather\nthan returning a silently emptied result.",
+        "properties": {
+          "engaged": {
+            "title": "Engaged",
+            "type": "boolean"
+          },
+          "in_scope": {
+            "title": "In Scope",
+            "type": "integer"
+          },
+          "lapsed": {
+            "default": 0,
+            "title": "Lapsed",
+            "type": "integer"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "unattributed": {
+            "default": 0,
+            "title": "Unattributed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "engaged",
+          "total",
+          "in_scope"
+        ],
+        "title": "ObserverScopeNote",
         "type": "object"
       },
       "OperatorEvent": {
@@ -2622,7 +2681,11 @@
           "ABSTRACTION_RESOLVED",
           "DUPLICATES_MERGED",
           "DUPLICATES_UNMERGED",
-          "BELIEF_MARKED_USEFUL"
+          "BELIEF_MARKED_USEFUL",
+          "OBSERVER_SCOPE_RESCOPED",
+          "OBSERVER_SCOPE_KEY_ASSIGNED",
+          "OBSERVER_SCOPE_WIDENED",
+          "OBSERVER_SCOPE_WIDEN_REVOKED"
         ],
         "title": "OperatorEventType",
         "type": "string"
@@ -2662,6 +2725,10 @@
               }
             ],
             "title": "Corpus Entry Id"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
           },
           "source_excerpt": {
             "anyOf": [
@@ -2704,13 +2771,14 @@
         "required": [
           "content",
           "subject_names",
-          "confidence"
+          "confidence",
+          "reason"
         ],
         "title": "OperatorSupersedeRequest",
         "type": "object"
       },
       "Particle": {
-        "description": "The minimal unit of knowledge in the Particles standard (\u00a76.1\u20136.2).\n\nA particle is a single claim with full provenance. `content` is the\nhuman-readable assertion. `confidence` and `uncertainty_nature` quantify\nepistemic state. `subject_ids` links the claim to canonical entities.\n`properties` carries structured ontology-keyed data for structured\nextractors (e.g. Numista); it is never used for conflict detection.\n\nAttributes:\n    content: The claim text (min length 1) \u2014 one falsifiable assertion\n        (\u00a76.1).\n    confidence: Stored, immutable confidence record (\u00a76.3); never modified\n        after creation.\n    uncertainty_nature: EPISTEMIC (reducible) or ALEATORY (irreducible).\n    provenance: Corpus entry / snapshot references.\n    asserted_by: Agent or extractor ID that created this particle.\n    status: Lifecycle status (ACTIVE, SUPERSEDED, RETRACTED, \u2026). Only the\n        transitions in the normative \u00a76.6 table are legal; go through\n        :func:`particles.core.status.validate_transition`, never a direct\n        assignment.\n    subject_ids: UUIDs of subjects this particle is a statement about.\n    properties: Nomisma ontology-keyed structured data.",
+        "description": "The minimal unit of knowledge in the Particles standard (\u00a76.1\u20136.2).\n\nA particle is a single claim with full provenance. `content` is the\nhuman-readable assertion. `confidence` and `uncertainty_nature` quantify\nepistemic state. `subject_ids` links the claim to canonical entities.\n`properties` carries structured ontology-keyed data for structured\nextractors (e.g. Numista); it is never used for conflict detection.\n\nAttributes:\n    content: The claim text (min length 1): one falsifiable assertion\n        (\u00a76.1).\n    confidence: Stored, immutable confidence record (\u00a76.3); never modified\n        after creation.\n    uncertainty_nature: EPISTEMIC (reducible) or ALEATORY (irreducible).\n    provenance: Corpus entry / snapshot references.\n    asserted_by: Agent or extractor ID that created this particle.\n    status: Lifecycle status (ACTIVE, SUPERSEDED, RETRACTED, \u2026). Only the\n        transitions in the normative \u00a76.6 table are legal; go through\n        :func:`particles.core.status.validate_transition`, never a direct\n        assignment.\n    subject_ids: UUIDs of subjects this particle is a statement about.\n    properties: Nomisma ontology-keyed structured data.",
         "properties": {
           "asserted_at": {
             "format": "date-time",
@@ -2945,7 +3013,7 @@
         "type": "object"
       },
       "ParticleAssertRequest": {
-        "description": "Assert one belief (flagship). Trust-/status-/identity-bearing\nfields are constructed server-side (\u00a74a) \u2014 only the claim, its subjects,\nself-reported confidence, and provenance are caller-supplied.",
+        "description": "Assert one belief (flagship). Trust-/status-/identity-bearing\nfields are constructed server-side (\u00a74a); only the claim, its subjects,\nself-reported confidence, and provenance are caller-supplied.",
         "properties": {
           "confidence": {
             "title": "Confidence",
@@ -2965,6 +3033,17 @@
               }
             ],
             "title": "Corpus Entry Id"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
           },
           "source_excerpt": {
             "anyOf": [
@@ -3013,7 +3092,7 @@
         "type": "object"
       },
       "ParticleBrief": {
-        "description": "A compact summary of one particle a card references.\n\nJust enough context to judge the card's gesture \u2014 the claim ``content``, the\n``subject_labels`` it attaches to, its query-time ``effective_confidence``\n, and its ``status`` \u2014 so a client (the bus-stop PWA) can\ndecide *which* of a duplicate pair to keep without a second\n``particles particle show <id>`` round-trip. Populated server-side when the queue is\nbuilt; never stored. Deliberately **not** the full ``Particle`` (the\nprovenance/expand view is deferred).",
+        "description": "A compact summary of one particle a card references.\n\nJust enough context to judge the card's gesture (the claim ``content``, the\n``subject_labels`` it attaches to, its query-time ``effective_confidence``,\nand its ``status``) so a client (the bus-stop PWA) can\ndecide *which* of a duplicate pair to keep without a second\n``particles particle show <id>`` round-trip. Populated server-side when the queue is\nbuilt; never stored. Deliberately **not** the full ``Particle`` (the\nprovenance/expand view is deferred).",
         "properties": {
           "content": {
             "title": "Content",
@@ -3126,7 +3205,7 @@
         "type": "object"
       },
       "ParticleSubjectAssignRequest": {
-        "description": "Assign a subject to an orphan particle. Resolution accepts an\nexplicit ``subject_id`` (link a Subject the operator picked) OR a\n``subject_name`` run through the standard resolver (local \u2192 Wikidata \u2192\nbare-local) \u2014 provide exactly one.",
+        "description": "Assign a subject to an orphan particle. Resolution accepts an\nexplicit ``subject_id`` (link a Subject the operator picked) OR a\n``subject_name`` run through the standard resolver (local \u2192 Wikidata \u2192\nbare-local). Provide exactly one.",
         "properties": {
           "subject_id": {
             "anyOf": [
@@ -3155,7 +3234,7 @@
         "type": "object"
       },
       "ParticleSupersedeRequest": {
-        "description": "Revise a belief: ``supersedes_id`` is retired to SUPERSEDED, then a\nsuccessor is asserted.",
+        "description": "Revise a belief: ``supersedes_id`` is retired to SUPERSEDED, then a\nsuccessor is asserted. ``reason`` is optional on this\nagent-attributed path and, when given, is recorded on the audit event.",
         "properties": {
           "confidence": {
             "title": "Confidence",
@@ -3175,6 +3254,28 @@
               }
             ],
             "title": "Corpus Entry Id"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "source_excerpt": {
             "anyOf": [
@@ -3277,8 +3378,19 @@
         "title": "ParticleType",
         "type": "string"
       },
+      "PassageMatch": {
+        "description": "How the returned passage relates to what the extractor saw.",
+        "enum": [
+          "EXACT",
+          "LOCATED",
+          "WHOLE",
+          "UNAVAILABLE"
+        ],
+        "title": "PassageMatch",
+        "type": "string"
+      },
       "PolicyRendering": {
-        "description": "One nameable policy's rendering of a claim's effective confidence.\n\n``policy`` is the attributable member name \u2014 ``\"local\"`` for the store's own\npolicy or an adopted lens's name \u2014 and ``effective_confidence`` is the value\nthat policy renders for the claim (the \u00a76.9 noisy-OR merge over the claim's\nco-evidential group, evaluated under this member alone). The extremes are\n*nameable policies* by design \u2014 the range statistic exists so the max and min\ncan be attributed (\"local: 0.43; acme-numismatics: 0.81\").",
+        "description": "One nameable policy's rendering of a claim's effective confidence.\n\n``policy`` is the attributable member name (``\"local\"`` for the store's own\npolicy or an adopted lens's name) and ``effective_confidence`` is the value\nthat policy renders for the claim (the \u00a76.9 noisy-OR merge over the claim's\nco-evidential group, evaluated under this member alone). The extremes are\n*nameable policies* by design; the range statistic exists so the max and min\ncan be attributed (\"local: 0.43; acme-numismatics: 0.81\").",
         "properties": {
           "effective_confidence": {
             "title": "Effective Confidence",
@@ -3604,6 +3716,18 @@
             ],
             "title": "Object Lt"
           },
+          "observer_project": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observer Project"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -3717,6 +3841,16 @@
             ],
             "title": "Answer Generation Error"
           },
+          "answer_generation_error_cause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnswerFailureCause"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "answer_refused": {
             "default": false,
             "title": "Answer Refused",
@@ -3823,6 +3957,16 @@
             "title": "Narrative Constituents",
             "type": "object"
           },
+          "observer_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObserverScopeNote"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "particles": {
             "items": {
               "$ref": "#/components/schemas/Particle"
@@ -3908,7 +4052,7 @@
         "type": "object"
       },
       "ReconcileResponse": {
-        "description": "Summary of a document-supersession reconcile sweep.\n\n``scope_pairs`` is the number of corpus-entry pairs in a (transitive)\ndocument-supersession relation; ``candidate_pairs`` the particle pairs that\ncleared the similarity floor; ``probed`` the replacement-signal probes run;\n``demoted`` the count transitioned ACTIVE \u2192 PROVENANCE_STALE /\nDOCUMENT_SUPERSEDED. ``demotions`` is the per-demotion audit list (winner /\nloser / entries / similarity). ``enabled`` / ``single_trust_order`` echo the\nv1 gates \u2014 a ``False`` on either means the sweep was a no-op.",
+        "description": "Summary of a document-supersession reconcile sweep.\n\n``scope_pairs`` is the number of corpus-entry pairs in a (transitive)\ndocument-supersession relation; ``candidate_pairs`` the particle pairs that\ncleared the similarity floor; ``probed`` the replacement-signal probes run;\n``demoted`` the count transitioned ACTIVE \u2192 PROVENANCE_STALE /\nDOCUMENT_SUPERSEDED. ``demotions`` is the per-demotion audit list (winner /\nloser / entries / similarity). ``enabled`` / ``single_trust_order`` echo the\nv1 gates; a ``False`` on either means the sweep was a no-op.",
         "properties": {
           "candidate_pairs": {
             "title": "Candidate Pairs",
@@ -4003,7 +4147,7 @@
         "type": "object"
       },
       "ReindexRequest": {
-        "description": "Reindex options. ``entry_ids=None`` reindexes every stale /\nfailed snapshot; ``extractor_version`` (when set) restricts to\nparticles emitted by that extractor version (used after an\nextractor upgrade). The particle-selecting fields \u2014\n``extractor_version`` / ``extractor_id`` / ``provider_model`` \u2014 union\nwith each other and intersect with ``entry_ids`` when both are sent\n, so naming entries can only narrow the scope.",
+        "description": "Reindex options. ``entry_ids=None`` reindexes every stale /\nfailed snapshot; ``extractor_version`` (when set) restricts to\nparticles emitted by that extractor version (used after an\nextractor upgrade). The particle-selecting fields\n(``extractor_version`` / ``extractor_id`` / ``provider_model``) union\nwith each other and intersect with ``entry_ids`` when both are sent,\nso naming entries can only narrow the scope.",
         "properties": {
           "dry_run": {
             "default": false,
@@ -4072,7 +4216,7 @@
         "type": "object"
       },
       "ReindexResponse": {
-        "description": "Summary of a reindex run.\n\n``scope`` is the total number of corpus entries visited;\n``succeeded`` / ``failed`` partition that scope; ``failed_entries``\nlists the entry IDs that failed (for operator-pull retry).\n``lint_summary`` is the structural lint count-by-status the\npost-reindex lint pass produced (empty dict when lint was skipped\nbecause ``scope`` was 0). ``plan`` is the upfront work plan computed\nbefore extraction, per-snapshot detail included (dry and live runs\nalike \u2014 the missing-blob list must survive into the envelope because\nthe CLI's human rendering caps it).",
+        "description": "Summary of a reindex run.\n\n``scope`` is the total number of corpus entries visited;\n``succeeded`` / ``failed`` partition that scope; ``failed_entries``\nlists the entry IDs that failed (for operator-pull retry).\n``lint_summary`` is the structural lint count-by-status the\npost-reindex lint pass produced (empty dict when lint was skipped\nbecause ``scope`` was 0). ``plan`` is the upfront work plan computed\nbefore extraction, per-snapshot detail included (dry and live runs\nalike: the missing-blob list must survive into the envelope because\nthe CLI's human rendering caps it).",
         "properties": {
           "dry_run": {
             "default": false,
@@ -4134,13 +4278,14 @@
           "AUTO_CLUSTER_V1",
           "MANUAL_CLI",
           "LLM_JUDGE",
-          "EXACT_DUPLICATE"
+          "EXACT_DUPLICATE",
+          "OBSERVER_DIVERGENCE"
         ],
         "title": "RelationCreatedBy",
         "type": "string"
       },
       "RelationType": {
-        "description": "Typed edge between two particles (\u00a76.10).\n\nThe registry of well-known values is documented. Today\n``CO_EVIDENTIAL`` plus the two narrative kinds (``PART_OF`` /\n``SEQUENCE_IN``) are emitted by code paths \u2014 the other\nmembers are RESERVED names, pre-blessed for future extractor work\nso the kind enum can grow additively without ad-hoc string drift.",
+        "description": "Typed edge between two particles (\u00a76.10).\n\nThe registry of well-known values is documented. Today\n``CO_EVIDENTIAL`` plus the two narrative kinds (``PART_OF`` /\n``SEQUENCE_IN``) are emitted by code paths; the other\nmembers are RESERVED names, pre-blessed for future extractor work\nso the kind enum can grow additively without ad-hoc string drift.",
         "enum": [
           "CO_EVIDENTIAL",
           "PART_OF",
@@ -4157,7 +4302,7 @@
         "type": "string"
       },
       "RelevanceNote": {
-        "description": "The question-level relevance disclosure for a semantic query.\n\nA **response model, not particle substrate** \u2014 computed at read time from\nthe rendered top-k, never stored, and never an input to ranking or\n``effective_confidence`` (the two-quantity discipline).\n``max_similarity`` is the maximum raw cosine similarity over the rendered\nhits on the normalized scale; when it falls below ``floor``\n(``config.query.relevance_floor``) the answer is a deterministic\nno-LLM refusal and the hits are presented as nearest-but-likely-unrelated.\nAbsent (``None`` on the response) for structural modes, when no embedding\nmodel is available, and when the result is empty.",
+        "description": "The question-level relevance disclosure for a semantic query.\n\nA **response model, not particle substrate**: computed at read time from\nthe rendered top-k, never stored, and never an input to ranking or\n``effective_confidence`` (the two-quantity discipline).\n``max_similarity`` is the maximum raw cosine similarity over the rendered\nhits on the normalized scale; when it falls below ``floor``\n(``config.query.relevance_floor``) the answer is a deterministic\nno-LLM refusal and the hits are presented as nearest-but-likely-unrelated.\nAbsent (``None`` on the response) for structural modes, when no embedding\nmodel is available, and when the result is empty.",
         "properties": {
           "below_floor": {
             "title": "Below Floor",
@@ -4422,8 +4567,107 @@
         "title": "SnapshotPlan",
         "type": "object"
       },
+      "SourcePassage": {
+        "description": "The source text behind one particle, with how it was found.\n\n``text`` is empty only when ``match`` is ``UNAVAILABLE``; ``note`` then\nsays why. ``locate_overlap`` is the share of the particle's distinct terms\nfound in a ``LOCATED`` passage \u2014 a reading aid, never a confidence.",
+        "properties": {
+          "corpus_entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corpus Entry Id"
+          },
+          "locate_overlap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locate Overlap"
+          },
+          "match": {
+            "$ref": "#/components/schemas/PassageMatch"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "particle_id": {
+            "title": "Particle Id",
+            "type": "string"
+          },
+          "snapshot_chars": {
+            "default": 0,
+            "title": "Snapshot Chars",
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Type"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "uri_r": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri R"
+          }
+        },
+        "required": [
+          "particle_id",
+          "match"
+        ],
+        "title": "SourcePassage",
+        "type": "object"
+      },
       "SplitSubjectRequest": {
-        "description": "Re-bind some particles off a source Subject onto a new one.\n\nSupply the new Subject's identity via ``new_external_id`` (authoritative \u2014\nmetadata pulled directly from the identifier, e.g. ``wikidata:Q30297735``)\nor ``new_name`` (canonicalised via the resolver). ``particle_ids`` lists the\nparticles to move off the source.",
+        "description": "Re-bind some particles off a source Subject onto a new one.\n\nSupply the new Subject's identity via ``new_external_id`` (authoritative:\nmetadata pulled directly from the identifier, e.g. ``wikidata:Q30297735``)\nor ``new_name`` (canonicalised via the resolver). ``particle_ids`` lists the\nparticles to move off the source.",
         "properties": {
           "new_external_id": {
             "anyOf": [
@@ -4491,7 +4735,7 @@
         "type": "object"
       },
       "StancePosition": {
-        "description": "One holder's position in a claim's query-time agreement distribution.\n\nComputed at query time over the ``ENDORSES`` / ``DISPUTES`` edges into the\ntarget's CO_EVIDENTIAL group; never stored (substrate-plus-lens).\n``effective_confidence`` is the *stance particle's own* believability\n(how sure we are the holder holds the attitude) \u2014 it is surfaced alongside,\nand never folded into, the target claim's confidence.",
+        "description": "One holder's position in a claim's query-time agreement distribution.\n\nComputed at query time over the ``ENDORSES`` / ``DISPUTES`` edges into the\ntarget's CO_EVIDENTIAL group; never stored (substrate-plus-lens).\n``effective_confidence`` is the *stance particle's own* believability\n(how sure we are the holder holds the attitude); it is surfaced alongside,\nand never folded into, the target claim's confidence.",
         "properties": {
           "effective_confidence": {
             "title": "Effective Confidence",
@@ -4554,6 +4798,7 @@
           "SOURCE_RETRACTED",
           "EXPLICIT_SUPERSESSION",
           "DOCUMENT_SUPERSEDED",
+          "SUPERSEDED_BY_UPDATE",
           "DUPLICATE_MERGED"
         ],
         "title": "StatusReason",
@@ -4574,7 +4819,7 @@
         "type": "object"
       },
       "StructuralAggregate": {
-        "description": "Deterministic aggregate result.\n\nCounts **claims**, never entities \u2014 duplicates per subject exist. The\neffective-confidence distribution (min/median/max) is disclosed beside\nevery count; the distribution fields are None only when zero claims match.",
+        "description": "Deterministic aggregate result.\n\nCounts **claims**, never entities; duplicates per subject exist. The\neffective-confidence distribution (min/median/max) is disclosed beside\nevery count; the distribution fields are None only when zero claims match.",
         "properties": {
           "buckets": {
             "items": {
@@ -4648,7 +4893,7 @@
         "type": "string"
       },
       "StructuredClaim": {
-        "description": "A derived, regenerable S-P-O rendering of a particle's ``content``.\n\nThe core invariant generalises: the **asserted** form is immutable,\nthe **derived** form is regenerable. This annotation is produced by tooling\nfrom ``content``, carries its own derivation stamp, and its fidelity is a\nproperty of the annotation \u2014 never evidence about the claim. Nothing that\nwrites it may touch ``content``, ``confidence``, or provenance.\n\nGenerated in exactly two places: the extraction pipeline\nand the ``particles structure`` backfill. Exporters report coverage and\nnever generate.\n\nAttributes:\n    subject: the subject term (never LITERAL).\n    predicate: the relation term (never LITERAL).\n    object: the object term.\n    subject_id: the resolved Subject UUID when the subject term names one\n        of the particle's subjects; None when it resolved to nothing.\n    structurizer_id: what produced the triple, e.g. ``general-extractor``.\n    structurizer_version: that generator's version at generation time.\n    generated_at: when the triple was produced.",
+        "description": "A derived, regenerable S-P-O rendering of a particle's ``content``.\n\nThe core invariant generalises: the **asserted** form is immutable,\nthe **derived** form is regenerable. This annotation is produced by tooling\nfrom ``content``, carries its own derivation stamp, and its fidelity is a\nproperty of the annotation, never evidence about the claim. Nothing that\nwrites it may touch ``content``, ``confidence``, or provenance.\n\nGenerated in exactly two places: the extraction pipeline\nand the ``particles structure`` backfill. Exporters report coverage and\nnever generate.\n\nAttributes:\n    subject: the subject term (never LITERAL).\n    predicate: the relation term (never LITERAL).\n    object: the object term.\n    subject_id: the resolved Subject UUID when the subject term names one\n        of the particle's subjects; None when it resolved to nothing.\n    structurizer_id: what produced the triple, e.g. ``general-extractor``.\n    structurizer_version: that generator's version at generation time.\n    generated_at: when the triple was produced.",
         "properties": {
           "generated_at": {
             "format": "date-time",
@@ -5019,7 +5264,7 @@
         "type": "object"
       },
       "TaxonomyDefinition": {
-        "description": "A depositable corpus artefact defining a hierarchical tag taxonomy.\n\nOperators publish taxonomies by depositing a JSON file; the\n``TaxonomyExtractor`` materialises the rows into the ``taxonomies`` and\n``tag_nodes`` query-time index. Tags carry no truth value \u2014 they are a\ncuration layer over the particle store, orthogonal to the Subject\nknowledge graph.",
+        "description": "A depositable corpus artefact defining a hierarchical tag taxonomy.\n\nOperators publish taxonomies by depositing a JSON file; the\n``TaxonomyExtractor`` materialises the rows into the ``taxonomies`` and\n``tag_nodes`` query-time index. Tags carry no truth value; they are a\ncuration layer over the particle store, orthogonal to the Subject\nknowledge graph.",
         "properties": {
           "author": {
             "minLength": 1,
@@ -5265,7 +5510,7 @@
     }
   },
   "info": {
-    "description": "Python SDK for the Particles epistemic knowledge standard \u2014 Core Loop.",
+    "description": "Python SDK for the Particles epistemic knowledge standard: Core Loop.",
     "title": "Particles API",
     "version": "1"
   },
@@ -5615,7 +5860,7 @@
     },
     "/corpus/links/suggest": {
       "post": {
-        "description": "Rank undeposited but frequently-cited URLs as deposit suggestions.\n\nMirrors ``particles corpus links suggest``. Read-only \u2014 nothing is fetched\nor deposited.",
+        "description": "Rank undeposited but frequently-cited URLs as deposit suggestions.\n\nMirrors ``particles corpus links suggest``. Read-only: nothing is fetched\nor deposited.",
         "operationId": "run_corpus_links_suggest_corpus_links_suggest_post",
         "requestBody": {
           "content": {
@@ -5779,7 +6024,7 @@
     },
     "/curation": {
       "get": {
-        "description": "Return the bus-stop-editing curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist\n\u2014 no new detection logic. ``limit`` overrides ``curation.session_size`` for\none call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``). 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** \u2014 correct, but as slow as it was before\nthe persisted-collection cutover \u2014 and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
+        "description": "Return the bus-stop-editing curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist;\nno new detection logic. ``limit`` overrides ``curation.session_size`` for\none call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``). 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** (correct, but as slow as it was before\nthe persisted-collection cutover) and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
         "operationId": "get_curation_queue_curation_get",
         "parameters": [
           {
@@ -5927,7 +6172,7 @@
     },
     "/curation/rebuild": {
       "post": {
-        "description": "Rebuild the persisted curation collection store-wide.\n\n**Synchronous and slow by design** \u2014 it runs every finder over the whole\nstore (minutes on a large one). It is not how the queue becomes fast; the\nnightly consolidation cycle is. This is the operator's escape hatch when they\nneed the queue to reflect right now, and the web UI already has an honest\nloading state for it. An async 202 + poll variant waits on a resident\nprocess to host job state (tracked).\n\nRequires the write bearer: it mutates the cache.",
+        "description": "Rebuild the persisted curation collection store-wide.\n\n**Synchronous and slow by design**: it runs every finder over the whole\nstore (minutes on a large one). It is not how the queue becomes fast; the\nnightly consolidation cycle is. This is the operator's escape hatch when they\nneed the queue to reflect right now, and the web UI already has an honest\nloading state for it. An async 202 + poll variant waits on a resident\nprocess to host job state (tracked).\n\nRequires the write bearer: it mutates the cache.",
         "operationId": "rebuild_curation_endpoint_curation_rebuild_post",
         "parameters": [
           {
@@ -6057,7 +6302,7 @@
     },
     "/digest/{store}": {
       "get": {
-        "description": "Render the session-start memory digest for a store.\n\nRead-only, zero LLM/embeddings, rendered fresh. 404 if the store handle is\nnot configured on this engine. ``build_digest`` manages its own per-store\nsession, so this handler takes no ``SessionDep``.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest\nis the provenance-ranked roll-up of the full belief store, including\ncontested beliefs \u2014 confidential operator context. The dev-key loopback\nskip keeps it open for local development.",
+        "description": "Render the session-start memory digest for a store.\n\nRead-only, zero LLM/embeddings, rendered fresh. 404 if the store handle is\nnot configured on this engine. ``project`` reads the store through that\nproject observer, evaluated against this engine's own sources.\n``build_digest`` manages its own per-store session, so this handler takes no\n``SessionDep``.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest\nis the provenance-ranked roll-up of the full belief store, including\ncontested beliefs, which is confidential operator context. The dev-key loopback\nskip keeps it open for local development.",
         "operationId": "get_digest_endpoint_digest__store__get",
         "parameters": [
           {
@@ -6067,6 +6312,23 @@
             "schema": {
               "title": "Store",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
             }
           }
         ],
@@ -6356,7 +6618,7 @@
     },
     "/graph": {
       "get": {
-        "description": "One scoped epistemic subgraph: the same ``GraphData`` the\nstatic ``export graph`` artifact embeds, computed fresh per request.\n\nScope is mandatory (the anti-hairball invariant \u2014 a whole-store render does\nnot exist): ``scope=subject`` needs ``subject_id``, ``scope=query`` needs\n``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's\nevidence: the INCONSISTENCY anchor, its disputants, their\nsubjects), ``scope=projection`` needs ``manifest`` + ``section`` (a\nmanifest section's deterministic selection \u2014 the manifest path is\nresolved on the engine host, which the bearer gate makes operator-equivalent\naccess); anything else is 422. ``subject_id`` accepts a subject id or an\nexact (case-insensitive) canonical name / alias; ``inconsistency_id``\naccepts a full id or unique prefix; ``scope_ref`` in the response is always\nthe resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the\n``graph.*`` caps; ``as_of`` renders the graph as believed at T;\n``history`` adds supersession-chain ghosts; ``store`` selects the target\nstore (404 on an unknown handle).\n\nBearer-gated regardless of ``api.require_auth_for_reads`` and rate-limited\n(same posture as ``/query``): the query scope drives a paid embedding per\nrequest. All epistemics are computed server-side \u2014 clients only render\n.",
+        "description": "One scoped epistemic subgraph: the same ``GraphData`` the\nstatic ``export graph`` artifact embeds, computed fresh per request.\n\nScope is mandatory (the anti-hairball invariant: a whole-store render does\nnot exist): ``scope=subject`` needs ``subject_id``, ``scope=query`` needs\n``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's\nevidence: the INCONSISTENCY anchor, its disputants, their\nsubjects), ``scope=projection`` needs ``manifest`` + ``section`` (a\nmanifest section's deterministic selection; the manifest path is\nresolved on the engine host, which the bearer gate makes operator-equivalent\naccess); anything else is 422. ``subject_id`` accepts a subject id or an\nexact (case-insensitive) canonical name / alias; ``inconsistency_id``\naccepts a full id or unique prefix; ``scope_ref`` in the response is always\nthe resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the\n``graph.*`` caps; ``as_of`` renders the graph as believed at T;\n``history`` adds supersession-chain ghosts; ``store`` selects the target\nstore (404 on an unknown handle). ``observer_project`` reads the\nsubject, query and projection scopes through a project observer;\nthe inconsistency scope addresses its evidence by id and is never filtered.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` and rate-limited\n(same posture as ``/query``): the query scope drives a paid embedding per\nrequest. All epistemics are computed server-side; clients only render.",
         "operationId": "get_graph_graph_get",
         "parameters": [
           {
@@ -6518,6 +6780,23 @@
               "title": "Store",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "observer_project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Observer Project"
+            }
           }
         ],
         "responses": {
@@ -6552,7 +6831,7 @@
     },
     "/health": {
       "get": {
-        "description": "Liveness check. Returns ``status=\"ok\"``, the SDK version, and the build date.\n\nIn daemon mode the response also carries the background tasks'\nstate, and ``status`` becomes ``\"degraded\"`` once any of them has crashed.\nThe process is still serving requests, so this stays a 200 \u2014 the API must\nnot take itself down because a scheduled tick died \u2014 but the disclosure is\nmachine-readable for an operator alert or a readiness gate.\n\n``built_at`` is present only when the artifact stamped itself (the\ncontainer image does; a source checkout does not), so the route stays\nunauthenticated with nothing new behind it: the version was already\ndisclosed here, and a build timestamp says no more about the deployment\nthan the version it accompanies.",
+        "description": "Liveness check. Returns ``status=\"ok\"``, the SDK version, and the build date.\n\nIn daemon mode the response also carries the background tasks'\nstate, and ``status`` becomes ``\"degraded\"`` once any of them has crashed.\nThe process is still serving requests, so this stays a 200 (the API must\nnot take itself down because a scheduled tick died), but the disclosure is\nmachine-readable for an operator alert or a readiness gate.\n\n``built_at`` is present only when the artifact stamped itself (the\ncontainer image does; a source checkout does not), so the route stays\nunauthenticated with nothing new behind it: the version was already\ndisclosed here, and a build timestamp says no more about the deployment\nthan the version it accompanies.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -6721,7 +7000,7 @@
     },
     "/lint": {
       "post": {
-        "description": "Run the lint pipeline. Returns the structured findings report.\n\n``fix`` defaults to ``False`` \u2014 pass ``fix: true`` to\napply structural status transitions (STALENESS, RETRACTION_CASCADE,\nCORPUS_LINK_INTEGRITY).",
+        "description": "Run the lint pipeline. Returns the structured findings report.\n\n``fix`` defaults to ``False``; pass ``fix: true`` to\napply structural status transitions (STALENESS, RETRACTION_CASCADE,\nCORPUS_LINK_INTEGRITY).",
         "operationId": "run_lint_endpoint_lint_post",
         "requestBody": {
           "content": {
@@ -6765,7 +7044,7 @@
     },
     "/lint/report": {
       "get": {
-        "description": "Return the structural-only lint report \u2014 no LLM call, no mutations.",
+        "description": "Return the structural-only lint report: no LLM call, no mutations.",
         "operationId": "get_lint_report_lint_report_get",
         "responses": {
           "200": {
@@ -6789,7 +7068,7 @@
     },
     "/memory/useful": {
       "post": {
-        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe \u2014 prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. 403 when belief\nwrites are disabled (``mcp.write.enabled_stores`` default-deny).",
+        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. 403 when belief\nwrites are disabled (``mcp.write.enabled_stores`` default-deny).",
         "operationId": "memory_useful_endpoint_memory_useful_post",
         "requestBody": {
           "content": {
@@ -6843,7 +7122,7 @@
     },
     "/particles": {
       "get": {
-        "description": "List particles, optionally filtered by status / subject (HTTP mirror of the\nMCP ``particles_list`` tool). Newest first; no embeddings.\n\n``limit`` defaults to 50 and is clamped to ``storage.max_page_size`` (F5).\n400 on an unknown ``status``.",
+        "description": "List particles, optionally filtered by status / subject (HTTP mirror of the\nMCP ``particles_list`` tool). Newest first; no embeddings.\n\n``limit`` defaults to 50 and is clamped to ``storage.max_page_size`` (F5).\n400 on an unknown ``status``. ``observer_project`` lists only what is in\nview for that project observer, paged after the predicate.",
         "operationId": "list_particles_endpoint_particles_get",
         "parameters": [
           {
@@ -6905,6 +7184,23 @@
               "title": "Offset",
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "observer_project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Observer Project"
+            }
           }
         ],
         "responses": {
@@ -6943,7 +7239,7 @@
     },
     "/particles/assert": {
       "post": {
-        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode) \u2014 a first-class result, not an error. 400 on a granularity / provenance\nviolation; 403 when belief writes are disabled.",
+        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode), a first-class result, not an error; so does re-asserting a claim an\noperator or reviewer retired (it is held for review), and\n``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a\ngranularity / provenance violation; 403 when belief writes are disabled.",
         "operationId": "particle_assert_endpoint_particles_assert_post",
         "requestBody": {
           "content": {
@@ -7025,7 +7321,7 @@
     },
     "/particles/contested-badges": {
       "post": {
-        "description": "Compose the contested badge for the requested ids.\n\nThe one composer for every recall surface: the routed MCP\n``particles_list`` tool used to hand-roll a one-basis badge of its own,\nwhich made the listing disagree with ``query`` on the same server. Keyed by\nid and **sparse** \u2014 an id no available basis fired on (or one that does not\nexist) is simply absent, exactly as ``/particles/contested`` omits an\nuncontested belief. 400 above ``storage.max_page_size`` ids (F5).",
+        "description": "Compose the contested badge for the requested ids.\n\nThe one composer for every recall surface: the routed MCP\n``particles_list`` tool used to hand-roll a one-basis badge of its own,\nwhich made the listing disagree with ``query`` on the same server. Keyed by\nid and **sparse**: an id no available basis fired on (or one that does not\nexist) is simply absent, exactly as ``/particles/contested`` omits an\nuncontested belief. 400 above ``storage.max_page_size`` ids (F5).",
         "operationId": "particle_contested_badges_particles_contested_badges_post",
         "requestBody": {
           "content": {
@@ -7127,7 +7423,7 @@
     },
     "/particles/search": {
       "get": {
-        "description": "List particles sharing a context fingerprint (HTTP mirror of the\nMCP ``particle_search`` tool). ``fingerprint`` is a full 64-char SHA-256 hex\nor a prefix (\u2265 8 chars; validated in-handler \u2192 400). ``limit`` defaults to 50\nand is clamped to ``storage.max_page_size`` (F5).",
+        "description": "List particles sharing a context fingerprint (HTTP mirror of the\nMCP ``particle_search`` tool). ``fingerprint`` is a full 64-char SHA-256 hex\nor a prefix (\u2265 8 chars; validated in-handler \u2192 400). ``limit`` defaults to 50\nand is clamped to ``storage.max_page_size`` (F5). ``observer_project`` keeps\nonly what is in view for that project observer.",
         "operationId": "search_particles_by_fingerprint_particles_search_get",
         "parameters": [
           {
@@ -7154,6 +7450,23 @@
                 }
               ],
               "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "observer_project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Observer Project"
             }
           }
         ],
@@ -7471,7 +7784,7 @@
     },
     "/particles/{particle_id}/retract": {
       "post": {
-        "description": "Operator-retract any belief, incl. an extracted one.\n\nRetract one extraction-/operator-sourced belief by id \u2014 the per-particle\nretract a curation card needs (vs the blunt per-source\n``POST /corpus/{id}/retract``). Skips only the ownership check; the\nHUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard\nviolation or empty reason; 403 when curation writes are disabled.",
+        "description": "Operator-retract any belief, incl. an extracted one.\n\nRetract one extraction-/operator-sourced belief by id: the per-particle\nretract a curation card needs (vs the blunt per-source\n``POST /corpus/{id}/retract``). Skips only the ownership check; the\nHUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard\nviolation or empty reason; 403 when curation writes are disabled.",
         "operationId": "operator_retract_endpoint_particles__particle_id__retract_post",
         "parameters": [
           {
@@ -7534,9 +7847,64 @@
         "summary": "Operator Retract Endpoint"
       }
     },
+    "/particles/{particle_id}/source": {
+      "get": {
+        "description": "Return the source passage behind a particle, with how it was found.\n\n``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),\n``LOCATED`` (best term-overlap paragraph \u2014 a reading aid, not\nverification), ``WHOLE`` (the snapshot text), or ``UNAVAILABLE`` with a\n``note``. Display only: never a ranking input. 404 if the particle does\nnot exist.",
+        "operationId": "get_particle_source_particles__particle_id__source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "particle_id",
+            "required": true,
+            "schema": {
+              "title": "Particle Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcePassage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Particle Source"
+      }
+    },
     "/particles/{particle_id}/subjects": {
       "post": {
-        "description": "Attach a subject to a NO_SUBJECT orphan (provenance-preserving).\n\nSupersedes the orphan with a successor that has the same content + the\nresolved subject(s), carrying over the predecessor's confidence record,\nextractor_ref, and source \u2014 it is the same extracted claim with a corrected\nlinkage. 400 on a bad resolution / guard violation; 403 when writes are\ndisabled.",
+        "description": "Attach a subject to a NO_SUBJECT orphan (provenance-preserving).\n\nSupersedes the orphan with a successor that has the same content + the\nresolved subject(s), carrying over the predecessor's confidence record,\nextractor_ref, and source; it is the same extracted claim with a corrected\nlinkage. 400 on a bad resolution / guard violation; 403 when writes are\ndisabled.",
         "operationId": "assign_subject_endpoint_particles__particle_id__subjects_post",
         "parameters": [
           {
@@ -7601,7 +7969,7 @@
     },
     "/particles/{particle_id}/supersede": {
       "post": {
-        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. 400 on a guard / granularity violation; 403\nwhen curation writes are disabled.",
+        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. ``reason`` is required and recorded on the\naudit event. 400 on a guard / granularity violation or an empty reason; 403\nwhen curation writes are disabled.",
         "operationId": "operator_supersede_endpoint_particles__particle_id__supersede_post",
         "parameters": [
           {
@@ -7774,7 +8142,7 @@
     },
     "/quality": {
       "get": {
-        "description": "Extraction quality dashboard \u2014 calibration distribution, corpus status, subject coverage.",
+        "description": "Extraction quality dashboard: calibration distribution, corpus status, subject coverage.",
         "operationId": "quality_dashboard_quality_get",
         "responses": {
           "200": {
@@ -7798,7 +8166,7 @@
     },
     "/query": {
       "post": {
-        "description": "Tag-aware semantic query. Embeds the question, runs cosine\nsimilarity over ACTIVE particles, generates a natural-language\nanswer with citations.\n\nRate-limited per client (``api.rate_limit_per_minute``; security review F6)\n\u2014 this drives a paid embedding + completion per request. Bearer-gated\nregardless of ``api.require_auth_for_reads`` (security review F2): the paid\nAnthropic completion runs on the operator's ``ANTHROPIC_API_KEY``, so an open\n``/query`` is an unbounded-spend vector. The dev-key loopback skip keeps it\nopen for local development.",
+        "description": "Tag-aware semantic query. Embeds the question, runs cosine\nsimilarity over ACTIVE particles, generates a natural-language\nanswer with citations.\n\nRate-limited per client (``api.rate_limit_per_minute``; security review F6):\nthis drives a paid embedding + completion per request. Bearer-gated\nregardless of ``api.require_auth_for_reads`` (security review F2): the paid\nAnthropic completion runs on the operator's ``ANTHROPIC_API_KEY``, so an open\n``/query`` is an unbounded-spend vector. The dev-key loopback skip keeps it\nopen for local development.",
         "operationId": "run_query_query_post",
         "requestBody": {
           "content": {
@@ -8023,7 +8391,7 @@
     },
     "/subjects": {
       "get": {
-        "description": "List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);\nan omitted ``limit`` returns the first ``storage.max_page_size`` and any\n``limit`` is clamped to that cap (security review F5 \u2014 formerly unbounded).\n``order=degree`` sorts by descending ACTIVE-particle link count instead\n(most-connected first \u2014 e.g. the web UI's Browse seed).",
+        "description": "List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);\nan omitted ``limit`` returns the first ``storage.max_page_size`` and any\n``limit`` is clamped to that cap (security review F5; formerly unbounded).\n``order=degree`` sorts by descending ACTIVE-particle link count instead\n(most-connected first, e.g. the web UI's Browse seed).",
         "operationId": "list_subjects_subjects_get",
         "parameters": [
           {
@@ -8483,7 +8851,7 @@
     },
     "/subjects/{subject_id}/particles": {
       "get": {
-        "description": "List ACTIVE particles whose subject set includes this subject.\n\n``limit``/``offset`` paginate over the linked particle IDs; an omitted\n``limit`` returns up to ``storage.max_page_size`` and any ``limit`` is\nclamped to it (security review F5 \u2014 formerly returned every linked\nparticle).",
+        "description": "List ACTIVE particles whose subject set includes this subject.\n\n``limit``/``offset`` paginate over the linked particle IDs; an omitted\n``limit`` returns up to ``storage.max_page_size`` and any ``limit`` is\nclamped to it (security review F5; formerly returned every linked\nparticle).",
         "operationId": "get_particles_for_subject_subjects__subject_id__particles_get",
         "parameters": [
           {

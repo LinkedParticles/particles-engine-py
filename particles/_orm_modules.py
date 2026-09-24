@@ -28,6 +28,7 @@ import particles.store.curation_snapshot_store  # noqa: F401
 import particles.store.event_store  # noqa: F401
 import particles.store.extractor_store  # noqa: F401
 import particles.store.lens_store  # noqa: F401
+import particles.store.observer_scope_store  # noqa: F401
 import particles.store.particle_store  # noqa: F401
 import particles.store.relation_store  # noqa: F401
 import particles.store.subject_store  # noqa: F401

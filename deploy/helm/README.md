@@ -28,7 +28,8 @@ kubectl port-forward svc/particles-linkedparticles-engine 8000:8000
 
 ## `replicas: 1` is load-bearing
 
-Do not raise it. The store is SQLite, which has exactly one writer, and the daemon schedules the consolidation cycle *inside* the serving process.
+Do not raise it. The store is SQLite, which has exactly one writer, and the
+daemon schedules the consolidation cycle *inside* the serving process.
 Two replicas would be two schedulers and two writers against one
 PersistentVolume — precisely the multi-writer shape the design exists to
 remove. Multi-replica/HA rides a Postgres backend that is **not a dependency

@@ -626,7 +626,8 @@ def _build_synthesis_prompt(
 
     ``flowing=True`` selects the flowing-prose first-attempt
     prompt: one continuous passage under the section title, with sub-heading
-    invention suppressed. ``direction`` (the section's authoring brief) and ``framing`` (the document spine) are interpolated
+    invention suppressed. ``direction`` (the section's authoring brief)
+    and ``framing`` (the document spine) are interpolated
     into the standard / flowing first-attempt templates when present; both
     absent leaves the prompt byte-identical to the pre-0163 prompt. As with
     ``sequence_mode``, all three are first-attempt-only — strict retries reuse

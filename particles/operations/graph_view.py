@@ -55,6 +55,7 @@ from particles.operations.query.as_of import AsOfView, ensure_utc, load_as_of_vi
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.effective_confidence import score_effective_confidence
 from particles.operations.query.main import retrieve_ranked
+from particles.operations.query.observer_scope import filter_visible
 from particles.operations.query.owner_policy import load_owner_policy
 from particles.render.markdown import build_subject_naming, exclude_non_asserted
 from particles.store.particle_store import (
@@ -90,14 +91,20 @@ async def build_graph_data(
     max_nodes: int | None = None,
     min_particle_confidence: float = 0.0,
     include_non_asserted: bool = False,
+    observer_project: str | None = None,
 ) -> GraphData:
     """Assemble one scoped subgraph.
+
+    ``observer_project`` keeps only the beliefs in view for that
+    project observer in the subject, query and projection scopes. The
+    inconsistency scope is a drill-down *by id* from a contested badge —
+    addressing, not retrieval — and is never filtered.
 
     Exactly one scope must be given — an unscoped render is a ``ValueError``,
     not a default: ``subject_id`` (neighbourhood), ``query`` (retrieval set),
     ``inconsistency_id`` (a contradiction's evidence), or
-    ``manifest`` + ``section`` together (a projection section's selection
-). ``subject_id`` accepts a subject id or an exact
+    ``manifest`` + ``section`` together (a projection section's selection).
+    ``subject_id`` accepts a subject id or an exact
     (case-insensitive) canonical name / alias; ``inconsistency_id`` accepts a
     full particle id or a unique prefix (the badge prose truncates to 8
     chars). The returned ``scope_ref`` is always the resolved anchor address.
@@ -178,6 +185,12 @@ async def build_graph_data(
             hit_rank,
             excluded_undatable,
         ) = await _gather_query_scope(session, query, view, as_of, include_non_asserted)
+
+    if observer_project is not None and scope_type != "inconsistency":
+        observed = await filter_visible(
+            session, list(particles.values()), observer_project, as_of=as_of
+        )
+        particles = {pid: p for pid, p in particles.items() if pid in observed.visible_ids}
 
     # History: pull the retired supersession-chain ancestors of what's in
     # scope (plus successors of retired in-scope particles), as ghosts.
@@ -491,7 +504,8 @@ def _currently_visible(
 ) -> tuple[bool, bool]:
     """(visible-on-the-current-lens, excluded-undatable) for one particle.
 
-    Present-time lens: visible = ACTIVE. As-of lens: the predicate. INCONSISTENCY records are never rendered as ordinary elements
+    Present-time lens: visible = ACTIVE. As-of lens: the
+    predicate. INCONSISTENCY records are never rendered as ordinary elements
     on either lens (they surface only through the contested
     badge's basis).
     """

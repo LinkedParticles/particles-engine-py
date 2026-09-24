@@ -233,7 +233,8 @@ async def load_trust_policy(session: AsyncSession) -> TrustPolicy:
     Called once per query — from the queried store in ``query``, from the
     **viewer's** store in ``query_federated``.
 
-    Composition: the store's **local** statements and the rules always win per key; for keys local policy does not assert, adopted
+    Composition: the store's **local** statements and the
+    rules always win per key; for keys local policy does not assert, adopted
     lenses contribute **most-skeptical-wins** — the minimum rank/score across
     lenses (for URL-pattern modifiers: per-lens sums, minimum of the sums).
     A key neither local policy nor any lens asserts stays absent — the

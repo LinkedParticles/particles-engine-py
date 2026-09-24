@@ -18,10 +18,14 @@ that all six §9 Core operations are importable from one place:
 New code should prefer ``from particles.operations.extract import extract_snapshot``
 to keep the spec-to-package mapping uniform. The pipeline module remains the
 implementation home; importing from either path resolves to the same function.
+
+``collapse_superseded_pending`` rides along for the same reason:
+every bulk caller of ``extract_snapshot`` runs it first, so both come from here.
 """
 
 from __future__ import annotations
 
+from particles.ingest.pending_collapse import CollapseReport, collapse_superseded_pending
 from particles.ingest.pipeline import extract_snapshot
 
-__all__ = ["extract_snapshot"]
+__all__ = ["CollapseReport", "collapse_superseded_pending", "extract_snapshot"]
