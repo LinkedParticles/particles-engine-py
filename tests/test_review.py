@@ -360,3 +360,104 @@ async def test_reviewer_trust_rank_is_configurable(db_session: object) -> None:
     stmts = await get_trust_statements_for_domain(session, "general")  # type: ignore[arg-type]
     stmt = next(s for s in stmts if s.statement_id == review.trust_statement_id)
     assert stmt.trust_rank == 0.65
+
+
+# ---------------------------------------------------------------------------
+# the statement is keyed so the write path can find it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prefer_a_statement_is_keyed_on_preferred_source_entry(db_session: object) -> None:
+    """The reviewer statement names A's corpus entry, and the §6.4 layered
+    lookup the ingest ladder consults returns the reviewer rank for it."""
+    from particles.config import get_config
+    from particles.core.schema import SourceRefType
+    from particles.operations.review import resolve
+    from particles.store.trust_store import get_layered_trust_rank, get_trust_statements_for_domain
+
+    session = db_session  # type: ignore[assignment]
+    pa = _make_active("Claim A")
+    pb = _make_active("Claim B")
+    inc = _make_inconsistency(pa.id, pb.id)
+    for p in (pa, pb, inc):
+        await insert_particle(session, p)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    review = await resolve(session, inc.id, ResolutionAction.PREFER_A, "reviewer-1")  # type: ignore[arg-type]
+
+    stmts = await get_trust_statements_for_domain(session, "general")  # type: ignore[arg-type]
+    stmt = next(s for s in stmts if s.statement_id == review.trust_statement_id)
+    assert stmt.source_ref.type is SourceRefType.CORPUS_ENTRY
+    assert stmt.source_ref.value == "e1"  # A's SOURCE provenance entry, not A's id
+    assert pa.id in (stmt.basis or "")
+    rank = await get_layered_trust_rank(session, "general", "e1", "WEB_PAGE", None, None)  # type: ignore[arg-type]
+    assert rank == get_config().trust.reviewer_trust_rank
+
+
+@pytest.mark.asyncio
+async def test_prefer_b_statement_names_the_promoted_claims_source(db_session: object) -> None:
+    from particles.operations.review import resolve
+    from particles.store.trust_store import get_trust_statements_for_domain
+
+    session = db_session  # type: ignore[assignment]
+    pa = _make_active("Claim A")
+    pb = _make_quarantined("Claim B")  # SOURCE entry e2
+    inc = _make_inconsistency(pa.id, pb.id)
+    for p in (pa, pb, inc):
+        await insert_particle(session, p)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    review = await resolve(session, inc.id, ResolutionAction.PREFER_B, "reviewer-1")  # type: ignore[arg-type]
+
+    stmts = await get_trust_statements_for_domain(session, "general")  # type: ignore[arg-type]
+    stmt = next(s for s in stmts if s.statement_id == review.trust_statement_id)
+    assert stmt.source_ref.value == "e2"
+
+
+@pytest.mark.asyncio
+async def test_two_reviews_preferring_one_source_count_as_two_confirmations(
+    db_session: object,
+) -> None:
+    """The gate counts statements per (domain, ref) — reachable
+    only when the ref is the entry two reviews can share."""
+    from particles.operations.review import resolve
+    from particles.store.trust_store import count_reviewer_confirmations
+
+    session = db_session  # type: ignore[assignment]
+    pa1, pa2 = _make_active("Claim A1"), _make_active("Claim A2")  # both from e1
+    pb1, pb2 = _make_active("Claim B1"), _make_active("Claim B2")
+    inc1, inc2 = _make_inconsistency(pa1.id, pb1.id), _make_inconsistency(pa2.id, pb2.id)
+    for p in (pa1, pa2, pb1, pb2, inc1, inc2):
+        await insert_particle(session, p)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    await resolve(session, inc1.id, ResolutionAction.PREFER_A, "reviewer-1")  # type: ignore[arg-type]
+    await resolve(session, inc2.id, ResolutionAction.PREFER_A, "reviewer-2")  # type: ignore[arg-type]
+
+    assert await count_reviewer_confirmations(session, "general", "CORPUS_ENTRY", "e1") == 2  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_prefer_without_source_provenance_writes_no_statement(db_session: object) -> None:
+    """An agent-asserted preferred claim names no corpus entry: the review
+    still closes the wrapper, records the judgment, and drives no cascade."""
+    from particles.operations.review import resolve
+    from particles.store.trust_store import get_trust_statements_for_domain
+
+    session = db_session  # type: ignore[assignment]
+    pa = _make_active("Claim A").model_copy(update={"provenance": []})
+    pb = _make_active("Claim B")
+    inc = _make_inconsistency(pa.id, pb.id)
+    for p in (pa, pb, inc):
+        await insert_particle(session, p)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    review = await resolve(session, inc.id, ResolutionAction.PREFER_A, "reviewer-1")  # type: ignore[arg-type]
+
+    assert review.trust_statement_id is None
+    assert await get_trust_statements_for_domain(session, "general") == []  # type: ignore[arg-type]
+    wrapper = await get_particle(session, inc.id)  # type: ignore[arg-type]
+    assert wrapper is not None and wrapper.status is Status.RETRACTED
+    loser = await get_particle(session, pb.id)  # type: ignore[arg-type]
+    assert loser is not None and loser.status is Status.PROVENANCE_STALE

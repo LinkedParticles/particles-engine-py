@@ -24,6 +24,7 @@ eyeballing the report — strongest pairings first.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -70,6 +71,46 @@ class MatchResult:
         return {p.id for _, p in self.matched}
 
 
+def subject_qualified(content: str, subjects: Sequence[str]) -> str:
+    """Render one emitted claim with any subject its ``content`` omits.
+
+    A particle's subject lives in a **field**, not in its ``content`` — the
+    schema's own separation — so an extractor that obeys the data model emits
+    "Operating costs for 2025 were $940,000." and links it to the subject
+    *Halcyon Grid Cooperative*. Gold prose written by a human restates the
+    subject inline. Comparing the two directly scores the pair on a difference
+    the data model asked the extractor to make, and charges it twice: once to
+    precision as a spurious claim, once to recall as a required miss.
+
+    Only *absent* subjects are prepended. A claim that already names its
+    subject is returned unchanged (identity, not a copy), because
+    double-naming it — "Fernwood Systems: Fernwood Systems is a 40-person …"
+    — measurably distorts the embedding.
+
+    **This function is one of two renderings, never a replacement.** The caller
+    scores bare ``content`` *and* this, and keeps the higher similarity per
+    pair; see :func:`match_emitted_to_expected`. Using it alone is wrong and
+    the seed suites prove it — a suite whose gold was copied verbatim from
+    extractor output is already subject-elided, and unconditional
+    qualification drove ``numismatic-seed-001`` from 1.00 to 0.57 precision.
+
+    Measured on ``prose-article-seed-001`` / ``claude-haiku-4-5`` over one
+    fixed emission set, best-of-both moved precision 0.800 -> 0.912 and recall
+    0.714 -> 0.857, admitting nine pairs that are the same fact in different
+    clothes and no pair that is not. It is **not** a loosened threshold: the
+    0.80 equivalence floor and 0.65 LLM pre-filter are untouched. Lowering the
+    threshold to 0.70 instead was measured on the same emissions and is worse
+    (recall 0.800), because it admits unrelated claims rather than reading
+    related ones correctly.
+    """
+    lowered = content.lower()
+    absent = [name.strip() for name in subjects if name.strip()]
+    absent = [name for name in absent if name.lower() not in lowered]
+    if not absent:
+        return content
+    return f"{', '.join(absent)}: {content}"
+
+
 async def match_emitted_to_expected(
     emitted: list[Particle],
     expected: list[ExpectedParticle],
@@ -77,6 +118,7 @@ async def match_emitted_to_expected(
     judge: EquivalenceJudge = EquivalenceJudge.EMBEDDING,
     threshold: float = 0.80,
     llm_prefilter: float = 0.65,
+    subject_names: Mapping[str, Sequence[str]] | None = None,
 ) -> MatchResult:
     """Greedy-similarity assignment of emitted to expected.
 
@@ -92,11 +134,67 @@ async def match_emitted_to_expected(
     is in ``[llm_prefilter, threshold)``; pairs above ``threshold``
     are accepted on similarity alone, pairs below ``llm_prefilter``
     are rejected without an LLM call. This bounds the LLM token cost.
+
+    ``subject_names`` maps an emitted particle's ``id`` to the subject names it
+    is about, and turns on subject-aware matching: the emitted side
+    is embedded as :func:`subject_qualified` renders it, so a claim whose
+    subject lives in a field is not scored against gold prose as if it had
+    omitted the subject. Passing ``None`` (the default) embeds bare ``content``
+    — the pre-0262 semantics, kept reachable so historical runs stay
+    reproducible.
+
+    **Why names and not ``particle.subject_ids``.** In a store-backed particle
+    those ids are UUIDs, and prefixing a claim with a UUID would silently
+    poison every similarity in the matrix. The benchmark runner happens to
+    carry unresolved subject *names* there, but relying on that would make a
+    correct-looking call site produce garbage the day it is handed a persisted
+    particle. The caller states the names explicitly instead.
     """
     if not emitted and not expected:
         return MatchResult()
 
-    similarities = _similarity_matrix([p.content for p in emitted], [e.content for e in expected])
+    expected_texts = [e.content for e in expected]
+    emitted_texts = [p.content for p in emitted]
+    similarities = _similarity_matrix(emitted_texts, expected_texts)
+
+    # Per (emitted, expected) pair, the rendering whose cosine won — consulted
+    # only by the LLM judge, so it reads the exact string that was scored.
+    judged_text: dict[tuple[int, int], str] = {}
+
+    if subject_names:
+        # Score each emitted claim under BOTH renderings and keep the better
+        # one per pair. Qualifying *unconditionally* is wrong, and the seed
+        # suites prove it: the authoring contract says to copy the extractor's
+        # current output verbatim into the gold, so a structured suite's gold
+        # is already subject-elided and prepending the subject destroys an
+        # exact match (numismatic-seed-001 fell 1.00 -> 0.57 precision when
+        # this was tried).
+        #
+        # Taking the max is monotone **per pair** — a pair's similarity can
+        # only rise, so no pair that cleared the threshold stops clearing it.
+        # The greedy assignment is *not* monotone in the same way: raising one
+        # pair can reorder the greedy pass and strand a gold that a
+        # lower-scoring pair used to match. See
+        # ``test_raising_a_score_can_reshuffle_the_greedy_assignment``. The
+        # guarantee this rests on is therefore the pair-level one — it is what
+        # rules out the numismatic collapse, where substitution pushed scores
+        # *below* the floor wholesale — and the suites are measured, not
+        # assumed.
+        qualified = [subject_qualified(p.content, subject_names.get(p.id, ())) for p in emitted]
+        changed = [
+            i
+            for i, (bare, qual) in enumerate(zip(emitted_texts, qualified, strict=True))
+            if bare != qual
+        ]
+        if changed:
+            # Only the rewritten rows need a second embedding pass; on the
+            # measured suite that is 21 of 80 claims.
+            q_sims = _similarity_matrix([qualified[i] for i in changed], expected_texts)
+            for row, i in enumerate(changed):
+                for j in range(len(expected_texts)):
+                    if q_sims[row][j] > similarities[i][j]:
+                        similarities[i][j] = q_sims[row][j]
+                        judged_text[(i, j)] = qualified[i]
 
     # Build all candidate pairs sorted by similarity (desc).
     candidates: list[tuple[float, int, int]] = []
@@ -125,7 +223,7 @@ async def match_emitted_to_expected(
         if (
             judge is EquivalenceJudge.LLM
             and sim < threshold
-            and not await _llm_pair_aligned(emitted_p, expected_p)
+            and not await _llm_pair_aligned(judged_text.get((i, j), emitted_texts[i]), expected_p)
         ):
             continue
 
@@ -199,8 +297,15 @@ CLAIM:        {emitted}
 GOLD STANDARD: {expected}"""
 
 
-async def _llm_pair_aligned(emitted: Particle, expected: ExpectedParticle) -> bool:
-    """LLM-judge whether one emitted particle matches one expected particle.
+async def _llm_pair_aligned(emitted_text: str, expected: ExpectedParticle) -> bool:
+    """LLM-judge whether one emitted claim matches one expected particle.
+
+    Takes the rendered emitted *text*, not the ``Particle``, so the judge reads
+    exactly the string the embedding judge scored — subject-qualified when
+    subject-aware matching is on. Handing the model bare ``content``
+    while the cosine was computed on the qualified form would make the two
+    judges disagree about what the claim even says, on precisely the claims
+    (subject in a field, not in the prose) the qualification exists for.
 
     Routes through the ``benchmark`` completion purpose; the
     provider/model resolve from ``config.llm.benchmark`` (falling back to
@@ -228,7 +333,7 @@ async def _llm_pair_aligned(emitted: Particle, expected: ExpectedParticle) -> bo
     """
     from particles.llm import complete
 
-    prompt = _JUDGE_PROMPT.format(emitted=emitted.content, expected=expected.content)
+    prompt = _JUDGE_PROMPT.format(emitted=emitted_text, expected=expected.content)
     try:
         verdict = (await complete("benchmark", prompt, max_tokens=16, temperature=0.0)).lower()
     except Exception as exc:

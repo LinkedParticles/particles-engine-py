@@ -30,8 +30,8 @@ reference the pre-split module paths (``particles.operations.lint.<name>``):
         _check_structured_claim_subjects
     _check_wikidata_link_confidence    (./wikidata_links.py)
 
-Co-evidential candidate proposal moved to ``particles.operations.links_suggest``
-; lint no longer emits ``CO_EVIDENTIAL_CANDIDATE`` findings.
+Co-evidential candidate proposal moved to ``particles.operations.links_suggest``;
+lint no longer emits ``CO_EVIDENTIAL_CANDIDATE`` findings.
 
 See ``orchestrator.run_lint`` for the entry point ordering.
 """

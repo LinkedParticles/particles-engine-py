@@ -36,11 +36,13 @@ from particles.config import get_config
 from particles.core.claims import ClaimMatch, match_claim
 from particles.core.schema import (
     SCHEMA_VERSION,
+    AnswerFailureCause,
     AsOfNote,
     ClaimCoverage,
     ContestedBadge,
     ContestednessReading,
     CoverageGapKind,
+    ObserverScopeNote,
     Particle,
     ParticleType,
     QueryRequest,
@@ -73,10 +75,12 @@ from particles.store.particle_store import (
 from .as_of import load_as_of_view
 from .decay_policy import DecayPolicy, load_decay_policy
 from .gaps import _find_coverage_gaps, _find_subject_coverage_gaps
+from .observer_scope import filter_visible, merged_scope_note
 from .rank import RANKING_DEGRADED_NO_ENCODER, _collapse_co_evidential_top_k, _embed
 from .respond import (
     _generate_response,
     fallback_listing,
+    generation_error_cause,
     generation_error_reason,
     strip_refusal_marker,
 )
@@ -165,6 +169,8 @@ async def _gather_scored(
     query_emb: np.ndarray | None,
     trust_policy: TrustPolicy,
     decay_policy: DecayPolicy,
+    *,
+    scope_notes: list[ObserverScopeNote] | None = None,
 ) -> tuple[
     list[Scored], dict[str, datetime | None], dict[str, AsOfNote], int, tuple[int, int] | None
 ]:
@@ -175,9 +181,11 @@ async def _gather_scored(
     cache, the ``trust_policy``, and the ``decay_policy`` are
     all loaded once from the viewer's store in federation, so the viewer's
     policies apply to every store's candidates). Returns the scored 3-tuples,
-    a ``particle_id -> pub_at`` map for recency display, the as-of surfaces — a ``particle_id -> AsOfNote`` map for hits retired after
+    a ``particle_id -> pub_at`` map for recency display, the
+    as-of surfaces — a ``particle_id -> AsOfNote`` map for hits retired after
     the reference instant, plus the fail-closed undatable-exclusion count
-    (both empty/zero when ``request.as_of`` is unset) — and the claim-prefilter stats ``(matched, not_comparable)``, ``None`` when the
+    (both empty/zero when ``request.as_of`` is unset) — and the
+    claim-prefilter stats ``(matched, not_comparable)``, ``None`` when the
     request carries no structural claim filter.
 
     with ``as_of`` set, the **temporal** quantities move to T —
@@ -297,6 +305,21 @@ async def _gather_scored(
             >= cutoff
         ]
 
+    # the project observer — a membership predicate over the candidate
+    # set. It sits after every other candidate filter and before scoring, top_k
+    # and the relevance floor, so a project's results are never starved by
+    # beliefs it cannot see. No observer, no work.
+    if request.observer_project is not None:
+        scope = await filter_visible(
+            session,
+            [p for p, _ in candidates],
+            request.observer_project,
+            as_of=request.as_of,
+        )
+        candidates = [(p, emb) for p, emb in candidates if p.id in scope.visible_ids]
+        if scope_notes is not None:
+            scope_notes.append(scope.note(request.observer_project))
+
     # Batch-load (content_published_at, source_type, entry_id, uri_r,
     # author_id) for all candidate particles — recency decay + the trust-policy
     # inputs, including the §6.4 AUTHOR tier.
@@ -332,8 +355,8 @@ async def _gather_scored(
             calibration_source=p.confidence.calibration_source,
         ) * support_discounts.get(p.id, 1.0)
 
-        # §9.3 step 5: min_confidence filters on *effective* confidence
-        #. The SQL raw-value filter in
+        # §9.3 step 5: min_confidence filters on *effective* confidence.
+        # The SQL raw-value filter in
         # get_active_particles_with_embeddings stays as a superset prefilter —
         # every factor above is ≤ 1.0 (extractor trust is demotion-only per
         # rank and decay clamp at 1.0), so effective ≤ raw and the
@@ -474,12 +497,13 @@ async def _build_response(
     as_of_excluded_undatable: int = 0,
     claim_coverage: ClaimCoverage | None = None,
     embeddings_used: bool = True,
+    observer_scope: ObserverScopeNote | None = None,
 ) -> QueryResponse:
     """Render the final NL answer + envelope from a ranked, collapsed result.
 
     Shared by ``query`` and ``query_federated`` so the response shape and the
     confidence / coverage notes are identical on both paths. ``narrative_constituents``
-     maps each NARRATIVE hit to its ordered constituents; empty on the
+    maps each NARRATIVE hit to its ordered constituents; empty on the
     federated path (per-store expansion is out of scope). ``as_of_notes_by_id``
     / ``as_of_excluded_undatable`` carry the per-hit supersession
     crossings and the fail-closed disclosure count when the request set
@@ -529,6 +553,7 @@ async def _build_response(
     # `relevance is None` alone is indistinguishable from the inert case.
     ranking_degraded = None if embeddings_used else RANKING_DEGRADED_NO_ENCODER
     answer_generation_error: str | None = None
+    answer_generation_error_cause: AnswerFailureCause | None = None
     answer_refused = False
     if relevance is not None and relevance.below_floor:
         answer = _below_floor_answer(request, relevance, len(top_particles))
@@ -558,6 +583,12 @@ async def _build_response(
             # the machine-readable field (for UI banners).
             log.error("Response generation failed: %s", exc)
             answer_generation_error = generation_error_reason(exc)
+            # …and which *kind* of failure it was, so a program need not parse
+            # the provider's prose: an exhausted token budget (the operator's
+            # cap, already retried once at the larger one) is a different thing
+            # from a billing or network failure, and a caller that must exclude
+            # unscoreable answers has to tell them apart.
+            answer_generation_error_cause = generation_error_cause(exc)
             answer = (
                 f"[Answer generation unavailable: {answer_generation_error}]\n"
                 "Showing the retrieved beliefs instead — this is a listing, "
@@ -581,6 +612,7 @@ async def _build_response(
     return QueryResponse(
         answer=answer,
         answer_generation_error=answer_generation_error,
+        answer_generation_error_cause=answer_generation_error_cause,
         ranking_degraded=ranking_degraded,
         answer_refused=answer_refused,
         particles=top_particles,
@@ -597,6 +629,7 @@ async def _build_response(
         as_of=request.as_of,
         as_of_notes=as_of_notes,
         as_of_excluded_undatable=as_of_excluded_undatable,
+        observer_scope=observer_scope,
         claim_coverage=claim_coverage,
         relevance=relevance,
     )
@@ -625,7 +658,7 @@ async def query(
 ) -> QueryResponse:
     """Execute a semantic search over one store and generate a NL answer.
 
-    A purely structural request (modes three and four — filters
+    A purely structural request (modes three and four: filters
     without a question, aggregates, or the predicate listing) dispatches to
     :func:`.structural.structural_query` instead: deterministic, no embedding,
     no LLM call.
@@ -645,8 +678,9 @@ async def query(
     if request.question is None:  # unreachable: the structural dispatch above caught None
         raise ValueError("semantic query requires a question")
     query_emb = _embed(request.question)
+    scope_notes: list[ObserverScopeNote] = []
     scored, pub_at_by_id, as_of_notes_by_id, as_of_excluded, claim_stats = await _gather_scored(
-        session, request, query_emb, trust_policy, decay_policy
+        session, request, query_emb, trust_policy, decay_policy, scope_notes=scope_notes
     )
     claim_coverage = await _claim_coverage_for_stats(session, claim_stats)
 
@@ -717,6 +751,7 @@ async def query(
         as_of_excluded_undatable=as_of_excluded,
         claim_coverage=claim_coverage,
         embeddings_used=query_emb is not None,
+        observer_scope=merged_scope_note(scope_notes),
     )
 
 
@@ -733,7 +768,8 @@ async def _precedence_demotions(
     supplied (the key-free deterministic projection path detects no conflicts —
     so the tie-break is inert and the order stays byte-stable), or when no pair
     has a comparable precedence key on both sides. Otherwise it reads each
-    candidate's authored precedence key (ADR id ordinal via the genre-adapter seam + ``content_published_at`` fallback) and returns the
+    candidate's authored precedence key (ADR id ordinal via the
+    genre-adapter seam + ``content_published_at`` fallback) and returns the
     recency-losers. Rank-time only — never mutates the store.
     """
     if not conflict_pairs or not get_config().document_precedence.enabled:
@@ -954,11 +990,14 @@ async def query_federated(
     as_of_excluded = 0
     # claim-prefilter stats and coverage counts summed across stores.
     claim_coverage: ClaimCoverage | None = None
+    # the viewer's observer rides the shared request; each store
+    # evaluates it against its own entry tags, and the disclosure is summed.
+    scope_notes: list[ObserverScopeNote] = []
     for store in stores:
         async with session_scope(store) as s:
             await assert_store_schema_current(s)
             scored, pubs, notes, excluded, claim_stats = await _gather_scored(
-                s, request, query_emb, trust_policy, decay_policy
+                s, request, query_emb, trust_policy, decay_policy, scope_notes=scope_notes
             )
             merged.extend(scored)
             pub_at_by_id.update(pubs)
@@ -997,6 +1036,7 @@ async def query_federated(
         as_of_excluded_undatable=as_of_excluded,
         claim_coverage=claim_coverage,
         embeddings_used=query_emb is not None,
+        observer_scope=merged_scope_note(scope_notes),
     )
 
 

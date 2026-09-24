@@ -151,6 +151,25 @@ class TestIdentifyScopeExplicit:
         assert snap_old.snapshot_id != snap_new.snapshot_id
 
     @pytest.mark.asyncio
+    async def test_a_newer_revisit_is_not_the_snapshot_to_reindex(self, db_session: Any) -> None:
+        """A REVISIT is COMPLETE, newer and blob-less; reindexing it extracts nothing."""
+        entry = await _add_entry(db_session)
+        snap = await _add_snapshot(db_session, entry, captured_at=datetime(2026, 1, 1, tzinfo=UTC))
+        revisit = Snapshot(
+            snapshot_id=str(uuid.uuid4()),
+            captured_at=datetime(2026, 5, 1, tzinfo=UTC),
+            content_hash=snap.content_hash,
+            extraction_status=ExtractionStatus.COMPLETE,
+            warc_record_type=WarcRecordType.REVISIT,
+            refers_to=snap.snapshot_id,
+        )
+        db_session.add(SnapshotRow.from_model(revisit, entry.entry_id))
+        await db_session.commit()
+
+        scope = await _identify_scope(db_session, [entry.entry_id], None, None, False)
+        assert scope == [(entry.entry_id, snap.snapshot_id)]
+
+    @pytest.mark.asyncio
     async def test_prefix_unique_match(self, db_session: Any) -> None:
         entry = await _add_entry(db_session)
         snap = await _add_snapshot(db_session, entry)
@@ -424,6 +443,51 @@ class TestIdentifyScopeAuto:
         assert (entry_pending.entry_id, snap_pending.snapshot_id) in scope
         # COMPLETE entries are NOT auto-included by include_failed
         assert not any(e == entry_complete.entry_id for e, _ in scope)
+
+    @pytest.mark.asyncio
+    async def test_auto_discovery_collapses_superseded_generations(self, db_session: Any) -> None:
+        """a FAILED old generation of a MUTABLE entry is not worth a retry."""
+        from particles.core.schema import Mutability
+        from particles.corpus.deposit import save_blob, sha256
+
+        entry = await _add_entry(db_session)
+        row = await db_session.get(CorpusEntryRow, entry.entry_id)
+        row.mutability = Mutability.MUTABLE.value
+        stale = await _add_snapshot(
+            db_session,
+            entry,
+            extraction_status=ExtractionStatus.FAILED,
+            captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        content = b"the newest generation"
+        newest = await _add_snapshot(
+            db_session,
+            entry,
+            extraction_status=ExtractionStatus.PENDING,
+            captured_at=datetime(2026, 5, 1, tzinfo=UTC),
+            content_hash=sha256(content),
+        )
+        save_blob(content, newest.content_hash)
+        await db_session.commit()
+
+        # --dry-run promises zero writes: it reports the narrowed scope, marks nothing.
+        lines: list[str] = []
+        dry = await _identify_scope(
+            db_session, None, None, None, include_failed=True, progress=lines.append, dry_run=True
+        )
+        assert dry == [(entry.entry_id, newest.snapshot_id)]
+        assert any("Skipped 1 superseded snapshot(s)" in line for line in lines)
+        stale_row = await db_session.get(SnapshotRow, stale.snapshot_id)
+        await db_session.refresh(stale_row)
+        assert stale_row.extraction_status == ExtractionStatus.FAILED.value
+        assert stale_row.superseded_by_snapshot_id is None
+
+        # The real run marks it.
+        scope = await _identify_scope(db_session, None, None, None, include_failed=True)
+        assert scope == [(entry.entry_id, newest.snapshot_id)]
+        await db_session.refresh(stale_row)
+        assert stale_row.extraction_status == ExtractionStatus.COMPLETE.value
+        assert stale_row.superseded_by_snapshot_id == newest.snapshot_id
 
     @pytest.mark.asyncio
     async def test_include_failed_false_excludes_failed_and_pending(self, db_session: Any) -> None:

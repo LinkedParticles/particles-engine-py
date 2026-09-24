@@ -5,15 +5,21 @@
 """The nine reference memory-server operations, backed by the store.
 
 Each function mirrors one ``KnowledgeGraphManager`` method from
-``@modelcontextprotocol/server-memory`` v0.6.3, including the parts that are
-easy to get subtly wrong and that the reference's own 42-case suite pins:
+``@modelcontextprotocol/server-memory`` (re-verified against the reference's
+``main`` on 2026-09-20), including the parts that are easy to get subtly wrong
+and that the reference's own suite pins:
 
 * ``create_entities`` returns **only** the newly created entities and silently
-  skips a name that already exists;
-* ``create_relations`` dedups on the exact ``(from, to, relationType)`` triple;
+  skips a name that already exists — in the store *or earlier in the same
+  batch*;
+* ``create_relations`` **raises** ``Entity with name X not found`` when either
+  endpoint is missing, before anything is written, then dedups on the exact
+  ``(from, to, relationType)`` triple;
 * ``add_observations`` **raises** ``Entity with name X not found``;
-* every ``delete_*`` is silent on an absent target and returns a fixed
-  ``{success, message}`` payload.
+* every ``delete_*`` tolerates an absent target but **reports** it: the
+  ``{success, message}`` payload carries the fixed success sentence only when
+  everything requested was actually deleted, and a ``Deleted N of M …`` count
+  otherwise. The counting arithmetic is the reference's, quirks included.
 
 Writes go through the agent-write path — deposit for provenance, then
 assert through the §6.6 ladder — under the façade's own asserting principal, so
@@ -33,7 +39,6 @@ from particles.config import get_config
 from particles.mcp.memory_compat.graph import (
     OBSERVATION_TAG,
     TOMBSTONE_TAG,
-    Subgraph,
     caps,
     entity_type_of,
     load_subgraph,
@@ -46,6 +51,38 @@ log = logging.getLogger(__name__)
 DELETE_ENTITIES_MESSAGE = "Entities deleted successfully"
 DELETE_OBSERVATIONS_MESSAGE = "Observations deleted successfully"
 DELETE_RELATIONS_MESSAGE = "Relations deleted successfully"
+
+
+def delete_entities_message(deleted: list[str], not_found: list[str]) -> str:
+    """The reference's ``delete_entities`` sentence, partial deletes reported.
+
+    Counts are per *requested name*, so a name listed twice counts twice on
+    both sides of the "N of M" — the reference's own arithmetic.
+    """
+    if not not_found:
+        return DELETE_ENTITIES_MESSAGE
+    requested = len(deleted) + len(not_found)
+    return f"Deleted {len(deleted)} of {requested} entities. Not found: {', '.join(not_found)}"
+
+
+def delete_observations_message(
+    deleted_count: int, requested: int, missing_entities: list[str]
+) -> str:
+    """The reference's ``delete_observations`` sentence, partial deletes reported."""
+    if deleted_count == requested:
+        return DELETE_OBSERVATIONS_MESSAGE
+    message = f"Deleted {deleted_count} of {requested} observations."
+    if missing_entities:
+        message += f" Entities not found: {', '.join(missing_entities)}"
+    return message
+
+
+def delete_relations_message(deleted_count: int, requested: int) -> str:
+    """The reference's ``delete_relations`` sentence, partial deletes reported."""
+    if deleted_count == requested:
+        return DELETE_RELATIONS_MESSAGE
+    return f"Deleted {deleted_count} of {requested} relations. The rest matched nothing."
+
 
 _RETRACT_REASON = "Deleted through the reference memory-server compatibility façade."
 
@@ -138,14 +175,6 @@ async def _create_subject(session: Any, name: str, entity_type: str) -> Any:
     return subject
 
 
-async def _ensure_subject(session: Any, sub: Subgraph, name: str, entity_type: str = "") -> Any:
-    """Resolve a name to a live Subject, reviving a tombstone or creating one."""
-    existing = sub.raw_subject_by_name(name)
-    if existing is None:
-        return await _create_subject(session, name, entity_type)
-    return existing
-
-
 # -- write operations ---------------------------------------------------
 
 
@@ -154,7 +183,19 @@ async def create_entities(
 ) -> list[dict[str, Any]]:
     """Create entities, returning only the newly created ones (reference semantics)."""
     sub = await load_subgraph(session)
-    pending = [e for e in entities if sub.subject_by_name(str(e.get("name", ""))) is None]
+    pending: list[dict[str, Any]] = []
+    claimed: set[str] = set()
+    for entity in entities:
+        name = str(entity.get("name", ""))
+        # The reference also skips a name repeated earlier in the same batch.
+        # The key is the façade's own name identity (``Subgraph`` matches names
+        # case-insensitively), so one batch can never mint two Subjects that
+        # every later lookup would treat as the same entity.
+        key = name.lower()
+        if key in claimed or sub.subject_by_name(name) is not None:
+            continue
+        claimed.add(key)
+        pending.append(entity)
     if not pending:
         return []
 
@@ -197,8 +238,23 @@ async def create_entities(
 async def create_relations(
     session: Any, *, store: str, relations: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Create relations, deduped on the exact triple, returning only the new ones."""
+    """Create relations, deduped on the exact triple, returning only the new ones.
+
+    Raises:
+        ValueError: If either endpoint of any relation is not an existing
+            entity — the reference throws ``Entity with name X not found``
+            for the whole batch before writing anything, ``from`` checked
+            before ``to``. A deleted (tombstoned) entity counts as absent.
+    """
     sub = await load_subgraph(session)
+    endpoints: dict[str, Any] = {}
+    for relation in relations:
+        for endpoint in (str(relation.get("from", "")), str(relation.get("to", ""))):
+            subject = sub.subject_by_name(endpoint)
+            if subject is None:
+                raise ValueError(f"Entity with name {endpoint} not found")
+            endpoints[endpoint] = subject
+
     pending: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for relation in relations:
@@ -217,15 +273,11 @@ async def create_relations(
     entry_id = await _deposit(session, "create_relations", relations)
     for relation in pending:
         src, dst, kind = relation["from"], relation["to"], relation["relationType"]
-        # The reference never checks that endpoints exist; we must materialise
-        # them because a particle links to Subjects, not to bare strings.
-        from_subject = await _ensure_subject(session, sub, src)
-        to_subject = await _ensure_subject(session, sub, dst)
         await _assert(
             session,
             store=store,
             content=relation_content(src, dst, kind),
-            subject_ids=[from_subject.id, to_subject.id],
+            subject_ids=[endpoints[src].id, endpoints[dst].id],
             corpus_entry_id=entry_id,
             tags=relation_tags(src, dst, kind),
         )
@@ -277,16 +329,30 @@ async def add_observations(
     return results
 
 
-async def delete_entities(session: Any, *, store: str, entity_names: list[str]) -> None:
-    """Retract entities and everything attached to them. Silent on absent names."""
+async def delete_entities(
+    session: Any, *, store: str, entity_names: list[str]
+) -> tuple[list[str], list[str]]:
+    """Retract entities and everything attached to them.
+
+    An absent name is not an error, but it is reported: returns
+    ``(deleted, not_found)``, each in request order, for
+    :func:`delete_entities_message`.
+    """
     sub = await load_subgraph(session)
-    doomed = [
-        subject
-        for subject in (sub.subject_by_name(str(n)) for n in entity_names)
-        if subject is not None
-    ]
+    deleted: list[str] = []
+    not_found: list[str] = []
+    doomed: list[Any] = []
+    for raw in entity_names:
+        name = str(raw)
+        subject = sub.subject_by_name(name)
+        if subject is None:
+            not_found.append(name)
+            continue
+        deleted.append(name)
+        if subject not in doomed:
+            doomed.append(subject)
     if not doomed:
-        return
+        return deleted, not_found
 
     entry_id = await _deposit(session, "delete_entities", entity_names)
     doomed_ids = {s.id for s in doomed}
@@ -312,32 +378,63 @@ async def delete_entities(session: Any, *, store: str, entity_names: list[str]) 
             corpus_entry_id=entry_id,
             tags=[TOMBSTONE_TAG],
         )
+    return deleted, not_found
 
 
-async def delete_observations(session: Any, *, store: str, deletions: list[dict[str, Any]]) -> None:
-    """Retract specific observations. Silent on an absent entity or observation."""
+async def delete_observations(
+    session: Any, *, store: str, deletions: list[dict[str, Any]]
+) -> tuple[int, int, list[str]]:
+    """Retract specific observations.
+
+    An absent entity or observation is not an error, but it is reported:
+    returns ``(deleted_count, requested, missing_entities)`` for
+    :func:`delete_observations_message`. ``requested`` is the reference's sum
+    of every listed string, repeats included; ``deleted_count`` is what was
+    actually retracted, so a string listed twice counts once.
+    """
     sub = await load_subgraph(session)
+    deleted_count = 0
+    requested = 0
+    missing_entities: list[str] = []
+    retracted: set[str] = set()
     for item in deletions:
-        subject = sub.subject_by_name(str(item.get("entityName", "")))
+        name = str(item.get("entityName", ""))
+        unwanted = [str(o) for o in item.get("observations", []) or []]
+        requested += len(unwanted)
+        subject = sub.subject_by_name(name)
         if subject is None:
+            missing_entities.append(name)
             continue
-        unwanted = {str(o) for o in item.get("observations", []) or []}
         for particle in sub.observation_particles(subject.id):
-            if particle.content in unwanted:
+            if particle.content in unwanted and particle.id not in retracted:
                 await _retract(session, store=store, particle_id=particle.id)
+                retracted.add(particle.id)
+                deleted_count += 1
+    return deleted_count, requested, missing_entities
 
 
-async def delete_relations(session: Any, *, store: str, relations: list[dict[str, Any]]) -> None:
-    """Retract relations matching the exact triple. Silent on absent."""
+async def delete_relations(
+    session: Any, *, store: str, relations: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """Retract relations matching the exact triple.
+
+    An absent relation is not an error, but it is reported: returns
+    ``(deleted_count, requested)`` for :func:`delete_relations_message`. A
+    triple listed twice is requested twice and deleted once, as in the
+    reference.
+    """
     sub = await load_subgraph(session)
+    retracted: set[str] = set()
     for relation in relations:
         particle = sub.find_relation(
             str(relation.get("from", "")),
             str(relation.get("to", "")),
             str(relation.get("relationType", "")),
         )
-        if particle is not None:
+        if particle is not None and particle.id not in retracted:
             await _retract(session, store=store, particle_id=particle.id)
+            retracted.add(particle.id)
+    return len(retracted), len(relations)
 
 
 # -- read operations ----------------------------------------------------

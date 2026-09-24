@@ -7,7 +7,8 @@
 One nullable column: the transaction-time end of a belief — the instant the
 particle first left ``ACTIVE`` — stamped write-once at the
 ``update_particle_status`` choke point from this migration forward. Historical
-rows stay NULL (recorded history cannot be backfilled); the reconstruction ladder dates them from successor pointers, the operator event
+rows stay NULL (recorded history cannot be backfilled); the
+reconstruction ladder dates them from successor pointers, the operator event
 log, and ``valid_until``, fail-closed where unknown.
 
 Additive and nullable: existing rows are unaffected, the core ``Particle``

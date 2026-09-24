@@ -21,7 +21,7 @@ from particles.operations.curation.cards import CardKind
 from particles.operations.curation.snapshot import CurationQueueResult
 
 curate_app = typer.Typer(
-    help="Bus-stop editing — the finite, leverage-ranked curation queue.",
+    help="Bus-stop editing: the finite, leverage-ranked curation queue.",
     no_args_is_help=False,
 )
 app.add_typer(curate_app, name="curate")
@@ -85,7 +85,7 @@ def curate_main(
     refresh: bool = typer.Option(
         False,
         "--refresh",
-        help="Rebuild the card collection before showing it. Slow — "
+        help="Rebuild the card collection before showing it. Slow: "
         "the finders re-run store-wide. Run this once on a store with no "
         "collection yet; the nightly `memory consolidate` does it for you "
         "after that.",

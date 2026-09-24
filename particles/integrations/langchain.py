@@ -145,8 +145,8 @@ def ParticlesDepositTool() -> StructuredTool:  # noqa: N802 - factory named for 
     ``backend.deposit_text(...)`` and returns the resulting
     ``(entry_id, snapshot_id)`` as a short confirmation string. This is the
     agent-write path the MCP ``deposit_text`` tool exposes; the adapter reuses it
-    through the same seam, inheriting the engine's own write-enablement gate
-     — the adapter never decides whether a store is writable.
+    through the same seam, inheriting the engine's own write-enablement gate—
+    the adapter never decides whether a store is writable.
     """
     _require_langchain()
     from langchain_core.tools import StructuredTool

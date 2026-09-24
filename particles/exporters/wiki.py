@@ -112,7 +112,8 @@ async def _load_qualifying_subjects(
     ``qualifying`` is ``(subject, sorted_active_particles)`` for each
     subject whose *post-filter* particle count meets ``min_particles``.
     ``dropped_by_subject`` maps ``subject.id`` → drop count so the
-    rendered article frontmatter can surface the per-subject bite wiki (the export summary sums this over the
+    rendered article frontmatter can surface the per-subject bite
+    wiki (the export summary sums this over the
     qualifying set).
 
     Loads all subjects + all ACTIVE particles + the join table in three
@@ -304,7 +305,7 @@ class WikiExporter:
         regenerate_all = bool(options.get("regenerate_all", False))
         invalidate_stale_links = bool(options.get("invalidate_stale_links", False))
         dry_run = bool(options.get("dry_run", False))
-        #: deterministic no-LLM export — every article is the
+        # : deterministic no-LLM export — every article is the
         # structured listing; no API key, no token cost, reproducible.
         without_synthesis = bool(options.get("without_synthesis", False))
         include_non_asserted = bool(options.get("include_non_asserted", False))

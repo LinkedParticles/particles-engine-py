@@ -33,6 +33,7 @@ from particles.api.cli._claude_code import (
     ConfigEditError,
     absolutize_sqlite_dsn,
     build_hook_commands,
+    claude_project_slug,
     default_memory_manifest_text,
     disable_memory_store_text,
     enable_memory_store_text,
@@ -41,6 +42,8 @@ from particles.api.cli._claude_code import (
     merge_particles_hook_entries,
     particles_hook_commands,
     render_settings_json,
+    repository_root,
+    rule_file_project_key,
     state_dir,
     strip_particles_hook_entries,
 )
@@ -114,7 +117,7 @@ def init_claude_code_cmd(
         help=(
             "Also install the shipped agent-onboarding skill files "
             "into the harness's skills directory (a Particles-owned subdirectory; "
-            "--remove deletes exactly that). Default on — an agent that has the "
+            "--remove deletes exactly that). Default on: an agent that has the "
             "tools but not the guidance is the gap these close."
         ),
     ),
@@ -122,8 +125,8 @@ def init_claude_code_cmd(
         False,
         "--json",
         help=(
-            "Emit a machine-readable result on stdout — what was "
-            "created, what was merged, and what is left for the human — so an "
+            "Emit a machine-readable result on stdout (what was "
+            "created, what was merged, and what is left for the human) so an "
             "agent can run the installer and report the outcome instead of "
             "scraping human-formatted output. Implies --no-audit: the audit "
             "hand-off is interactive, and the result names it under next_steps."
@@ -333,6 +336,15 @@ def _install(
     rendered = render_settings_json(merged)
     _warn_if_store_dsn_cwd_relative(handle, hook_env)
 
+    # a `--project` install is about this project, so its side
+    # effects are too. (The read lens is the same in both installs — it comes
+    # from the session's working directory, not from which file holds the hook.)
+    project_root = repository_root(Path.cwd()) if _is_project_scope(settings_path) else None
+    project_memory_dir = (
+        Path.home() / ".claude" / "projects" / claude_project_slug(project_root) / "memory"
+        if project_root is not None
+        else None
+    )
     if dry_run:
         _say(f"--dry-run: would write {settings_path}:")
         _say(rendered)
@@ -344,10 +356,10 @@ def _install(
             if not memory_manifest_path().exists():
                 _say(f"--dry-run: would write {memory_manifest_path()}:")
                 _say(default_memory_manifest_text())
-            for md in _memory_files_without_region():
+            for md in _memory_files_without_region(project_memory_dir):
                 _say(f"--dry-run: would insert the projected region into {md}")
         if get_config().rule_sources.enabled:
-            for path in _resolved_rule_sources():
+            for path in _resolved_rule_sources(project_root):
                 _say(f"--dry-run: would register rule source {path}")
         if install_skills_files:
             planned_skills = _plan_skills(project=_is_project_scope(settings_path))
@@ -377,7 +389,7 @@ def _install(
     # manifest (never clobbering an operator-edited one) and seed the sentinel
     # region into any existing per-project MEMORY.md that lacks it.
     if get_config().agent_memory.projection.enabled:
-        _provision_projection()
+        _provision_projection(project_memory_dir)
 
     # 2c. Rule-source registration: the operating documents that
     # govern how the agent works here become tracked MUTABLE + LAZY sources, so
@@ -386,7 +398,7 @@ def _install(
     # audit hand-off, which extracts, so the rules land as beliefs in this same
     # install rather than waiting for a night.
     if get_config().rule_sources.enabled:
-        _provision_rule_sources(handle)
+        _provision_rule_sources(handle, project_root)
 
     # 3. The marker-owned settings merge.
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -406,7 +418,12 @@ def _install(
 
     # 4. First-run audit hand-off (skippable).
     if not no_audit:
-        _offer_first_run_audit(handle)
+        _offer_first_run_audit(handle, project_memory_dir)
+
+    # 5. Project keys. Last, so whatever the audit just deposited
+    # is covered; it is also what lets `claude_code.observer_scope: project`
+    # engage on this store at all.
+    _rescope_store(handle)
 
     return result
 
@@ -550,19 +567,21 @@ def _claude_memory_files() -> list[Path]:
     return sorted(p for p in root.glob("*/memory/MEMORY.md") if p.is_file())
 
 
-def _memory_files_without_region() -> list[Path]:
+def _memory_files_without_region(only_memory_dir: Path | None = None) -> list[Path]:
     """The MEMORY.md files init still needs to seed with the sentinel region."""
     from particles.render.markdown import find_projected_regions
 
     missing: list[Path] = []
     for md in _claude_memory_files():
+        if only_memory_dir is not None and md.parent != only_memory_dir:
+            continue
         text = md.read_text(encoding="utf-8", errors="replace")
         if not any(r.region == MEMORY_REGION for r in find_projected_regions(text)):
             missing.append(md)
     return missing
 
 
-def _provision_projection() -> None:
+def _provision_projection(only_memory_dir: Path | None = None) -> None:
     """Write the default ``memory.yaml`` + seed sentinel regions (§3/§7).
 
     The manifest is written only when absent — an operator-edited manifest is
@@ -578,20 +597,20 @@ def _provision_projection() -> None:
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(default_memory_manifest_text(), encoding="utf-8")
         _say(f"Wrote the MEMORY.md projection manifest to {manifest} (yours to edit).")
-    for md in _memory_files_without_region():
+    for md in _memory_files_without_region(only_memory_dir):
         text = md.read_text(encoding="utf-8", errors="replace")
         atomic_write_text(md, insert_projected_region_at_top(text, MEMORY_REGION, str(manifest)))
         _say(f"Inserted the projected memory-index region into {md}.")
 
 
-def _resolved_rule_sources() -> list[Path]:
+def _resolved_rule_sources(project_root: Path | None = None) -> list[Path]:
     """The rule-source set this install would register."""
     from particles.corpus.rule_sources import resolve_rule_sources
 
-    return resolve_rule_sources().files
+    return resolve_rule_sources([str(project_root)] if project_root is not None else None).files
 
 
-def _provision_rule_sources(handle: str) -> None:
+def _provision_rule_sources(handle: str, project_root: Path | None = None) -> None:
     """Register the rule-source set against ``handle``.
 
     Non-fatal by the same reasoning as :func:`_offer_first_run_audit`: the hook
@@ -605,7 +624,13 @@ def _provision_rule_sources(handle: str) -> None:
     async def _go() -> None:
         async with session_scope(handle, write=True) as session:
             report = await sync_rule_sources(
-                session, filter_text=projected_region_filter(), deposited_by="init"
+                session,
+                # A `--project` install registers this project's rule documents
+                # only; the user-level ones belong to the user-level install.
+                [str(project_root)] if project_root is not None else None,
+                filter_text=projected_region_filter(),
+                deposited_by="init",
+                project_key_for=rule_file_project_key,
             )
             await session.commit()
         if not report.resolution.files:
@@ -622,7 +647,43 @@ def _provision_rule_sources(handle: str) -> None:
         _say(f"Rule-source registration failed ({exc}) — run `particles rules sync` later.")
 
 
-def _offer_first_run_audit(handle: str) -> None:
+def _rescope_store(handle: str) -> None:
+    """Bring the store's project keys up to date. Additive and idempotent.
+
+    Non-fatal, like the other post-install steps: the hooks are installed and
+    correct whether or not this succeeds, and `particles memory rescope` is
+    there to run by hand.
+    """
+    from particles.api.cli._claude_code import entry_project_key
+    from particles.db import session_scope
+    from particles.operations.observer_scope import rescope
+
+    root = Path.home() / ".claude" / "projects"
+
+    async def _go() -> None:
+        async with session_scope(handle, write=True) as session:
+            report = await rescope(
+                session,
+                key_for=lambda _entry_id, uri_r, tags: entry_project_key(uri_r, tags, root),
+                actor="init",
+            )
+            await session.commit()
+        if report.added:
+            _say(f"Added {len(report.added)} project key(s) to already-harvested sources.")
+        if report.unattributed:
+            _say(
+                f"{len(report.unattributed)} harvested source(s) could not be attributed to a "
+                "project — `particles memory rescope` lists them."
+            )
+
+    try:
+        run(_go())
+    except Exception as exc:  # noqa: BLE001 — the install itself already succeeded
+        log.debug("rescope failed", exc_info=True)
+        _say(f"Project-key rescope failed ({exc}) — run `particles memory rescope` later.")
+
+
+def _offer_first_run_audit(handle: str, only_memory_dir: Path | None = None) -> None:
     """First-run memory-audit hand-off (implemented).
 
     Runs ``particles audit`` over every ``~/.claude/projects/*/memory/``
@@ -634,7 +695,10 @@ def _offer_first_run_audit(handle: str) -> None:
     from particles.api.cli.audit import run_first_run_audit
 
     try:
-        run_first_run_audit(handle)
+        if only_memory_dir is None:
+            run_first_run_audit(handle)
+        else:
+            run_first_run_audit(handle, only_memory_dir=only_memory_dir)
     except typer.Exit:
         # Refusal / abort inside the audit flow already printed its message.
         _say(

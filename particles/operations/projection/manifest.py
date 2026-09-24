@@ -96,8 +96,8 @@ class DerivedSection(BaseModel):
     query: str | None = None
     top_k: int = Field(default=12, ge=1, le=200)
     min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    # Per-section rank-time demotion of code-symbol (docstring) particles
-    #; default 1.0 is inert. Rank-time only, so stored confidence /
+    # Per-section rank-time demotion of code-symbol (docstring) particles;
+    # default 1.0 is inert. Rank-time only, so stored confidence /
     # effective_confidence are untouched.
     code_symbol_rank_weight: float = Field(default=1.0, ge=0.0, le=1.0)
     # Directed-per-section authoring brief: what prose to write,

@@ -114,7 +114,8 @@ def test_share_ceiling_rejects_a_cohort_that_takes_the_head() -> None:
 def test_utility_target_non_regression_is_criterion_three() -> None:
     """Criterion 3 — aboutness must not push the utility-promoted belief out.
 
-    ``u`` only reaches the head via its reinforcement, so it is exactly the case: two promotion-only terms competing for one finite head.
+    ``u`` only reaches the head via its reinforcement, so it is exactly the
+    case: two promotion-only terms competing for one finite head.
     """
     rows = [
         _row("u", 0.5, r=30.0),  # utility-promoted, not about the viewer

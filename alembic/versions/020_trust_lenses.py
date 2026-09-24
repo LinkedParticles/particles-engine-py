@@ -9,7 +9,8 @@ per name), ``trust_lens_entries`` (polymorphic policy entries — statements,
 URL rules, extractor weights), and ``trust_lens_adoptions`` (the store's
 viewpoint: one row per adopted lens name). Lens definitions arrive as
 deposited corpus artefacts (``source_type = TRUST_LENS_DEFINITION``) and are
-materialised by the TrustLensExtractor; adoption composes them into the query-time TrustPolicy, local-wins / most-skeptical-across-lenses.
+materialised by the TrustLensExtractor; adoption composes them into the
+query-time TrustPolicy, local-wins / most-skeptical-across-lenses.
 
 Revision ID: 020
 Revises: 019

@@ -552,7 +552,8 @@ async def test_probe_control_intra_scope_pairs_probed_before_mixed(db_session: o
 async def test_probe_control_store_wide_order_is_pure_similarity(db_session: object) -> None:
     """No scope (store-wide / ``particles lint``) ⇒ no tiers: similarity alone orders.
 
-    Companion to the tiering test above: with ``scope_particle_ids=None`` the tier reads 0 for every pair and the highest-similarity
+    Companion to the tiering test above: with ``scope_particle_ids=None`` the
+    tier reads 0 for every pair and the highest-similarity
     order is unchanged, ``intra_scope_pairs`` stays 0.
     """
     from unittest.mock import patch
@@ -675,6 +676,83 @@ async def test_empty_complete_snapshot_flagged(db_session: object) -> None:
     flagged = [f for f in report.findings if f.finding_type == "EMPTY_COMPLETE_SNAPSHOT"]
     assert len(flagged) == 1
     assert flagged[0].corpus_entry_id == "entry-empty"
+
+
+@pytest.mark.asyncio
+async def test_empty_complete_snapshot_skips_collapsed_and_replaced_generations(
+    db_session: object,
+) -> None:
+    """ "re-extract to confirm" is wrong advice for a superseded generation.
+
+    A collapsed snapshot is empty by design, and an empty snapshot whose
+    replacement generation is in the store could only, if re-extracted, retire
+    that replacement. An empty snapshot whose only newer sibling FAILED is still
+    reported: it may be the best generation the entry has.
+    """
+    from particles.core.schema import (
+        CorpusEntry,
+        ExtractionStatus,
+        FetchPolicy,
+        Mutability,
+        WarcRecordType,
+    )
+    from particles.corpus.store import CorpusEntryRow, SnapshotRow
+    from particles.operations.lint import run_lint
+
+    session = db_session  # type: ignore[assignment]
+    now = datetime.now(UTC)
+
+    def _entry(entry_id: str) -> CorpusEntryRow:
+        return CorpusEntryRow.from_model(
+            CorpusEntry(
+                entry_id=entry_id,
+                source_type="LOCAL_MARKDOWN",
+                uri_r=f"file:///tmp/{entry_id}.md",
+                mutability=Mutability.MUTABLE,
+                fetch_policy=FetchPolicy.NEVER,
+                deposited_by="test",
+            )
+        )
+
+    def _snap(
+        snapshot_id: str,
+        entry_id: str,
+        *,
+        days_old: int,
+        status: ExtractionStatus = ExtractionStatus.COMPLETE,
+        superseded_by: str | None = None,
+    ) -> SnapshotRow:
+        return SnapshotRow(
+            snapshot_id=snapshot_id,
+            entry_id=entry_id,
+            captured_at=now - timedelta(days=days_old),
+            content_hash=(snapshot_id[0] * 64)[:64],
+            warc_record_type=WarcRecordType.RESPONSE.value,
+            extraction_status=status.value,
+            superseded_by_snapshot_id=superseded_by,
+        )
+
+    session.add_all(  # type: ignore[union-attr]
+        [
+            _entry("entry-collapsed"),
+            _snap("collapsed", "entry-collapsed", days_old=2, superseded_by="newest-a"),
+            _snap("newest-a", "entry-collapsed", days_old=1, status=ExtractionStatus.PENDING),
+            _entry("entry-replaced"),
+            _snap("replaced", "entry-replaced", days_old=2),
+            _snap("zcurrent", "entry-replaced", days_old=1),
+            _entry("entry-survivor"),
+            _snap("survivor", "entry-survivor", days_old=2),
+            _snap("broken", "entry-survivor", days_old=1, status=ExtractionStatus.FAILED),
+        ]
+    )
+    await session.commit()  # type: ignore[union-attr]
+
+    report = await run_lint(session, fix=False, semantic=False)  # type: ignore[arg-type]
+    flagged = {
+        f.detail.split()[1] for f in report.findings if f.finding_type == "EMPTY_COMPLETE_SNAPSHOT"
+    }
+    # `zcurrent` is itself empty and current, so it is reported like any other.
+    assert flagged == {"zcurrent", "survivor"}
 
 
 @pytest.mark.asyncio
@@ -1172,3 +1250,39 @@ async def test_probe_control_batch_respects_the_cap(db_session: object) -> None:
     assert control.candidate_pairs == 3
     assert control.probes_run == 1
     assert control.capped is True
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_contradiction_is_reported_without_a_probe(db_session: object) -> None:
+    """the write path's confirmed, declined pair is a structural finding."""
+    from unittest.mock import AsyncMock, patch
+
+    from particles.operations.lint import run_lint
+    from particles.store.particle_store import update_particle_status
+    from particles.store.relation_store import record_observer_divergence
+
+    session = db_session  # type: ignore[assignment]
+    a = _make_particle("The default branch is main.")
+    b = _make_particle("The default branch is master.")
+    gone = _make_particle("The default branch is trunk.")
+    for p in (a, b):
+        await insert_particle(session, p, _EMB_HI_A)  # type: ignore[arg-type]
+    await insert_particle(session, gone)  # type: ignore[arg-type]
+    await update_particle_status(  # type: ignore[arg-type]
+        session, gone.id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
+    )
+    await record_observer_divergence(session, a.id, b.id)  # type: ignore[arg-type]
+    await record_observer_divergence(session, a.id, gone.id)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    probe = AsyncMock(return_value="YES: a probe that must not run")
+    with patch("particles.operations.lint.contradictions._llm_check_contradiction", probe):
+        structural = await run_lint(session, fix=False, semantic=False)  # type: ignore[arg-type]
+        semantic = await run_lint(session, fix=False, semantic=True)  # type: ignore[arg-type]
+
+    for report in (structural, semantic):
+        found = [f for f in report.findings if f.finding_type == "CONTRADICTION"]
+        # One finding for the live pair; a pair with a retired end is not live.
+        assert len(found) == 1
+        assert "no probe run" in found[0].detail
+    probe.assert_not_awaited()  # the one near-duplicate pair is already recorded

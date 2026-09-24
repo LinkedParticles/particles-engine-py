@@ -123,6 +123,7 @@ async def _resolve_subject_ref(session: AsyncSession, ref: SubjectRef) -> tuple[
         find_by_external_ref,
         find_by_name,
         insert_subject,
+        persona_alias_guard,
     )
 
     for ext in ref.external_refs:
@@ -131,7 +132,13 @@ async def _resolve_subject_ref(session: AsyncSession, ref: SubjectRef) -> tuple[
             return existing.id, False
 
     if ref.canonical_name:
-        by_name = await find_by_name(session, ref.canonical_name)
+        # A binding path: an imported Subject named "User" or "I" is not this
+        # store's conversational persona, whatever forms its fold has recorded.
+        by_name = await find_by_name(
+            session,
+            ref.canonical_name,
+            skip_aliases_of=persona_alias_guard(ref.canonical_name, None),
+        )
         if by_name is not None:
             return by_name.id, False
         subject = Subject(
@@ -262,13 +269,15 @@ async def _import_subject_unit(session: AsyncSession, unit: dict[str, Any]) -> b
         find_by_external_ref,
         find_by_name,
         insert_subject,
+        persona_alias_guard,
     )
 
     subject = subject_from_unit(unit)
     for ext in subject.external_ids:
         if await find_by_external_ref(session, ext.namespace, ext.id) is not None:
             return False
-    if await find_by_name(session, subject.canonical_name) is not None:
+    guard = persona_alias_guard(subject.canonical_name, None)
+    if await find_by_name(session, subject.canonical_name, skip_aliases_of=guard) is not None:
         return False
     await insert_subject(session, subject)
     return True

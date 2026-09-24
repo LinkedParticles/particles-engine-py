@@ -16,7 +16,8 @@ candidate closed form either overshot the admissible band by 3–8×, returned z
 on head diversity — which measures over-extraction, not utility policy,
 and would quietly re-tune ``λ`` downward to conceal duplicate clusters.
 
-So this module ships the *harness* rather than a fit: it loads the two maps recipe names, hands them to the pure sweep in ``core/scoring/utility.py``, and
+So this module ships the *harness* rather than a fit: it loads the two maps
+recipe names, hands them to the pure sweep in ``core/scoring/utility.py``, and
 lets the operator supply the one input a fit cannot manufacture — which beliefs
 they assert ought to reach the head.
 
@@ -269,13 +270,15 @@ async def sweep_store_owner_rank_lift(
 
     Read-only. The utility ``λ`` in force is held **fixed** across the sweep, so
     what is measured is what aboutness does to the head *utility has already
-    shaped* — which is what makes third criterion (the targets must not regress out of the head) mean anything.
+    shaped* — which is what makes third criterion (the
+    targets must not regress out of the head) mean anything.
 
     Args:
         session: Active store session.
         head_sizes: Each rendered surface's ``N`` (the band is a
             property of the surface, not the store).
-        target_ids: Beliefs that must **stay** in the head — pass the utility targets here to check them for non-regression.
+        target_ids: Beliefs that must **stay** in the head — pass the
+            utility targets here to check them for non-regression.
         grid_max: Largest ``ω`` to evaluate.
         grid_steps: Non-zero grid points (band edges resolve to one step).
         min_owner_in_head: Criterion 1's floor — viewer beliefs the head must

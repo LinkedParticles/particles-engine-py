@@ -6,7 +6,8 @@
 
 This is **storage-layer bookkeeping, not particle schema**: it adds no field
 to :class:`~particles.core.schema.Particle` and does not touch
-``SCHEMA_VERSION``. Every operator-initiated mutation that meets the inclusion criterion records one immutable event here, *in the same
+``SCHEMA_VERSION``. Every operator-initiated mutation that meets the
+inclusion criterion records one immutable event here, *in the same
 transaction as the mutation*.
 
 ``record_event()`` is called from the operation / store layer — never a CLI
@@ -56,7 +57,7 @@ class OperatorEventType(StrEnum):
     SUBJECTS_MERGED = "SUBJECTS_MERGED"
     SUBJECT_DELETED = "SUBJECT_DELETED"
     SUBJECT_ALIASED = "SUBJECT_ALIASED"
-    #: operator overrode a subject's Nomisma class when the
+    # : operator overrode a subject's Nomisma class when the
     # resolver mis-classed it. Only the current class is kept (overwritten on
     # the next change), so the event log is the durable history.
     SUBJECT_RECLASSIFIED = "SUBJECT_RECLASSIFIED"
@@ -129,11 +130,26 @@ class OperatorEventType(StrEnum):
     # than merely listing presses.
     BELIEF_MARKED_USEFUL = "BELIEF_MARKED_USEFUL"
 
+    # observer scope. RESCOPED is also the store's "the lens may
+    # engage" marker — a project observer is honoured only once a rescope has
+    # run, so an upgrade never silently empties a digest. Its payload carries
+    # the counts (keys added, entries left unattributed). WIDENED / REVOKED are
+    # the operator's standing judgement that a belief (PARTICLE ref) or a whole
+    # source (CORPUS_ENTRY ref) applies in every project; distinct types because
+    # they are opposite outcomes.
+    OBSERVER_SCOPE_RESCOPED = "OBSERVER_SCOPE_RESCOPED"
+    # One entry given a key by hand (`rescope --assign`). Its own type because
+    # RESCOPED is the engage marker: attributing one source must not, by
+    # itself, turn the lens on for a store whose other sources are still stale.
+    OBSERVER_SCOPE_KEY_ASSIGNED = "OBSERVER_SCOPE_KEY_ASSIGNED"
+    OBSERVER_SCOPE_WIDENED = "OBSERVER_SCOPE_WIDENED"
+    OBSERVER_SCOPE_WIDEN_REVOKED = "OBSERVER_SCOPE_WIDEN_REVOKED"
+
 
 class EventRefKind(StrEnum):
     """The kind of record an event ref points at.
 
-    The queryable record types — extensible alongside :class:`OperatorEventType`.
+    The queryable record types, extensible alongside :class:`OperatorEventType`.
     An event with no ref of these kinds (rare) carries its targets in
     ``payload`` only.
     """

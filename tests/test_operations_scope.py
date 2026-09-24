@@ -5,7 +5,8 @@
 """Tests for ``particles/operations/_scope.py`` — the shared harvest-scope tier.
 
 ``pair_scope_tier`` is the two-tier priority both budgeted candidate
-scans order by: the contradiction probe and the duplicate-judge pass consume intra-scope pairs (both sides harvested) before
+scans order by: the contradiction probe and the
+duplicate-judge pass consume intra-scope pairs (both sides harvested) before
 mixed pairs (one side), highest similarity within each tier. Pure function —
 no store, no LLM.
 """

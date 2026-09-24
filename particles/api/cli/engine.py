@@ -6,7 +6,8 @@
 
 ``particles engine serve <host:port>`` is the server side of the client/engine
 split: it launches the FastAPI engine other machines' thin clients talk to. It
-mirrors ``particles mcp serve`` and **unifies the bind argument with the fail-closed gate** — it derives ``api.bind_host`` from the bind, runs
+mirrors ``particles mcp serve`` and **unifies the bind argument with the
+fail-closed gate** — it derives ``api.bind_host`` from the bind, runs
 ``enforce_fail_closed_on_startup()`` *before* the socket opens, and only then
 hands off to uvicorn. So ``engine serve 0.0.0.0:8000`` without a real
 ``PARTICLES_API_KEY`` is refused up front, while ``localhost:8000`` is
@@ -79,7 +80,7 @@ def engine_serve_cmd(
     is refused before the socket opens.
 
     With ``--daemon`` (or ``daemon.enabled``) the process also schedules its own
-    background work in the FastAPI lifespan — the rider on the
+    background work in the FastAPI lifespan, the rider on the
     external-scheduler contract. Without it, this command behaves exactly as it
     always has.
     """

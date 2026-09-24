@@ -1,4 +1,4 @@
-# Provider survey — extraction quality (2026-08)
+# Provider survey: extraction quality (2026-08)
 
 **A dated snapshot, as of 2026-08-04.** Between 2026-08-01 and 2026-08-04
 the operator benchmarked **14 model configurations across 5 vendors** on the
@@ -6,15 +6,24 @@ general-extractor's extraction quality, plus a set of Fireworks pricing
 checks. This page is the durable record of that survey: the numbers,
 the method, and the operational verdict.
 
+!!! info "A newer survey exists"
+    The [2026-09 survey](provider-survey-2026-09.md) re-measures the two
+    Anthropic incumbents below at **three runs each** and adds measured dollar
+    cost, which this page has none of. Where the two disagree, prefer the newer
+    page: every number here is a **single run**, and both Anthropic models
+    re-measured lower on an identical harness. This page remains the record of
+    the 14-configuration sweep and of the method findings that made the
+    non-Anthropic rows runnable at all.
+
 It measures a single **extractor's** output against gold particles (the
-`particles extractor benchmark*` family) — not the whole-pipeline
+`particles extractor benchmark*` family), not the whole-pipeline
 agent-memory benchmark on the [Benchmarks](../benchmarks.md) page. Different
 system under test, different verb group.
 
 !!! note "This is a snapshot, not a live leaderboard"
     The raw per-run reports live as JSON under `benchmark.runs_dir`
     (default `~/.particles/benchmark/runs/`), stamped with the resolved
-    `provider:model` pairing — the durable series behind provider
+    `provider:model` pairing, the durable series behind provider
     comparisons and calibration-drift analysis.
     Those run files are gitignored; **this page is the committed
     interpretation of them.** Re-run the harness (see
@@ -37,7 +46,7 @@ All headline numbers are from the **`prose-article-seed-001`** suite at
 
 Three metrics per configuration: **recall** (fraction of the 35 required
 claims recovered), **precision** (fraction of emitted claims that matched a
-required claim), and **ECE** (expected calibration error — lower is better).
+required claim), and **ECE** (expected calibration error; lower is better).
 "Emitted" is the raw count of candidate particles the model produced across
 the 4 cases.
 
@@ -48,14 +57,14 @@ adoption decision.
 
 | Model | Vendor | Recall | Precision | ECE | Emitted | Notes |
 |---|---|---:|---:|---:|---:|---|
-| **claude-sonnet-5** | Anthropic | **0.94** | **0.87** | **0.03** | 85 | **Champion — ADOPTED for extraction 2026-08-04** |
+| **claude-sonnet-5** | Anthropic | **0.94** | **0.87** | **0.03** | 85 | **Champion: ADOPTED for extraction 2026-08-04** |
 | **claude-sonnet-4-6** | Anthropic | 0.94 | 0.85 | 0.15 | 104 | Prior incumbent |
 | kimi-k3 | Fireworks | 0.89 | 0.77 | 0.13 | 99 | Best outsider; no economic case (see below) |
 | gpt-5.6-terra | OpenAI | 0.89 | 0.76 | 0.18 | 102 | |
 | claude-haiku-4-5 | Anthropic | 0.74 | 0.73 | 0.19 | 77 | The cheap tier ($1/$5; $0.50/$2.50 batched) |
 | glm-5p2 | Fireworks | 0.74 | 0.68 | 0.28 | 100 | |
-| gpt-5.6-luna | OpenAI | 0.71 | 0.62 | 0.34 | 106 | High variance — see single-case runs below |
-| claude-opus-5 | Anthropic | 0.69 | 0.58 | 0.29 | 105 | **Not a capability verdict** — see below |
+| gpt-5.6-luna | OpenAI | 0.71 | 0.62 | 0.34 | 106 | High variance; see single-case runs below |
+| claude-opus-5 | Anthropic | 0.69 | 0.58 | 0.29 | 105 | **Not a capability verdict**; see below |
 | minimax-m3 | Fireworks | 0.60 | 0.59 | 0.32 | 86 | |
 | deepseek-v4-flash | Fireworks | 0.57 | 0.48 | 0.44 | 104 | |
 | qwen3p7-plus | Fireworks | 0.57 | 0.58 | 0.36 | 83 | Alibaba closed model, not self-hostable |
@@ -69,25 +78,25 @@ The Fireworks router ids are `accounts/fireworks/routers/<name>` (e.g.
 
 - **claude-sonnet-5 is the champion and was ADOPTED for extraction on
   2026-08-04.** It ties sonnet-4-6 on recall (0.94), edges it on precision
-  (0.87 vs 0.85), and is dramatically better calibrated (ECE 0.03 vs 0.15) —
+  (0.87 vs 0.85), and is dramatically better calibrated (ECE 0.03 vs 0.15),
   while emitting fewer, tighter candidates (85 vs 104). See
   [pricing and the Sept 1 re-evaluation](#pricing-and-the-sept-1-re-evaluation).
 
 - **claude-opus-5's 0.69 is not a capability verdict.** Its output was
   fluent with no truncation; the low score is a scope mismatch. The prompt
-  and judge are tuned for sonnet, and opus-5 expands scope — emitting claims
+  and judge are tuned for sonnet, and opus-5 expands scope, emitting claims
   that a sonnet-tuned prompt+judge does not credit. Evaluating opus-5 fairly
   needs a prompt re-tune first; treat this row as "unmeasured against a fair
   harness," not "worse than haiku."
 
 - **kimi-k3 is the best outsider (0.89) but has no economic case.**
-  Fireworks prices it at **$3/$15 per MTok — sonnet list price — and offers
+  Fireworks prices it at **$3/$15 per MTok (sonnet list price) and offers
   no batch API**, so there is no cost lever to justify the ~5-point recall
   and ~10-point precision gap below sonnet-5.
 
 - **gpt-5.6-luna and gpt-5.6-sol are erratic.** Both scored far higher on
   earlier single-case v0.1.0 runs (luna 0.88 and 0.75 recall; sol 0.88) than
-  on the 4-case v0.2.0 suite (0.71 and 0.51). High variance across cases —
+  on the 4-case v0.2.0 suite (0.71 and 0.51). High variance across cases,
   not a stable ranking.
 
 ## Pricing and the Sept 1 re-evaluation
@@ -100,15 +109,26 @@ claude-sonnet-5 was adopted **during its introductory pricing window**:
 | from 2026-09-01 | **$3 / $15** | List price, **with a new tokenizer (~+30% tokens)** |
 
 At list price the new tokenizer's token inflation makes sonnet-5 cost
-**~1.3× sonnet-4-6** for the same work. **A re-evaluation is due 2026-09-01**
-to confirm sonnet-5 is still the right default once introductory pricing
-ends and the tokenizer change lands.
+**~1.3× sonnet-4-6** for the same work. A re-evaluation was due 2026-09-01 to
+confirm sonnet-5 is still the right default once introductory pricing ended and
+the tokenizer change landed.
+
+!!! success "Resolved: see the 2026-09 survey"
+    That re-evaluation was run on 2026-09-13 and is recorded on the
+    [2026-09 survey](provider-survey-2026-09.md), which supersedes this page's
+    pricing section and adds measured dollar cost per run. Headline findings:
+    the tokenizer change is **+36.9 %** (measured exactly, slightly larger than
+    the ~30 % estimated here), so sonnet-5 costs **~1.37×** sonnet-4-6 for
+    identical work and **~2.05×** what it cost when it was adopted; and at three
+    runs per model sonnet-5 measures **recall 0.800** here, not the 0.94 in the
+    table above, which is one of several reasons to read this page's single-run
+    figures as point estimates of unknown position in their own distribution.
 
 Other pricing anchors from the survey:
 
-- **claude-haiku-4-5** — the cheap tier: **$1 / $5**, or **$0.50 / $2.50
+- **claude-haiku-4-5**, the cheap tier: **$1 / $5**, or **$0.50 / $2.50
   batched**.
-- **Fireworks kimi-k3** — **$3 / $15**, equal to sonnet list price, no batch
+- **Fireworks kimi-k3**: **$3 / $15**, equal to sonnet list price, no batch
   API.
 
 ## Method notes
@@ -119,8 +139,8 @@ empty rows or truncation failures.
 
 ### Token budget and timeout (all reasoning models)
 
-Every reasoning model — **DeepSeek-V4, Kimi K3, the Fireworks GLM / MiniMax
-/ Qwen models, and the entire GPT-5.6 family** — required:
+Every reasoning model (**DeepSeek-V4, Kimi K3, the Fireworks GLM / MiniMax
+/ Qwen models, and the entire GPT-5.6 family**) required:
 
 ```yaml
 extraction:
@@ -158,18 +178,18 @@ Anthropic models accepted; the native adapter **degrades gracefully**
 
 sonnet-5 was calibration-probed on **`prose-calibration-001`**:
 **65/65 candidates were judged correct**, so the calibrator **correctly
-refused to fit** — the labels were degenerate (all-correct gives the fit no
+refused to fit**: the labels were degenerate (all-correct gives the fit no
 signal). For that model/suite pairing, **`EXTRACTOR_DIRECT` is the measured
 optimum**: an uncalibrated direct-confidence pass-through is the right
 behavior, not a fallback. A newly routed model discloses `EXTRACTOR_DIRECT`
 until a benchmark-driven calibration exists for its own `provider:model`
 pairing.
 
-## Earlier single-case runs (v0.1.0 — indicative only)
+## Earlier single-case runs (v0.1.0, indicative only)
 
 Before the v0.2.0 4-case suite existed, models were probed on a single case
 under **suite version v0.1.0**: **8 required claims, so each claim is worth
-±12.5 points of recall.** These numbers are **coarse and indicative only** —
+±12.5 points of recall.** These numbers are **coarse and indicative only**:
 do not compare them against the v0.2.0 table above, and do not average the
 two.
 
@@ -185,7 +205,7 @@ The two luna rows (0.88 vs 0.75 recall on the *same* single case) and sol's
 0.88-here / 0.51-there swing are the origin of the "erratic GPT-5.6" caveat
 above.
 
-## Hallucinated model names — do not re-chase
+## Hallucinated model names: do not re-chase
 
 Two Fireworks model ids were probed during the survey and **do not exist**.
 They are plausible-looking autocomplete hallucinations; recorded here so a
@@ -204,7 +224,7 @@ or add a new model:
 **1. Route the extraction purpose at the model under test.** For an
 Anthropic model, set `llm.default` (or `llm.extraction`) in a config file;
 for a non-Anthropic vendor, add a named provider and point
-`llm.extraction` at it. Example for a reasoning model — note the token
+`llm.extraction` at it. Example for a reasoning model; note the token
 budget and timeout the method notes require:
 
 ```yaml
@@ -238,17 +258,17 @@ PARTICLES_CONFIG=survey-model.yaml uv run particles extractor benchmark general-
 `--estimate` prints the projected LLM cost and exits without calling. The
 run persists a report JSON under `benchmark.runs_dir` stamped with the
 resolved `provider:model` pairing (pass `--no-save` for a throwaway run).
-Extraction is a sampling process, so a single run is a single sample — pass
+Extraction is a sampling process, so a single run is a single sample; pass
 `--runs N` to repeat and report each metric's mean ± spread (the error bars
 a provider comparison needs before it calls a gap real).
 
 **3. Calibrate the newly-routed model** on `prose-calibration-001`
- before trusting its stored confidences; until then its particles
+before trusting its stored confidences; until then its particles
 disclose `EXTRACTOR_DIRECT`. Use `particles extractor calibrate`.
 
 ## Cross-references
 
-- Named OpenAI-compatible providers — adding a vendor is configuration,
+- Named OpenAI-compatible providers: adding a vendor is configuration,
   never code.
 - The per-particle provider stamp: every particle records the
   `provider:model` pairing that produced it.

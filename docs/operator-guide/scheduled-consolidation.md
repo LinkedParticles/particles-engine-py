@@ -1,36 +1,36 @@
-# Scheduled consolidation — the dream cycle
+# Scheduled consolidation: the dream cycle
 
 `particles memory consolidate` runs the cross-session memory
 maintenance passes in one verb, in a fixed order, under the existing cost
-caps — so "memory that tends itself" becomes a crontab line instead of four
+caps, so "memory that tends itself" becomes a crontab line instead of four
 verbs an operator has to remember to run.
 
 The pass list, in order:
 
-1. **Extract catch-up** *(LLM)* — extract PENDING snapshots, oldest first,
+1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, oldest first,
    capped at `consolidation.max_pending_entries` per run. A capped run
    discloses the remainder ("12 remain — next run continues").
-2. **Reconcile** *(LLM, capped)* — the cross-entry
-   document-supersession sweep. Each candidate pair costs one
+2. **Reconcile** *(LLM, capped)*: the cross-entry document-supersession
+   sweep. Each candidate pair costs one
    replacement-signal probe, spent highest-similarity-first under
    `consolidation.max_reconcile_probes`; a truncated run discloses
    "probed X of Y candidate pairs". Skipped (disclosed) on degraded runs.
-3. **Census** *(LLM, capped + scoped)* — the audit's contradiction probe +
+3. **Census** *(LLM, capped + scoped)*: the audit's contradiction probe +
    duplicate scan, capped at `audit.max_contradiction_probes` and scoped to
    what changed since the previous run (see [Delta scope](#delta-scope)).
-4. **Curation-queue refresh** — the queue, computed from the *same*
+4. **Curation-queue refresh**: the queue, computed from the *same*
    card collection the census already paid for; the report ends with the
    morning's worklist.
-5. **Utility mining** *(LLM, bounded)* — the pass over harvested
+5. **Utility mining** *(LLM, bounded)*: the pass over harvested
    session transcripts. The literal tier is LLM-free and always runs; the
    behavioural tier spends **one shared per-run budget**
    (`utility.mining.max_behavioural_calls`) across all sessions, and
    exhaustion is disclosed ("behavioural budget exhausted after N of M
    sessions").
-6. **Projection re-render** *(zero-LLM)* — the `MEMORY.md`
-   render-splice cycle, via the same harvest-then-render tail the SessionEnd
+6. **Projection re-render** *(zero-LLM)*: the `MEMORY.md` render-splice
+   cycle, via the same harvest-then-render tail the SessionEnd
    hook uses.
-7. **Record + report** — one `CONSOLIDATION_RUN` operator event per run,
+7. **Record + report**: one `CONSOLIDATION_RUN` operator event per run,
    readable afterwards through [Auditing](auditing.md).
 
 Each pass has a page of its own if you want to run it by hand first, or to
@@ -60,7 +60,7 @@ you install the job by hand, once.
     mode is off unless you ask for it. See
     [Running in a container](container-deployment.md).
 
-!!! warning "A scheduled job inherits nothing — bake in absolute paths"
+!!! warning "A scheduled job inherits nothing: bake in absolute paths"
 
     This is the one way to get a job that *looks* healthy and does nothing.
     A LaunchAgent runs with **no working directory** (effectively `/`), no
@@ -74,7 +74,7 @@ you install the job by hand, once.
 
     The same trap bit the session hooks, which silently dropped
     harvests until v1.70.2 baked absolute env pins into their command
-    strings. Every path and variable below is absolute for that reason —
+    strings. Every path and variable below is absolute for that reason;
     substitute your own, and do not shorten them to relative forms.
 
     **`DATABASE_URL` pins only the `default` store.** It overrides
@@ -82,16 +82,16 @@ you install the job by hand, once.
     handle resolves from `storage.stores[<handle>]` in `config.yaml` and
     ignores `DATABASE_URL` completely (`particles/db.py`). So:
 
-    - running against **`default`** (the example below) — set both
+    - running against **`default`** (the example below): set both
       `PARTICLES_CONFIG` *and* `DATABASE_URL`;
-    - running against a **named store** (`--store memory`, `--store research`)
-      — `PARTICLES_CONFIG` is the load-bearing pin, because the DSN comes from
+    - running against a **named store** (`--store memory`, `--store research`):
+      `PARTICLES_CONFIG` is the load-bearing pin, because the DSN comes from
       the config file; `DATABASE_URL` does nothing for that handle, and setting
       it alongside a named store is the misleading combination to avoid.
 
     **`PARTICLES_BLOB_DIR` matters as much as the database URL.** The corpus
     stores raw source bytes as content-addressed blobs, and
-    `storage.blob_dir` defaults to the **relative** `./corpus_blobs` — so a
+    `storage.blob_dir` defaults to the **relative** `./corpus_blobs`, so a
     process started from a different directory writes blobs somewhere else
     while happily sharing the same database. The rows then reference content
     that is not where this process is looking, and extraction fails with
@@ -113,8 +113,8 @@ you install the job by hand, once.
 Write `~/Library/LaunchAgents/dev.particles.consolidate.plist`. Two things to
 substitute:
 
-- **every `/Users/you/src/myproject` path** — with your project's absolute path;
-- **the store handle** — the value after `--store` in `ProgramArguments` below.
+- **every `/Users/you/src/myproject` path**, with your project's absolute path;
+- **the store handle**: the value after `--store` in `ProgramArguments` below.
   A *store handle* names a database: `default` is the implicit store (most
   setups have only this one), and any other handle must be declared under
   `storage.stores` in your `config.yaml` (see `config.yaml.sample`).
@@ -123,7 +123,7 @@ substitute:
   `particles memory consolidate --if-due --store memory`: the first is the CLI
   *command group*, the second would be a store that happens to be named
   `memory`. The example below uses the handle `default` to keep the two
-  distinct — and because of the pin rule in the next paragraph.
+  distinct, and because of the pin rule in the next paragraph.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -134,7 +134,7 @@ substitute:
   <key>Label</key>
   <string>dev.particles.consolidate</string>
 
-  <!-- Absolute path to the venv console script — launchd has no PATH. -->
+  <!-- Absolute path to the venv console script; launchd has no PATH. -->
   <key>ProgramArguments</key>
   <array>
     <string>/Users/you/src/myproject/.venv/bin/particles</string>
@@ -172,7 +172,7 @@ substitute:
   </dict>
 
   <!-- Cron mails you on failure; launchd does not. These files ARE your
-       failure notification — the exit-code table below is only useful if
+       failure notification; the exit-code table below is only useful if
        someone reads it. -->
   <key>StandardOutPath</key>
   <string>/Users/you/Library/Logs/particles-consolidate.log</string>
@@ -184,16 +184,16 @@ substitute:
 
 ### The API key
 
-The semantic passes read **`ANTHROPIC_API_KEY` from the process environment**
-— there is no secrets *file* and no `PARTICLES_SECRETS` variable
+The semantic passes read **`ANTHROPIC_API_KEY` from the process environment**.
+There is no secrets *file* and no `PARTICLES_SECRETS` variable
 (`particles/secrets.py` is an internal module that calls
 `os.environ.get("ANTHROPIC_API_KEY")`; it is deliberately absent from
 `config.yaml`, because secrets never live in config). And **launchd does not
-source shell files** — `EnvironmentVariables` is a literal key→value dict, so
+source shell files**: `EnvironmentVariables` is a literal key→value dict, so
 pointing it at `~/.zshenv` or `~/.zprofile` sets a useless string and the job
 runs key-less. Three honest options:
 
-**1. Key in the plist** (simplest; the plist becomes a secret — `chmod 600`,
+**1. Key in the plist** (simplest; the plist becomes a secret: `chmod 600`,
 never commit it):
 
 ```xml
@@ -214,7 +214,7 @@ sources a file). Point `ProgramArguments` at the wrapper instead of at
 
 ```sh
 #!/bin/sh
-# ~/bin/particles-consolidate.sh — chmod 700
+# ~/bin/particles-consolidate.sh (chmod 700)
 . "$HOME/.particles-env"          # a chmod 600 file: export ANTHROPIC_API_KEY=sk-ant-…
 export PARTICLES_CONFIG=/Users/you/src/myproject/config.yaml
 export DATABASE_URL=sqlite+aiosqlite:////Users/you/src/myproject/particles.db
@@ -223,7 +223,7 @@ exec /Users/you/src/myproject/.venv/bin/particles memory consolidate --if-due --
 ```
 
 Verified to work from a stripped environment (`env -i`), which is what launchd
-supplies. Note `.` (POSIX source), not `source` — the script runs under
+supplies. Note `.` (POSIX source), not `source`: the script runs under
 `/bin/sh`, not zsh.
 
 **3. No key at all.** A key-less run is *honest, not broken*: it completes,
@@ -247,7 +247,7 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.particles.consolidate.pl
 # confirm it is registered
 launchctl print gui/$UID/dev.particles.consolidate | head -20
 
-# force one run now instead of waiting for 03:30 — the real smoke test
+# force one run now instead of waiting for 03:30: the real smoke test
 launchctl kickstart -p gui/$UID/dev.particles.consolidate
 
 # uninstall
@@ -261,7 +261,7 @@ After the kickstart, **verify it hit your store rather than an empty one**:
 # reads the *default* store and has no --store flag. For the `default` handle
 # below, pointing DATABASE_URL at the same file the plist pins is exactly the
 # check you want. (If your job targets a NAMED store, set PARTICLES_CONFIG here
-# instead and give that store's DSN — DATABASE_URL cannot reach it.)
+# instead and give that store's DSN; DATABASE_URL cannot reach it.)
 DATABASE_URL=sqlite+aiosqlite:////Users/you/src/myproject/particles.db \
   particles events list --type CONSOLIDATION_RUN --limit 1
 
@@ -269,8 +269,8 @@ DATABASE_URL=sqlite+aiosqlite:////Users/you/src/myproject/particles.db \
 tail -20 ~/Library/Logs/particles-consolidate.err
 ```
 
-If `events list` shows no new record, the job ran against the wrong store —
-re-check `PARTICLES_CONFIG` and `DATABASE_URL` in the plist before trusting
+If `events list` shows no new record, the job ran against the wrong store.
+Re-check `PARTICLES_CONFIG` and `DATABASE_URL` in the plist before trusting
 the schedule.
 
 ### Linux / BSD (cron)
@@ -281,15 +281,15 @@ the schedule.
 
 `cd` covers the working-directory half of the trap, and cron mails you on a
 non-zero exit (see the exit-code table below), so cron needs less scaffolding
-than launchd — but set `PARTICLES_CONFIG` explicitly anyway, since cron's
+than launchd, but set `PARTICLES_CONFIG` explicitly anyway, since cron's
 environment is also minimal.
 
 `--if-due` reads the verb's own last successful `CONSOLIDATION_RUN` event
 (an interactive `particles audit` writes the same event type but does not
-count; a disclosed structural-only run does — so a key-less setup retries
+count; a disclosed structural-only run does, so a key-less setup retries
 next interval instead of hot-looping) and exits 0 without running (one log
 line, no run record) when that run is younger than
-`consolidation.min_interval_hours` (default 20 — daily scheduling with
+`consolidation.min_interval_hours` (default 20: daily scheduling with
 headroom for clock drift). A laptop that was asleep at 03:30 can therefore
 safely retry hourly; two overlapping schedules collapse to one run per
 interval.
@@ -298,7 +298,7 @@ interval.
 
 | Code | Meaning |
 |---|---|
-| `0` | Success — including disclosed structural-only runs and `--if-due` / lock skips |
+| `0` | Success, including disclosed structural-only runs and `--if-due` / lock skips |
 | `1` | One or more passes failed (the run record is still written; stderr names them) |
 | `2` | The cycle could not start (unusable store, config error) |
 
@@ -309,7 +309,7 @@ see.
 
 **The log files append; nothing rotates them.** launchd opens
 `StandardOutPath` / `StandardErrorPath` in append mode, so every run stacks
-below the last one — `cat` will show you the *oldest* run first and get less
+below the last one; `cat` will show you the *oldest* run first and get less
 useful over time. Use `tail`:
 
 ```bash
@@ -328,7 +328,7 @@ pgrep -f "memory consolidate"
 # state, and the exit code of the last COMPLETED run
 launchctl print gui/$UID/dev.particles.consolidate | grep -E "state|last exit code"
 
-# the authoritative record — written even on partial failure
+# the authoritative record, written even on partial failure
 DATABASE_URL=sqlite+aiosqlite:////Users/you/src/myproject/particles.db \
   particles events list --type CONSOLIDATION_RUN --limit 2
 ```
@@ -340,15 +340,15 @@ the table above.
 ### Rotating the logs
 
 Nothing rotates these files for you. `newsyslog.d` is the system mechanism but
-needs root to install and validate, so the self-contained option — and the one
-that composes with the wrapper script above — is to rotate at the **start** of
+needs root to install and validate, so the self-contained option (and the one
+that composes with the wrapper script above) is to rotate at the **start** of
 the wrapper, when no run is in flight. That ordering matters: the job is
 periodic rather than long-lived, so between runs no process holds the file
 open and a rename-based rotation is safe.
 
 ```sh
 #!/bin/sh
-# ~/bin/particles-consolidate.sh — rotate first, then run.
+# ~/bin/particles-consolidate.sh: rotate first, then run.
 rotate_log() {                      # rotate_log <path> <max_bytes> <generations>
   f=$1; max_bytes=$2; keep=$3
   [ -f "$f" ] || return 0
@@ -392,27 +392,27 @@ particles memory consolidate
 ```
 
 There is no confirmation prompt and no `--yes`: an autonomous verb cannot
-prompt, so cost is bounded *by construction* — the existing caps plus delta
-scope — and confirmation is replaced with disclosure.
+prompt, so cost is bounded *by construction* (the existing caps plus delta
+scope) and confirmation is replaced with disclosure.
 
 ## Delta scope
 
 By default the semantic passes probe only the particles created or modified
 since the watermark, plus particles from corpus entries deposited since then.
 The watermark is the previous eligible run's **`started_at`** (not its
-completion — so nothing written mid-cycle ever falls between two runs'
+completion, so nothing written mid-cycle ever falls between two runs'
 windows; overlap re-probes are idempotent), and the scope is computed *after*
 pass 1, so the particles extraction just minted are censused in the same run.
 Watermark-eligible means: a successful, non-degraded run by the consolidation
-verb itself — a structural-only night or an interactive `particles audit`
+verb itself; a structural-only night or an interactive `particles audit`
 never advances the watermark. Nightly cost therefore scales with the day's
 delta, not the store. The first run (no prior eligible record) and
-`--scope store` run store-wide — still capped, with the "probed X of Y
+`--scope store` run store-wide, still capped, with the "probed X of Y
 candidate pairs" disclosure. The below-cap tail of *pre-existing* pairs is
 never reached by scheduled runs; a deliberate `--scope store` run or
 `particles lint` remains the exhaustive instrument.
 
-## Degradation — structural-only is disclosed, never silent
+## Degradation: structural-only is disclosed, never silent
 
 With no API key, an open circuit breaker, `--structural-only`, or
 `consolidation.semantic: false`, the LLM-free passes (curation refresh,
@@ -421,7 +421,7 @@ reconcile sweep are skipped (each disclosed), the census runs structural
 finders + REPORT-mode duplicates only, and utility mining runs the literal
 tier only. Every skip is disclosed in the report and recorded on the run
 record (`semantic_degraded` + reason). A degraded run's contradiction line
-reads **"not probed this run"**, never "0" — and a degraded run never
+reads **"not probed this run"**, never "0", and a degraded run never
 advances the delta watermark, so everything it did not probe stays in scope
 for the next full run.
 
@@ -432,7 +432,7 @@ versioned payload (`format: 1`): per-pass status/durations, per-pass LLM call
 counts, the machine-readable census (probe counts, duplicate totals, pending
 backlog, utility events), degradation disclosures, provider/model per
 purpose, and `started_at` / `completed_at` (`started_at` is the next run's
-delta watermark — see [Delta scope](#delta-scope)). "Is the cycle actually
+delta watermark; see [Delta scope](#delta-scope)). "Is the cycle actually
 running?" is one command:
 
 ```bash
@@ -441,7 +441,7 @@ particles events list --type CONSOLIDATION_RUN
 
 `particles audit` records the same event shape (`actor: audit`) and the
 report's headline lines carry "+2 since last run" deltas against the most
-recent prior run of either kind — but an audit event neither advances the
+recent prior run of either kind, but an audit event neither advances the
 consolidation watermark nor satisfies `--if-due` (the audit runs none of the
 cross-session passes, so it cannot stand in for a consolidation run).
 
@@ -456,7 +456,7 @@ cross-session passes, so it cannot stand in for a consolidation run).
   per transaction exactly as its verb always has, and every pass is
   idempotent.
 - **Failure mid-pass: continue and report.** A failing pass is caught,
-  recorded on the run record (`failed(<error>)`), and the cycle continues —
+  recorded on the run record (`failed(<error>)`), and the cycle continues;
   the zero-LLM projection render still runs, so a flaky network night never
   leaves `MEMORY.md` staler than it had to be.
 
@@ -477,11 +477,11 @@ Detection thresholds deliberately stay where they live (`audit.*`, `lint.*`,
 `utility.mining.*`, `links_suggest.*`): consolidation composes the finders,
 it does not re-tune them.
 
-### Half-price probes — batch completion
+### Half-price probes: batch completion
 
-Nobody is waiting for a 03:30 run, so its two largest probe populations — the
+Nobody is waiting for a 03:30 run, so its two largest probe populations, the
 contradiction probe (capped at `audit.max_contradiction_probes`) and the
-behavioural utility matcher (`utility.mining.max_behavioural_calls`) — are
+behavioural utility matcher (`utility.mining.max_behavioural_calls`), are
 submitted to the Anthropic **Message Batches API** as one job each instead of
 one call each. All token usage in a batch is billed at **50%**. At today's caps
 that is roughly 1200 of the cycle's ~1250 nightly probe calls.
@@ -508,7 +508,7 @@ levels. A batch the provider refuses outright falls back to sequential calls
 `max_wait_seconds` is cancelled and its probes report unavailable, so a stuck
 job cannot hold the cycle open until the API's own 24-hour expiry. An individual
 request that errored or expired inside an otherwise healthy batch comes back as
-one unanswered probe — counted in the run's disclosure, never silently dropped.
+one unanswered probe, counted in the run's disclosure, never silently dropped.
 
 One pass is **not** batched: the reconcile sweep (50 probes/night, whose loop
 skips candidates already demoted earlier in the same loop). It is still billed
@@ -517,14 +517,14 @@ per call.
 To turn the whole thing off and get a cycle that finishes fast at full price,
 set `llm.batch.enabled: false`.
 
-### Half-price extraction — the pooled extract pass
+### Half-price extraction: the pooled extract pass
 
 The extract pass is the cycle's dominant **token** consumer (the Claude Code
 session harvests are large transcripts), and since it rides the same
 Message Batches discount: the capped pending set runs as concurrent
 per-snapshot tasks whose chunk requests merge into **one nightly batch job**
-through a completion pool, so the whole set — single-chunk documents
-included — clears `llm.batch.min_requests` together. Wall clock for the pass
+through a completion pool, so the whole set (single-chunk documents
+included) clears `llm.batch.min_requests` together. Wall clock for the pass
 becomes roughly one batch turnaround instead of 10–20 sequential multi-minute
 calls.
 
@@ -552,6 +552,6 @@ silently drop particles behind unparseable JSON; an endpoint that rejects the
 parameter gets one retry without it (a logged downgrade back to
 tolerant-parser reliability). Set `structured_output: off` to disable. The
 Anthropic provider ignores the schema in v1. Note: v1 ships the semantic
-passes on the configured (Anthropic) provider — routing `semantic_lint` to a
+passes on the configured (Anthropic) provider; routing `semantic_lint` to a
 local model is one config edit, pending the probe-quality measurement named
 in the consolidation design.

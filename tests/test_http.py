@@ -114,8 +114,8 @@ class TestGetCapped:
 class TestParticlesClient:
     @pytest.mark.asyncio
     async def test_routes_through_validating_transport(self) -> None:
-        # Every particles_client routes through the SSRF connect-time gate
-        #, so the validation covers redirects too.
+        # Every particles_client routes through the SSRF connect-time gate,
+        # so the validation covers redirects too.
         from particles.http import particles_client
         from particles.url_safety import ValidatingTransport
 

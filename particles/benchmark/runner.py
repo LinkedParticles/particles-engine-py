@@ -24,30 +24,47 @@ Per-case orchestration mirrors the conformance validator
 4. Run the equivalence match between emitted and expected.
 5. Accumulate matched-IDs and emitted-particles across cases for the
    global metrics rollup, and record each emitted particle's
-   ``(raw confidence, matched?)`` pair on its ``CaseResult``.
+   ``(raw confidence, matched?)`` pair on its ``CaseResult``, plus one
+   :class:`EmittedClaim` per emission carrying that claim's text, stated
+   confidence and judged outcome.
 
 Step 5's pairs are what :func:`graded_pairs` hands to ``particles extractor
 calibrate``. They exist because a caller cannot reconstruct them from the
 report's summaries: re-running the extractor to recover the confidences mints
-*new* particle ids, which match nothing in this run's id set — the bug, which labelled every particle incorrect and drove six months of fits to
+*new* particle ids, which match nothing in this run's id set — the
+bug, which labelled every particle incorrect and drove six months of fits to
 the optimizer bound.
 
 :func:`run_benchmark_repeated` is the repeat-runs wrapper: it
 calls :func:`run_benchmark` N times over the same suite and returns an
 :class:`AggregateBenchmarkReport` — the N unmodified reports plus a
-per-metric distribution. The frozen §13.3 :class:`BenchmarkReport` gains
-no field; the aggregate is a separate object that *contains* reports, the
-same way the memory harness keeps its own report model beside
-the frozen one.
+per-metric distribution. :class:`BenchmarkReport` gains no *run-level*
+field; the aggregate is a separate object that *contains* reports, the same
+way the memory harness keeps its own report model beside it. (Only
+run-level aggregates are excluded. Per-case detail with a default is a
+different thing and is fine — ``graded`` and ``emitted_claims`` below. What
+techspec §13.3 actually freezes is the suite *input* schema in
+:mod:`particles.benchmark.schema`; it specifies no report shape at all.)
+
+Step 5's :class:`EmittedClaim` records are why a *saved* report can be audited.
+The id lists (``matched`` / ``spurious`` / ``under_confidence``) name emitted
+particles by uuid, and the harness never persists to the store — so after the
+process exits those uuids resolve to nothing, and a report saying precision
+0.73 gave no way to read the 27 %. A hallucinated claim and a correct claim
+the gold set happens not to list were the same three lines of JSON. The
+records are strictly additive: every id list keeps its shape, so the format-1
+envelope needs no bump and existing readers are untouched.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from particles.benchmark.equivalence import (
@@ -72,6 +89,67 @@ from particles.extraction.registry import ExtractorPlugin
 
 log = logging.getLogger(__name__)
 
+#: A Wikidata QID, which ``CandidateParticle.subjects`` may carry alongside
+#: names (``numista/coin.py`` appends one to issuer subjects). It is an
+#: identifier, not a name, so it is dropped before subject-aware matching for
+#: the same reason a UUID is (D4): "Q42: the coin was struck in 1961"
+#: is not a rendering of the claim any gold string will be written as. Under
+#: the max it could only ever lose, so this costs nothing but the embedding
+#: pass it avoids.
+_QID_RE = re.compile(r"^Q\d+$")
+
+
+class ClaimOutcome(StrEnum):
+    """How the equivalence judge classified one emitted claim.
+
+    The three outcomes partition a case's emitted set: every emitted
+    particle is matched, demoted to an under-confidence partial match, or
+    spurious. A :class:`StrEnum` so ``asdict()`` + ``json.dumps`` render it
+    as its bare string in a persisted run file.
+    """
+
+    MATCHED = "matched"
+    UNDER_CONFIDENCE = "under_confidence"
+    SPURIOUS = "spurious"
+
+
+@dataclass(frozen=True)
+class EmittedClaim:
+    """One emitted claim, recorded with enough text to audit it later.
+
+    The sibling id lists (``matched`` / ``spurious`` / ``under_confidence``)
+    identify emitted particles by uuid, and a benchmark run never persists to
+    the store — so once the process exits, those uuids resolve to nothing. A
+    saved report could report precision 0.73 and give an operator no way to
+    read the 27 % that matched nothing: a hallucination and a
+    correct-but-not-in-the-gold-set claim were indistinguishable, and the only
+    recourse was re-running the suite and paying for the inference again. This
+    record is that missing half; the id lists are unchanged beside it.
+
+    ``content`` is the emitted claim text, or ``None`` when
+    ``benchmark.record_claim_text`` is off — the harness can be pointed at a
+    private corpus, and the run files outlive the run. ``confidence`` is the
+    **raw stated** value (the runner converts candidates with
+    ``calibration=None``, so nothing has been scaled), which is what makes the
+    reported ``calibration_error`` auditable per claim rather than only in
+    aggregate. ``matched_expected`` is the gold text this claim was assigned
+    to — ``None`` for a spurious claim — so *what matched what* is readable
+    from one record instead of joined across two lists.
+    """
+
+    particle_id: str
+    outcome: ClaimOutcome
+    confidence: float
+    content: str | None = None
+    matched_expected: str | None = None
+    # The subject names this claim is about. Recorded because they
+    # are an *input to the match* under subject-aware matching, so a report
+    # that omitted them could not explain why a pair scored as it did — the
+    # same after-the-fact-auditability argument the text itself rests on.
+    # Suppressed with ``content`` when ``benchmark.record_claim_text`` is off:
+    # a subject name is extracted from the corpus too.
+    subjects: list[str] = field(default_factory=list)
+
 
 @dataclass
 class CaseResult:
@@ -85,11 +163,17 @@ class CaseResult:
     spurious: list[str]
     under_confidence: list[tuple[str, float, float]]  # (expected, stated, required_min)
     # (raw stated confidence, matched?) for every particle this case emitted —
-    # the labelled population `extractor calibrate` fits its temperature on
-    #. Raw because the runner converts candidates with
+    # the labelled population `extractor calibrate` fits its temperature on.
+    # Raw because the runner converts candidates with
     # ``calibration=None``, so nothing has been scaled. Defaulted so a case that
     # crashed mid-extract contributes an empty list rather than a wrong label.
     graded: list[tuple[float, bool]] = field(default_factory=list)
+    # One :class:`EmittedClaim` per emitted particle — the same population as
+    # ``graded``, carrying the claim *text* and its judged outcome so a saved
+    # report can be audited without re-running the suite. Additive beside the
+    # id lists above, which keep their shapes; defaulted for the same reason
+    # ``graded`` is, and empty when the extractor emitted nothing.
+    emitted_claims: list[EmittedClaim] = field(default_factory=list)
 
 
 @dataclass
@@ -203,7 +287,8 @@ class BenchmarkRunEstimate:
     """Projected LLM cost of a (possibly repeated) benchmark run.
 
     Computed before any call is made, from the resolved case bytes and the
-    same chunk math the memory harness's estimate uses. ``estimated_extraction_calls`` is a floor: an
+    same chunk math the memory harness's estimate uses.
+    ``estimated_extraction_calls`` is a floor: an
     extractor may issue extra calls per source (subject resolution,
     classifier passes) that this cannot see.
     """
@@ -333,6 +418,59 @@ async def run_benchmark_repeated(
     )
 
 
+def _record_emitted_claims(
+    emitted: list[Particle],
+    match: MatchResult,
+    subject_names: dict[str, list[str]],
+) -> list[EmittedClaim]:
+    """Build one :class:`EmittedClaim` per emitted particle, in emission order.
+
+    The judged outcome comes from ``match``, whose three buckets partition the
+    emitted set — so a particle in none of them would be a bug in the
+    assignment, not a fourth state; it is recorded ``SPURIOUS`` (the
+    conservative reading: it matched no gold claim) rather than dropped, so
+    the record stays one-per-emission and the count reconciles with
+    ``emitted_count``.
+
+    ``benchmark.record_claim_text`` is read here rather than at persist time
+    on purpose. The text is suppressed at *production*, so an operator who
+    turns it off is not relying on every downstream sink — the persisted run
+    file, ``--format json`` on stdout, a test that pickles a report — to
+    remember to scrub it. Nothing ever holds the text.
+
+    It suppresses ``content`` only. ``matched_expected`` is *gold* text, read
+    from the suite YAML, and the report already carries every gold string
+    unconditionally in ``matched`` and ``missed_required`` — a flag that
+    redacted it here while leaving those intact would suggest a protection it
+    does not provide. An operator whose gold claims quote private material is
+    already exposed by the pre-existing fields; the fix there is the suite
+    file, not this switch.
+    """
+    record_text = get_config().benchmark.record_claim_text
+    matched_gold: dict[str, str] = {p.id: e.content for e, p in match.matched}
+    under_gold: dict[str, str] = {p.id: e.content for e, p in match.under_confidence}
+
+    claims: list[EmittedClaim] = []
+    for particle in emitted:
+        if particle.id in matched_gold:
+            outcome, gold = ClaimOutcome.MATCHED, matched_gold[particle.id]
+        elif particle.id in under_gold:
+            outcome, gold = ClaimOutcome.UNDER_CONFIDENCE, under_gold[particle.id]
+        else:
+            outcome, gold = ClaimOutcome.SPURIOUS, None
+        claims.append(
+            EmittedClaim(
+                particle_id=particle.id,
+                outcome=outcome,
+                confidence=particle.confidence.value,
+                content=particle.content if record_text else None,
+                matched_expected=gold,
+                subjects=list(subject_names.get(particle.id, ())) if record_text else [],
+            )
+        )
+    return claims
+
+
 async def run_benchmark(
     suite: BenchmarkSuite,
     extractor: ExtractorPlugin,
@@ -400,24 +538,38 @@ async def run_benchmark(
             continue
 
         emitted: list[Particle] = []
+        # particle id -> the subject *names* the candidate declared. Built here
+        # rather than read back off ``particle.subject_ids`` because that field
+        # holds resolved UUIDs in any store-backed particle; see
+        # ``match_emitted_to_expected``'s note on why the caller states names.
+        subject_names: dict[str, list[str]] = {}
         for candidate in result.candidates:
-            emitted.append(
-                candidate_to_particle(
-                    candidate,
-                    corpus_entry_id="benchmark-fixture-entry",
-                    snapshot_id=snapshot.snapshot_id,
-                    asserted_by=extractor.EXTRACTOR_ID,
-                    extractor_ref=ext_ref,
-                    subject_ids=list(candidate.subjects),
-                )
+            particle = candidate_to_particle(
+                candidate,
+                corpus_entry_id="benchmark-fixture-entry",
+                snapshot_id=snapshot.snapshot_id,
+                asserted_by=extractor.EXTRACTOR_ID,
+                extractor_ref=ext_ref,
+                subject_ids=list(candidate.subjects),
             )
+            emitted.append(particle)
+            subject_names[particle.id] = [
+                name
+                for name in (str(x).strip() for x in candidate.subjects)
+                if name and not _QID_RE.match(name)
+            ]
         quality_notes.extend(f"Case {case.case_id}: {n}" for n in result.quality_notes)
 
+        # the emitted side is embedded as the particle asserts it —
+        # subject prepended when ``content`` does not already name it. Off
+        # restores the pre-0262 comparison, which is what every run file and
+        # provider-survey page written before 1.140.0 was measured under.
         match: MatchResult = await match_emitted_to_expected(
             emitted,
             case.expected,
             judge=judge,
             threshold=threshold,
+            subject_names=subject_names if get_config().benchmark.subject_aware_matching else None,
         )
 
         # Per-case detail
@@ -433,6 +585,7 @@ async def run_benchmark(
         # keep `match.matched_ids` untouched.
         case_matched_ids = match.matched_ids
         case_semantic_ids = case_matched_ids | {p.id for _, p in match.under_confidence}
+        emitted_claims = _record_emitted_claims(emitted, match, subject_names)
         per_case.append(
             CaseResult(
                 case_id=case.case_id,
@@ -448,6 +601,7 @@ async def run_benchmark(
                     for expected_p, emitted_p in match.under_confidence
                 ],
                 graded=[(p.confidence.value, p.id in case_semantic_ids) for p in emitted],
+                emitted_claims=emitted_claims,
             )
         )
 

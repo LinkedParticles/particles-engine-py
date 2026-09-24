@@ -6,7 +6,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Create multiple new entities in the knowledge graph",
+    "description": "Create multiple new entities in the knowledge graph Backed by a Particles store: entity names match case-insensitively, so a name differing from an existing entity only by case is treated as that entity and skipped.",
     "inputSchema": {
       "properties": {
         "entities": {
@@ -395,7 +395,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Read the entire knowledge graph Backed by a Particles store: results are capped for context safety and any truncation is disclosed in an extra text block.",
+    "description": "Read the entire knowledge graph Backed by a Particles store: results are capped for context safety and any truncation is disclosed in an extra text block. Entities are returned in name order, not creation order.",
     "inputSchema": {
       "properties": {},
       "type": "object"
@@ -477,6 +477,7 @@
       "properties": {
         "query": {
           "description": "The search query to match against entity names, types, and observation content",
+          "maxLength": 2048,
           "type": "string"
         }
       },

@@ -379,6 +379,14 @@ class TestHttpBackendOperatorVerbs:
         assert p is not None and p.id == pid
         assert asyncio.run(http_backend.particle_show("does-not-exist")) is None
 
+    def test_particle_source(self, http_backend: HttpBackend) -> None:
+        # No corpus source: the round-trip still parses into the shared model.
+        pid = asyncio.run(_seed_particle("A claim."))
+        passage = asyncio.run(http_backend.particle_source(pid))
+        assert passage is not None and passage.particle_id == pid
+        assert passage.match.value == "UNAVAILABLE"
+        assert asyncio.run(http_backend.particle_source("does-not-exist")) is None
+
     def test_particle_tag_untag(self, http_backend: HttpBackend) -> None:
         pid = asyncio.run(_seed_particle("Taggable claim."))
         added = asyncio.run(http_backend.particle_tag(pid, ["coins/germany"]))
@@ -697,6 +705,7 @@ class TestHttpBackendBeliefWrites:
                 uncertainty_nature="EPISTEMIC",
                 tags=None,
                 store=DEFAULT_STORE,
+                reason="recount",
             )
         )
         assert out.verdict == "ASSERTED"

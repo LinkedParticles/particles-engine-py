@@ -13,7 +13,8 @@ Obsidian block-ref conversion (:func:`_to_obsidian_block_refs`).
 The exporter passes its own trust-weighted ``eff_conf`` / ``subject_map`` /
 ``naming`` (the same dicts the per-subject notes use), so a narrative note's
 confidence numbers and ``[[Subject]]`` wikilinks match the rest of the vault.
-The synthesis cache (keyed by narrative id + ordered constituents) is consulted via ``session``, so re-exports and prior
+The synthesis cache (keyed by narrative id + ordered constituents)
+is consulted via ``session``, so re-exports and prior
 ``particle narrative --synthesize`` runs avoid re-paying the LLM.
 """
 

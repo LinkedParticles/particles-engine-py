@@ -100,7 +100,7 @@ def export_cmd(
         False,
         "--without-synthesis",
         help=(
-            "Wiki: render every article as the deterministic structured listing — "
+            "Wiki: render every article as the deterministic structured listing: "
             "no LLM call, no ANTHROPIC_API_KEY, reproducible output. "
             "Bypasses the synthesis cache so existing LLM articles are replaced."
         ),
@@ -109,7 +109,7 @@ def export_cmd(
         False,
         "--include-non-asserted",
         help=(
-            "Include non-asserted particles — a document's rejected / superseded / "
+            "Include non-asserted particles: a document's rejected / superseded / "
             "deferred / counterfactual prose (polarity DECLINED / HYPOTHETICAL). "
             "Excluded from the rendered surface by default; the "
             "round-trippable `interchange` export always keeps them."
@@ -119,9 +119,9 @@ def export_cmd(
         None,
         "--subject",
         help=(
-            "Graph: render one Subject's neighbourhood — a subject "
+            "Graph: render one Subject's neighbourhood, given as a subject "
             "id or an exact (case-insensitive) canonical name / alias. Scope "
-            "is mandatory for the graph exporter — pass exactly one of "
+            "is mandatory for the graph exporter: pass exactly one of "
             "--subject or --query; a whole-store render does not exist."
         ),
     ),
@@ -129,7 +129,7 @@ def export_cmd(
         None,
         "--query",
         help=(
-            "Graph: render one query's retrieval set — the picture of the "
+            "Graph: render one query's retrieval set, the picture of the "
             "knowledge a query consults (top graph.query_top_k hits + their "
             "subjects). Mutually exclusive with --subject."
         ),
@@ -138,7 +138,7 @@ def export_cmd(
         None,
         "--inconsistency",
         help=(
-            "Graph: render one contradiction's evidence — the "
+            "Graph: render one contradiction's evidence: the "
             "INCONSISTENCY particle (full id or unique prefix) as the anchor, "
             "its two disputant beliefs with their true statuses, their "
             "subjects and sources. Mutually exclusive with the other scopes."
@@ -148,8 +148,7 @@ def export_cmd(
         None,
         "--manifest",
         help=(
-            "Graph: with --section, render a projection manifest "
-            "section's deterministic selection."
+            "Graph: with --section, render a projection manifest section's deterministic selection."
         ),
     ),
     graph_section: str | None = typer.Option(
@@ -193,14 +192,14 @@ def export_cmd(
             "Notion: the target database id to sync subjects into for this run "
             "(overrides config.notion.database_id). Share that database "
             "with your integration first. The NOTION_API_KEY token is read from "
-            "the environment — never passed as a flag."
+            "the environment, never passed as a flag."
         ),
     ),
     no_update_blocks: bool = typer.Option(
         False,
         "--no-update-blocks",
         help=(
-            "Notion: create-only — write a page's particle blocks once and never "
+            "Notion: create-only. Write a page's particle blocks once and never "
             "rewrite the managed block range on re-sync, preserving hand-edits "
             ". Default behaviour owns the managed range and "
             "overwrites it so re-sync is idempotent."

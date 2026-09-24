@@ -1,13 +1,13 @@
 # Depositing from your phone
 
 Two routes get a URL (or a snippet of text) from the iOS Share Sheet into
-the corpus. They are not alternatives to pick between once — most operators
+the corpus. They are not alternatives to pick between once; most operators
 end up with both, because they fail in opposite directions.
 
 | Route | Path | Use it when |
 |---|---|---|
-| **HTTP** (primary) | Share Sheet → Shortcut → `POST /corpus/deposit/url` on the engine | The engine is running and reachable from the phone — a LAN host, a tailnet, a container, a VPS |
-| **iCloud file** (fallback) | Share Sheet → Shortcut → iCloud Drive file → `particles inbox watch` on a Mac | The engine is not reachable — you're offline, on a foreign network, or the engine only ever runs on one laptop |
+| **HTTP** (primary) | Share Sheet → Shortcut → `POST /corpus/deposit/url` on the engine | The engine is running and reachable from the phone: a LAN host, a tailnet, a container, a VPS |
+| **iCloud file** (fallback) | Share Sheet → Shortcut → iCloud Drive file → `particles inbox watch` on a Mac | The engine is not reachable: you're offline, on a foreign network, or the engine only ever runs on one laptop |
 
 The HTTP route is now the primary one. The file route came first, and it
 carried a structural limitation: the file hop is the one segment of the
@@ -34,7 +34,7 @@ iPhone → Share Sheet ─┤   Shortcut → POST /corpus/deposit/url (bearer)  
 
 ---
 
-## Route A — HTTP share-sheet deposit
+## Route A: HTTP share-sheet deposit
 
 ### What the engine already does for you
 
@@ -48,14 +48,14 @@ the file-route processor calls per line. Three behaviours you get for free:
 * **Reddit `/s/` share links resolve engine-side.** The mobile share sheet
   produces opaque `https://www.reddit.com/r/<sub>/s/<id>` links; the importer
   recognizes and resolves them to the canonical permalink before
-  fetching. Share the link your phone actually gives you — no
+  fetching. Share the link your phone actually gives you, with no
   "open in browser first to get the real URL" step.
 * **SSRF and transport checks.** The deposit runs the standard URL-safety
   check and the connect-checked fetch transport, the same as
   `particles deposit <url>` on a laptop.
 
 Depositing is *not* extraction. The entry lands with its snapshot in
-`PENDING`; particles are minted when extraction runs — on the next
+`PENDING`; particles are minted when extraction runs: on the next
 consolidation cycle if the engine runs in daemon mode, or when you run
 `particles extract --all-pending`.
 
@@ -76,66 +76,58 @@ curl -sS -X POST http://<engine-host>:8000/corpus/deposit/url \
 
 Only `url` is required. `deposited_by` and `tags` are worth setting anyway:
 they are what later lets you tell phone-shared material apart from everything
-else (`particles corpus list --json` shows both).
+else. `particles corpus list --json` carries the tags, and
+`particles corpus show <entry-id>` reports the depositor.
 
-Re-sharing a URL you already deposited does **not** create a second entry —
+Re-sharing a URL you already deposited does **not** create a second entry;
 the corpus keys on the URI, so a repeat share adds a snapshot to the existing
 entry.
 
 ### Building the Shortcut
 
-On the iPhone: **Shortcuts** → `+` → **New Shortcut**.
+Don't build it by hand. The shortcut is fully determined by two values, your
+endpoint and your token, so the repository generates and signs it for you:
 
-**1. Set the receive types.** Tap the "Receive [types] from Share Sheet"
-header at the top and enable at least **URLs**. Set "If there's no input:" →
-**Continue**.
+```bash
+export PARTICLES_API_KEY=<your-token>
+uv run python scripts/make_share_shortcut.py \
+  --endpoint http://<engine-host>:8000/corpus/deposit/url
+```
 
-**2. Add one action — `Get Contents of URL`** (search for it by name), then
-tap **Show More** and fill it in:
+That writes `Deposit to Particles.shortcut`. Install it either way:
 
-| Field | Value |
-|---|---|
-| **URL** | `http://<engine-host>:8000/corpus/deposit/url` — the full path, not just the host |
-| **Method** | `POST` |
-| **Headers** | one entry: key `Authorization`, value `Bearer <your-token>` |
-| **Request Body** | `JSON` |
+* **Open it on a Mac** signed into the same iCloud account as the phone. It
+  imports into Shortcuts and syncs to the device on its own.
+* **AirDrop it** to the phone and tap the file.
 
-Then add the body fields with the **Add new field** control. `Content-Type:
-application/json` is set for you by the JSON body type — don't add it by hand.
+Useful flags: `--kind text` for the text-deposit companion below, `--tag` to
+change the applied tags (repeatable), `--unsigned` to emit the raw `.wflow`
+on a non-Mac. Prefer the `PARTICLES_API_KEY` environment variable over
+`--token`, since command-line arguments are visible to other processes
+via `ps`.
 
-| Key | Type | Value |
-|---|---|---|
-| `url` | Text | the **Shortcut Input** variable (tap the field, then pick it from the variable bar) |
-| `deposited_by` | Text | `ios-share-sheet` |
-| `tags` | Array | one Text item: `from-phone` |
-
-**3. Add two actions to report the result** (optional, but the difference
-between "it worked" and "I think it worked"):
-
-| Action | Configuration |
-|---|---|
-| **Get Dictionary Value** | **Get** `Value` **for** `entry_id` **in** `Contents of URL` |
-| **Show Notification** | Body: the **Dictionary Value** variable |
-
-**4. Name and publish it.** Tap the name at the top → rename to **Deposit to
-Particles**. Tap (i) → confirm **Show in Share Sheet** is on. Save.
-
-Now: **Share** in any app → **Deposit to Particles**. The share sheet stays
-up until the engine answers — a plain page is quick, but a URL deposit is a
+Then: **Share** in any app → **Deposit to Particles**. The share sheet stays
+up until the engine answers. A plain page is quick, but a URL deposit is a
 *live fetch* (and a Reddit `/s/` link resolves a redirect first), so a few
 seconds is normal.
+
+**The first share raises a permission prompt**, *Allow "Deposit to Particles"
+to send 1 Safari item to "\<host\>"?* This is iOS asking once per destination
+host, not an error. Choose **Always Allow** unless you want to re-approve
+every share.
 
 ### Sharing text, not a URL
 
 The Share Sheet also hands over selected text, and there is a matching
-endpoint. Make a second shortcut — receive type **Text**, same action, with
-these two changes:
+endpoint. Generate the companion shortcut:
 
-* **URL**: `http://<engine-host>:8000/corpus/deposit/text`
-* **Request Body** fields: `text` (Text) = **Shortcut Input**, plus the same
-  `deposited_by` / `tags`.
+```bash
+uv run python scripts/make_share_shortcut.py --kind text \
+  --endpoint http://<engine-host>:8000/corpus/deposit/text
+```
 
-Verified request and response:
+It receives **Text** rather than URLs and posts the selection as the `text`
+field. Verified request and response:
 
 ```bash
 curl -sS -X POST http://<engine-host>:8000/corpus/deposit/text \
@@ -151,10 +143,61 @@ curl -sS -X POST http://<engine-host>:8000/corpus/deposit/text \
 `source_type` defaults to `CONVERSATION` on this endpoint; pass it explicitly
 if you want shared snippets to carry a different label.
 
+### Building it by hand, if you must
+
+You do not need this section unless you are changing the shortcut's shape on
+the device. It is recorded because the manual route has one trap that is very
+easy to fall into and produces a **credential leak rather than a visible
+failure**.
+
+`Get Contents of URL` is normally used to *fetch* the shared page, so
+Shortcuts pre-fills its URL parameter with the `Shortcut Input` variable.
+Here the action is repurposed to POST to your own engine. Two different URLs
+are in play, and the Shortcuts UI calls both of them "URL":
+
+| | The destination | The payload |
+|---|---|---|
+| What it is | your engine's endpoint | the page you shared |
+| Changes? | never; typed once | every time |
+| Lives in | the action's **URL** parameter | Request Body → `url` field |
+| As | literal typed text | the **Shortcut Input** variable |
+
+Leave `Shortcut Input` in the action's URL parameter and your bearer token is
+POSTed to whatever page you just shared. The endpoint belongs in the action's
+URL; the shared page belongs in the body.
+
+The steps, as of iOS 26.6.2:
+
+1. **Shortcuts** → `+` → tap the title → **Rename** → `Deposit to Particles`.
+2. Add **Sharing → Share**, tap its **Input** parameter, select **Shortcut
+   Input**. This makes the *Receive* header appear.
+3. Tap the *Receive* parameter, tap **Clear**, then enable only **URLs**.
+4. Tap **Nowhere** and toggle **Show in Share Sheet** on.
+5. Delete the **Share** action added in step 2. It was only there to summon
+   the header, which persists as a shortcut-level setting.
+6. Add **Get Contents of URL** and tap `>` to expand it.
+7. Replace the auto-filled `Shortcut Input` in its **URL** parameter with the
+   typed endpoint, e.g. `http://<engine-host>:8000/corpus/deposit/url`.
+8. **Method** → `POST`.
+9. **Headers** → add key `Authorization`, value `Bearer <your-token>`.
+10. **Request Body** → `JSON`. Don't add `Content-Type` by hand; the JSON
+    body type sets it.
+11. Add three body fields with **Add new field**:
+
+| Key | Type | Value |
+|---|---|---|
+| `url` | Text | the **Shortcut Input** variable |
+| `deposited_by` | Text | `ios-share-sheet` |
+| `tags` | Array | one Text item: `from-phone` |
+
+To reach it in fewer taps, scroll to the bottom of the share sheet, tap
+**Edit Actions**, and add the shortcut to Favorites. Otherwise it lives
+behind **View More**.
+
 ### Reaching the engine from the phone
 
 A phone is not on loopback, so the engine has to bind somewhere the phone can
-reach it — and the moment it does, a real `PARTICLES_API_KEY` becomes
+reach it, and the moment it does, a real `PARTICLES_API_KEY` becomes
 **mandatory**. The fail-closed gate refuses to start a non-loopback
 bind that still has the development key, which is the one guard standing
 between "share sheet deposit" and "an unauthenticated write endpoint on your
@@ -162,25 +205,25 @@ network". Do not work around it.
 
 Three exposures, best first:
 
-* **Tailscale (or another private mesh) — recommended.** Install it on the
+* **Tailscale (or another private mesh), recommended.** Install it on the
   phone and the engine host; point the Shortcut at the engine's tailnet name.
   The mesh encrypts the hop, so the bearer is not travelling in cleartext, and
   it works from any network without opening a port.
 * **Plain LAN** (`http://mac-mini.local:8000`). Simplest, and fine at home if
   you accept that the bearer crosses your Wi-Fi in cleartext and is only as
   private as that network. Not appropriate on a shared or public network.
-* **Public TLS endpoint** — out of scope for this setup and not recommended;
+* **Public TLS endpoint**: out of scope for this setup and not recommended;
   the remote-engine posture deliberately stops at a private path.
 
 An SSH local-forward, the usual answer for a laptop client, is not practical
-from iOS — this is where the phone case genuinely differs.
+from iOS; this is where the phone case genuinely differs.
 
 Because the engine is now reachable, remember its **read** surface is
 unauthenticated by default; set `api.require_auth_for_reads: true` if you want
 the bearer to gate reads too. See
 [Operator Guide → Remote engine](../operator-guide/remote-engine.md).
 
-### Security posture — read this before pasting the token
+### Security posture: read this before pasting the token
 
 **The bearer lives in the shortcut, in plain text.** iOS Shortcuts is not a
 credential store: the token sits in the action's header field, syncs with your
@@ -188,7 +231,7 @@ shortcuts through iCloud, and travels inside any copy of the shortcut you
 share or export. Anyone who can unlock the device can read it.
 
 **It is a full-privilege credential.** The engine compares one key
-(`PARTICLES_API_KEY`) for every authenticated route — there is no read-only or
+(`PARTICLES_API_KEY`) for every authenticated route; there is no read-only or
 deposit-only scope today. A token on the phone is therefore equivalent to
 write access to the store, not just deposit access. Rotate it by changing the
 value on the engine and editing the shortcut; there is nothing finer-grained
@@ -197,16 +240,16 @@ to revoke.
 **Consequences worth accepting deliberately:**
 
 * Put the token in the `Authorization` **header**, never in the URL query
-  string — URLs end up in logs and history.
+  string, because URLs end up in logs and history.
 * Treat a lost or shared phone as a store-credential compromise: rotate.
-* If none of that is acceptable for your threat model, use **Route B** — the
+* If none of that is acceptable for your threat model, use **Route B**; the
   file route puts no credential on the device at all.
 
 **What the SSRF guard means for you in practice.** The URL deposit rejects
 loopback, RFC 1918, link-local, and cloud-metadata addresses, and it validates
 the address it actually connects to across DNS re-resolution and
 redirects. So you cannot use the share sheet to deposit a page from
-your home network or from the engine host itself — that returns `400` with
+your home network or from the engine host itself; that returns `400` with
 `Could not deposit the provided URL`. That is the guard working, not a bug;
 deposit local material from the engine host with `particles deposit <path>`.
 
@@ -224,7 +267,7 @@ running with the development key and your phone isn't loopback. Set a real
 the SSRF guard (above), or the fetch failed. The engine log names the actual
 cause; the response deliberately does not.
 
-**`502` with an upstream detail.** The origin refused the fetch — Reddit's bot
+**`502` with an upstream detail.** The origin refused the fetch; Reddit's bot
 wall is the common one. The request was fine; the source is the problem.
 
 **Connection can't be established / times out.** The engine isn't reachable
@@ -239,7 +282,7 @@ cosmetic error regardless of outcome. Check the notification from step 3, or
 
 ---
 
-## Route B — the iCloud file fallback
+## Route B: the iCloud file fallback
 
 The original path, kept for the offline / no-credential-on-device case:
 
@@ -252,7 +295,7 @@ Particles corpus
 ```
 
 URLs queue up on iCloud while the Mac is offline; they're processed the next
-time the watcher runs. Nothing about this route changed — it is simply no
+time the watcher runs. Nothing about this route changed; it is simply no
 longer the recommended default when the engine is reachable.
 
 ### One-time setup
@@ -272,7 +315,7 @@ inbox:
   file_path: ~/Library/Mobile Documents/com~apple~CloudDocs/Documents/_inbox.txt
 ```
 
-`~` is expanded. The file is auto-created on the first share — you
+`~` is expanded. The file is auto-created on the first share; you
 don't need to `touch` it. The leading underscore keeps Obsidian from
 indexing it as a note when you place it inside a vault. You can also
 override per shell:
@@ -292,17 +335,17 @@ export INBOX_FILE_PATH="$HOME/inbox.txt"
 > [!warning]
 > **Don't shell-escape spaces in `config.yaml`.** When you copy a path
 > from your terminal where spaces are written as `\ ` (e.g. from
-> tab-completion or `pwd`), the backslashes are shell-only syntax —
+> tab-completion or `pwd`), the backslashes are shell-only syntax;
 > YAML treats them as literal characters and the resolved path won't
 > match anything on disk. Either drop the backslashes or wrap the
 > whole value in double quotes:
 >
 > ```yaml
-> # wrong — backslash is taken literally:
+> # wrong: backslash is taken literally:
 > file_path: ~/Library/Mobile\ Documents/com~apple~CloudDocs/Documents/_inbox.txt
-> # right — unquoted, no escape:
+> # right: unquoted, no escape:
 > file_path: ~/Library/Mobile Documents/com~apple~CloudDocs/Documents/_inbox.txt
-> # also right — quoted:
+> # also right: quoted:
 > file_path: "~/Library/Mobile Documents/com~apple~CloudDocs/Documents/_inbox.txt"
 > ```
 >
@@ -316,7 +359,7 @@ On your iPhone, open the **Shortcuts** app, then `+` → **New Shortcut**.
 **Set the Receive types.** At the top of the new Shortcut there's a
 "Receive [types] from Share Sheet" header (initially says "Receive
 Apps and 18 more"). Tap it and enable at least **URLs** (other types
-can stay enabled too — the action below only acts on whatever comes
+can stay enabled too; the action below only acts on whatever comes
 in, and Safari / Reddit / Mobile Safari send the page URL as the
 Shortcut Input). Set "If there's no input:" → **Continue**.
 
@@ -324,7 +367,7 @@ Shortcut Input). Set "If there's no input:" → **Continue**.
 
 | Action | Source category | Configuration |
 |---|---|---|
-| **Append to Text File** | Files | **Service**: iCloud Drive. **File Path**: browse to your inbox file via the file picker (don't type the path — letting iOS record the file selection avoids container-mismatch surprises). **Text**: tap the input slot and insert the **Shortcut Input** variable. **Make New Line**: **ON**. |
+| **Append to Text File** | Files | **Service**: iCloud Drive. **File Path**: browse to your inbox file via the file picker (don't type the path; letting iOS record the file selection avoids container-mismatch surprises). **Text**: tap the input slot and insert the **Shortcut Input** variable. **Make New Line**: **ON**. |
 
 Then:
 
@@ -334,7 +377,7 @@ Then:
 
 From now on, tap **Share** in any app that shares a URL, find
 **Particles Inbox** in the action list, and the URL is appended to
-the inbox file (one URL per line). Test from Safari first — every
+the inbox file (one URL per line). Test from Safari first: every
 web page Share Sheet sends a clean URL, so a successful Safari test
 confirms the file-write path is wired up correctly.
 
@@ -342,7 +385,7 @@ confirms the file-write path is wired up correctly.
 > **No intermediate variable transforms needed.** Earlier doc revisions
 > recommended a three-action recipe (Get URLs → Text → Append) and
 > later a two-action recipe (Get URLs → Append). Empirically the
-> simplest one-action recipe — `Append [Shortcut Input]` directly —
+> simplest one-action recipe (`Append [Shortcut Input]` directly)
 > is also the only one that consistently works across iOS versions.
 > `Get URLs from Input` is intended to extract URLs from rich-text
 > content (e.g. a paragraph that mentions a URL); when the Share
@@ -357,10 +400,10 @@ confirms the file-write path is wired up correctly.
 Two flavours, pick whichever fits your workflow:
 
 ```bash
-# One-shot — run on demand, after cron, or bound to a desktop hotkey:
+# One-shot: run on demand, after cron, or bound to a desktop hotkey:
 uv run particles inbox process
 
-# Continuous — leave running in a terminal tab; polls every
+# Continuous: leave running in a terminal tab; polls every
 # inbox.poll_interval_seconds (default 30s):
 uv run particles inbox watch
 
@@ -404,7 +447,7 @@ failed URL, edit the file and remove the `# Failed … ` prefix.
   with "Make New Line" on, which looks like an empty file).
 * Fix: rewrite the Shortcut to a single `Append [Shortcut Input]`
   action as shown in step 2 above. Drop any intermediate variable
-  transforms — the Shortcut Input variable already carries the URL.
+  transforms; the Shortcut Input variable already carries the URL.
 
 **Symptom: the Shortcut writes to a different file than expected.**
 
@@ -430,11 +473,11 @@ proceed. Please try again later." popup after invoking the Shortcut.**
 
 **Symptom: nothing happens on the Mac after sharing.**
 
-* iCloud sync latency — typically seconds, occasionally a minute.
+* iCloud sync latency: typically seconds, occasionally a minute.
   Open the inbox file on your Mac via Finder and watch it for
   changes, or run `particles inbox status` to confirm pending URLs.
 * If `inbox status` shows nothing pending after iCloud sync
-  completes, the share never reached the file — re-read the
+  completes, the share never reached the file; re-read the
   Shortcut troubleshooting above.
 
 ### Known limitations of the file route
@@ -457,8 +500,8 @@ proceed. Please try again later." popup after invoking the Shortcut.**
 
 Android needs none of this: a PWA can register as a **Web Share Target**, so
 the unified web UI can appear in the system share sheet directly and post to
-the engine itself. iOS has no equivalent — Safari does not implement Web Share
-Target — which is why the iOS answer is a Shortcut driving the HTTP API by
+the engine itself. iOS has no equivalent (Safari does not implement Web Share
+Target), which is why the iOS answer is a Shortcut driving the HTTP API by
 hand.
 
 That asymmetry is expected to persist until a native mobile app ships, which

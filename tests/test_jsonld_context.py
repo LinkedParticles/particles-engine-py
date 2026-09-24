@@ -6,7 +6,8 @@
 
 Three surfaces used to answer "is this prefix published?" from three hand-lists
 that all disagreed with `artifacts/schemas/context.jsonld`. These tests pin the
-reader and the two drift guards that keep the artifact, the registry, and the code from separating again.
+reader and the two drift guards that keep the artifact, the
+registry, and the code from separating again.
 """
 
 from __future__ import annotations

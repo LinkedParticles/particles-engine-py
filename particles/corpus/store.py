@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, String, Text, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, aliased, mapped_column
 
 from particles.core.schema import (
     ContributorRef,
@@ -114,6 +116,13 @@ class SnapshotRow(Base):
     content_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Set when the bulk extraction paths skip this snapshot because a newer
+    # generation of the same MUTABLE entry superseded it: the id of that newer
+    # snapshot. A snapshot is collapsed if and only if this is non-null; its
+    # ``extraction_status`` is COMPLETE ("no extraction work is owed"), which
+    # alone cannot tell a skipped generation from an extracted one. SDK-internal
+    # by design: not a Snapshot-model field and not serialised.
+    superseded_by_snapshot_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (Index("ix_snapshots_entry_extraction", "entry_id", "extraction_status"),)
 
@@ -219,6 +228,12 @@ async def claim_snapshot_for_extraction(
     if row is not None:
         row.extraction_status = ExtractionStatus.IN_PROGRESS.value
         row.extraction_started_at = started_at
+        # A claim un-collapses. The bulk paths never claim a
+        # collapsed snapshot (``skip_if_superseded``), so reaching here with the
+        # mark set means an operator named this generation explicitly; from now
+        # on it is an extracted generation, or on failure a PENDING one the
+        # next bulk pass is free to collapse again.
+        row.superseded_by_snapshot_id = None
         await session.flush()
 
 
@@ -322,6 +337,122 @@ async def get_source_types_for_entries(
     return {entry_id: source_type for entry_id, source_type in rows}
 
 
+async def list_entry_tag_rows(session: AsyncSession) -> list[tuple[str, str | None, list[str]]]:
+    """``(entry_id, uri_r, tags)`` for every corpus entry, oldest first.
+
+    What ``rescope`` walks.
+    """
+    rows = (
+        await session.execute(
+            select(
+                CorpusEntryRow.entry_id, CorpusEntryRow.uri_r, CorpusEntryRow.tags_json
+            ).order_by(CorpusEntryRow.created_at)
+        )
+    ).all()
+    return [(entry_id, uri_r, json.loads(tags_json or "[]")) for entry_id, uri_r, tags_json in rows]
+
+
+async def get_tags_for_entries(
+    session: AsyncSession, entry_ids: Collection[str]
+) -> dict[str, list[str]]:
+    """Batch-load tags keyed by entry_id (where a belief was observed).
+
+    Ids that name no corpus entry are simply absent from the result, which is
+    what a caller wants when some of its "entry ids" came from ``PARTICLE``
+    provenance refs.
+    """
+    ids = list(entry_ids)
+    tags: dict[str, list[str]] = {}
+    for start in range(0, len(ids), 500):
+        rows = (
+            await session.execute(
+                select(CorpusEntryRow.entry_id, CorpusEntryRow.tags_json).where(
+                    CorpusEntryRow.entry_id.in_(ids[start : start + 500])
+                )
+            )
+        ).all()
+        tags.update({entry_id: json.loads(tags_json or "[]") for entry_id, tags_json in rows})
+    return tags
+
+
+@dataclass(frozen=True)
+class EntryCurrency:
+    """What the observer-scope join needs to know about one attesting entry."""
+
+    tags: list[str]
+    mutable: bool
+    latest_snapshot_id: str | None
+    """For a ``MUTABLE`` entry: its latest *extracted* generation (the
+    :func:`get_latest_completed_snapshot_id` reading, batched), or ``None`` when
+    nothing has been extracted yet. Always ``None`` for other mutabilities."""
+
+
+async def get_entry_currency(
+    session: AsyncSession, entry_ids: Collection[str], *, as_of: datetime | None = None
+) -> dict[str, EntryCurrency]:
+    """Tags, mutability and latest extracted snapshot per entry, in two batched reads.
+
+    ``as_of`` restricts "latest" to snapshots captured at or before the instant,
+    so an as-of read sees which generation was current then. Ids
+    that name no corpus entry are absent from the result, as in
+    :func:`get_tags_for_entries`.
+    """
+    ids = list(entry_ids)
+    base: dict[str, tuple[list[str], bool]] = {}
+    for start in range(0, len(ids), 500):
+        rows = await session.execute(
+            select(
+                CorpusEntryRow.entry_id, CorpusEntryRow.tags_json, CorpusEntryRow.mutability
+            ).where(CorpusEntryRow.entry_id.in_(ids[start : start + 500]))
+        )
+        for entry_id, tags_json, mutability in rows.all():
+            base[entry_id] = (json.loads(tags_json or "[]"), mutability == Mutability.MUTABLE.value)
+
+    mutable = [e for e, (_tags, is_mutable) in base.items() if is_mutable]
+    latest: dict[str, tuple[datetime, str]] = {}
+    for start in range(0, len(mutable), 500):
+        stmt = select(SnapshotRow.entry_id, SnapshotRow.snapshot_id, SnapshotRow.captured_at).where(
+            SnapshotRow.entry_id.in_(mutable[start : start + 500]),
+            SnapshotRow.extraction_status == ExtractionStatus.COMPLETE.value,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.superseded_by_snapshot_id.is_(None),
+        )
+        if as_of is not None:
+            stmt = stmt.where(SnapshotRow.captured_at <= as_of)
+        for entry_id, snapshot_id, captured_at in (await session.execute(stmt)).all():
+            held = latest.get(entry_id)
+            if held is None or captured_at > held[0]:
+                latest[entry_id] = (captured_at, snapshot_id)
+
+    return {
+        entry_id: EntryCurrency(
+            tags=tags,
+            mutable=is_mutable,
+            latest_snapshot_id=latest[entry_id][1] if entry_id in latest else None,
+        )
+        for entry_id, (tags, is_mutable) in base.items()
+    }
+
+
+async def add_entry_tags(
+    session: AsyncSession, entry_id: str, new_tags: Sequence[str]
+) -> list[str]:
+    """Append tags an entry does not already carry; returns the ones actually added.
+
+    Additive only — the corpus never loses a tag this way. Flushes; the caller
+    owns the transaction.
+    """
+    row = await session.get(CorpusEntryRow, entry_id)
+    if row is None:
+        return []
+    current: list[str] = json.loads(row.tags_json or "[]")
+    added = [tag for tag in dict.fromkeys(new_tags) if tag not in current]
+    if added:
+        row.tags_json = json.dumps([*current, *added])
+        await session.flush()
+    return added
+
+
 async def get_entry_uri_map(
     session: AsyncSession, entry_ids: set[str] | None = None
 ) -> dict[str, str | None]:
@@ -351,8 +482,10 @@ async def get_document_supersession_map(
 ) -> dict[str, str | None]:
     """Batch-load ``document_supersession_json`` keyed by entry_id.
 
-    One ``SELECT`` for the given entries. The value is the raw JSON string the cap. 2 genre adapter stamped at deposit (``{"key": "adr:0166",
-    …}``) or ``None`` for any entry that is not a recognised genre. The document-precedence tie-break reads the ``key`` from this map to recover the
+    One ``SELECT`` for the given entries. The value is the raw JSON string the
+    cap. 2 genre adapter stamped at deposit (``{"key": "adr:0166",
+    …}``) or ``None`` for any entry that is not a recognised genre. The
+    document-precedence tie-break reads the ``key`` from this map to recover the
     ADR id ordinal without re-parsing the source blob. Returns ``{}`` for an
     empty input set, skipping the round-trip.
     """
@@ -625,12 +758,24 @@ async def list_complete_response_snapshots(
 
 
 async def get_latest_completed_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:
-    """Return the most recent COMPLETE snapshot_id for an entry, or None."""
+    """Return the entry's newest *extracted* generation: its latest COMPLETE RESPONSE snapshot.
+
+    REVISIT snapshots are excluded. The fetch ladder writes every REVISIT
+    ``COMPLETE`` ("no new extraction needed"), so without the filter the newest
+    COMPLETE row is usually a REVISIT — blob-less, with no particles of its own.
+    Both callers mean "the generation whose beliefs are in the store": the
+    generation backfill would otherwise take the REVISIT as current and demote
+    every ACTIVE particle of the entry, including the generation the REVISIT
+    refers to, and ``reindex <entry>`` would hand the pipeline a snapshot it
+    skips for having no ``archive_path``.
+    """
     result = await session.execute(
         select(SnapshotRow.snapshot_id)
         .where(
             SnapshotRow.entry_id == entry_id,
             SnapshotRow.extraction_status == ExtractionStatus.COMPLETE.value,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.superseded_by_snapshot_id.is_(None),
         )
         .order_by(SnapshotRow.captured_at.desc())
         .limit(1)
@@ -638,10 +783,125 @@ async def get_latest_completed_snapshot_id(session: AsyncSession, entry_id: str)
     return result.scalar_one_or_none()
 
 
+@dataclass(frozen=True)
+class GenerationRow:
+    """One RESPONSE snapshot of a MUTABLE entry, as the collapse reads it."""
+
+    entry_id: str
+    snapshot_id: str
+    captured_at: datetime
+    extraction_status: ExtractionStatus
+    content_hash: str
+    collapsed: bool
+
+
+async def list_generations_with_unextracted_snapshots(
+    session: AsyncSession, *, entry_ids: Collection[str] | None = None
+) -> dict[str, list[GenerationRow]]:
+    """RESPONSE snapshots of every MUTABLE entry that still owes an extraction.
+
+    The candidate read. An entry qualifies when it has at least one
+    RESPONSE snapshot that is ``PENDING`` or ``FAILED`` and not already
+    collapsed; for each such entry **all** of its RESPONSE snapshots are
+    returned, oldest first on ``(captured_at, snapshot_id)`` — the same
+    tie-break :func:`list_pending_snapshots_oldest_first` uses — because
+    whether a snapshot is superseded depends on its newer siblings, whatever
+    their status. REVISIT snapshots are excluded: a REVISIT records that the
+    content did *not* change, so it is never a generation.
+
+    ``entry_ids`` scopes the read (the audit's harvest); ``None`` is store-wide.
+    """
+    owing = select(SnapshotRow.entry_id).where(
+        SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+        SnapshotRow.extraction_status.in_(
+            [ExtractionStatus.PENDING.value, ExtractionStatus.FAILED.value]
+        ),
+        SnapshotRow.superseded_by_snapshot_id.is_(None),
+    )
+    stmt = (
+        select(SnapshotRow)
+        .join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id)
+        .where(
+            CorpusEntryRow.mutability == Mutability.MUTABLE.value,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.entry_id.in_(owing),
+        )
+        .order_by(SnapshotRow.entry_id, SnapshotRow.captured_at, SnapshotRow.snapshot_id)
+    )
+    if entry_ids is not None:
+        stmt = stmt.where(SnapshotRow.entry_id.in_(list(entry_ids)))
+    grouped: dict[str, list[GenerationRow]] = {}
+    for row in (await session.execute(stmt)).scalars():
+        grouped.setdefault(row.entry_id, []).append(
+            GenerationRow(
+                entry_id=row.entry_id,
+                snapshot_id=row.snapshot_id,
+                captured_at=row.captured_at,
+                extraction_status=ExtractionStatus(row.extraction_status),
+                content_hash=row.content_hash,
+                collapsed=row.superseded_by_snapshot_id is not None,
+            )
+        )
+    return grouped
+
+
+async def mark_snapshot_superseded(
+    session: AsyncSession, snapshot_id: str, *, superseded_by: str
+) -> bool:
+    """Collapse one snapshot: ``COMPLETE`` plus the id of the generation that replaced it.
+
+    Conditional on the row still being ``PENDING`` / ``FAILED`` and not yet
+    collapsed, so a snapshot another runner claimed between the candidate read
+    and this write is left alone. Returns whether the row was marked. Caller
+    commits.
+    """
+    result = await session.execute(
+        update(SnapshotRow)
+        .where(
+            SnapshotRow.snapshot_id == snapshot_id,
+            SnapshotRow.extraction_status.in_(
+                [ExtractionStatus.PENDING.value, ExtractionStatus.FAILED.value]
+            ),
+            SnapshotRow.superseded_by_snapshot_id.is_(None),
+        )
+        .values(
+            extraction_status=ExtractionStatus.COMPLETE.value,
+            extraction_started_at=None,
+            superseded_by_snapshot_id=superseded_by,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(getattr(result, "rowcount", 0) == 1)
+
+
+async def get_snapshot_superseded_by(session: AsyncSession, snapshot_id: str) -> str | None:
+    """The id of the generation that collapsed this snapshot, or None.
+
+    Read fresh from the database rather than the identity map: the mark is
+    written by a conditional bulk UPDATE, possibly from another process.
+    """
+    result = await session.execute(
+        select(SnapshotRow.superseded_by_snapshot_id)
+        .where(SnapshotRow.snapshot_id == snapshot_id)
+        .execution_options(populate_existing=True)
+    )
+    value = result.scalar_one_or_none()
+    return str(value) if value is not None else None
+
+
+async def list_collapsed_snapshot_ids(session: AsyncSession) -> set[str]:
+    """Ids of every collapsed snapshot, for the empty-COMPLETE lint."""
+    result = await session.execute(
+        select(SnapshotRow.snapshot_id).where(SnapshotRow.superseded_by_snapshot_id.is_not(None))
+    )
+    return {str(sid) for sid in result.scalars()}
+
+
 async def list_refreshable_local_entries(session: AsyncSession) -> list[tuple[str, str]]:
     """``(entry_id, uri_r)`` for every LAZY corpus entry with a ``file://`` URI-R.
 
-    The refresh pass's work list. The ``LAZY`` filter is the gate, reused deliberately: ``deposit_file`` defaults to ``NEVER``, so nothing
+    The refresh pass's work list. The ``LAZY`` filter is the
+    gate, reused deliberately: ``deposit_file`` defaults to ``NEVER``, so nothing
     already in a store starts refreshing on upgrade — an operator opts in per
     entry, which is the same operator promise mutability keys on.
 
@@ -694,3 +954,32 @@ async def list_entry_status_pairs_with_extraction_status(
         .distinct()
     )
     return [(str(row[0]), str(row[1])) for row in result.all()]
+
+
+async def list_replaced_mutable_snapshot_ids(session: AsyncSession) -> set[str]:
+    """COMPLETE RESPONSE snapshots of MUTABLE entries whose replacement is in the store.
+
+    "Replaced" means a newer RESPONSE sibling is COMPLETE and not collapsed —
+    an *extracted* later generation. Used by the empty-COMPLETE lint:
+    re-extracting such a snapshot could only retire the generation that
+    replaced it. A newer sibling that is FAILED, PENDING or collapsed does not
+    count, so an empty snapshot that may be the entry's best surviving
+    generation stays visible.
+    """
+    newer = aliased(SnapshotRow)
+    result = await session.execute(
+        select(SnapshotRow.snapshot_id)
+        .join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id)
+        .join(newer, newer.entry_id == SnapshotRow.entry_id)
+        .where(
+            CorpusEntryRow.mutability == Mutability.MUTABLE.value,
+            SnapshotRow.extraction_status == ExtractionStatus.COMPLETE.value,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            newer.warc_record_type == WarcRecordType.RESPONSE.value,
+            newer.extraction_status == ExtractionStatus.COMPLETE.value,
+            newer.superseded_by_snapshot_id.is_(None),
+            newer.captured_at > SnapshotRow.captured_at,
+        )
+        .distinct()
+    )
+    return {str(sid) for sid in result.scalars()}

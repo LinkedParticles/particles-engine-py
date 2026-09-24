@@ -1,46 +1,46 @@
-# Graph view — seeing the epistemics
+# Graph view: seeing the epistemics
 
 `particles export graph` renders a **scoped subgraph** of your store as a
-single self-contained HTML file: no server, no build toolchain, no CDN — the
+single self-contained HTML file: no server, no build toolchain, no CDN. The
 graph library (Cytoscape.js, MIT) and all data are inlined, so the file opens
 over `file://` and works air-gapped.
 
 What makes it different from every other memory product's graph view is what
-it renders. The schema already *is* a graph — Subjects are nodes,
+it renders. The schema already *is* a graph (Subjects are nodes,
 multi-subject particles are edges, single-subject particles are node
-properties — so the view has no topology extraction step to get wrong.
+properties), so the view has no topology extraction step to get wrong.
 Instead it spends its visual channels on the epistemics:
 
 | Channel | Meaning |
 |---|---|
 | **Opacity** | [Effective confidence](concepts.md#confidence), computed at render time (never stored). Decay renders as literal fading; what drives it is [Operator guide → tuning](../operator-guide/tuning.md). |
 | **Form** | [Status](concepts.md#status): solid = ACTIVE; dashed ghost = SUPERSEDED (with its successor chain in the panel); dotted amber = PROVENANCE_STALE; ☒ = RETRACTED tombstone. |
-| **⚠ badge** | [Contested](querying.md#the-contested-badge) — open the panel for the fired bases (`stance` / `divergence` / `inconsistency`) and the drill-down ids. |
-| **Node size** | Utility evidence: how often the belief was demonstrably used. Display only — it never changes a confidence. |
+| **⚠ badge** | [Contested](querying.md#the-contested-badge); open the panel for the fired bases (`stance` / `divergence` / `inconsistency`) and the drill-down ids. |
+| **Node size** | Utility evidence: how often the belief was demonstrably used. Display only; it never changes a confidence. |
 | **Node shade** | The best-supported claim on that subject (a labeled display aggregate). |
 | **Bold blue** | A retrieval hit, in query scope. |
 
 Click any node or edge to open the detail panel: every visual claim is one
-click from its underlying particles — content, stored vs effective
+click from its underlying particles: content, stored vs effective
 confidence, status, provenance link, supersession chain.
 
 ## Scoped, always
 
-A whole-store render does not exist — that is the anti-hairball rule
-, and it is deliberate: a 10,000-node force layout answers no
+A whole-store render does not exist. That is the anti-hairball rule,
+and it is deliberate: a 10,000-node force layout answers no
 question. Every render is anchored:
 
 ```bash
 # One Subject's neighbourhood (1 hop by default; --hops up to graph.max_hops)
 uv run particles export graph pluto.html --subject <subject-id>
 
-# One query's retrieval set — the picture of the knowledge a query consults
+# One query's retrieval set: the picture of the knowledge a query consults
 uv run particles export graph answer.html --query "is Pluto a planet?"
 ```
 
 Renders are bounded by `graph.max_nodes` and `graph.max_particles_per_subject`
-(see `config.yaml.sample`). When a cap binds, the page says so in a banner —
-"showing 150 of 412 subjects" — and the machine-readable census in the file
+(see `config.yaml.sample`). When a cap binds, the page says so in a banner
+("showing 150 of 412 subjects"), and the machine-readable census in the file
 carries the exact counts. A capped view is a disclosed lower bound, never a
 silent truncation.
 
@@ -60,10 +60,10 @@ retired ancestors as dashed ghosts, with the directed chain in the panel.
 
 `--as-of` renders the store's beliefs *as they stood at T*: visibility and
 decay evaluate at T, while trust and the contested marker stay current
-(temporal-vs-judgment rule — the same lens the `query` verb takes,
+(the temporal-vs-judgment rule; the same lens the `query` verb takes,
 described in full under [As-of time travel](as-of.md)). Retirements the store cannot date are
 excluded fail-closed and counted in the banner. Export the same subject at two
-instants — before and after a supersession — and you can watch a belief get
+instants, before and after a supersession, and you can watch a belief get
 retired between the two files.
 
 To try it cold, seed the throwaway demo store and anchor on the subject by
@@ -79,7 +79,7 @@ DATABASE_URL="sqlite+aiosqlite:///$PWD/pluto-demo.db" \
 ```
 
 Open `pluto.html`: seven subjects around `Pluto`, and *two* links to `Solar
-System` where every other pair has one — the dashed one is the retired belief.
+System` where every other pair has one; the dashed one is the retired belief.
 Click it to read the claim, its dates, and what replaced it; untick *show
 history* to drop it from view. Clicking any other node opens that subject's own
 claims instead, which is the point: the supersession is one feature of a normal
@@ -90,17 +90,17 @@ this exact export.
 
 The same render is available on the wire (shipped):
 `GET /graph` on the FastAPI engine returns the identical `GraphData` contract
-the static export embeds — one build, two presentations. Scope is mandatory
+the static export embeds: one build, two presentations. Scope is mandatory
 here too (an unscoped request is 422). All four scopes are
 served: `scope=subject&subject_id=…`, `scope=query&q=…`,
 `scope=inconsistency&inconsistency_id=…` (a contradiction's evidence: the
 INCONSISTENCY record as the anchor plus its disputants with their true
-statuses — the quarantined loser included; accepts a full id or a unique
+statuses, the quarantined loser included; accepts a full id or a unique
 prefix), and `scope=projection&manifest=…&section=…` (a manifest
 section's deterministic selection, addressed by region id or exact title).
 The same `hops` / `history` / `as_of` / `max_nodes` params apply, plus
 `store` to target a non-default store. The endpoint is bearer-gated and
-rate-limited like `POST /query` (query scope drives a paid embedding) — see
+rate-limited like `POST /query` (query scope drives a paid embedding); see
 [Operator guide → remote engine](../operator-guide/remote-engine.md) for
 standing the engine up and issuing the token.
 
@@ -110,8 +110,8 @@ a "show the conflict" link that opens the evidence render with the panel
 already listing the INCONSISTENCY and both disputants.
 
 Over MCP, the read-registered `graph_view` tool returns the scoped
-`GraphData` inline — how an agent hands you the picture of the knowledge it
-consulted — and, when `engine.base_url` is configured, adds a `url` field
+`GraphData` inline (how an agent hands you the picture of the knowledge it
+consulted) and, when `engine.base_url` is configured, adds a `url` field
 deep-linking the same scope on the unified web UI (`/app#/browse?…`), where
 the render is interactive and carries the as-of scrubber.
 
@@ -127,5 +127,5 @@ the render is interactive and carries the as-of scrubber.
 | `--history` | Include supersession-chain ghosts + a client-side toggle |
 | `--as-of <ISO-8601>` | Single-instant as-of lens |
 | `--max-nodes N` | Per-run node cap (clamped to `graph.max_nodes`) |
-| `--min-particle-confidence X` | Cross-exporter floor on effective confidence — shared with [every exporter](exporting.md), set globally under [`exporter_common`](../operator-guide/tuning.md#cross-exporter-quality-threshold) |
+| `--min-particle-confidence X` | Cross-exporter floor on effective confidence; shared with [every exporter](exporting.md), set globally under [`exporter_common`](../operator-guide/tuning.md#cross-exporter-quality-threshold) |
 | `--include-non-asserted` | Keep DECLINED / HYPOTHETICAL particles |

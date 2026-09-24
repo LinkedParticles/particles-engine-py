@@ -67,8 +67,8 @@ class WebUIStaticFiles(StaticFiles):
     tests) can assert *which* mount they got, and so the reasoning below has a
     home next to the code it explains.
 
-    This deliberately does **not** run ``verify_request_bearer``. It used to
-    , and that made the UI unopenable in any browser once a real
+    This deliberately does **not** run ``verify_request_bearer``. It used to,
+    and that made the UI unopenable in any browser once a real
     key was set: the token prompt is inside the bundle the gate withheld. What
     is served here is the static shell only — no store data passes through this
     mount, and every ``/curation``, ``/query``, ``/graph`` call the loaded app

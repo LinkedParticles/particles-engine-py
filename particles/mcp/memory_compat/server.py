@@ -4,13 +4,15 @@
 
 """The drop-in memory-server MCP surface.
 
-Mirrors ``@modelcontextprotocol/server-memory`` v0.6.3 closely enough that a
-client which worked against the reference works here unmodified: same nine tool
-names, same input schemas, same output schemas, same annotations, same
+Mirrors ``@modelcontextprotocol/server-memory`` (re-verified against the
+reference's ``main`` on 2026-09-20) closely enough that a client which worked
+against the reference works here unmodified: same nine tool names, same input
+schemas, same output schemas, same annotations, same
 ``memory://knowledge-graph`` resource with subscriptions, and the same response
 envelope — including the detail that the three ``delete_*`` tools return a bare
 sentence as their text content but a ``{success, message}`` object as their
-structured content.
+structured content, and that the sentence reports a partial delete rather than
+claiming success for deletions that did not happen.
 
 This module uses the **low-level** ``mcp.server.lowlevel.Server`` rather than
 FastMCP (which the native ``particles`` server uses), for two reasons that are
@@ -19,10 +21,14 @@ cannot implement the capability the reference has shipped since 2026-06-17;
 and returning a ``CallToolResult`` directly is the only way to control the
 envelope byte-for-byte (§2).
 
-Three behaviours differ from the reference and are disclosed in the tool
-descriptions the client actually reads, not only in the ADR: deletes retract
-rather than destroy, ``read_graph`` is capped, and the write tools refuse with
-an actionable message on a store that is not write-enabled.
+Five behaviours a tool call can observe differ from the reference and are
+disclosed in the tool descriptions the client actually reads, not only in the
+ADR: deletes retract rather than destroy, reads are capped, the write tools
+refuse with an actionable message on a store that is not write-enabled, entity
+names match case-insensitively, and ``read_graph`` returns entities in name
+order rather than creation order. Two more are invisible to a tool call and are
+recorded in the ADR alone: ``serverInfo.version`` is this package's version,
+and concurrent mutations are isolated per transaction rather than queued.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from pydantic import AnyUrl
 
+from particles import __version__
 from particles.db import DEFAULT_STORE
 from particles.mcp.memory_compat import ops
 
@@ -42,6 +49,11 @@ log = logging.getLogger(__name__)
 
 SERVER_NAME = "memory-server"
 RESOURCE_URI = "memory://knowledge-graph"
+
+#: The reference's ``SEARCH_QUERY_MAX_LENGTH``. Declared in the input schema,
+#: which is also what enforces it: the low-level server validates arguments
+#: against ``inputSchema`` before a handler runs.
+SEARCH_QUERY_MAX_LENGTH = 2048
 
 _ENTITY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -95,6 +107,11 @@ _CAP_NOTE = (
     " Backed by a Particles store: results are capped for context safety and any "
     "truncation is disclosed in an extra text block."
 )
+_NAME_NOTE = (
+    " Backed by a Particles store: entity names match case-insensitively, so a name "
+    "differing from an existing entity only by case is treated as that entity and skipped."
+)
+_ORDER_NOTE = " Entities are returned in name order, not creation order."
 
 _WRITE_TOOLS = frozenset(
     {
@@ -114,7 +131,7 @@ def _tools() -> list[types.Tool]:
         types.Tool(
             name="create_entities",
             title="Create Entities",
-            description="Create multiple new entities in the knowledge graph",
+            description="Create multiple new entities in the knowledge graph" + _NAME_NOTE,
             inputSchema={
                 "type": "object",
                 "properties": {"entities": {"type": "array", "items": _ENTITY_SCHEMA}},
@@ -305,7 +322,7 @@ def _tools() -> list[types.Tool]:
         types.Tool(
             name="read_graph",
             title="Read Graph",
-            description="Read the entire knowledge graph" + _CAP_NOTE,
+            description="Read the entire knowledge graph" + _CAP_NOTE + _ORDER_NOTE,
             inputSchema={"type": "object", "properties": {}},
             outputSchema=_GRAPH_OUTPUT,
             annotations=types.ToolAnnotations(
@@ -324,6 +341,7 @@ def _tools() -> list[types.Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
+                        "maxLength": SEARCH_QUERY_MAX_LENGTH,
                         "description": (
                             "The search query to match against entity names, types, "
                             "and observation content"
@@ -435,7 +453,10 @@ def build_server(store: str | None = None) -> Server[Any, Any]:
     Separated from :func:`main` so tests can drive the handlers without
     spawning the stdio transport.
     """
-    server: Server[Any, Any] = Server(SERVER_NAME)
+    # The reference reports its own package version here, a date stamp that
+    # moves every release and so cannot be mirrored; left unset, the SDK would
+    # report *its* version, which describes neither server.
+    server: Server[Any, Any] = Server(SERVER_NAME, version=__version__)
     read_store = store or DEFAULT_STORE
     subscribers: set[str] = set()
 
@@ -528,20 +549,22 @@ async def _dispatch_write(
             )
             return _json_result({"results": results})
         case "delete_entities":
-            await ops.delete_entities(
+            deleted, not_found = await ops.delete_entities(
                 session, store=store, entity_names=arguments.get("entityNames", [])
             )
-            return _delete_result(ops.DELETE_ENTITIES_MESSAGE)
+            return _delete_result(ops.delete_entities_message(deleted, not_found))
         case "delete_observations":
-            await ops.delete_observations(
+            deleted_count, requested, missing = await ops.delete_observations(
                 session, store=store, deletions=arguments.get("deletions", [])
             )
-            return _delete_result(ops.DELETE_OBSERVATIONS_MESSAGE)
+            return _delete_result(
+                ops.delete_observations_message(deleted_count, requested, missing)
+            )
         case "delete_relations":
-            await ops.delete_relations(
+            removed, asked = await ops.delete_relations(
                 session, store=store, relations=arguments.get("relations", [])
             )
-            return _delete_result(ops.DELETE_RELATIONS_MESSAGE)
+            return _delete_result(ops.delete_relations_message(removed, asked))
     raise ValueError(f"Unknown tool: {name}")
 
 

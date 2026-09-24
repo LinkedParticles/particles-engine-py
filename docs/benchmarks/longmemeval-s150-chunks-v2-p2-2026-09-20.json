@@ -1,0 +1,3077 @@
+{
+  "benchmark": "longmemeval",
+  "selection": {
+    "dataset_revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+    "variant": "s",
+    "sample_seed": 13,
+    "question_limit": 150,
+    "question_types": [],
+    "questions_selected": 150,
+    "questions_total": 500,
+    "top_k": 10,
+    "answer_model_id": "anthropic:claude-sonnet-5",
+    "judge_model_id": "anthropic:claude-sonnet-5",
+    "extraction_model_id": null,
+    "embedding_model_id": "all-MiniLM-L6-v2",
+    "context_budget_tokens": null,
+    "abstraction": false,
+    "consolidation": false,
+    "dedup_judge": false,
+    "stores_reused": false,
+    "reused_from": null,
+    "answer_scaffold": 2,
+    "judge_protocol": 2,
+    "thresholds": {
+      "extraction.similarity_threshold": 0.8,
+      "confidence.uncalibrated_cap.enabled": 0.0,
+      "confidence.uncalibrated_cap.cap_value": 0.7,
+      "extraction.duplicate_suppression.enabled": 1.0,
+      "links_suggest.auto_merge.enabled": 1.0,
+      "content_age_decay.sources.CONVERSATION.half_life_days": 0.0,
+      "content_age_decay.sources.CONVERSATION.floor": 1.0
+    },
+    "memory": "chunks"
+  },
+  "retrieval_stage": {
+    "questions": 143,
+    "abstention_questions": 7,
+    "mean_recall_at_k": 0.9122377622377622,
+    "mean_precision_at_k": 0.6517482517482518,
+    "recall_by_type": {
+      "knowledge-update": 0.9761904761904762,
+      "multi-session": 0.913157894736842,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.8888888888888888,
+      "single-session-user": 0.95,
+      "temporal-reasoning": 0.8223684210526315
+    },
+    "per_question": [
+      {
+        "question_id": "01493427",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "08e075c7",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "0977f2af",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "10e09553",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "26bdc477",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "41698283",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "603deb26",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "6071bd76",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "6a1eabeb",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "6a27ffc2",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "6aeb4375_abs",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "7401057b",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "7a87bd0c",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "852ce960",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "89941a94",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "8fb83627",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "9ea5eabc",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "b01defab",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "c4ea545c",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "d7c942c3",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "dfde3500",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "f685340e_abs",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "f9e8c073",
+        "question_type": "knowledge-update",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "0100672e",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "28dc39ac",
+        "question_type": "multi-session",
+        "evidence_sessions": 5,
+        "evidence_sessions_hit": 5,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "2e6d26dc",
+        "question_type": "multi-session",
+        "evidence_sessions": 4,
+        "evidence_sessions_hit": 4,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "37f165cf",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "3fe836c9",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "4adc0475",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "55241a1f",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "60036106",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "60bf93ed",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "61f8c8f8",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "6c49646a",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "77eafa52",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "80ec1f4f_abs",
+        "question_type": "multi-session",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "81507db6",
+        "question_type": "multi-session",
+        "evidence_sessions": 5,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.4,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "85fa3a3f",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "87f22b4a",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "88432d0a_abs",
+        "question_type": "multi-session",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "91b15a6e",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "92a0aa75",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "9aaed6a3",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "9ee3ecd6",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "a11281a2",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "a1cc6108",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "a3332713",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "a4996e51",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "a9f6b44c",
+        "question_type": "multi-session",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "bb7c3b45",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "bc149d6b",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "c18a7dc8",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "d3ab962e",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "d6062bb9",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "d905b33f",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "e6041065",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "edced276",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "eeda8a6d",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "ef66a6e5",
+        "question_type": "multi-session",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_2f91af09",
+        "question_type": "multi-session",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_7fce9456",
+        "question_type": "multi-session",
+        "evidence_sessions": 5,
+        "evidence_sessions_hit": 4,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.8,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_d12ceb0e",
+        "question_type": "multi-session",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_e05b82a6",
+        "question_type": "multi-session",
+        "evidence_sessions": 4,
+        "evidence_sessions_hit": 4,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "1d4da289",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "2bf43736",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "3249768e",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "352ab8bd",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "3e321797",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "488d3006",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "58470ed2",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "70b3e69b",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "8cf51dda",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "a40e080f",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "cc539528",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "ceb54acb",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "e3fc4d6e",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "e8a79c70",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "eaca4986",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "fca762bc",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "fea54f57",
+        "question_type": "single-session-assistant",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "09d032c9",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "195a1a1b",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "35a27287",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "505af2f5",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "6b7dfb22",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "75832dbd",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "afdc33df",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "d6233ab6",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.0,
+        "precision_at_k": 0.0,
+        "abstention": false
+      },
+      {
+        "question_id": "fca70973",
+        "question_type": "single-session-preference",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "001be529",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "0862e8bf",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "0862e8bf_abs",
+        "question_type": "single-session-user",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "15745da0",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "19b5f2b3",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "29f2956b",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "311778f1",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "4fd1909e",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "545bd2b5",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "5d3d2817",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.0,
+        "precision_at_k": 0.0,
+        "abstention": false
+      },
+      {
+        "question_id": "66f24dbb",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "6b168ec8",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "86f00804",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "8a137a7f",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "a06e4cfe",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "af8d2e46",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "c19f7a0b",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "c5e8278d",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "d52b4f67",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "e47becba",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "f4f1d8a4",
+        "question_type": "single-session-user",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "0bc8ad92",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.6666666666666666,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "2c63a862",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "2ebe6c90",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.3,
+        "abstention": false
+      },
+      {
+        "question_id": "6e984302",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "8077ef71",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "993da5e2",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "a3838d2b",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 6,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "b29f3365",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "b46e15ee",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 4,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.75,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "b9cfe692",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "bbf86515",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "c8090214",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.6,
+        "abstention": false
+      },
+      {
+        "question_id": "dcfa8644",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_1a1dc16d",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_1e4a8aeb",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_2312f94c",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_2487a7cb",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_468eb063",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.0,
+        "precision_at_k": 0.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_4fc4f797",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_5438fa52",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_59149c78",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.0,
+        "precision_at_k": 0.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_68e94288",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_70e84552",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_70e84552_abs",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "gpt4_76048e76",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_7ca326fa",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.6666666666666666,
+        "precision_at_k": 0.9,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_7ddcf75f",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.4,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_7f6b06db",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.3333333333333333,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_8e165409",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_93159ced",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.5,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_93159ced_abs",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 0,
+        "evidence_sessions_hit": 0,
+        "particles_retrieved": 10,
+        "recall_at_k": null,
+        "precision_at_k": null,
+        "abstention": true
+      },
+      {
+        "question_id": "gpt4_9a159967",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 3,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.7,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_af6db32f",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.8,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_b5700ca0",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_b5700ca9",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 0.2,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_cd90e484",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_d31cdae3",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.5,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_e061b84g",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 3,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 0.3333333333333333,
+        "precision_at_k": 0.1,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_e072b769",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 1,
+        "evidence_sessions_hit": 1,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      },
+      {
+        "question_id": "gpt4_fa19884c",
+        "question_type": "temporal-reasoning",
+        "evidence_sessions": 2,
+        "evidence_sessions_hit": 2,
+        "particles_retrieved": 10,
+        "recall_at_k": 1.0,
+        "precision_at_k": 1.0,
+        "abstention": false
+      }
+    ]
+  },
+  "qa_particles": {
+    "condition": "qa_chunks",
+    "model_id": "anthropic:claude-sonnet-5",
+    "questions": 150,
+    "accuracy": 0.7333333333333333,
+    "excluded_budget": 0,
+    "excluded_infra": 0,
+    "excluded_unrecorded": 0,
+    "accuracy_by_type": {
+      "knowledge-update": 0.9130434782608695,
+      "multi-session": 0.525,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.8888888888888888,
+      "single-session-user": 0.8571428571428571,
+      "temporal-reasoning": 0.625
+    },
+    "per_question": [
+      {
+        "question_id": "01493427",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the latest statement (Nov 30, 2023), you had added 25 new postcards to your collection since you started collecting again.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "08e075c7",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your latest update (Sept 2, 2023), you'd been using your Fitbit Charge 3 for about 9 months.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "0977f2af",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "An Instant Pot.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "10e09553",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "On the earlier trip (referenced in the 8/11/2023 conversation), you caught 7 largemouth bass.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "26bdc477",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Five trips, as you mentioned on 2023/05/30.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "41698283",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your chat history, your most recently purchased lens was the Canon EF 70-200mm f/2.8L IS III USM (a 70-200mm zoom lens), which you mentioned owning as of May and August 2023. You were still only considering a wide-angle lens (14-24mm or 16-35mm) as of your August 30 conversation, so that had not yet been purchased.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "603deb26",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "10 times.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6071bd76",
+        "question_type": "knowledge-update",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Yes, you switched to more water per tablespoon of coffee. Initially (Feb 2023) you used 1 tablespoon of coffee per 6 ounces of water, but by your later message (Jun 30, 2023) you had changed to 1 tablespoon per 5 ounces of water — which is actually *less water* per tablespoon (a stronger ratio), not more.",
+        "verdict": "no",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6a1eabeb",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your personal best time in the charity 5K run was 25:50.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6a27ffc2",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your latest update (2023/05/26), you had completed 30 videos of Corey Schafer's Python programming series.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6aeb4375_abs",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention any Italian restaurants you've tried.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "7401057b",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You have enough Hilton Honors points for two free nights' stays at any Hilton property (as of 2023/05/30).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "7a87bd0c",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You've been sticking to your daily tidying routine for 4 weeks, as of 2023/09/30.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "852ce960",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You were pre-approved for $350,000 from Wells Fargo (as stated on 2023/08/11). Note: in a later session (2023/11/30) you mentioned a $400,000 pre-approval, but the assistant in that conversation did not confirm or have access to that detail.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "89941a94",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Yes — before the gravel bike, you had a road bike in addition to your mountain bike and commuter bike (and you later added a hybrid bike as well, making four bikes total).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "8fb83627",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You've finished 5 issues of National Geographic (as of your 2023/07/15 update).",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "9ea5eabc",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your most recent family trip was to Paris, France (taken in late April 2023, mentioned as \"last month\" in your May 28, 2023 conversation).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "b01defab",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Yes — by the March 30, 2023 conversation, you mentioned having finished reading \"The Nightingale\" and found it amazing/powerful.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "c4ea545c",
+        "question_type": "knowledge-update",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your schedule from June 2023, you go to the gym on Tuesdays, Thursdays, and Saturdays (3 times a week) — there's no record of a change to this frequency since then, so it appears the same as before.",
+        "verdict": "no",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d7c942c3",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Yes — as of your April 30 session, you and your mom share the same grocery list app and use it together to coordinate your shopping.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "dfde3500",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Wednesday evening.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "f685340e_abs",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information — the context only mentions you playing regular tennis (not table tennis) with friends at the local park every other week (Sundays).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "f9e8c073",
+        "question_type": "knowledge-update",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "According to your most recent mention (2023/10/30), you said you attended **five sessions** of the bereavement support group.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "0100672e",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You spent $60 total on 5 coffee mugs for your coworkers, which works out to about $12 per mug.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "28dc39ac",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the completion times you've mentioned: The Last of Us Part II on hard difficulty (30 hours), The Last of Us Part II on normal difficulty (25 hours), and Celeste (10 hours) — totaling **65 hours**.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "2e6d26dc",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context, **5 babies** were born to friends and family members in the last few months:\n\n1. **Charlotte** – daughter of Mike and Emma, born a few weeks after Rachel's baby shower (~March)\n2. **Max** – son of cousin Rachel, born in March\n3. **Ava** and **Lily** – twin daughters of your aunt, born in April\n4. **Jasper** – third child (a son) of David and his wife, born a few weeks before mid-May\n\n(Aaliyah, Sarah's daughter, was adopted rather than born, so she isn't counted as a new birth.)",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "37f165cf",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention any novels finished in January or March.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "3fe836c9",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The pre-approval amount was $350,000 and the final sale price was $325,000, so the pre-approval was $25,000 more than the sale price.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "4adc0475",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your prior conversation, you mentioned having 2 assists in the indoor soccer league. There's no mention of any goals scored, so the total recorded is 2 assists (0 goals).",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "55241a1f",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your Facebook Live session got 12 comments, but the number of comments on your most popular YouTube video isn't specified in the context — only that it \"has quite a few comments.\" So I can't provide a total.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "60036106",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have information about an Instagram influencer collaboration or its reach. The only reach figure I have is from your previous Facebook ad campaign, which reached around 2,000 people.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "60bf93ed",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your messages, you bought the backpack on 1/15 and it arrived on 1/20 — that's 5 days.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "61f8c8f8",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context only records your previous 5K time (45 minutes) as a baseline; there's no record of a new, faster 5K finish time to compare it to.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6c49646a",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the trips mentioned in your conversations, here's what I can piece together:\n\n1. **Yellowstone National Park trip** (family, 4 days) – 1,200 miles total\n2. **Denver to Aspen** – approximately 160 miles\n3. **Denver to Mount Rushmore** – distance not specified in our conversations\n4. **California to Florida** – distance not finalized, since you were still weighing multiple route options (Route 66 ~2,796 mi, I-10 ~2,460 mi, I-40 ~2,550 mi) without settling on one\n\nSo I only have concrete mileage for two of the four trips (Yellowstone and Denver–Aspen), totaling **1,360 miles**. I don't have enough information to give an exact total distance for all four trips since the Mount Rushmore route and the specific California-to-Florida route weren't confirmed with mileage.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "77eafa52",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The corrected/final price was $2,800, versus the initial quote of $2,500 — so $300 more.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "80ec1f4f_abs",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't record any museum or gallery visits in December.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "81507db6",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "85fa3a3f",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Adding these up: stainless steel food bowl ($15) + measuring cup ($5) + dental chews ($10) + flea and tick collar ($20) = **$50 total**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "87f22b4a",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your figures this month, you sold 40 dozen eggs at $3 a dozen, which comes to **$120**.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "88432d0a_abs",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information — there's no mention of you baking egg tarts in the context.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "91b15a6e",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your prior conversations: the vintage diamond necklace is worth $5,000, and you expect to sell the antique vanity for at least $150. So the combined minimum would be **$5,150**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "92a0aa75",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "9aaed6a3",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't record any SaveMart cashback earned specifically on that date.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "9ee3ecd6",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You need a total of 300 points to redeem a free skincare product at Sephora, and as of 5/29, you were close to reaching that goal.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a11281a2",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Approximately 350 followers in two weeks.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a1cc6108",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't state the user's age.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a3332713",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your gift tracking: $100 for your coworker's baby shower gift (baby clothes and toys from Buy Buy Baby) plus $100 for your brother's graduation gift card = **$200 total**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a4996e51",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "During peak campaign seasons, you increase your work hours by 10 hours weekly, which means you work about 50 hours a week (up from your typical 40-hour week).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a9f6b44c",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You serviced or planned to service **2 bikes** in March:\n\n1. **Road bike** – cleaned and lubricated the chain on March 2nd, and later had it serviced at Pedal Power on March 10th (worn brake pads and cables replaced).\n2. **Commuter bike** – planned to replace the front tire before April due to wear and a flat tire experienced on February 20th.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "bb7c3b45",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the original retail price of $500 and the $200 you paid at the outlet mall, you saved $300 on the Jimmy Choo heels.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "bc149d6b",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The context records one feed purchase: a 50-pound batch of layer feed (mentioned 2023/05/22). Total weight purchased in the past two months: **50 pounds**.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "c18a7dc8",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information—there's nothing in our conversation history about when you graduated from college or your age.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d3ab962e",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have enough information to answer that — the John Muir Trail backpacking trip's distance isn't specified in your history, so I can't calculate a total. The only hike with a stated distance is the 5-mile Red Rock Canyon hike from two weekends ago.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d6062bb9",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the figures you shared: your TikTok video of Luna chasing a laser pointer had 1,456 views, and your YouTube tutorial on social media analytics had 542 views. Combined, that's 1,998 views.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d905b33f",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You got a 20% discount — the book was originally $30 and you paid $24 after the discount.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "e6041065",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "On your last trip, you packed 5 pairs of shoes but only wore 2 (sneakers and sandals) — that's 40%.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "edced276",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context: 5 days in New York City (solo trip, mentioned 2023/05/21). The Hawaii trip's duration isn't specified—only that it was an island-hopping trip with family (mentioned 2023/05/24). I don't have the number of days for Hawaii, so I can't provide a total.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "eeda8a6d",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your 20-gallon tank, you have 10 neon tetras, 5 golden honey gouramis, and 1 pleco catfish — 16 fish. You also mentioned a 10-gallon tank with Bubbles the betta — 1 fish.\n\nTotal: 17 fish across both tanks.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "ef66a6e5",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context, you've mentioned playing two sports competitively in the past: tennis (competitively in high school) and swimming (competitively in college).",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_2f91af09",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your writing activity mentioned in our chats:\n- **17 poems** (mentioned 2023/05/21, written in the two weeks prior)\n- **5 short stories** (mentioned 2023/05/28)\n- **1 writing challenge piece** — \"The Smell of Old Books\" (referenced 2023/05/30, tied to a memory/nostalgia theme prompt)\n\nThat totals **23 pieces of writing** completed so far.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_7fce9456",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_d12ceb0e",
+        "question_type": "multi-session",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Average age = (32 + 55 + 58 + 75 + 78) ÷ 5 = **59.6 years old**\n\n(You: 32; Mom: 55; Dad: 58; Grandma: 75; Grandpa: 78)",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_e05b82a6",
+        "question_type": "multi-session",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the events you mentioned with specific dates in that window:\n\n- **SeaWorld San Diego (July):** Mako, Kraken, and Manta — 3 rides in one night.\n- **Knott's Berry Farm (October 8th):** Xcelerator — 1 ride.\n- **Disneyland (September 24th):** Space Mountain: Ghost Galaxy — ridden 3 times.\n\n**Total: 7 rollercoaster rides** across these events from July to October.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "1d4da289",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Two-factor authentication methods mentioned were biometric authentication (such as fingerprint or facial recognition) and one-time passwords (OTP), such as codes sent to a mobile device.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "2bf43736",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Chapter 4 of Book 1 (second part) of Tanqueray's Spiritual Life treatise, titled \"Vocal Prayer and Meditation,\" discusses the prayer of beginners.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "3249768e",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The fifth bottle recommended was Absinthe.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "352ab8bd",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The HAMT agent gave an average framerate improvement of approximately 20%, with a further ~4x improvement when adding the Active Training Modulation system.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "3e321797",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "10 minutes, then wash off with cold water.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "488d3006",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The trail was the **GR-90**, a circular hiking trail of about 36 kilometers that takes two to three days to complete, passing through the Moncayo summit, the Fuenfría waterfall, and several local villages.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "58470ed2",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Borges wrote: \"The Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.\" (Borges, 1941)",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "70b3e69b",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Manolo García was the example given — a Spanish-Catalan singer-songwriter who has publicly supported unity between Catalonia and Spain.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "8cf51dda",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The three objectives outlined were:\n\n1. To identify molecular subtypes of endometrial cancer using a combination of genomic and transcriptomic approaches.\n2. To investigate the clinical and biological significance of the identified molecular subtypes, including their association with patient outcomes and response to therapy.\n3. To develop biomarkers for the early detection and prognosis of endometrial cancer based on the identified molecular subtypes.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a40e080f",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The two companies mentioned were **Patagonia** and **Southwest Airlines**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "cc539528",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on our conversation, the back-end programming languages recommended were Ruby, Python, or PHP. Additionally, resources mentioned included Node.js (via NodeSchool), Java, and frameworks like Flask, Django, Spring, and Hibernate.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "ceb54acb",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The other four options were:\n\n1. Sexual fixations\n2. Problematic sexual behaviors\n3. Sexual impulsivity\n4. Compulsive sexuality",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "e3fc4d6e",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Dr. Arati Prabhakar is the President's Chief Advisor for Science and Technology and Director of the White House Office of Science and Technology Policy.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "e8a79c70",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The classic French omelette recipe called for 2-3 eggs.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "eaca4986",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The chorus in the second (more romantic) song used the notes: **C D E F G A B A G F E D C**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "fca762bc",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Memrise uses mnemonics to help learners memorize words, phrases, and grammatical concepts.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "fea54f57",
+        "question_type": "single-session-assistant",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The song was \"Evolution.\"",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "09d032c9",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have specific notes on phone battery-life troubleshooting from our past chats. However, based on what I know about your setup — you already have a portable power bank (and were comparing options like the Anker PowerCore, Jackery Titan S, etc.) plus a wireless charging pad — a couple of practical steps could help:\n\n- **Use your power bank as a stopgap**: Since you've got one of the 10,000mAh options, keep it topped up and with you so battery drain isn't a daily crisis while you look into the root cause.\n- **Check charging habits**: Wireless charging pads (like the one you use for travel) can generate more heat than wired charging, which over time can accelerate battery wear — try mixing in wired charging occasionally.\n- **General diagnostics**: Check battery health settings (iOS: Settings > Battery > Battery Health; Android: varies by manufacturer) to see if the battery itself has degraded capacity.\n\nIf you want, I can help you look into specific battery-saving settings or apps, but that's outside what we've discussed before, so let me know if you'd like recommendations there.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "195a1a1b",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on what you've shared, here are some evening activities that fit well with your interests and your goal of winding down for a 9:30 pm bedtime:\n\n- **Guided meditation**: You mentioned wanting to try the Headspace \"Sleep\" meditation — a good fit for calming your mind before bed.\n- **Reading**: Something light and not too stimulating, as part of your relaxation routine.\n- **Gentle yoga or stretching**: Since you've enjoyed yoga classes and improved your flexibility, some easy evening stretches could help you relax.\n- **Painting/art**: You've been working on cityscape paintings with fabric stamping and drybrushing — a creative, calming way to spend part of your evening (just avoid screens if you're referencing digital images late at night).\n- **Journaling**: Reflecting on your day before bed, as part of your pre-sleep routine.\n- **Deep breathing exercises**: To calm your nervous system before sleep.\n- **Soothing music or nature sounds**: Like the \"Rainy Night\" meditation you were considering.\n\nTry to keep screens out of the mix in the last 30 minutes before bed to protect your wind-down routine.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "35a27287",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have access to your location, so I can't provide specific event listings for this weekend. Based on your interest in language diversity, cultural exchange, and immersive multicultural experiences (like your Nigerian/Mozambican-themed dinner party and interest in French/Spanish language exchange), I'd suggest checking Eventbrite or Meetup for local language festivals, cultural exchange meetups, or international festivals, following local cultural centers/embassies on social media, or reaching out to language schools near you for upcoming events.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "505af2f5",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on what you’ve been doing lately, here are a couple of creamer ideas that fit your goals (lower sugar, budget‑friendly, made with almond milk):\n\n**1. Spring Lemon‑Ginger Creamer** (since you loved that flavor combo for your coffee)\n- Base: unsweetened almond milk (or try cashew/oat milk for extra creaminess)\n- 1 tsp fresh grated ginger or ginger extract\n- A few drops of lemon extract or lemon zest\n- Sweeten lightly with stevia or monk fruit instead of honey\n- Pinch of salt to balance flavors\n- Optional: a dash of vanilla extract to round it out\n\n**2. Guava‑Vanilla Creamer** (playing off your recent guava oatmeal experiment)\n- Base: unsweetened almond milk\n- 2–3 tbsp pureed fresh guava (strain out seeds)\n- 1 tsp vanilla extract\n- Sweetened lightly with honey or a natural low‑sugar alternative (start small and adjust)\n- Pinch of cinnamon or nutmeg for warmth\n- Pinch of salt\n\nFor both, you can boost nutrition with a scoop of collagen peptides or MCT oil, and store in a reusable glass jar to keep with your eco-friendly habits. Start with less sweetener than you think you need — you can always add more to taste.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6b7dfb22",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on what you've shared, you're already drawing inspiration from social media and doing a 30-day painting challenge—both great sources of fresh ideas. To build on that, you might try:\n\n- **Studying real subjects closely**, like you've done with flowers—observing shape, structure, color, and light from different angles before painting can spark new ideas for other subjects too.\n- **Experimenting with techniques you enjoy**, like palette knife work (impasto, scraping, swirling)—trying a familiar subject with a new technique can reignite creative energy.\n- **Revisiting your studio setup**—since you're working on optimizing your space, small changes like adding inspirational elements (art prints, quotes, plants, music) around your workspace can help shift your mindset.\n- **Looking beyond social media** for a change—visiting galleries, browsing art books, or exploring nature can offer a different kind of inspiration than what you're used to scrolling through.\n- **Pushing through the challenge**—since you're mid-30-day challenge, if you're feeling stuck, consider varying the constraint (new color palette, new subject, or new brush type each day) to keep it fresh.\n\nWould you like more specific ideas tailored to a particular subject or medium you're working with?",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "75832dbd",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your interests, here are some relevant recommendations:\n\n**Conferences:** You've mentioned wanting to publish in peer-reviewed AI conferences like **NeurIPS, CVPR, ICML, ICLR, and ICCV** — these would be great venues to follow for recent publications given your focus on deep learning and medical image analysis.\n\n**Topics to search for recent papers/articles:**\n- Multi-modal image fusion in medical imaging\n- Transfer learning in medical imaging\n- Domain adaptation in medical imaging\n- Explainable AI (XAI) in medical image analysis, particularly visualization/interpretation techniques for deep learning models\n\nGiven your background in PyTorch/TensorFlow and your work on multimodal RL agents, keeping an eye on papers from these conferences that intersect with medical imaging and interpretability would align well with your research goals for the University of Edinburgh application.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "afdc33df",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on what's come up with your kitchen, here are some tips that fit your situation:\n\n1. **Utensil organization**: Since you got a new utensil holder, keep using dividers/compartments to group utensils by type or task, store frequently-used items front and center, and clean the holder regularly to prevent food residue buildup.\n\n2. **Granite countertop care**: Keep it clean with soft cloths (avoid harsh chemicals or abrasive cleaners), use cutting boards when prepping food, and use coasters/pads under pots and pans to prevent further scratches.\n\n3. **Garbage disposal maintenance**: Run cold water through it regularly while grinding food, and periodically clean it with baking soda/vinegar or ice and rock salt to prevent odors and clogs.\n\n4. **Faucet upkeep**: Keep an eye out for leaks (check aerator, O-rings, valve seats) since addressing them early prevents water damage and mess around the sink area.\n\nStaying on top of these regular maintenance habits — cleaning the disposal, wiping down countertops, keeping utensils sorted, and checking the faucet — should help keep your kitchen from feeling cluttered again.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d6233ab6",
+        "question_type": "single-session-preference",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have information about a high school reunion or your feelings about your school years in our previous conversations, so I can't give a tailored recommendation on that specific topic.\n\nThat said, based on what I do know about you—you've been working on a heartfelt memory album for your grandma, celebrating meaningful moments with family, and you clearly value connecting with loved ones (like your concert outing with your sister Sophia)—it does seem like nostalgia and reconnecting with people/memories are meaningful to you. If a reunion could offer that same sense of connection and celebration of shared history, it might be worth considering. If you'd like, tell me more about what's making you hesitant or excited about it, and I can help you think it through.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "fca70973",
+        "question_type": "single-session-preference",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your past theme park visits (Disneyland, Knott's Berry Farm, Six Flags Magic Mountain, and Universal Studios Hollywood), here are some suggestions for your next theme park weekend, especially since you've shown interest in Halloween-themed events:\n\n- **Disneyland**: Halloween Time (starting mid-September) with themed decorations, food, and the \"Oogie Boogie Bash\" event.\n- **Knott's Berry Farm**: Knott's Scary Farm, featuring haunted mazes and scare zones through the fall.\n- **Six Flags Magic Mountain**: Fright Fest (late September–early November) with haunted mazes, scare zones, and themed dining like the Fright Fest Feast.\n- **Universal Studios Hollywood**: Halloween Horror Nights (mid-September–early November), including the VIP Experience with a Gourmet Buffet and optional Behind-the-Scenes Tour, which you were considering booking.\n\nGiven your interest in the VIP package with the Gourmet Buffet and Behind-the-Scenes Tour, that could be a great highlight for your weekend if you want a more immersive, upscale experience.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "001be529",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You waited over a year for your asylum application to be approved.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "0862e8bf",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your cat's name is Luna.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "0862e8bf_abs",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "15745da0",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "As of 2023/05/21 you said you'd been collecting for three months, so by 2023/05/30 that would be about 3 months and 9 days.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "19b5f2b3",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You spent two weeks traveling solo around Japan.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "29f2956b",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You practice guitar for 30 minutes daily.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "311778f1",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You reported spending about 10 hours last month watching documentaries on Netflix.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "4fd1909e",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The Imagine Dragons concert was at the Xfinity Center on June 15th.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "545bd2b5",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You've been averaging around 2 hours of screen time on Instagram per day (as of the past two weeks, per your May 27, 2023 message).",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "5d3d2817",
+        "question_type": "single-session-user",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "66f24dbb",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "For your sister's birthday, you bought her a yellow dress and a pair of earrings to match.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6b168ec8",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You own three bikes: a road bike (Trek Emonda), a mountain bike, and a commuter bike.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "86f00804",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You mentioned reading \"The Seven Husbands of Evelyn Hugo,\" and separately your book club discussed \"The Last House Guest\" by Megan Miranda (which you had already read).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "8a137a7f",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your chat history, you didn't mention replacing a bulb in your bedside lamp — you noted you've been *using* a Philips LED bulb in it and liked its warm tone, but there's no mention of replacing a bulb there.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a06e4cfe",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your preferred ratio is 3:1 (gin to vermouth), with a dash of citrus bitters.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "af8d2e46",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You packed 7 shirts for your Costa Rica trip (though you only wore 3 of them). Note: the context doesn't specify the trip length as 5 days—it's just referred to as your \"last trip to Costa Rica.\"",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "c19f7a0b",
+        "question_type": "single-session-user",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — you mentioned having about an hour to spare between getting home from work and starting dinner, but no specific time was given.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "c5e8278d",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your last name before you changed it was Johnson (you changed it to Winters).",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "d52b4f67",
+        "question_type": "single-session-user",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context mentions your mom looked stunning at your cousin's wedding, but doesn't specify where it took place.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "e47becba",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You graduated with a degree in Business Administration.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "f4f1d8a4",
+        "question_type": "single-session-user",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your sister gave you the new stand mixer as a birthday gift.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "0bc8ad92",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Your last mentioned museum visit with a friend was the behind-the-scenes tour of the Science Museum with your chemistry professor friend on 2022/10/22. From that date to the question date (2023/03/25) is about 5 months.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "2c63a862",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Rachel started working with the user on 2/15, and the user found the house they loved on 3/1 — that's 14 days.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "2ebe6c90",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The user started \"The Nightingale\" on 2023/01/10 and finished it by 2023/01/31, so it took 21 days.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "6e984302",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention a purchase related to a competition around that time.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "8077ef71",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You attended the networking event on 2022/03/09 — that was **26 days ago** from 2022/04/04.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "993da5e2",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the dates given: the area rug was acquired about a month before 2023/05/26 (so around late April), and the furniture rearrangement happened about three weeks before 2023/05/26 (so around early May). That means the user had been using the new rug for roughly **one week** before rearranging the living room furniture.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "a3838d2b",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the dates mentioned, you participated in **2 charity events** before the \"Run for the Cure\" event on October 15th:\n\n1. **\"Dance for a Cause\"** – May 1st\n2. **\"Food for Thought\" charity gala** – September 25th",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "b29f3365",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the timeline: you'd been taking weekly guitar lessons with Alex for about 6 weeks as of 2023/05/25, and you bought the new amp about 2 weeks before that same date. So when you bought the amp, you had already been taking lessons for roughly **4 weeks**.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "b46e15ee",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "On 2023/03/19, you participated in the \"Walk for Hunger\" charity event with your colleagues, walking 5 kilometers to raise money for the local food bank.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "b9cfe692",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "\"The Seven Husbands of Evelyn Hugo\" took two and a half weeks, and \"The Nightingale\" took about three weeks — combined, that's approximately five and a half weeks.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "bbf86515",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention a \"Rack Fest\" event.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "c8090214",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information. The context mentions you bought the iPhone 13 Pro on Black Freeday (11/24/2023) and separately discusses a Holiday Market visit, but it doesn't state a specific date for when you attended the Holiday Market, so I can't calculate the number of days between the two events.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "dcfa8644",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Adidas shoes were bought on 2023/01/10, and the Converse shoelace broke on 2023/01/24 — that's 14 days.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_1a1dc16d",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The meeting with Rachel happened first — it took place on April 10th, while the pride parade was attended on May 1st.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_1e4a8aeb",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The gardening workshop was on 2023/04/15, and the tomato saplings were planted on 2023/04/21 — that's 6 days later.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_2312f94c",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You got the **Samsung Galaxy S22 first** — you purchased it on February 20th. The Dell XPS 13, though pre-ordered earlier (January 28th), didn't actually arrive until February 25th due to a shipping delay.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_2487a7cb",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The **\"Data Analysis using Python\" webinar** came first — you attended it about two months before 05/24/2023 (so around March 2023), whereas the \"Effective Time Management\" workshop was \"last Saturday,\" i.e., around May 20, 2023.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_468eb063",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have any information about you meeting someone named Emma.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_4fc4f797",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context, you mentioned receiving feedback about your suspension being too soft during the conversation on **March 17, 2023**, and your open track day test at VIR took place on **April 24, 2023**.\n\nThat's **38 days** between the feedback and the track day test.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_5438fa52",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context mentions you attending a cultural festival, but there's no record of you starting Spanish classes (only that you already have Spanish skills mentioned in a later conversation).",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_59149c78",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention an art-related event occurring around two weeks before February 1, 2023.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_68e94288",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "On 2023/03/15, you participated in a social media challenge called **#PlankChallenge** to help stay motivated with your fitness goals.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_70e84552",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the dates given, fixing the fence happened first. It was fixed about three weeks before 2023/05/25 (around early May), while the goats' hooves were trimmed about two weeks before that date (around mid‑May) — so the fence repair predates the hoof trimming.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_70e84552_abs",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "Based on the context, I only have information about you fixing the fence (completed roughly three weeks before 2023/05/21). There's no record of you purchasing three cows from Peter, so I can't compare the two tasks or confirm that purchase happened.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_76048e76",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context, only the bike's repair is dated in February (mid-February, for gear issues). There's no February date mentioned for car-related maintenance, so the bike was the one taken care of first (and only one specifically dated) in February.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_7ca326fa",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have information about Rachel's graduation in the context provided, so I can't determine a full ranking of three. Based on what's recorded:\n\n- **Emma** graduated on 2022/05/27 (the day before the 2022/05/28 conversation about her graduation gift).\n- **Alex** graduated around 2022/06/22 (the session discussing congratulating him on his engineering degree).\n\nSo Emma graduated before Alex, but there's no information about Rachel's graduation date to place her in the order.",
+        "verdict": "no",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_7ddcf75f",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The whitewater rafting trip was on 2023/06/17, which was 3 days ago.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_7f6b06db",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your trip‑planning conversations, the three trips (in chronological order) were:\n\n1. **Sequoia National Park** (day‑hike to General Sherman Tree/Congress Trail) – planned around late Feb 2023, taking place shortly after.\n2. **Kyoto/Osaka during Golden Week** – early May 2023.\n3. **John Muir Trail (John Muir Wilderness) hike** – planned around mid‑May 2023, the most recent of the three.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_8e165409",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context mentions repotting the spider plant on 2023/03/04 and discusses getting Mrs. Johnson a planter and potting mix, but there's no record of giving her spider plant cuttings or the date that happened.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_93159ced",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context only mentions that you've been at NovaTech for about 4 years and 3 months, with no details about work history before that.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_93159ced_abs",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": true,
+        "excluded": null,
+        "answer": "I don't have that information. The context mentions you've been working professionally for 9 years and have been at NovaTech for about 4 years and 3 months, but there's no mention of a job at Google or how long you worked before starting it.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_9a159967",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on your history, United Airlines appears to be your most-flown airline — you mentioned taking four flights with United last month (March), plus you referenced flying with them again for Las Vegas and have accumulated around 20,000 miles with them over the past three months.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_af6db32f",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "You watched the Super Bowl on 2023/02/12, which was 17 days before 2023/03/01.",
+        "verdict": "Yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_b5700ca0",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't record where you attended a religious activity last week.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_b5700ca9",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention you attending a Maundy Thursday service at an Episcopal Church.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_cd90e484",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the timeline: you got your new binoculars about three weeks before 5/20 (around late April), and you saw the American goldfinches returning during a walk about a week before 5/20 (around May 13). That means you'd had the binoculars for roughly **2 weeks** before spotting the goldfinches.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_d31cdae3",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context only shows a solo road trip through the American Southwest (Sedona, Monument Valley, Hoover Dam), with no mention of a solo trip to Europe or a family road trip.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_e061b84g",
+        "question_type": "temporal-reasoning",
+        "correct": false,
+        "abstention": false,
+        "excluded": null,
+        "answer": "I don't have that information — the context doesn't mention you participating in a sports event two weeks before 2023/07/01.",
+        "verdict": "No",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_e072b769",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "Based on the context, you downloaded Ibotta on 2023/04/16. From that date to 2023/05/06 is 20 days, which is about 3 weeks ago.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      },
+      {
+        "question_id": "gpt4_fa19884c",
+        "question_type": "temporal-reasoning",
+        "correct": true,
+        "abstention": false,
+        "excluded": null,
+        "answer": "The keyboard session was on 2023/03/25 and the bluegrass band discovery was on 2023/03/31 — that's 6 days apart.",
+        "verdict": "yes",
+        "context_particle_ids": []
+      }
+    ]
+  },
+  "qa_full_context": null,
+  "qa_no_memory": null,
+  "quality_notes": [
+    "Comparator run (memory=chunks): qa_full_context / qa_no_memory were not run — under an identical tuple they are the same calls as the particles run's; reuse those columns and say so.",
+    "Decay is INERT for this run: content_age_decay.sources has no CONVERSATION rule, so every particle scores at recency factor 1.0. A decay on/off ablation needs a CONVERSATION entry in config before the 'on' arm means anything."
+  ],
+  "generated_at": "2026-09-20T18:54:07.366578Z"
+}

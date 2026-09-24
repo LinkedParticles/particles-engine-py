@@ -290,14 +290,19 @@ class TestSupersede:
         first = await particle_assert("X is 5.", ["X"], 0.8, source_excerpt="x is 5")
         old_id = first["asserted_particle_id"]
         out = await particle_supersede(
-            old_id, "X is 6.", ["X"], 0.85, source_excerpt="actually x is 6"
+            old_id, "X is 6.", ["X"], 0.85, source_excerpt="actually x is 6", reason="recount"
         )
         assert out["superseded_id"] == old_id
         async with session_scope(DEFAULT_STORE) as s:
             old = await get_particle(s, old_id)
             new = await get_particle(s, out["asserted_particle_id"])
+            from particles.store.event_store import OperatorEventType, list_events
+
+            events = await list_events(s, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
         assert old is not None and new is not None
         assert old.status == Status.SUPERSEDED
+        # optional on the agent path, recorded when given.
+        assert [e.reason for e in events] == ["recount"]
         assert old.status_reason == StatusReason.EXPLICIT_SUPERSESSION
         assert new.status == Status.ACTIVE
         assert new.supersedes == old_id
@@ -395,16 +400,20 @@ class TestConsensusAndFailClosed:
     """The §6b/§6 engine behaviour exercised end-to-end through particle_assert."""
 
     @pytest.mark.asyncio
-    async def test_contradiction_raises_inconsistency_not_supersede(
+    async def test_an_agents_own_revision_supersedes_and_says_so(
         self,
         db_session: Any,
         stub_subjects: None,
         similar_embeddings: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A write store reconciles in consensus mode (§6b): a confirmed contradiction
-        surfaces as an INCONSISTENCY and the prior belief is NOT auto-superseded; the
-        §7 contested marker then surfaces it on the recall path (M6)."""
+        """An agent revising *its own* earlier belief supersedes it.
+
+        The §6b consensus rule still holds against everyone else's claims — an
+        agent never wins a disagreement with an extracted, operator, or other
+        agent's belief. Its own past self is the one exception, and the verdict
+        says so rather than overwriting silently.
+        """
         import particles.llm as llm
         from particles.mcp.tools.particles import particles_list
         from particles.mcp.tools.write import particle_assert
@@ -422,26 +431,24 @@ class TestConsensusAndFailClosed:
         b = await particle_assert(
             "Deploy key never rotates.", ["deploy key"], 0.9, source_excerpt="never rotates"
         )
-        assert b["verdict"] == "INCONSISTENCY_RAISED"
-        inc_id = b["inconsistency_id"]
+        assert b["verdict"] == "SUPERSEDED_PRIOR"
+        assert b["superseded_particle_id"] == a_id
         cand_id = b["asserted_particle_id"]
-        # M6 review fix: the belief id is the quarantined candidate, NOT the
-        # INCONSISTENCY meta-particle's id.
-        assert cand_id != inc_id
 
         async with session_scope(DEFAULT_STORE) as s:
             a_p = await get_particle(s, a_id)
             cand = await get_particle(s, cand_id)
-            inc = await get_particle(s, inc_id)
         assert a_p is not None
-        assert a_p.status == Status.ACTIVE  # prior belief preserved, not auto-superseded
-        assert cand is not None and cand.status == Status.PROVENANCE_STALE  # quarantined belief
-        assert inc is not None and inc.status == Status.INCONSISTENCY
+        # The agent's own superseded belief: off the ACTIVE surface, auditable,
+        # and not a judgment retirement (a later restatement re-mints).
+        assert a_p.status == Status.PROVENANCE_STALE
+        assert a_p.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        assert cand is not None and cand.status == Status.ACTIVE
+        assert cand.supersedes == a_id
 
-        # M6: contested marker on the agent's own recall path.
         listing = await particles_list(status="ACTIVE")
-        a_entry = next(p for p in listing["particles"] if p["id"] == a_id)
-        assert a_entry["contested"] == inc_id
+        ids = [p["id"] for p in listing["particles"]]
+        assert cand_id in ids and a_id not in ids
 
     @pytest.mark.asyncio
     async def test_probe_failure_fails_closed(

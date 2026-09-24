@@ -8,7 +8,12 @@ Builds a per-audience prompt over the top-k particles and asks the shared
 ``particles.llm`` client for an answer. A failing LLM call **raises** — the
 caller (``main.query``) catches it, renders the deterministic
 :func:`fallback_listing` instead, and *discloses* the failure on the response
-(``QueryResponse.answer_generation_error``). The old silent
+(``QueryResponse.answer_generation_error``, plus the typed
+``answer_generation_error_cause``). One failure is re-issued before that
+happens: a reply carrying no text block is the model having spent the whole
+``query.answer_max_tokens`` allowance thinking, so the call is retried once at
+``query.answer_retry_max_tokens`` — a larger budget is a different call, where
+the same budget would only reproduce it. The old silent
 concatenate-and-pretend fallback is deliberately gone: a billing or network
 failure must never masquerade as an answer (the honesty posture —
 "not probed this run", never a quiet degradation).
@@ -19,7 +24,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from particles.core.schema import AudienceHint, Particle, ParticleType
+from particles.core.schema import (
+    AnswerFailureCause,
+    AudienceHint,
+    Particle,
+    ParticleType,
+)
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +160,13 @@ async def _generate_response(
     audience_instructions = _AUDIENCE_INSTRUCTIONS[audience]
 
     from particles.config import get_config
-    from particles.llm import complete, data_fence_instruction, fence, make_nonce
+    from particles.llm import (
+        EmptyCompletionError,
+        complete,
+        data_fence_instruction,
+        fence,
+        make_nonce,
+    )
 
     # Trusted instructions → system; untrusted question + particle list →
     # user, each behind the same per-call nonce fence (F9).
@@ -176,8 +192,32 @@ async def _generate_response(
         f"{confidence_note}\n{coverage_note}"
     )
 
-    max_tokens = get_config().extraction.query_max_tokens
-    return await complete("query_response", user, max_tokens=max_tokens, system=system)
+    cfg = get_config().query
+    try:
+        return await complete(
+            "query_response", user, max_tokens=cfg.answer_max_tokens, system=system
+        )
+    except EmptyCompletionError as exc:
+        # The budget failure, and the only one worth re-issuing: the reply came
+        # back HTTP-200 carrying no text because an extended-thinking model
+        # spent the whole allowance before answering. An identical call at an
+        # identical budget reproduces that, so the benchmark's rule — never
+        # retry this one (1.137.1) — holds for a *same-cap* retry.
+        # A larger cap is a different call, and it is what recovers the answer
+        # a user would otherwise be handed a particle listing in place of.
+        # Every other failure (billing, network, refusal) degrades immediately,
+        # exactly as before.
+        retry_max_tokens = cfg.answer_retry_max_tokens
+        if retry_max_tokens <= cfg.answer_max_tokens:
+            raise
+        log.warning(
+            "Query answer call returned no text at max_tokens=%d (%s); retrying "
+            "once at %d. Raise query.answer_max_tokens if this recurs.",
+            cfg.answer_max_tokens,
+            exc,
+            retry_max_tokens,
+        )
+        return await complete("query_response", user, max_tokens=retry_max_tokens, system=system)
 
 
 def fallback_listing(particles: list[Particle]) -> str:
@@ -198,3 +238,20 @@ def generation_error_reason(exc: Exception) -> str:
     """
     reason = str(exc).strip() or type(exc).__name__
     return reason[:300]
+
+
+def generation_error_cause(exc: Exception) -> AnswerFailureCause:
+    """Classify a failed answer generation as budget vs provider.
+
+    The machine-readable companion to :func:`generation_error_reason`, which
+    returns prose a program cannot branch on. Only the port's own
+    ``EmptyCompletionError`` is evidence of a budget failure — it is raised
+    exactly when a 200 reply carried no text block — and by the time it
+    reaches here the larger-cap retry has already been spent, so ``BUDGET``
+    means the operator's cap, not a transient.
+    """
+    from particles.llm import EmptyCompletionError
+
+    if isinstance(exc, EmptyCompletionError):
+        return AnswerFailureCause.BUDGET
+    return AnswerFailureCause.PROVIDER

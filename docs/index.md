@@ -6,7 +6,7 @@
   direct edit here is overwritten by the next export).
 
   These docs are the SDK's guides and CLI/HTTP reference. The project's landing
-  page — the belief-ledger lead, the demos, the three repository doors — is the
+  page (the belief-ledger lead, the demos, the three repository doors) is the
   standard repository's site at https://linkedparticles.org, so this page is
   deliberately a short index and not a second front door.
 
@@ -39,22 +39,25 @@ particles init claude-code
 ```
 
 [Claude Code memory](user-guide/claude-code.md) walks through the hooks, the
-`MEMORY.md` projection, and the first-run audit.
+`MEMORY.md` projection, and the first-run audit. By default one store serves
+every project on the machine; that guide's
+[One store serves every project](user-guide/claude-code.md#one-store-serves-every-project)
+says what that means and how to narrow it.
 
 ## Where to go
 
-- **[User guide](user-guide/index.md)** — deposit, extract, query, lint,
+- **[User guide](user-guide/index.md)**: deposit, extract, query, lint,
   export. Start at [getting started](user-guide/getting-started.md).
-- **[Operator guide](operator-guide/index.md)** — running a store long-term:
-  configuration, tuning, review, consolidation, troubleshooting.
-- **[Plugin-author guide](plugin-author-guide/index.md)** — adding an
+- **[Operator guide](operator-guide/index.md)**: running a store long-term
+  (configuration, tuning, review, consolidation, troubleshooting).
+- **[Plugin-author guide](plugin-author-guide/index.md)**: adding an
   extractor, an exporter, or a benchmark suite.
-- **[CLI](cli.md)** — the workflow-oriented command index, with the
+- **[CLI](cli.md)**: the workflow-oriented command index, with the
   [full command reference](cli-reference.md) beside it.
-- **[API reference](api/schema.md)** — generated from the source docstrings,
-  across both distributions: the schema models and extraction from the Client
+- **[API reference](api/schema.md)**: generated from the source docstrings
+  across both distributions, the schema models and extraction from the Client
   layer, the corpus, store, and operations from the Engine.
-- **[HTTP API](api/http.md)** — every operation as a typed endpoint, rendered
+- **[HTTP API](api/http.md)**: every operation as a typed endpoint, rendered
   from the committed OpenAPI contract.
 
 ## The standard
@@ -65,7 +68,7 @@ conform to:
 
 - [Whitepaper](https://linkedparticles.org/spec/whitepaper/) and
   [technical specification](https://linkedparticles.org/spec/technical-specification/)
-- [Vocabulary](https://linkedparticles.org/vocab) — every term at the
+- [Vocabulary](https://linkedparticles.org/vocab): every term at the
   identifier it resolves to
 - [`particle.schema.json`](https://linkedparticles.org/schemas/particle.schema.json),
   [`context.jsonld`](https://linkedparticles.org/schemas/context.jsonld), and
@@ -77,5 +80,5 @@ conform to:
 | Repository | What it is |
 |---|---|
 | [particles-standard](https://github.com/LinkedParticles/particles-standard) | The standard: spec prose, normative artifacts, conformance fixtures |
-| [particles-engine-py](https://github.com/LinkedParticles/particles-engine-py) | This repository — the Engine and its surfaces (`linkedparticles`) |
+| [particles-engine-py](https://github.com/LinkedParticles/particles-engine-py) | This repository: the Engine and its surfaces (`linkedparticles`) |
 | [particles-core-py](https://github.com/LinkedParticles/particles-core-py) | The store-free Client layer (`linkedparticles-core`) |

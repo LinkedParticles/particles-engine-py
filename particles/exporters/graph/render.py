@@ -4,7 +4,8 @@
 
 """Self-contained HTML assembly for the graph exporter.
 
-One output file, no network: the vendored Cytoscape.js, the encoding styles, the glue script, and the :class:`GraphData` JSON payload are
+One output file, no network: the vendored Cytoscape.js, the
+encoding styles, the glue script, and the :class:`GraphData` JSON payload are
 all inlined, so the artifact opens over ``file://`` and works air-gapped.
 
 Safety notes:

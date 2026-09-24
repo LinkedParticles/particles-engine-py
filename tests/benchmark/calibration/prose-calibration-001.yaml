@@ -38,7 +38,7 @@
 # (2026-08-03, five runs), the four cases emit 66–69 candidates carrying nine to
 # eleven distinct confidence values from 0.40 to 0.97, and **not one saturated
 # emission in any run** — against 94-of-101 saturated on the §13.3 prose suite.
-#(a) the fittable population is therefore N of N every time,
+# (a) the fittable population is therefore N of N every time,
 # where `prose-article-seed-001` leaves 7 of 101.
 #
 # That is the whole reason this file exists, and it is worth stating plainly
@@ -100,8 +100,8 @@
 #   N=66  63 matched / 3 unmatched  T=0.6877  ECE 0.0724 → 0.0686  would persist
 #   N=66  64 matched / 2 unmatched  T=0.5445  ECE 0.0936 → 0.0456  PERSISTED
 #
-# The fourth row is the one to look at hardest: it cleared all four guards
-#, printed no warning, and wrote T=0.5445 to the extractor record. Run it
+# The fourth row is the one to look at hardest: it cleared all four guards,
+# printed no warning, and wrote T=0.5445 to the extractor record. Run it
 # an hour earlier and the stored value would have been 0.7418, or the run would
 # have refused outright. Nothing in the output tells the operator which of those
 # they got.

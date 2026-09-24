@@ -96,7 +96,7 @@ def inbox_watch_cmd(
     """Continuously poll the inbox file. Ctrl-C to stop.
 
     Uses mtime to skip the file read when nothing has changed since
-    the last poll — cheap enough to leave running in a terminal tab.
+    the last poll, cheap enough to leave running in a terminal tab.
     """
     from particles.config import get_config
 

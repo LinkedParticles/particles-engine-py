@@ -45,7 +45,7 @@ def project_cmd(
         False,
         "--without-synthesis",
         help=(
-            "Render the deterministic structured listing — no LLM call, no "
+            "Render the deterministic structured listing: no LLM call, no "
             "ANTHROPIC_API_KEY, reproducible output. The drift gate uses this mode."
         ),
     ),
@@ -69,7 +69,7 @@ def project_cmd(
             "output file, preserving everything outside them, instead of "
             "overwriting the whole file. The output file must already carry the "
             "sentinel pair for REGION. On a manifest with per-section `region:` "
-            "bindings, renders only that region's section — the "
+            "bindings, renders only that region's section, the "
             "single-region re-roll path."
         ),
     ),
@@ -101,11 +101,11 @@ def project_cmd(
         particles project docs/projection/readme.yaml README.md
         particles project docs/projection/readme.yaml --without-synthesis
         particles project docs/projection/readme.yaml --check   # CI drift gate
-        # splice every declared region of the README in one pass:
+        # Splice every declared region of the README in one pass:
         particles project docs/projection/readme.yaml --splice-all
-        # re-roll a single sentinel region:
+        # Re-roll a single sentinel region:
         particles project docs/projection/readme.yaml README.md --splice what-is
-        # refresh the committed drift-gate bundle:
+        # Refresh the committed drift-gate bundle:
         particles project docs/projection/readme.yaml --export-corpus
     """
     configure_logging(verbose, debug=False)

@@ -6,7 +6,8 @@
 
 Routed through the ``Backend`` seam: with no engine configured the
 local backend runs the query in-process (today's behaviour); with
-``engine.base_url`` set it runs on the canonical engine. The contested marker is fetched through the same backend so it reflects whichever
+``engine.base_url`` set it runs on the canonical engine. The
+contested marker is fetched through the same backend so it reflects whichever
 store served the query.
 """
 
@@ -16,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from particles.core.schema import AudienceHint, QueryRequest, StructuralGroupBy
+from particles.mcp.observer import observer_for, scope_disclosure
 
 
 async def query(
@@ -36,6 +38,7 @@ async def query(
     group_by: str | None = None,
     min_effective_confidence: float | None = None,
     list_predicates: bool = False,
+    all_projects: bool = False,
 ) -> dict[str, Any]:
     """Run a tag-aware semantic query against the particle store.
 
@@ -88,6 +91,9 @@ async def query(
         list_predicates: List the distinct predicate terms with kind and
             claim count (``predicate_vocabulary`` in the response) — the
             discovery surface for the exact-string predicate filter.
+        all_projects: On a server bound to one project, read the whole
+            store instead of that project's view. The result says so. No effect
+            on an unbound server.
 
     Returns:
         The full ``QueryResponse`` as JSON — answer string plus the
@@ -148,6 +154,7 @@ async def query(
         group_by=group_by_val,
         min_effective_confidence=min_effective_confidence,
         list_predicates=list_predicates,
+        observer_project=observer_for(all_projects),
     )
     backend = get_backend()
     resp = await backend.query(req)
@@ -157,8 +164,12 @@ async def query(
     backrefs = await backend.inconsistency_backrefs()
     for particle in resp.particles:
         particle.contested = backrefs.get(particle.id)
+    disclosure = scope_disclosure(all_projects)
     if not summary:
-        return resp.model_dump(mode="json")
+        full = resp.model_dump(mode="json")
+        if disclosure is not None:
+            full["observer"] = disclosure
+        return full
 
     # Build a slim response: drop full Particle bodies, keep the
     # ranked-hit essentials plus the NL answer and coverage info.
@@ -184,4 +195,6 @@ async def query(
             hit["contested_bases"] = list(badge.bases) if badge is not None else None
         slim_hits.append(hit)
     out["particles"] = slim_hits
+    if disclosure is not None:
+        out["observer"] = disclosure
     return out

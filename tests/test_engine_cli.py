@@ -34,7 +34,8 @@ def _restore_bind_host_env() -> Iterator[None]:
     """Undo `engine serve`'s deliberate write to the process environment.
 
     `engine.py` sets ``PARTICLES_API_BIND_HOST`` itself — the documented
-    bootstrap path for a launcher configuring its own process, so the gate sees the interface uvicorn is about to bind. In production that write
+    bootstrap path for a launcher configuring its own process, so the
+    gate sees the interface uvicorn is about to bind. In production that write
     dies with the process; under ``CliRunner`` the command runs **in-process**,
     so it escapes into the pytest session and any later test reading
     ``api.bind_host`` sees ``0.0.0.0``.

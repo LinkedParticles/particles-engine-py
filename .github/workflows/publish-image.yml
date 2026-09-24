@@ -31,6 +31,16 @@
 # Tags are immutable by policy, PyPI-style: a version tag that already exists
 # on GHCR refuses to be re-pushed (recovery is the next patch release).
 # `latest` follows the newest published version.
+#
+# SBOM: after the tagged image exists, the `sbom` job scans each platform image
+# by digest (syft, CycloneDX 1.6), adds the baked embedding encoder — which no
+# scanner can see — via .github/image_sbom.py, attests the result as a signed
+# referrer on the image, and attaches it to this version's GitHub Release. It
+# is a separate job on purpose: `merge` succeeding means "published", and an
+# inventory failure must not make that false. Because version tags are
+# immutable, re-running the whole workflow cannot recover a failed SBOM; the
+# `sbom_only` dispatch re-runs just that job against an existing tag, and
+# `version` lets it backfill an earlier release.
 name: Publish image
 
 on:
@@ -38,6 +48,15 @@ on:
     workflows: [Publish]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      sbom_only:
+        description: "Skip build/push; (re)generate the SBOM for an already-published tag"
+        type: boolean
+        default: false
+      version:
+        description: "With sbom_only: the published version to describe (default: this tree's)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -57,7 +76,7 @@ jobs:
   # minutes into the better part of an hour.
   build:
     name: build (${{ matrix.arch }})
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.sbom_only) || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       matrix:
         include:
@@ -145,6 +164,10 @@ jobs:
           file: deploy/Dockerfile
           push: true
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true
+          # BuildKit's in-index SLSA provenance, which survives the merge
+          # below. Explicit rather than the action's default for a public
+          # repo, so an action bump cannot silently drop it.
+          provenance: mode=max
           build-args: |
             SOURCE=pypi
             VERSION=${{ steps.ver.outputs.version }}
@@ -247,3 +270,167 @@ jobs:
           got="$(docker run --rm --entrypoint python "$IMAGE:v$v" -c 'import particles; print(particles.__version__)')"
           [ "$got" = "$v" ] || { echo "baked version $got != $v" >&2; exit 1; }
           echo "smoke OK: $IMAGE:v$v carries linkedparticles $got"
+
+      # The image has no GPU, so torch must be the CPU build: the CUDA closure
+      # (43 nvidia-* wheels + triton) is ~3 GB of unreachable weight on every
+      # pull. The pypi builder once shipped it unnoticed because
+      # only the tree builder honoured the CPU-index routing.
+      - name: Post-publish smoke — assert CPU-only torch
+        run: |
+          set -euo pipefail
+          v="${{ needs.build.outputs.version }}"
+          docker run --rm --entrypoint python "$IMAGE:v$v" -c '
+          import importlib.metadata as md, torch
+          assert not torch.cuda.is_available(), "torch reports CUDA available"
+          assert torch.version.cuda is None, f"CUDA torch build: {torch.__version__}"
+          gpu = sorted(n for n in (d.metadata["Name"] or "" for d in md.distributions())
+                       if n.lower().startswith("nvidia-") or n.lower() == "triton")
+          assert not gpu, f"GPU runtime distributions installed: {gpu}"
+          print("cpu-only torch OK:", torch.__version__)
+          '
+
+  # What was published, described after it was published (see the header).
+  # One native runner per architecture: the two platform closures differ
+  # (different torch wheels), and reading the baked encoder means running the
+  # image. Scans the pushed digest, not the build output, so the SBOM describes
+  # the exact bytes a consumer pulls.
+  sbom:
+    name: sbom (${{ matrix.arch }})
+    needs: merge
+    # Normally after a successful merge; with `sbom_only`, merge is skipped
+    # (nothing is built or pushed) and this job describes an existing tag.
+    if: ${{ !cancelled() && (needs.merge.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.sbom_only)) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write # attach the SBOM to the Release
+      packages: write # push the attestation referrer to GHCR
+      id-token: write # sigstore identity for the SBOM attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the version to describe
+        id: ver
+        env:
+          REQUESTED: ${{ inputs.sbom_only && inputs.version || '' }}
+        run: |
+          set -euo pipefail
+          v="$REQUESTED"
+          [ -n "$v" ] || v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not determine the version to describe" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Always resolved from the published tag — the same path whether this
+      # follows a merge or backfills an older release.
+      - name: Resolve the published digests
+        id: digests
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE:v${{ steps.ver.outputs.version }}"
+          index="$(docker buildx imagetools inspect "$ref" --format '{{ json .Manifest }}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')" \
+            || { echo "$ref is not published — nothing to describe" >&2; exit 1; }
+          platform="$(docker buildx imagetools inspect "$ref" --raw | python3 -c '
+          import json, os, sys
+          m = [d["digest"] for d in json.load(sys.stdin)["manifests"]
+               if d.get("platform", {}).get("os") == "linux"
+               and d["platform"].get("architecture") == os.environ["ARCH"]]
+          assert len(m) == 1, m
+          print(m[0])')"
+          echo "index=$index" >> "$GITHUB_OUTPUT"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
+          echo "path=sbom/engine-${{ steps.ver.outputs.version }}-linux-$ARCH.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "Describing $ref linux/$ARCH ($platform, index $index)"
+
+      - name: Install syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: v1.52.0
+
+      # Straight from the registry — no daemon, no local image. Runs before
+      # the pull below so the scan's unpacked layers are cleaned up before the
+      # image lands on disk a second time (the image is several GB).
+      - name: Scan the platform image
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          "${{ steps.syft.outputs.cmd }}" scan "$IMAGE@${{ steps.digests.outputs.platform }}" \
+            --from registry -o "cyclonedx-json@1.6=${{ steps.digests.outputs.path }}"
+          df -h / | tail -1
+
+      # No scanner catalogs model weights, so ask the image itself which
+      # encoder revision it baked. Offline and read-only: the script is
+      # mounted in, and nothing reaches the network.
+      - name: Read the baked encoder
+        run: |
+          set -euo pipefail
+          img="$IMAGE@${{ steps.digests.outputs.platform }}"
+          docker pull -q "$img"
+          docker run --rm --network none -v "$PWD/.github:/sbom-tools:ro" \
+            --entrypoint python "$img" /sbom-tools/image_sbom.py baked-model > sbom/model.json
+          cat sbom/model.json
+
+      - name: Add the encoder and image identity to the SBOM
+        run: |
+          set -euo pipefail
+          python3 .github/image_sbom.py enrich "${{ steps.digests.outputs.path }}" \
+            --model sbom/model.json \
+            --image "$IMAGE" \
+            --tag "v${{ steps.ver.outputs.version }}" \
+            --arch "${{ matrix.arch }}" \
+            --platform-digest "${{ steps.digests.outputs.platform }}" \
+            --index-digest "${{ steps.digests.outputs.index }}"
+
+      # Signed with the same sigstore identity as the provenance above, and
+      # pushed beside it as a referrer. Twice: on the platform image, which is
+      # what the SBOM describes, and on the manifest list, because that is the
+      # digest a tag resolves to — so
+      # `gh attestation verify oci://ghcr.io/linkedparticles/engine:vX.Y.Z
+      #   --owner LinkedParticles --predicate-type https://cyclonedx.org/bom`
+      # finds both platforms' SBOMs (each names its platform in its metadata).
+      - name: Attest the SBOM (platform image)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digests.outputs.platform }}
+          sbom-path: ${{ steps.digests.outputs.path }}
+          push-to-registry: true
+
+      - name: Attest the SBOM (manifest list)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digests.outputs.index }}
+          sbom-path: ${{ steps.digests.outputs.path }}
+          push-to-registry: true
+
+      # Beside the wheel SBOMs on the Release that started this chain, so one
+      # place per release holds every artifact's inventory.
+      - name: Attach the SBOM to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "v${{ steps.ver.outputs.version }}" \
+            "${{ steps.digests.outputs.path }}" --clobber --repo "${{ github.repository }}"

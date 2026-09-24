@@ -4286,7 +4286,7 @@
     ]
   },
   "quality_notes": [
-    "Checkpoint: restored 132 previously completed question(s); outcomes accumulate in /Users/jeff/.particles/benchmark/longmemeval/checkpoints/memory-run-10d9c9468cc40482.jsonl.",
+    "Checkpoint: restored 132 previously completed question(s); outcomes accumulate in ~/.particles/benchmark/longmemeval/checkpoints/memory-run-10d9c9468cc40482.jsonl.",
     "Candidate cache: 862 unique session extraction(s), 0 cache replay(s)."
   ],
   "generated_at": "2026-08-17T04:26:20.179004Z"

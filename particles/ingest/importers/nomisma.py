@@ -2,10 +2,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Nomisma importer (Engine layer; moved from particles.extraction.nomisma
-).
+"""Nomisma importer (Engine layer; moved from particles.extraction.nomisma).
 
-Imports Nomisma entity URIs by fetching the ``.jsonld`` document URI. The Client-safe URL regex and constants stay in
+Imports Nomisma entity URIs by fetching the ``.jsonld`` document URI.
+The Client-safe URL regex and constants stay in
 ``particles.extraction.nomisma``.
 """
 

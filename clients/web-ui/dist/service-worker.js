@@ -15,7 +15,7 @@
  * calls go to sibling paths (/curation, /query, /graph, …) outside this scope.
  * The network-only guard below is belt-and-suspenders.
  */
-const SHELL_CACHE = "particles-web-ui-shell-0.3.0+60aed71eec6c";
+const SHELL_CACHE = "particles-web-ui-shell-0.3.0+1985fa0328ba";
 const SHELL_ASSETS = [
   "./",
   "./index.html",

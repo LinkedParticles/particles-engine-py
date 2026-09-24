@@ -5,8 +5,8 @@
 """MCP resource surface — the session-start memory digest.
 
 The MCP protocol's *resources* primitive: readable URIs a client pulls directly,
-distinct from the *tools* (function calls) that make up the rest of the surface
-. This module registers the **compiled memory digest** at
+distinct from the *tools* (function calls) that make up the rest of the surface.
+This module registers the **compiled memory digest** at
 ``particles://digest/<store>`` — the ``MEMORY.md`` analog, deferred.
 
 The digest is **read-only**, costs **zero LLM calls and zero embeddings**, and
@@ -40,6 +40,7 @@ from collections.abc import Awaitable, Callable
 from mcp.server.fastmcp import FastMCP
 
 from particles.config import get_config
+from particles.mcp.observer import bound_project
 from particles.operations.digest import build_digest
 
 __all__ = ["build_digest", "register_digest_resources"]
@@ -47,11 +48,15 @@ __all__ = ["build_digest", "register_digest_resources"]
 log = logging.getLogger(__name__)
 
 
-async def _render_digest(store: str) -> str:
-    """Render the digest for ``store`` through the backend seam."""
+async def _render_digest(store: str, project: str | None = None) -> str:
+    """Render the digest for ``store`` through the backend seam.
+
+    With no explicit ``project`` a server bound to one project
+    renders through it; an unbound server renders the whole store, as before.
+    """
     from particles.api.client import get_backend
 
-    return await get_backend().digest(store)
+    return await get_backend().digest(store, project or bound_project())
 
 
 _DIGEST_DESCRIPTION = (
@@ -79,6 +84,21 @@ def register_digest_resources(server: FastMCP) -> None:
     )
     async def _digest_template(store: str) -> str:
         return await _render_digest(store)
+
+    # the same digest read through a named project observer.
+    # Additive under the golden-file rule — a second template, the
+    # first unchanged.
+    @server.resource(
+        "particles://digest/{store}/{project}",
+        name="memory-digest-for-project",
+        description=(
+            _DIGEST_DESCRIPTION + " Read through one project's observer: global "
+            "beliefs plus those observed in that project."
+        ),
+        mime_type="text/markdown",
+    )
+    async def _digest_for_project(store: str, project: str) -> str:
+        return await _render_digest(store, project)
 
     for handle in get_config().digest_listed_stores():
 

@@ -2,11 +2,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""GitHub importer (Engine layer; moved from particles.extraction.github.importer
-).
+"""GitHub importer (Engine layer; moved from particles.extraction.github.importer).
 
-``GitHubImporter`` is the single entry point for repo, gist, and Pages URLs
-. It dispatches on URL pattern and writes blobs in the format
+``GitHubImporter`` is the single entry point for repo, gist, and Pages URLs.
+It dispatches on URL pattern and writes blobs in the format
 the matching extractor expects. The importer-only HTTP helpers
 (``_fetch_last_commit_meta``, ``_fetch_gist_comments``, ``_clone_gist_files``,
 ``_parse_link_next``) move with the importer — none are referenced by the
@@ -535,8 +534,7 @@ async def _clone_gist_files(
 
     # Pin the clone's connection to addresses vetted in *this* process, so the
     # validated address is the connected address — the git-side
-    # equivalent of `curl --resolve`, and of the validating transport for httpx
-    #.
+    # equivalent of `curl --resolve`, and of the validating transport for httpx.
     # git verifies the certificate against the real hostname regardless, so the
     # pin adds no downgrade. Known asymmetry: git silently ignores unknown
     # `http.*` config, so on a libcurl without CURLOPT_RESOLVE the pin becomes a

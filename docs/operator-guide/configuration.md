@@ -2,13 +2,13 @@
 
 All tuneable parameters live in `particles/config.py` as a Pydantic
 model. The canonical sample is `config.yaml.sample` in the repo
-root — copy it to `config.yaml` to override defaults. `config.yaml`
+root; copy it to `config.yaml` to override defaults. `config.yaml`
 is gitignored.
 
 ## Which sections apply to your install
 
-Every section is tagged `[client]` or `[engine]` in `config.yaml.sample`
-. Both are always loaded and both are valid to set — the tag says
+Every section is tagged `[client]` or `[engine]` in `config.yaml.sample`.
+Both are always loaded and both are valid to set; the tag says
 which *distribution* acts on the section:
 
 | Tag | Read by | Effective in |
@@ -16,12 +16,12 @@ which *distribution* acts on the section:
 | `[client]` | the Client layer, shipped in `linkedparticles-core` | every install |
 | `[engine]` | the Engine layer and the surfaces, shipped in `linkedparticles` | the full install only |
 
-If you installed `linkedparticles` — the ordinary case, and what every guide
-here assumes — all 64 sections apply and the tags are informational. They
+If you installed `linkedparticles` (the ordinary case, and what every guide
+here assumes), all 64 sections apply and the tags are informational. They
 matter only for a `linkedparticles-core`-only install, which is the store-free
 Client substrate: there an `[engine]` section still validates and still loads,
-but nothing present reads it. That is a deliberate trade — the two
-distributions share one import package, so they share one config model — and
+but nothing present reads it. That is a deliberate trade (the two
+distributions share one import package, so they share one config model), and
 the tag is how the inert surface is made visible rather than carved away.
 
 The declaration lives in `CLIENT_SECTIONS` in `particles/config.py`; tests keep
@@ -31,11 +31,11 @@ it, the sample's tags, and the modules that actually read config in agreement.
 
 Discovery walks upward, git-style:
 
-1. `PARTICLES_CONFIG`, if set — absolute authority. A path that does not
+1. `PARTICLES_CONFIG`, if set: absolute authority. A path that does not
    exist resolves to *no config file* rather than falling through, so this
    is also the explicit opt-out from everything below.
 2. `./config.yaml` in the working directory.
-3. The nearest `config.yaml` in an ancestor directory — first match wins.
+3. The nearest `config.yaml` in an ancestor directory; first match wins.
    The walk stops after examining the directory that holds a `.git` entry
    (a *file* in a git worktree, a directory in a normal checkout), so a
    `config.yaml` in `$HOME` is never inherited by the projects beneath it.
@@ -43,7 +43,7 @@ Discovery walks upward, git-style:
 
 Step 3 is why a verb run from `scripts/`, from a git worktree, or from a
 hook spawn now gets the config you wrote at the repo root. Before it, such
-a process silently reverted **every** knob to its compiled default — the
+a process silently reverted **every** knob to its compiled default, the
 cause behind blobs written somewhere nobody looks. `particles config
 validate` and `particles hook doctor` both print the file they resolved;
 when "which config am I loading?" matters, ask them rather than guess.
@@ -65,7 +65,7 @@ Env-var overrides are registered in `_ENV_OVERRIDES` in
 | `PARTICLES_BLOB_DIR` | `blob_dir` | Where deposited blobs are stored |
 | `PARTICLES_CONFIG` | — (bootstrap) | Path to a non-default `config.yaml` |
 | `TRUST_DIFFERENTIAL_THRESHOLD` | `trust.differential_threshold` | When trust differences flag inconsistencies |
-| `RECONCILIATION_STORE_MODE` | `reconciliation.store_mode` | `single` (default) or `multi` — consensus-store reconciliation regime |
+| `RECONCILIATION_STORE_MODE` | `reconciliation.store_mode` | `single` (default) or `multi`, the consensus-store reconciliation regime |
 
 For the full env-var list and field-by-field tuning options, see
 `config.yaml.sample`.
@@ -86,9 +86,9 @@ requires editing `particles/secrets.py`.
 
 ## LLM provider selection
 
-Every chat/completion call routes through a `CompletionProvider` port
-. The `llm` section picks the `(provider, model)` pairing per
-**purpose** — a `default` plus optional overrides for `extraction`,
+Every chat/completion call routes through a `CompletionProvider` port.
+The `llm` section picks the `(provider, model)` pairing per
+**purpose**: a `default` plus optional overrides for `extraction`,
 `semantic_lint`, `query_response`, `synthesis`, and `benchmark`:
 
 ```yaml
@@ -96,7 +96,7 @@ llm:
   default:
     provider: anthropic
     model: claude-sonnet-4-6
-  # Route a single purpose to a different model — e.g. a cheaper model for
+  # Route a single purpose to a different model, e.g. a cheaper model for
   # high-volume extraction while synthesis stays on the default.
   # extraction:
   #   model: claude-haiku-4-5
@@ -104,14 +104,22 @@ llm:
 
 `provider` is `anthropic` (the native adapter) or the name of any entry in
 `llm.providers` (see the next section). `max_tokens` is **not**
-set here — it is per-call and lives with each call site
-(`extraction.max_tokens`, `extraction.query_max_tokens`,
+set here; it is per-call and lives with each call site
+(`extraction.max_tokens`, `query.answer_max_tokens`,
 `wiki.max_tokens`).
+
+Those per-call budgets are **total output** allowances on the wire, not
+response-length caps: an extended-thinking model spends its thinking tokens
+from the same number. A budget sized to the expected prose therefore returns a
+reply with no text in it at all — extraction reports a truncated JSON array,
+and `query` degrades to its deterministic belief listing with
+`answer_generation_error_cause: BUDGET`. `query` retries that case once at
+`query.answer_retry_max_tokens` before degrading; the others do not.
 
 ### Named providers (any OpenAI-compatible endpoint)
 
-Every non-Anthropic vendor — hosted (OpenAI, DeepSeek, Kimi, gateways) or
-local (Ollama, llama.cpp's server, vLLM, LM Studio) — speaks the OpenAI
+Every non-Anthropic vendor, hosted (OpenAI, DeepSeek, Kimi, gateways) or
+local (Ollama, llama.cpp's server, vLLM, LM Studio), speaks the OpenAI
 `chat/completions` dialect, so all of them are **named entries** in
 `llm.providers`: adding a vendor is a config block, never code.
 The endpoint, resilience, and dialect policy are per-entry; only the
@@ -150,12 +158,12 @@ not runtime negotiation: `max_tokens_param` picks which body member carries
 the length cap, and `send_temperature: false` drops `temperature` from
 requests entirely. A wrong knob fails loudly with the endpoint's own
 HTTP 400. `structured_output: strict` transforms JSON schemas to the
-OpenAI-strict dialect (every key required, optionality as union-with-null)
-— required for api.openai.com; leave the default `auto` for tolerant
+OpenAI-strict dialect (every key required, optionality as union-with-null).
+It is required for api.openai.com; leave the default `auto` for tolerant
 endpoints like Ollama.
 
 > **Deprecation:** the pre-0227 `llm.local` block is honoured as
-> `llm.providers.local` with a warning for one release cycle — move it
+> `llm.providers.local` with a warning for one release cycle; move it
 > under `providers` when convenient.
 
 #### Reasoning models need a bigger token budget
@@ -163,7 +171,7 @@ endpoints like Ollama.
 A reasoning model (DeepSeek-V4, Kimi K3, the GPT-5.6 family) spends its
 thinking tokens from the **same completion budget as the answer**, so a
 prompt that fit comfortably in the default `extraction.max_tokens: 8192`
-on a non-reasoning model can exhaust it before the answer is finished — or
+on a non-reasoning model can exhaust it before the answer is finished, or
 before it starts. The endpoint returns HTTP 200 with `finish_reason:
 length` and text that stops mid-token, which the extractor's JSON parser
 then reports as `Failed to parse extraction response: Unterminated string`.
@@ -172,8 +180,8 @@ reply comes back truncated, so the two are not confused; a truncated reply
 with *no* text at all fails with a budget-shaped error rather than a
 generic empty-response one.
 
-Give these models headroom — `extraction.max_tokens: 16384` cleared the
-parse failures in the 2026-08 trial (DeepSeek-V4 flash/pro, Kimi K3) — and
+Give these models headroom (`extraction.max_tokens: 16384` cleared the
+parse failures in the 2026-08 trial with DeepSeek-V4 flash/pro and Kimi K3), and
 consider raising the entry's `timeout_seconds` for large models, since a long
 thinking pass takes wall-clock time the default 120 s may not cover:
 
@@ -190,25 +198,25 @@ extraction:
 Confidence calibration is **per `(extractor, model)` pairing**:
 each `particles extractor calibrate` run stores a record keyed by the
 extraction model it ran under, and the pipeline applies the one matching the
-configured model. So a *newly* pointed model — including any
-`<provider>:<model>` — is uncalibrated until you benchmark it (queries fall
+configured model. So a *newly* pointed model, including any
+`<provider>:<model>`, is uncalibrated until you benchmark it (queries fall
 back to the `EXTRACTOR_DIRECT` disclosure meanwhile), but switching **back**
 to a model you calibrated before restores its calibration with no re-fit.
 List the stored pairings with `particles extractor calibrations
 <extractor-id>`.
 
 > **Pick provider names before you benchmark.** The calibration key is
-> `<name>:<model>` — the *operator-chosen entry name*, not the vendor —
+> `<name>:<model>` (the *operator-chosen entry name*, not the vendor),
 > so renaming a provider entry orphans every calibration record made under
 > the old name. Treat a rename as a recalibration event.
 
 > **Deprecation:** `extraction.model` and `wiki.model` moved into this
 > section. The old keys are migrated automatically (to `llm.default.model`
-> and `llm.synthesis.model`) with a warning for one release cycle — move
+> and `llm.synthesis.model`) with a warning for one release cycle; move
 > them to `llm` when convenient.
 >
 > Note the scope change: `llm.default.model` is the fallback for *every*
-> purpose, including semantic lint and the benchmark judge — which were
+> purpose, including semantic lint and the benchmark judge, which were
 > previously hard-wired to `claude-sonnet-4-6`. So if you set a non-default
 > `extraction.model` (now `llm.default.model`), it will also drive lint and
 > benchmark. To keep those on a cheaper model, set `llm.semantic_lint.model`
@@ -218,50 +226,84 @@ List the stored pairings with `particles extractor calibrations
 
 A few config fields you'll likely want to set early:
 
-- `llm.default.model` (and per-purpose `llm.<purpose>.model`) — the
+- `llm.default.model` (and per-purpose `llm.<purpose>.model`): the
   completion model each purpose uses. See *LLM provider
   selection* above.
-- `exporter_common.min_particle_confidence` — the cross-exporter
+- `exporter_common.min_particle_confidence`: the cross-exporter
   quality threshold. Particles below this `effective_confidence` are
   dropped from every export. Per-run override and the
   per-exporter flag lists: [User guide → exporting](../user-guide/exporting.md).
-- `wiki.min_particles` — minimum particles per subject for the wiki
+- `wiki.min_particles`: minimum particles per subject for the wiki
   exporter to render. Default 3. See
   [User guide → exporting → wiki articles](../user-guide/exporting.md#wiki-articles).
-- `query.top_k` — top-k truncation for the semantic search. What it does
+- `query.top_k`: top-k truncation for the semantic search. What it does
   to a result list: [User guide → ranking](../user-guide/querying.md#ranking-what-the-sdk-actually-does).
-- `embeddings.progress_bars` — whether the embedding stack prints its
+- `embeddings.progress_bars`: whether the embedding stack prints its
   tqdm progress bars (`Loading weights …` on model load, `Batches …` on
   each encode) to stderr. Default `false` (they are noise for a CLI verb
-  like `query`); set `true` — or `PARTICLES_EMBEDDINGS_PROGRESS_BARS=1` —
+  like `query`); set `true` (or `PARTICLES_EMBEDDINGS_PROGRESS_BARS=1`)
   to restore them.
-- `obsidian.default_output_path` — so `particles export obsidian`
+- `obsidian.default_output_path`: so `particles export obsidian`
   works without an argument.
-- `inbox.file_path` — the iCloud-synced file the `particles inbox`
+- `inbox.file_path`: the iCloud-synced file the `particles inbox`
   commands read URLs from (`inbox.poll_interval_seconds` tunes the
   `inbox watch` cadence). Setup walkthrough: [User Guide → Depositing
   from your phone](../user-guide/inbox.md).
-- `reconciliation.store_mode` — `single` (default) for a solo store, or
+- `reconciliation.store_mode`: `single` (default) for a solo store, or
   `multi` for a multi-contributor / consensus store. In `multi` mode a
   confirmed cross-source contradiction is surfaced as an INCONSISTENCY
   (both claims stay ACTIVE, ranked per-viewer at query time) rather than
-  one claim auto-superseding the other on trust — a contributor's claim is
+  one claim auto-superseding the other on trust; a contributor's claim is
   never dropped by another contributor's trust.
 
 See [Tuning](tuning.md) for the trust / calibration / age-decay
 knobs that drive `effective_confidence`.
 
+## Observer scope
+
+Whether a Claude Code session is shown the whole store or its own project's
+view of it; see [User Guide → Claude
+Code](../user-guide/claude-code.md#choose-what-a-session-sees) for what the
+view contains. Three switches, deliberately in three places:
+
+- `claude_code.observer_scope` (default `store`): `project` reads the
+  session-start digest, the `MEMORY.md` region and the freshness check through
+  the session's project. It takes effect only on a store that
+  `particles memory rescope` has run on; until then the surfaces stay
+  store-wide and say so, and `particles hook doctor` reports "NOT in effect".
+- `particles mcp serve --project-observer cwd`: binds one MCP server process to
+  the project of its working directory, for reads and writes. A **launch flag,
+  not config**, because `config.yaml` is shared by every MCP client on the
+  machine and a client started from your home directory should not be bound to
+  it.
+- `observer_scope.harness_tags` (default `["claude-code"]`): the corpus-entry
+  tags that mark a harness deposit. A harvested source with no project key is
+  *unattributed*: in view store-wide and for no project, never global. Add
+  your adapter's tag here when you wire a second harness, or its keyless
+  deposits will read as global.
+
+**Hygiene.** `particles memory rescope --dry-run` is safe to run any time and
+is the census: sources per project, sources left unattributed, and sources
+whose only project no longer exists on this machine. It only ever adds tags.
+Run it after deleting or moving a repository, and after importing a store from
+another machine (project keys are local path names, and an import arrives with
+none, so imported beliefs read as global).
+
+**What it costs.** One batched join per scoped read. On a 28,000-belief store
+the join took 0.2–0.4 s and the scoped digest rendered in about 1.9 s against
+1.6 s store-wide, inside the 10 s `claude_code.hook_deadline_seconds`.
+
 ## Agent-memory projection
 
 The `agent_memory.projection` block governs the `MEMORY.md` projection for
-the Claude Code integration — see [User Guide → Claude
+the Claude Code integration; see [User Guide → Claude
 Code](../user-guide/claude-code.md#the-memorymd-projection) for the
 walkthrough. The load-bearing knobs:
 
-- `agent_memory.projection.enabled` (default `true`) — render + splice the
+- `agent_memory.projection.enabled` (default `true`): render + splice the
   `memory-index` region and run the session-start freshness check. `false`
   falls back to a plain digest push with no region writes.
-- `agent_memory.projection.fold_authored_lines` (default `true`) — move
+- `agent_memory.projection.fold_authored_lines` (default `true`): move
   agent-authored lines outside the projected region into the append-only
   archive after each successful harvest (never destroyed).
 
@@ -271,22 +313,22 @@ Off by default. When enabled **and** the memory directory is inside a git
 repo, each render that changes files under it is committed with a structured
 message (run id + ranking-delta summary), giving you a diffable,
 rollback-able history of the *view* while the store stays the source of
-truth. **Every git failure degrades silently** (logged at debug, never raised)
-— the commit is a bonus, the projection is the product.
+truth. **Every git failure degrades silently** (logged at debug, never raised):
+the commit is a bonus, the projection is the product.
 
-- `agent_memory.projection.git.enabled` (default `false`) — master switch.
+- `agent_memory.projection.git.enabled` (default `false`): master switch.
   Committing into your repo is opt-in; turning it on without the memory
   directory being a git repo is harmless (the step is simply inert).
-- `agent_memory.projection.git.sign` (default `false`) — `false` passes
+- `agent_memory.projection.git.sign` (default `false`): `false` passes
   `--no-gpg-sign` so an unattended session-end commit never blocks on a
   signing agent; `true` drops the override and respects your own
   `commit.gpgsign`. This SDK's own GPG requirement is never imposed on your
   memory repo, and a signing failure never fails the projection.
 - `agent_memory.projection.git.author_name` / `.author_email` (default
-  `null`) — passed per-commit via `-c user.name` / `-c user.email` (never
+  `null`): passed per-commit via `-c user.name` / `-c user.email` (never
   written into your git config). `null` uses your repo's own identity; when
   that is absent, the commit degrades silently.
-- `agent_memory.projection.git.max_delta_excerpts` (default `6`) — cap on the
+- `agent_memory.projection.git.max_delta_excerpts` (default `6`): cap on the
   added/removed excerpt lines in the commit message. The count line always
   states the true totals, so a large delta is never silently truncated.
 

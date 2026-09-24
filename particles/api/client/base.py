@@ -53,12 +53,13 @@ from particles.core.schema import (
 from particles.extraction.general import PageStat
 
 if TYPE_CHECKING:
-    # Engine-layer result models the operator-verb / MCP methods return
-    #. Imported only for annotations (this module is
+    # Engine-layer result models the operator-verb / MCP methods return.
+    # Imported only for annotations (this module is
     # ``from __future__`` lazy), so the seam stays import-light and the protocol
     # carries no Engine import at runtime.
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
 
 
@@ -306,6 +307,7 @@ class Backend(Protocol):
         as_of: datetime | None = None,
         max_nodes: int | None = None,
         store: str = "default",
+        observer_project: str | None = None,
     ) -> GraphData:
         """One scoped epistemic subgraph.
 
@@ -378,6 +380,8 @@ class Backend(Protocol):
 
     async def corpus_blob(self, selector: str) -> BlobResult | None: ...
 
+    async def particle_source(self, particle_id: str) -> SourcePassage | None: ...
+
     # MCP-read surface — the routed MCP read tools target these.
 
     async def inconsistency_backrefs(self) -> dict[str, str]: ...
@@ -387,10 +391,18 @@ class Backend(Protocol):
     async def particle_detail(self, particle_id: str) -> ParticleDetail: ...
 
     async def particles_list(
-        self, *, status: str | None, subject_id: str | None, limit: int, offset: int
+        self,
+        *,
+        status: str | None,
+        subject_id: str | None,
+        limit: int,
+        offset: int,
+        observer_project: str | None = None,
     ) -> list[Particle]: ...
 
-    async def particles_by_fingerprint(self, fingerprint: str, *, limit: int) -> list[Particle]: ...
+    async def particles_by_fingerprint(
+        self, fingerprint: str, *, limit: int, observer_project: str | None = None
+    ) -> list[Particle]: ...
 
     async def subject_detail(self, subject_id: str, *, particle_id_limit: int) -> SubjectDetail: ...
 
@@ -402,7 +414,7 @@ class Backend(Protocol):
         self, *, limit: int, source_type: str | None
     ) -> list[CorpusEntry]: ...
 
-    async def digest(self, store: str) -> str: ...
+    async def digest(self, store: str, project: str | None = None) -> str: ...
 
     async def events_list(
         self,
@@ -495,6 +507,7 @@ class Backend(Protocol):
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        project_key: str | None = None,
     ) -> AgentWriteResult: ...
 
     async def particle_supersede(
@@ -509,6 +522,8 @@ class Backend(Protocol):
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        reason: str | None = None,
+        project_key: str | None = None,
     ) -> AgentWriteResult: ...
 
     async def particle_retract(self, *, particle_id: str, reason: str, store: str) -> None: ...
@@ -521,8 +536,13 @@ class Backend(Protocol):
         store: str,
         deposited_by: str | None = None,
         source_type: str | None = None,
+        project_key: str | None = None,
     ) -> tuple[str, str]:
         """Deposit a literal string as one corpus entry; no fetch, no extraction.
+
+        ``project_key`` is the project a bound agent surface writes as.
+        It is the server's to supply, never the caller's: on the agent path
+        it replaces any ``project:`` tag in ``tags``.
 
         Two callers with deliberately different attribution:
 

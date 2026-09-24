@@ -347,6 +347,169 @@ class TestValidatingTransport:
 
 
 # ---------------------------------------------------------------------------
+# Multi-address failover across the vetted set (pin, backported
+# to the httpx path). The parent transport is stubbed, so "connect failed" is a
+# raised httpx.ConnectError and no socket is opened.
+# ---------------------------------------------------------------------------
+
+
+def _failing_parent(outcomes: dict[str, BaseException | None], seen: list[tuple[str, Any]]) -> Any:
+    """A parent transport: per pinned IP, raise the mapped error or answer 200."""
+
+    async def parent(self: Any, request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, (request.extensions.get("timeout") or {}).get("connect")))
+        exc = outcomes.get(request.url.host)
+        if exc is not None:
+            raise exc
+        return httpx.Response(200, request=request, content=b"ok")
+
+    return parent
+
+
+class TestValidatingTransportFailover:
+    @pytest.mark.asyncio
+    async def test_a_dead_first_address_fails_over_to_the_next_vetted_one(self) -> None:
+        seen: list[tuple[str, Any]] = []
+        parent = _failing_parent({"93.184.216.34": httpx.ConnectError("refused")}, seen)
+        transport = ValidatingTransport(
+            resolve=_resolver({"cdn.example": ["93.184.216.34", "93.184.216.35"]})
+        )
+        request = httpx.Request("GET", "https://cdn.example/x")
+        with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent):
+            resp = await transport.handle_async_request(request)
+        assert resp.status_code == 200
+        assert [ip for ip, _ in seen] == ["93.184.216.34", "93.184.216.35"]
+        assert request.extensions["sni_hostname"] == "cdn.example"
+        assert request.headers["host"] == "cdn.example"
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_first_address_is_the_only_one_tried(self) -> None:
+        seen: list[tuple[str, Any]] = []
+        parent = _failing_parent({}, seen)
+        transport = ValidatingTransport(
+            resolve=_resolver({"cdn.example": ["93.184.216.34", "93.184.216.35"]})
+        )
+        with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent):
+            await transport.handle_async_request(httpx.Request("GET", "https://cdn.example/"))
+        assert [ip for ip, _ in seen] == ["93.184.216.34"]
+
+    @pytest.mark.asyncio
+    async def test_every_address_failing_raises_the_last_connect_error(self) -> None:
+        seen: list[tuple[str, Any]] = []
+        parent = _failing_parent(
+            {
+                "93.184.216.34": httpx.ConnectTimeout("first"),
+                "93.184.216.35": httpx.ConnectError("second"),
+            },
+            seen,
+        )
+        transport = ValidatingTransport(
+            resolve=_resolver({"cdn.example": ["93.184.216.34", "93.184.216.35"]})
+        )
+        with (
+            patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent),
+            pytest.raises(httpx.ConnectError, match="second"),
+        ):
+            await transport.handle_async_request(httpx.Request("GET", "https://cdn.example/"))
+        assert len(seen) == 2
+
+    @pytest.mark.asyncio
+    async def test_an_error_after_connecting_is_not_retried(self) -> None:
+        """Only a failure to *connect* is safe to retry — once bytes may have been
+        sent, a second attempt could repeat a non-idempotent request."""
+        seen: list[tuple[str, Any]] = []
+        parent = _failing_parent({"93.184.216.34": httpx.ReadTimeout("mid-response")}, seen)
+        transport = ValidatingTransport(
+            resolve=_resolver({"cdn.example": ["93.184.216.34", "93.184.216.35"]})
+        )
+        with (
+            patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent),
+            pytest.raises(httpx.ReadTimeout),
+        ):
+            await transport.handle_async_request(httpx.Request("POST", "https://cdn.example/"))
+        assert [ip for ip, _ in seen] == ["93.184.216.34"]
+
+    @pytest.mark.asyncio
+    async def test_the_connect_budget_is_shared_not_multiplied(self) -> None:
+        """Worst case, every attempt times out and burns its whole slice: each
+        address but the last gets half of what remains, the last the rest, and
+        the total is the one connect timeout the caller asked for."""
+        clock = [100.0]
+        seen: list[tuple[str, Any]] = []
+        ips = ["93.184.216.34", "93.184.216.35", "93.184.216.36"]
+
+        async def timing_out(self: Any, request: httpx.Request) -> httpx.Response:
+            budget = request.extensions["timeout"]["connect"]
+            seen.append((request.url.host, budget))
+            clock[0] += budget  # the attempt waits out its slice
+            raise httpx.ConnectTimeout("slow")
+
+        transport = ValidatingTransport(resolve=_resolver({"cdn.example": ips}))
+        request = httpx.Request(
+            "GET",
+            "https://cdn.example/",
+            extensions={"timeout": {"connect": 8.0, "read": 30.0, "write": 30.0, "pool": 5.0}},
+        )
+        with (
+            patch("particles.url_safety.time.monotonic", lambda: clock[0]),
+            patch.object(httpx.AsyncHTTPTransport, "handle_async_request", timing_out),
+            pytest.raises(httpx.ConnectTimeout),
+        ):
+            await transport.handle_async_request(request)
+        assert [b for _, b in seen] == [4.0, 2.0, 2.0]
+        assert clock[0] - 100.0 == 8.0  # a dead host still fails in one timeout
+        assert request.extensions["timeout"]["read"] == 30.0  # the rest pass through
+
+    @pytest.mark.asyncio
+    async def test_a_fast_refusal_does_not_spend_the_budget(self) -> None:
+        clock = [100.0]
+        seen: list[tuple[str, Any]] = []
+        ips = ["93.184.216.34", "93.184.216.35", "93.184.216.36"]
+        parent = _failing_parent({ip: httpx.ConnectError("refused") for ip in ips[:2]}, seen)
+        transport = ValidatingTransport(resolve=_resolver({"cdn.example": ips}))
+        request = httpx.Request(
+            "GET", "https://cdn.example/", extensions={"timeout": {"connect": 8.0}}
+        )
+        with (
+            patch("particles.url_safety.time.monotonic", lambda: clock[0]),
+            patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent),
+        ):
+            await transport.handle_async_request(request)
+        assert [b for _, b in seen] == [4.0, 4.0, 8.0]
+
+    @pytest.mark.asyncio
+    async def test_no_connect_timeout_means_no_budget_to_split(self) -> None:
+        seen: list[tuple[str, Any]] = []
+        parent = _failing_parent({"93.184.216.34": httpx.ConnectError("down")}, seen)
+        transport = ValidatingTransport(
+            resolve=_resolver({"cdn.example": ["93.184.216.34", "93.184.216.35"]})
+        )
+        request = httpx.Request(
+            "GET", "https://cdn.example/", extensions={"timeout": {"connect": None}}
+        )
+        with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", parent):
+            await transport.handle_async_request(request)
+        assert [b for _, b in seen] == [None, None]
+
+    @pytest.mark.asyncio
+    async def test_a_split_answer_is_still_refused_before_any_connect(self) -> None:
+        """Failover widens the pin to every *vetted* address; it never relaxes
+        the all-or-nothing vetting that precedes it."""
+        seen: list[tuple[str, Any]] = []
+        transport = ValidatingTransport(
+            resolve=_resolver({"split.example": ["93.184.216.34", "10.0.0.1"]})
+        )
+        with (
+            patch.object(
+                httpx.AsyncHTTPTransport, "handle_async_request", _failing_parent({}, seen)
+            ),
+            pytest.raises(UnsafeUrlError, match="private/reserved"),
+        ):
+            await transport.handle_async_request(httpx.Request("GET", "https://split.example/"))
+        assert seen == []
+
+
+# ---------------------------------------------------------------------------
 # resolve_and_pin — the subprocess-egress counterpart.
 # Same resolver, same blocklist, same fail-closed rule; only the connecting
 # differs, so the guarantee reaches fetches that never enter httpx.

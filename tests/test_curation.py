@@ -542,8 +542,8 @@ class TestDuplicateVerdict:
     async def test_unavailable_llm_degrades_to_unsure_no_demotion(
         self, db_session: AsyncSession
     ) -> None:
-        """When the LLM is unavailable the judge defaults each pair to UNSURE
-        ; the card still surfaces with that verdict and is NOT demoted
+        """When the LLM is unavailable the judge defaults each pair to UNSURE;
+        the card still surfaces with that verdict and is NOT demoted
         (only DISTINCT demotes) — graceful degrade, no crash."""
         mock = _fake_suggest(mode=SuggestMode.LLM_JUDGE, verdict=JudgeVerdictKind.UNSURE)
         with patch("particles.operations.curation.collect.suggest_co_evidential", mock):

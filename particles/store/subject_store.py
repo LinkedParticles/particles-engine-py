@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any, Literal
 
@@ -19,6 +20,7 @@ from sqlalchemy import DateTime, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
+from particles.config import get_config
 from particles.core.schema import ContributorRef, ExternalRef, Subject
 from particles.db import Base
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
@@ -142,15 +144,59 @@ async def get_subject(session: AsyncSession, subject_id: str) -> Subject | None:
     return None
 
 
-async def find_by_name(session: AsyncSession, name: str) -> Subject | None:
+def persona_alias_guard(name: str, source_type: str | None) -> tuple[str, ...]:
+    """Canonical names whose aliases must not answer ``name`` for this source.
+
+    The persona fold records each surface form it folds ("user", "I", "the
+    speaker") as an alias of the persona Subject, so a lookup that binds
+    nothing — a graph anchor, an owner-lens name, a projection manifest —
+    resolves them without having to know about the fold. A path
+    that *binds a particle to a Subject* is the opposite case: "I" in a web
+    page, or a Subject named "User" in an imported bundle, is not the person
+    this store's transcripts call "I". Every such path passes this guard as
+    ``find_by_name(..., skip_aliases_of=...)``, so outside a persona source
+    type it binds exactly as it did before the aliases existed.
+
+    Scoped to persona *forms*: an alias an operator added to the persona
+    Subject ("Jeff") answers everywhere. Keyed on the configured canonical
+    name, so renaming ``subjects.persona_canonical_name`` on a folded store
+    wants a ``subjects merge`` of the old persona Subject into the new one —
+    which it already needed, since the fold would otherwise split them.
+
+    Returns:
+        The ``skip_aliases_of`` value: empty inside a persona source type (the
+        resolver folds the name there, and never looks the raw form up) and
+        for any name that is not a persona form.
+    """
+    cfg = get_config().subjects
+    if source_type is not None and source_type in cfg.persona_source_types:
+        return ()
+    if name.strip().casefold() not in {a.casefold() for a in cfg.persona_aliases}:
+        return ()
+    return (cfg.persona_canonical_name,)
+
+
+async def find_by_name(
+    session: AsyncSession, name: str, *, skip_aliases_of: Collection[str] = ()
+) -> Subject | None:
     """Case-insensitive lookup against canonical_name and aliases.
 
     Used by the subject resolver during extraction to avoid creating duplicate
     subjects for the same real-world entity.
+
+    Args:
+        session: Active SQLAlchemy session.
+        name: The name to look up.
+        skip_aliases_of: Canonical names (case-insensitive) of Subjects that
+            may answer by canonical name only — their aliases are not
+            consulted. A path that binds a particle to the result passes
+            :func:`persona_alias_guard` here; a lookup that binds nothing
+            leaves it empty.
     """
     from sqlalchemy import func
 
     name_lower = name.lower()
+    skip_lower = {c.lower() for c in skip_aliases_of}
 
     # Exact canonical_name match first (fast path). This is an *exact* lookup, so
     # we compare with case-insensitive equality (func.lower(col) == name_lower),
@@ -184,6 +230,8 @@ async def find_by_name(session: AsyncSession, name: str) -> Subject | None:
     # Scan aliases (acceptable at v0.3 scale; add a dedicated alias table if needed)
     result = await session.execute(select(SubjectRow))
     for row in result.scalars():
+        if row.canonical_name.lower() in skip_lower:
+            continue
         aliases: list[str] = json.loads(row.aliases_json)
         if any(a.lower() == name_lower for a in aliases):
             return row.to_model()
@@ -297,7 +345,7 @@ async def add_aliases(
     Idempotent: names already present (case-insensitive) are silently skipped.
     Invalidates the subject resolver cache so subsequent extractions pick up
     the new aliases immediately. Records a ``SUBJECT_ALIASED`` operator event
-     when names are actually added.
+    when names are actually added.
     """
     row = await session.get(SubjectRow, subject_id)
     if row is None:
@@ -431,7 +479,7 @@ async def merge_subjects(
 
     The source's canonical_name and aliases are added to the target as aliases.
     All particle_subjects join rows pointing to source are re-pointed to target.
-    Irreversible — caller should confirm before committing.
+    Irreversible; the caller should confirm before committing.
 
     Returns:
         Tuple of (updated_target_subject, aliases_added, particles_relinked).
@@ -584,7 +632,7 @@ async def split_subject(
     canonicalisation lives in the resolver layer where the Anthropic
     + Wikidata clients are already wired.
 
-    
+
 
     - The source Subject is preserved with its remaining particles.
       It is NOT deleted even if every particle was split off — the
@@ -700,7 +748,7 @@ async def get_particle_count_for_subject(session: AsyncSession, subject_id: str)
 async def set_subject_class(session: AsyncSession, subject_id: str, subject_class: str) -> None:
     """Set (or update) the subject_class for a subject. Idempotent.
 
-    The extraction pipeline's classification path (no operator event — an
+    The extraction pipeline's classification path (no operator event: an
     automated pipeline step fails inclusion criterion). For the
     operator-initiated override verb, use :func:`reclassify_subject`.
     """
@@ -763,7 +811,7 @@ async def list_all_subjects(
     """List subjects, alphabetical by default.
 
     ``order="degree"`` sorts by descending count of ACTIVE particles linked
-    via ``particle_subjects`` (canonical-name tie-break) — "most-connected
+    via ``particle_subjects`` (canonical-name tie-break): "most-connected
     first", the seed the web UI's Browse route opens on. Degree counts only
     ACTIVE links: a subject whose beliefs are all retired is not a good
     picture of the store's current shape.

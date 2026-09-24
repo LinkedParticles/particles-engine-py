@@ -1,17 +1,20 @@
 # Particles — unified web UI
 
-One same-origin **Progressive Web App** over the Particles FastAPI engine
-: the bus-stop **curation queue**, a **query** surface
-over `POST /query`, and the **scoped epistemic graph view** (`GET /graph`) in a single shell with hash routing — plus deposit (URL / text /
+One same-origin **Progressive Web App** over the Particles FastAPI engine:
+the bus-stop **curation queue**, a **query** surface
+over `POST /query`, and the **scoped epistemic graph view** (`GET /graph`)
+in a single shell with hash routing — plus deposit (URL / text /
 file) and settings as global actions. The client holds **no store, no schema
 logic, and no reconciliation**: every state change runs on the engine, and
 every epistemic quantity it renders (effective confidence, contested badges,
-as-of visibility) is **server-computed** — the client only renders (generalized app-wide). *Rigor in the substrate, casualness
+as-of visibility) is **server-computed** — the client only renders
+(generalized app-wide). *Rigor in the substrate, casualness
 in the surface.*
 
 Like every client in `clients/`, it is a typed HTTP client of the frozen
 FastAPI contract and lives **outside** the Python package's mypy /
-ruff / import-linter scope; it is not part of the wheel. It was born as the curation PWA (`clients/curation-pwa/`) and renamed here.
+ruff / import-linter scope; it is not part of the wheel. It was born as the
+curation PWA (`clients/curation-pwa/`) and renamed here.
 
 ## Routes
 
@@ -32,15 +35,16 @@ The pre-rename route names (`#/queue`, `#/graph`) are permanent aliases.
 ## Same-origin by construction (no CORS)
 
 The engine serves this app's built bundle **from its own origin** at `GET /app`
-(`particles/api/web_app.py`). The **shell itself is unauthenticated**
- — a browser navigation cannot carry an `Authorization` header, and
+(`particles/api/web_app.py`). The **shell itself is unauthenticated**—
+a browser navigation cannot carry an `Authorization` header, and
 gating it made the app unopenable in any browser once a real key was set,
 since the settings view where you paste the token is inside the withheld
-bundle. Every API path the loaded app calls stays behind the fail-closed bearer. Because the app shell and the API it calls
+bundle. Every API path the loaded app calls stays behind the
+fail-closed bearer. Because the app shell and the API it calls
 (`/curation`, `/query`, `/graph`, …) share one origin, the authenticated
 `fetch` calls carry no cross-origin `Origin` and trigger **no CORS
-preflight** — so the engine adds no CORS middleware and gains no CORS surface
-. This is the same failure mode (the "Failed to fetch"
+preflight** — so the engine adds no CORS middleware and gains no CORS surface.
+This is the same failure mode (the "Failed to fetch"
 preflight → unhandled `OPTIONS` → 405) **designed out, not patched around**. A
 separately-hosted (different-origin) deployment would force a first-class
 engine-CORS change and is deferred.
@@ -115,7 +119,8 @@ unaffected.
 
 ## Gestures → endpoints
 
-Each queue card surfaces only the gestures its `CardKind` offers. Every gesture maps onto an endpoint that already ships — the client adds
+Each queue card surfaces only the gestures its `CardKind` offers.
+Every gesture maps onto an endpoint that already ships — the client adds
 no new contract surface:
 
 | Gesture | Endpoint |

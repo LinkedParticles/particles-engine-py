@@ -160,6 +160,26 @@ async def create_relation(
     return relation
 
 
+async def record_observer_divergence(
+    session: AsyncSession, particle_a: str, particle_b: str
+) -> bool:
+    """Record a declined, probe-confirmed pair as ``CONTRADICTS``.
+
+    Idempotent: a pair already joined by a ``CONTRADICTS`` edge (by any writer)
+    is left alone, so a sweep that meets the same divergence twice writes once.
+    Returns ``True`` when an edge was written.
+    """
+    if particle_a == particle_b:
+        return False
+    a, b = _endpoints_for_write(particle_a, particle_b, RelationType.CONTRADICTS)
+    if await session.get(ParticleRelationRow, (a, b, RelationType.CONTRADICTS.value)) is not None:
+        return False
+    await create_relation(
+        session, a, b, RelationType.CONTRADICTS, RelationCreatedBy.OBSERVER_DIVERGENCE
+    )
+    return True
+
+
 async def get_relations_for_particle(
     session: AsyncSession,
     particle_id: str,
@@ -298,8 +318,7 @@ async def remove_particle_from_relations(session: AsyncSession, particle_id: str
     when a target is retracted would orphan the surviving stance — stripping
     its role marker so it silently drops out of the §4 agreement distribution
     with no lint signal. The dangling edge is excluded from the distribution
-    (an endpoint is no longer ACTIVE) but remains inspectable for stance-lint
-    .
+    (an endpoint is no longer ACTIVE) but remains inspectable for stance-lint.
     """
     stance_kind_values = [k.value for k in STANCE_KINDS]
     result: CursorResult[None] = await session.execute(  # type: ignore[assignment]

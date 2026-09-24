@@ -270,6 +270,51 @@ class TestLLMModelKeyMigration:
         assert cfg.llm.default.model == "explicit-new"
 
 
+class TestQueryAnswerBudgetMigration:
+    """``extraction.query_max_tokens`` → ``query.answer_max_tokens``.
+
+    The knob only ever drove the §9.3 answer call; under ``extraction`` it read
+    as an extraction cap, and its 1024 default left an extended-thinking model
+    no tokens for the answer at all.
+    """
+
+    def test_legacy_key_migrates_and_is_popped(self) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {"extraction": {"query_max_tokens": 2048}}
+        _migrate_legacy_keys(raw)
+        assert "query_max_tokens" not in raw["extraction"]  # type: ignore[operator]
+        cfg = ParticlesConfig.model_validate(raw)
+        # An operator who had deliberately raised it keeps their value.
+        assert cfg.query.answer_max_tokens == 2048
+
+    def test_new_key_wins_over_legacy(self) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {
+            "extraction": {"query_max_tokens": 1024},
+            "query": {"answer_max_tokens": 8192},
+        }
+        _migrate_legacy_keys(raw)
+        cfg = ParticlesConfig.model_validate(raw)
+        assert cfg.query.answer_max_tokens == 8192
+
+    def test_defaults_leave_headroom_for_a_thinking_model(self) -> None:
+        from particles.config import ParticlesConfig
+
+        query = ParticlesConfig().query
+        # The 1024 that produced the measured failures is gone…
+        assert query.answer_max_tokens == 4096
+        # …and the retry budget is strictly larger, or it would re-issue an
+        # identical call and reproduce the same empty reply.
+        assert query.answer_retry_max_tokens > query.answer_max_tokens
+
+    def test_extraction_no_longer_carries_the_knob(self) -> None:
+        from particles.config import ExtractionConfig
+
+        assert not hasattr(ExtractionConfig(), "query_max_tokens")
+
+
 class TestSubjectLinkThresholds:
     """the abstain ≤ suppress invariant on SubjectsConfig."""
 
@@ -391,6 +436,21 @@ class TestConsolidationConfig:
         assert LocalProviderConfig(structured_output="off").structured_output == "off"
         with pytest.raises(ValidationError):
             LocalProviderConfig(structured_output="json_object")  # type: ignore[arg-type]
+
+
+class TestMemoryBenchmarkConfig:
+    """the published number describes the product, not a lab build."""
+
+    def test_top_k_default_matches_the_product_query_default(self) -> None:
+        # The benchmark's retrieval depth mirrors the shipped query default
+        # (the API request model; the CLI --top-k and MCP query tool carry the
+        # same literal). A lower k is a disclosed ablation on the run tuple,
+        # never the default, so the two literals must not drift apart.
+        from particles.config import MemoryBenchmarkConfig
+        from particles.core.schema import QueryRequest
+
+        assert MemoryBenchmarkConfig().top_k == QueryRequest.model_fields["top_k"].default
+        assert MemoryBenchmarkConfig().top_k == 40
 
 
 class TestAbstractionConfig:

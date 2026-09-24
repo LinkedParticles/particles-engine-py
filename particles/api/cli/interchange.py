@@ -6,7 +6,8 @@
 
 A bundle is a directory of a ``manifest.json`` envelope plus particles / subjects
 members, serialized either as canonical JSONL (``particles.jsonl``) or the
-human-editable YAML-LD sibling (``particles.yaml``; ``export --format yaml``). Import / restore auto-detect the container from the member
+human-editable YAML-LD sibling (``particles.yaml``; ``export --format yaml``).
+Import / restore auto-detect the container from the member
 extension, so either form round-trips with no flag. Import runs each particle
 through the §6.6 ladder (import is a single-store write that
 reconciles).

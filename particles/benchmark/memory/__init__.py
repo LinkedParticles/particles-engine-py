@@ -5,8 +5,8 @@
 """Agent-memory benchmark evaluation — LongMemEval first.
 
 The fourth measurement package under ``particles.benchmark`` and the third
-*sibling* harness beside ``modality/`` and ``polarity/``
- — but with a different system under test. The content / modality /
+*sibling* harness beside ``modality/`` and ``polarity/``—
+but with a different system under test. The content / modality /
 polarity harnesses measure one **extractor's** output against gold particles;
 this one measures the **whole pipeline** (deposit → extract → reconcile →
 query) against gold *answers* on LongMemEval (Wu et al., ICLR 2025):
@@ -56,15 +56,18 @@ from particles.benchmark.memory.metrics import (
     qa_accuracy,
     recall_at_k,
 )
+from particles.benchmark.memory.rejudge import RejudgeError, rejudge_report, stored_answer_count
 from particles.benchmark.memory.runner import (
     CachingExtractor,
     ContextWindowCheck,
     ContextWindowExceeded,
+    EstimateCostComponent,
     MemoryRunEstimate,
     SameModelViolation,
     check_context_window,
     estimate_run,
     render_context_window_check,
+    render_cost_projection,
     render_estimate,
     run_memory_benchmark,
     session_id_from_uri,
@@ -75,6 +78,7 @@ from particles.benchmark.memory.schema import (
     QA_EXCLUSION_BUDGET,
     QA_EXCLUSION_INFRA,
     QA_EXCLUSION_KINDS,
+    QA_EXCLUSION_UNRECORDED,
     QUESTION_TYPES,
     MemoryBenchmarkReport,
     MemoryQuestion,
@@ -92,10 +96,12 @@ __all__ = [
     "QA_EXCLUSION_BUDGET",
     "QA_EXCLUSION_INFRA",
     "QA_EXCLUSION_KINDS",
+    "QA_EXCLUSION_UNRECORDED",
     "QUESTION_TYPES",
     "CachingExtractor",
     "ContextWindowCheck",
     "ContextWindowExceeded",
+    "EstimateCostComponent",
     "MemoryBenchmarkReport",
     "MemoryDatasetLoadError",
     "MemoryQuestion",
@@ -104,6 +110,7 @@ __all__ = [
     "MemoryTurn",
     "QaConditionMetrics",
     "QaQuestionResult",
+    "RejudgeError",
     "RetrievalStageMetrics",
     "RunSelection",
     "SameModelViolation",
@@ -117,11 +124,14 @@ __all__ = [
     "precision_at_k",
     "qa_accuracy",
     "recall_at_k",
+    "rejudge_report",
     "render_context_window_check",
+    "render_cost_projection",
     "render_estimate",
     "render_report_table",
     "run_memory_benchmark",
     "select_questions",
     "session_id_from_uri",
     "session_uri",
+    "stored_answer_count",
 ]

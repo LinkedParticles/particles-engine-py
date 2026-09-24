@@ -6,7 +6,8 @@
 
 Surfaces undeposited primary sources the corpus leans on: a URL cited by many
 distinct sources but never deposited means the database represents *hearsay
-about* the source rather than the source itself. The lint framing (preferred) anchors the suggestion to a real grounding gap, not URL
+about* the source rather than the source itself. The lint framing (preferred)
+anchors the suggestion to a real grounding gap, not URL
 popularity. Structural / read-only — no LLM, no mutation.
 
 The check reuses the ranking operation (``suggest_deposits``) with the more

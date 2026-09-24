@@ -494,3 +494,20 @@ class TestDirectedAccessors:
         assert await get_outgoing(db_session, "p:a", RelationType.SEQUENCE_IN) == ["p:b"]
         # A different kind sees nothing.
         assert await get_outgoing(db_session, "p:a", RelationType.PART_OF) == []
+
+
+@pytest.mark.asyncio
+async def test_record_observer_divergence_is_idempotent_in_either_order(
+    db_session: AsyncSession,
+) -> None:
+    """a divergence met twice is recorded once, as a symmetric CONTRADICTS."""
+    from particles.store.relation_store import get_all_relations, record_observer_divergence
+
+    assert await record_observer_divergence(db_session, "p-b", "p-a")
+    assert not await record_observer_divergence(db_session, "p-a", "p-b")
+    assert not await record_observer_divergence(db_session, "p-a", "p-a")
+
+    edges = await get_all_relations(db_session, RelationType.CONTRADICTS)
+    assert [(e.particle_a, e.particle_b, e.created_by) for e in edges] == [
+        ("p-a", "p-b", RelationCreatedBy.OBSERVER_DIVERGENCE)
+    ]

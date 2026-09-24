@@ -6,14 +6,14 @@ writes to the `output` path you pass on the CLI.
 
 Three more `export` targets have different shapes and live elsewhere:
 
-- **`graph`** — a scoped, self-contained HTML render of the store's
+- **`graph`**: a scoped, self-contained HTML render of the store's
   epistemics rather than a document set. It has its own page:
   [Graph view](graph-view.md).
-- **`notion`** — an idempotent upsert into a Notion database over the HTTP
+- **`notion`**: an idempotent upsert into a Notion database over the HTTP
   API, so it writes no files at all (`--dry-run` plans it with zero API
   writes). It needs a credential; see
   [Operator guide → configuration → secrets](../operator-guide/configuration.md#secrets).
-- **`jsonl`** — line-delimited JSON for downstream tooling.
+- **`jsonl`**: line-delimited JSON for downstream tooling.
 
 `particles export --help` and the
 [command reference](../cli-reference.md) carry the full, always-current flag
@@ -31,22 +31,22 @@ linking template; everything else gets the generic callout template.
 
 **Useful flags:**
 
-- `--min-particles N` — skip subjects with fewer than N ACTIVE
+- `--min-particles N`: skip subjects with fewer than N ACTIVE
   particles after the quality filter.
-- `--min-links N` — skip subjects with fewer than N graph links (in
+- `--min-links N`: skip subjects with fewer than N graph links (in
   + out combined). Reduces phantom-node noise in the graph view.
-- `--with-synthesis` — splice an LLM-synthesised prose article into
+- `--with-synthesis`: splice an LLM-synthesised prose article into
   each note. Requires `ANTHROPIC_API_KEY`. Shares the article-cache
   with `export wiki`, so running both pays the LLM cost once per
   subject. Also emits one cited-prose note per NARRATIVE
-  under `Narratives/` — a journal entry rendered as its whole-entry
+  under `Narratives/`, a journal entry rendered as its whole-entry
   narrative. Disable with `obsidian.emit_narrative_notes:
   false`; with no key these notes fall back to a deterministic cited
   listing.
-- `--invalidate-stale-links` — drop the article-cache hash from any
+- `--invalidate-stale-links`: drop the article-cache hash from any
   note whose `[[X]]` wikilinks reference a renamed subject.
-- `--min-particle-confidence F` — cross-exporter quality filter
-  . Drops particles whose `effective_confidence` is below
+- `--min-particle-confidence F`: cross-exporter quality filter.
+  Drops particles whose `effective_confidence` is below
   `F` from every rendered note. To set a standing floor for every export
   instead of passing it each run, see
   [Operator guide → cross-exporter quality threshold](../operator-guide/tuning.md#cross-exporter-quality-threshold);
@@ -65,8 +65,8 @@ key; descriptive particles emit one card from the content.
 
 **Useful flags:**
 
-- `--deck-name NAME` — root deck name prefix.
-- `--min-particle-confidence F` — same cross-exporter filter.
+- `--deck-name NAME`: root deck name prefix.
+- `--min-particle-confidence F`: same cross-exporter filter.
 
 (The exporter also accepts a `max_cards_per_subject` option via the
 Python / HTTP API; it is not exposed as a CLI flag.)
@@ -83,15 +83,15 @@ entries. Plus a top-level `index.md`.
 
 **Useful flags:**
 
-- `--dry-run` — report cache hits + regen count + estimated token
+- `--dry-run`: report cache hits + regen count + estimated token
   spend; no LLM calls or file writes.
-- `--regenerate-all` — bypass the per-subject input-hash cache.
-- `--invalidate-stale-links` — same wikilink-staleness behaviour as
+- `--regenerate-all`: bypass the per-subject input-hash cache.
+- `--invalidate-stale-links`: same wikilink-staleness behaviour as
   Obsidian.
-- `--subjects "A,B,C"` — limit to specific canonical names.
-- `--min-particles N` — minimum post-filter particle count
+- `--subjects "A,B,C"`: limit to specific canonical names.
+- `--min-particles N`: minimum post-filter particle count
   (default 3 per `config.wiki.min_particles`).
-- `--min-particle-confidence F` — cross-exporter quality filter.
+- `--min-particle-confidence F`: cross-exporter quality filter.
 
 The export also writes one cited article per NARRATIVE under
 `Narratives/`, using the same render path and cache as the Obsidian
@@ -104,14 +104,14 @@ Narratives are subject-less, so `--subjects` suppresses them.
 uv run particles export logseq ./my-graph
 ```
 
-Writes `pages/<subject>.md` in Logseq's native bullet-outline format
-. Each particle is emitted as a block whose `id::` is the
+Writes `pages/<subject>.md` in Logseq's native bullet-outline format.
+Each particle is emitted as a block whose `id::` is the
 particle ID, enabling cross-page citation via `((<particle_id>))`
 syntax.
 
 **Useful flags:**
 
-- `--with-synthesis` — same synthesis splice as Obsidian; shares the
+- `--with-synthesis`: same synthesis splice as Obsidian; shares the
   article cache, so running multiple synthesising
   exporters pays the LLM cost once per subject. It also emits one
   cited-prose page per NARRATIVE in Logseq's `Narratives/` page
@@ -119,7 +119,7 @@ syntax.
   `## Narratives` backlink block to each subject page whose claims
   take part in one. Disable with `logseq.emit_narrative_notes: false`.
 - `--invalidate-stale-links`, `--min-particles`, `--min-links`,
-  `--min-particle-confidence` — same semantics as Obsidian.
+  `--min-particle-confidence`: same semantics as Obsidian.
 
 ## The dry-run summary
 
@@ -133,7 +133,7 @@ available as `*.model_dump_json()` for downstream tooling.
 
 The plugin registry is designed so an exporter is one file plus
 one registry line. If the format you want isn't in the list above, writing it
-is a small job — see
+is a small job; see
 [Plugin-author guide → writing an exporter](../plugin-author-guide/exporters.md),
 which walks the contract, the worked examples in the tree, and the
 [cross-exporter options](../plugin-author-guide/exporters.md#cross-exporter-contract)

@@ -976,3 +976,175 @@ class TestFindDuplicateSubjects:
         await insert_subject(session, _make_subject("Solo"))  # type: ignore[arg-type]
         await session.commit()  # type: ignore[union-attr]
         assert await find_duplicate_subjects(session, threshold=0.5) == []  # type: ignore[arg-type]
+
+
+class TestPersonaAliasRecording:
+    """The persona fold leaves a trace, and only lookups that bind nothing read it.
+
+    ``resolve_subject`` folded "user" / "I" / "the speaker" onto one
+    Subject and recorded nothing, so ``find_by_name("user")`` returned ``None``
+    on a folded store and every caller resolving a subject by name had to
+    remember to fold. The fold now records each surface form it folds as an
+    alias of the canonical Subject. Two rules bound that write:
+    it never changes what a name *already* resolves to, and no path that binds
+    a particle to a Subject outside a persona source type reads the alias.
+    """
+
+    @staticmethod
+    def _no_wikidata() -> object:
+        return patch(
+            "particles.ingest.authorities.wikidata._wikidata_search",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_folded_form_resolves_by_name_afterwards(self, db_session: object) -> None:
+        """The defect: on a folded store the raw forms resolved to nothing."""
+        from particles.ingest.subject_resolver import resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        persona = await resolve_subject(session, "user", source_type="CONVERSATION")  # type: ignore[arg-type]
+        for form in ("I", "the speaker"):
+            folded = await resolve_subject(session, form, source_type="JOURNAL")  # type: ignore[arg-type]
+            assert folded.id == persona.id
+
+        assert persona.canonical_name == "the user"
+        for form in ("user", "USER", "I", "the speaker"):
+            found = await find_by_name(session, form)  # type: ignore[arg-type]
+            assert found is not None, form
+            assert found.id == persona.id
+        stored = await get_subject(session, persona.id)  # type: ignore[arg-type]
+        assert stored is not None
+        assert stored.aliases == ["user", "I", "the speaker"]
+        # A configured form the extractor never emitted is not invented.
+        assert await find_by_name(session, "myself") is None  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_already_folded_store_heals_on_the_next_fold(self, db_session: object) -> None:
+        """No backfill pass: a 1.146.x store records the form the next time it folds.
+
+        The Subject exists with ``aliases: []`` and the resolution is served
+        from the in-memory cache — the recording must not depend on the mint.
+        """
+        from particles.ingest.subject_resolver import resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        existing = _make_subject("the user")
+        await insert_subject(session, existing)  # type: ignore[arg-type]
+        await resolve_subject(session, "the user", source_type="CONVERSATION")  # type: ignore[arg-type]  # warms the cache
+        assert await find_by_name(session, "speaker") is None  # type: ignore[arg-type]
+
+        resolved = await resolve_subject(session, "speaker", source_type="CONVERSATION")  # type: ignore[arg-type]
+        assert resolved.id == existing.id
+        found = await find_by_name(session, "speaker")  # type: ignore[arg-type]
+        assert found is not None and found.id == existing.id
+
+    @pytest.mark.asyncio
+    async def test_recording_is_idempotent_and_disclosed(self, db_session: object) -> None:
+        from particles.ingest.subject_resolver import resolve_subject
+        from particles.store.event_store import OperatorEventType, list_events
+
+        session = db_session  # type: ignore[assignment]
+        for _ in range(3):
+            persona = await resolve_subject(session, "User", source_type="CONVERSATION")  # type: ignore[arg-type]
+        # The canonical form itself, in any case, is not an alias of itself.
+        await resolve_subject(session, "The User", source_type="CONVERSATION")  # type: ignore[arg-type]
+
+        stored = await get_subject(session, persona.id)  # type: ignore[arg-type]
+        assert stored is not None and stored.aliases == ["User"]
+        events = await list_events(
+            session,  # type: ignore[arg-type]
+            ref_id=persona.id,
+            event_type=OperatorEventType.SUBJECT_ALIASED,
+        )
+        assert [(e.actor, e.payload) for e in events] == [("persona-fold", {"added": ["User"]})]
+
+    @pytest.mark.asyncio
+    async def test_a_subject_already_split_keeps_its_name(self, db_session: object) -> None:
+        """Subjects already split stay split.
+
+        A pre-fold store holds "User" as its own Subject. Recording "user" on
+        the canonical Subject would leave an alias that the canonical-name match
+        shadows today and that silently starts answering the day "User" is
+        renamed — so a form some other Subject already answers to is skipped.
+        """
+        from particles.ingest.subject_resolver import resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        split = _make_subject("User")
+        await insert_subject(session, split)  # type: ignore[arg-type]
+
+        persona = await resolve_subject(session, "user", source_type="CONVERSATION")  # type: ignore[arg-type]
+        assert persona.id != split.id
+        stored = await get_subject(session, persona.id)  # type: ignore[arg-type]
+        assert stored is not None and stored.aliases == []
+        found = await find_by_name(session, "user")  # type: ignore[arg-type]
+        assert found is not None and found.id == split.id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source_type", ["WEB_PAGE", None])
+    async def test_a_persona_alias_never_captures_another_source(
+        self, db_session: object, source_type: str | None
+    ) -> None:
+        """ "I" in a web page is not the person this store's transcripts call "I".
+
+        Outside a persona source type the write path must bind exactly as it
+        did before the alias existed: a genuine Subject of that name is minted,
+        and from then on the canonical-name match answers for it everywhere.
+        """
+        from particles.ingest.subject_resolver import resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        persona = await resolve_subject(session, "I", source_type="CONVERSATION")  # type: ignore[arg-type]
+        found = await find_by_name(session, "I")  # type: ignore[arg-type]
+        assert found is not None and found.id == persona.id
+
+        with self._no_wikidata():
+            genuine = await resolve_subject(session, "I", source_type=source_type)  # type: ignore[arg-type]
+        assert genuine.id != persona.id
+        assert genuine.canonical_name == "I"
+        # The conversational path still folds; the genuine Subject does not capture it.
+        again = await resolve_subject(session, "I", source_type="CONVERSATION")  # type: ignore[arg-type]
+        assert again.id == persona.id
+
+    @pytest.mark.asyncio
+    async def test_the_readonly_precompute_applies_the_same_scope(self, db_session: object) -> None:
+        """A name resolved by two paths is scoped by both (the lesson)."""
+        from particles.ingest.subject_resolver import find_existing_subject, resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        persona = await resolve_subject(session, "me", source_type="CONVERSATION")  # type: ignore[arg-type]
+
+        conversational = await find_existing_subject(session, "me", source_type="CONVERSATION")  # type: ignore[arg-type]
+        assert conversational is not None and conversational.id == persona.id
+        assert await find_existing_subject(session, "me", source_type="WEB_PAGE") is None  # type: ignore[arg-type]
+        assert await find_existing_subject(session, "me", source_type=None) is None  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_an_operator_alias_on_the_persona_still_binds_everywhere(
+        self, db_session: object
+    ) -> None:
+        """The scope covers persona *forms*, not the persona Subject's every alias."""
+        from particles.ingest.subject_resolver import resolve_subject
+        from particles.store.subject_store import add_aliases
+
+        session = db_session  # type: ignore[assignment]
+        persona = await resolve_subject(session, "user", source_type="CONVERSATION")  # type: ignore[arg-type]
+        await add_aliases(session, persona.id, ["Jeff"])  # type: ignore[arg-type]
+
+        resolved = await resolve_subject(session, "Jeff", source_type="WEB_PAGE")  # type: ignore[arg-type]
+        assert resolved.id == persona.id
+
+    @pytest.mark.asyncio
+    async def test_folding_off_records_nothing(
+        self, db_session: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.ingest.subject_resolver import resolve_subject
+
+        session = db_session  # type: ignore[assignment]
+        monkeypatch.setattr(get_config().subjects, "persona_source_types", [])
+        resolved = await resolve_subject(session, "user", source_type="CONVERSATION")  # type: ignore[arg-type]
+        assert resolved.canonical_name == "user"
+        assert resolved.aliases == []

@@ -31,7 +31,8 @@ this same seam without changing the term.
 resolve to a local Subject are *reported*, never guessed. If none resolve the
 policy is :data:`EMPTY_OWNER_POLICY` and the ordering is byte-identical to the
 pre-0220 ranking. Resolution is **local-only** — ``find_by_name`` / by-id
-against the Subject store, never the live-authority rungs of the cascade — because the digest is a zero-LLM, zero-network surface
+against the Subject store, never the live-authority rungs of the
+cascade — because the digest is a zero-LLM, zero-network surface
 and must stay one.
 
 **Applied only on the recall (projection / digest / graph-node) ranking path** —
@@ -42,8 +43,8 @@ simply the top of the store. A caller who wants the viewer's beliefs
 specifically already has ``QueryRequest.subject_id``.
 
 The bonus is added to form a **ranking score**; neither the stored
-``confidence.value`` nor the read-time ``effective_confidence`` is ever changed
-. With ``owner_lens.enabled = False``, no configured subjects, or a
+``confidence.value`` nor the read-time ``effective_confidence`` is ever changed.
+With ``owner_lens.enabled = False``, no configured subjects, or a
 belief not about the viewer, the bonus is ``+0``.
 """
 

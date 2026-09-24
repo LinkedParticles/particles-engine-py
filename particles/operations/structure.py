@@ -143,8 +143,8 @@ async def backfill_structured_claims(
     interval = 60.0 / rate if rate > 0 else 0.0
     annotated = 0
     # A particle the structurizer declines to triple-ize is *skipped*, not
-    # failed: "this prose has no honest triple" is a valid, permanent answer
-    #, not an error to alarm the operator with. The decline is
+    # failed: "this prose has no honest triple" is a valid, permanent answer,
+    # not an error to alarm the operator with. The decline is
     # RECORDED so it is not re-asked on every future run — see
     # ``record_structured_claim_declined``.
     skipped = 0

@@ -7,15 +7,16 @@
 One nullable column plus its index on ``particles``:
 
 * ``extraction_provider_model`` — the ``"<provider>:<model>"`` pairing that
-  produced the particle. The disclosure key and the calibration key, now recorded on the belief itself rather than computed
+  produced the particle. The disclosure key and the
+  calibration key, now recorded on the belief itself rather than computed
   transiently at extraction and thrown away.
 * ``ix_particles_status_provider_model`` — the ``reindex --provider-model``
   scope query is the reason the column exists, so it is indexed on
   ``(status, extraction_provider_model)``, mirroring the three existing
   status-leading indexes.
 
-The column is deliberately **not** a key inside ``extractor_ref_json``
-: ``extractor_ref`` names the code, this names the runtime
+The column is deliberately **not** a key inside ``extractor_ref_json``:
+``extractor_ref`` names the code, this names the runtime
 substrate that code invoked, and one extractor version runs under many
 models — folding them would make a model swap read as an extractor upgrade
 to ``reindex --extractor-version``. The JSON column is also selected by SQL

@@ -6,7 +6,7 @@
 
 An **authority** owns how one external-ID namespace (``wikidata``, ``numista``,
 ``isbn``, …) is populated during subject resolution. This mirrors the extractor
- and exporter registries: a new ID source is added by
+and exporter registries: a new ID source is added by
 implementing :class:`SubjectAuthority` and registering it in
 ``_make_authorities()`` — not by editing ``subject_resolver``.
 

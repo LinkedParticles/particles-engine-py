@@ -30,11 +30,14 @@ from typing import Any, Literal
 from particles.api.cli._claude_code import (
     ARCHIVE_POINTER_PREFIX,
     MEMORY_REGION,
+    load_projection_snapshots,
     memory_archive_path,
     memory_backup_path,
     memory_manifest_path,
     memory_snapshot_path,
+    observer_project_for,
     projection_enabled,
+    resolve_session_project,
 )
 from particles.config import get_config
 from particles.render.markdown import (
@@ -48,11 +51,11 @@ from particles.render.markdown import (
 log = logging.getLogger(__name__)
 
 
-def archive_pointer_line() -> str:
+def archive_pointer_line(memory_dir: Path | None = None) -> str:
     """The one line fold-and-archive leaves behind in MEMORY.md."""
     return (
         f"{ARCHIVE_POINTER_PREFIX} into the memory store; the moved originals "
-        f"are archived at `{memory_archive_path()}`.*"
+        f"are archived at `{memory_archive_path(memory_dir)}`.*"
     )
 
 
@@ -92,9 +95,9 @@ def fold_authored_lines(text: str, pointer_line: str) -> tuple[str, list[str]]:
     return kept + "\n\n" + pointer_line + "\n", folded
 
 
-def _append_to_archive(lines: list[str], source_name: str) -> None:
+def _append_to_archive(memory_dir: Path, lines: list[str], source_name: str) -> None:
     """Append folded lines to the state-dir archive (append-only, with a receipt)."""
-    path = memory_archive_path()
+    path = memory_archive_path(memory_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     block = f"\n<!-- folded from {source_name} -->\n" + "\n".join(lines) + "\n"
     with path.open("a", encoding="utf-8") as f:
@@ -106,18 +109,41 @@ def _append_to_archive(lines: list[str], source_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _render_region_body(store: str) -> str:
+def _observer_trailer(observer_project: str, engaged: bool) -> str:
+    """The region's last line under a project observer.
+
+    It names the observer the region was rendered through, which is both the
+    disclosure and what the SessionStart freshness check reads: a region
+    rendered through a different observer, or through none, is never "current".
+    """
+    if engaged:
+        return f"<!-- observer: project {observer_project} -->"
+    return (
+        f"<!-- observer: project {observer_project} NOT applied — this store has not been "
+        "rescoped (`particles memory rescope`); the whole store is shown -->"
+    )
+
+
+async def _render_region_body(store: str, observer_project: str | None = None) -> str:
     """Deterministic, budget-enforced render of the memory-index splice body."""
     from particles.db import session_scope
     from particles.operations.projection import load_manifest, project_splice_body
+    from particles.operations.query.observer_scope import lens_may_engage
 
     manifest_path = memory_manifest_path()
     manifest = load_manifest(manifest_path)
     async with session_scope(store) as session:
         result = await project_splice_body(
-            session, manifest, base_dir=manifest_path.parent, synthesize=False
+            session,
+            manifest,
+            base_dir=manifest_path.parent,
+            synthesize=False,
+            observer_project=observer_project,
         )
-    return result.document
+        if observer_project is None:
+            return result.document
+        engaged = await lens_may_engage(session)
+    return result.document.rstrip("\n") + "\n" + _observer_trailer(observer_project, engaged) + "\n"
 
 
 async def run_projection_cycle(
@@ -141,7 +167,7 @@ async def run_projection_cycle(
 
     run_id = new_run_id()
     try:
-        body = await _render_region_body(store)
+        body = await _render_region_body(store, observer_project_for(memory_dir.parent.name))
         manifest_ref = str(memory_manifest_path())
         memory_md = memory_dir / "MEMORY.md"
         current = memory_md.read_text(encoding="utf-8") if memory_md.is_file() else None
@@ -165,7 +191,7 @@ async def run_projection_cycle(
             created = f"{begin}\n{stripped_body}\n{end}\n"
             memory_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_text(memory_md, created)
-            _write_snapshot(body)
+            _write_snapshot(memory_dir, body)
             result: dict[str, Any] = {"outcome": "created", "run_id": run_id}
             git = await _maybe_commit(
                 memory_dir, store=store, outcome="created", body=body, snapshot=None, run_id=run_id
@@ -177,11 +203,10 @@ async def run_projection_cycle(
         # Drift telemetry (§6): a dirty region's content was already deposited
         # as authored input by this cycle's harvest strip; the re-render below
         # routes it through the ladder instead of destroying it.
-        snapshot = (
-            memory_snapshot_path().read_text(encoding="utf-8")
-            if memory_snapshot_path().is_file()
-            else None
-        )
+        # This project's last render, or — for a project not rendered since
+        # snapshots became per-project — the machine-wide one older versions
+        # wrote.
+        snapshot = load_projection_snapshots(memory_dir).get(MEMORY_REGION)
         target = next(
             (r for r in find_projected_regions(current) if r.region == MEMORY_REGION), None
         )
@@ -193,7 +218,7 @@ async def run_projection_cycle(
         folded: list[str] = []
         text_to_splice = current
         if get_config().agent_memory.projection.fold_authored_lines:
-            text_to_splice, folded = fold_authored_lines(current, archive_pointer_line())
+            text_to_splice, folded = fold_authored_lines(current, archive_pointer_line(memory_dir))
 
         try:
             spliced = splice_region(text_to_splice, MEMORY_REGION, body, manifest=manifest_ref)
@@ -203,13 +228,13 @@ async def run_projection_cycle(
             log.warning("memory projection splice refused: %s", exc)
             return {"skipped": "splice-error", "error": str(exc)}
 
-        backup = memory_backup_path()
+        backup = memory_backup_path(memory_dir)
         backup.parent.mkdir(parents=True, exist_ok=True)
         backup.write_text(current, encoding="utf-8")
         if folded:
-            _append_to_archive(folded, memory_md.name)
+            _append_to_archive(memory_dir, folded, memory_md.name)
         atomic_write_text(memory_md, spliced)
-        _write_snapshot(body)
+        _write_snapshot(memory_dir, body)
         result = {
             "outcome": "rendered",
             "dirty_region": dirty,
@@ -227,9 +252,13 @@ async def run_projection_cycle(
         return {"outcome": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _write_snapshot(body: str) -> None:
-    """Persist the just-spliced region body — the §6 drift/pristine reference."""
-    path = memory_snapshot_path()
+def _observer_line(body: str) -> str | None:
+    return next((ln for ln in body.splitlines() if ln.startswith("<!-- observer:")), None)
+
+
+def _write_snapshot(memory_dir: Path, body: str) -> None:
+    """Persist the body just spliced into ``memory_dir`` — its §6 drift/pristine reference."""
+    path = memory_snapshot_path(memory_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.strip("\n") + "\n", encoding="utf-8")
 
@@ -245,7 +274,8 @@ async def _maybe_commit(
 ) -> str | None:
     """Optional git-versioned history of the just-written render.
 
-    Returns ``None`` when the feature is off (config gate read at call time), else the best-effort commit's telemetry string. The commit is a
+    Returns ``None`` when the feature is off (config gate read at call time),
+    else the best-effort commit's telemetry string. The commit is a
     bonus (never raises, never alters the projection outcome);
     ``snapshot`` is the *previous* region body, so the delta compares old vs new.
     """
@@ -293,10 +323,12 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
         # compared against it meaningfully — push the full digest.
         return DigestDecision("full")
 
-    transcript_path = str(payload.get("transcript_path") or "")
-    if not transcript_path:
+    # The file Claude Code loaded is the repository's, which in a linked
+    # worktree is not the one beside the transcript.
+    memory_dir = resolve_session_project(payload).memory_dir
+    if memory_dir is None:
         return DigestDecision("full")
-    memory_md = Path(transcript_path).parent / "memory" / "MEMORY.md"
+    memory_md = memory_dir / "MEMORY.md"
     if not memory_md.is_file():
         return DigestDecision("full")
 
@@ -308,7 +340,13 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     if loaded_ids is None:
         return DigestDecision("full")
 
-    fresh = await _render_region_body(store)
+    observer = observer_project_for(memory_dir.parent.name)
+    fresh = await _render_region_body(store, observer)
+    if observer is not None and _observer_line(fresh) != _observer_line(region.body):
+        # The loaded region was rendered through another observer, or none: what
+        # it shows is not this session's view, so a top-up over it would be
+        # wrong. Push the whole scoped digest.
+        return DigestDecision("full")
     fresh_ids = parse_sources_trailers(fresh)
     if fresh_ids is None:
         return DigestDecision("full")

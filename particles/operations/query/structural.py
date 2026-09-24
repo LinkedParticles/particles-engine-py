@@ -31,6 +31,7 @@ from particles.core.schema import (
     AggregateBucket,
     AsOfNote,
     ClaimCoverage,
+    ObserverScopeNote,
     Particle,
     PredicateInfo,
     QueryRequest,
@@ -55,6 +56,7 @@ from particles.store.particle_store import (
 from .as_of import load_as_of_view
 from .decay_policy import DecayPolicy, load_decay_policy
 from .effective_confidence import score_effective_confidence
+from .observer_scope import filter_visible, merged_scope_note
 from .source_trust import TrustPolicy, load_trust_policy
 
 log = logging.getLogger(__name__)
@@ -125,7 +127,10 @@ class _Gathered:
 
 
 async def _candidate_claims(
-    session: AsyncSession, request: QueryRequest
+    session: AsyncSession,
+    request: QueryRequest,
+    *,
+    scope_notes: list[ObserverScopeNote] | None = None,
 ) -> tuple[list[tuple[Particle, StructuredClaim]], dict[str, AsOfNote], int]:
     """Load and default-filter one store's claim-carrying candidates.
 
@@ -178,6 +183,15 @@ async def _candidate_claims(
         reference_now = request.as_of if request.as_of is not None else datetime.now(UTC)
         cutoff = reference_now - timedelta(days=request.recency_window_days)
         particles = [p for p in particles if _tz_aware(p.asserted_at) >= cutoff]
+    # the project observer, at the same point as on the semantic path —
+    # after every other candidate filter, before anything is counted or listed.
+    if request.observer_project is not None:
+        scope = await filter_visible(
+            session, particles, request.observer_project, as_of=request.as_of
+        )
+        particles = [p for p in particles if p.id in scope.visible_ids]
+        if scope_notes is not None:
+            scope_notes.append(scope.note(request.observer_project))
 
     pairs: list[tuple[Particle, StructuredClaim]] = []
     for p in particles:
@@ -193,10 +207,13 @@ async def _gather_store(
     trust_policy: TrustPolicy | None = None,
     decay_policy: DecayPolicy | None = None,
     populate_cache: bool = True,
+    scope_notes: list[ObserverScopeNote] | None = None,
 ) -> _Gathered:
     """Filter and score one store's claims; used by both the single-store and
     federated paths (federation passes the viewer's policies)."""
-    pairs, as_of_notes, excluded_undatable = await _candidate_claims(session, request)
+    pairs, as_of_notes, excluded_undatable = await _candidate_claims(
+        session, request, scope_notes=scope_notes
+    )
     filters = claim_filters_from_request(request)
     matched: list[tuple[Particle, StructuredClaim]] = []
     not_comparable = 0
@@ -377,9 +394,16 @@ async def _assemble(
     )
 
 
-async def _predicates_listing(session: AsyncSession, request: QueryRequest) -> QueryResponse:
+async def _predicates_listing(
+    session: AsyncSession,
+    request: QueryRequest,
+    *,
+    scope_notes: list[ObserverScopeNote] | None = None,
+) -> QueryResponse:
     """§2.2 ``--predicates``: the distinct predicate terms with kind and count."""
-    pairs, _notes, excluded_undatable = await _candidate_claims(session, request)
+    pairs, _notes, excluded_undatable = await _candidate_claims(
+        session, request, scope_notes=scope_notes
+    )
     vocabulary = [
         PredicateInfo(value=value, kind=TermKind(kind), claim_count=n)
         for value, kind, n in predicate_vocabulary(claim for _, claim in pairs)
@@ -411,10 +435,18 @@ async def structural_query(session: AsyncSession, request: QueryRequest) -> Quer
     path through here.
     """
     await assert_store_schema_current(session)
+    scope_notes: list[ObserverScopeNote] = []
     if request.list_predicates:
-        return await _predicates_listing(session, request)
-    gathered = await _gather_store(session, request)
-    return await _assemble(request, gathered, session)
+        response = await _predicates_listing(session, request, scope_notes=scope_notes)
+    else:
+        gathered = await _gather_store(session, request, scope_notes=scope_notes)
+        response = await _assemble(request, gathered, session)
+    return _with_scope_note(response, scope_notes)
+
+
+def _with_scope_note(response: QueryResponse, notes: list[ObserverScopeNote]) -> QueryResponse:
+    note = merged_scope_note(notes)
+    return response if note is None else response.model_copy(update={"observer_scope": note})
 
 
 async def structural_query_federated(
@@ -438,13 +470,16 @@ async def structural_query_federated(
         trust_policy = await load_trust_policy(viewer_session)
         decay_policy = await load_decay_policy(viewer_session)
 
+    scope_notes: list[ObserverScopeNote] = []
     if request.list_predicates:
         merged_pairs: list[tuple[Particle, StructuredClaim]] = []
         active_total = with_claims = 0
         for store in stores:
             async with session_scope(store) as s:
                 await assert_store_schema_current(s)
-                pairs, _notes, _undatable = await _candidate_claims(s, request)
+                pairs, _notes, _undatable = await _candidate_claims(
+                    s, request, scope_notes=scope_notes
+                )
                 merged_pairs.extend(pairs)
                 counts = await count_structured_claim_coverage(s)
                 active_total += counts["active"]
@@ -453,18 +488,21 @@ async def structural_query_federated(
             PredicateInfo(value=value, kind=TermKind(kind), claim_count=n)
             for value, kind, n in predicate_vocabulary(claim for _, claim in merged_pairs)
         ]
-        return QueryResponse(
-            answer=(
-                f"{len(vocabulary)} distinct predicate term(s) across "
-                f"{len(merged_pairs)} structured claims."
+        return _with_scope_note(
+            QueryResponse(
+                answer=(
+                    f"{len(vocabulary)} distinct predicate term(s) across "
+                    f"{len(merged_pairs)} structured claims."
+                ),
+                particles=[],
+                effective_confidences=[],
+                predicate_vocabulary=vocabulary,
+                claim_coverage=ClaimCoverage(
+                    active_total=active_total, with_claims=with_claims, matched=len(merged_pairs)
+                ),
+                as_of=request.as_of,
             ),
-            particles=[],
-            effective_confidences=[],
-            predicate_vocabulary=vocabulary,
-            claim_coverage=ClaimCoverage(
-                active_total=active_total, with_claims=with_claims, matched=len(merged_pairs)
-            ),
-            as_of=request.as_of,
+            scope_notes,
         )
 
     merged = _Gathered()
@@ -477,6 +515,7 @@ async def structural_query_federated(
                 trust_policy=trust_policy,
                 decay_policy=decay_policy,
                 populate_cache=False,
+                scope_notes=scope_notes,
             )
             merged.rows.extend(gathered.rows)
             merged.not_comparable += gathered.not_comparable
@@ -484,4 +523,4 @@ async def structural_query_federated(
             merged.excluded_undatable += gathered.excluded_undatable
             merged.active_total += gathered.active_total
             merged.with_claims += gathered.with_claims
-    return await _assemble(request, merged, None)
+    return _with_scope_note(await _assemble(request, merged, None), scope_notes)

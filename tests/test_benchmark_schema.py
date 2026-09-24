@@ -31,6 +31,7 @@ from particles.benchmark.equivalence import (
     EquivalenceJudge,
     MatchResult,
     match_emitted_to_expected,
+    subject_qualified,
 )
 from particles.benchmark.loader import (
     SuiteLoadError,
@@ -433,8 +434,10 @@ class TestEquivalence:
         )
         calls: list[tuple[str, str]] = []
 
-        async def fake_judge(emitted: Particle, expected: ExpectedParticle) -> bool:
-            calls.append((emitted.content, expected.content))
+        # the judge receives the rendered emitted *text* — the same
+        # string the cosine scored — not the Particle.
+        async def fake_judge(emitted_text: str, expected: ExpectedParticle) -> bool:
+            calls.append((emitted_text, expected.content))
             return True
 
         monkeypatch.setattr("particles.benchmark.equivalence._llm_pair_aligned", fake_judge)
@@ -452,3 +455,235 @@ class TestEquivalence:
 
 def test_match_result_matched_ids_empty() -> None:
     assert MatchResult().matched_ids == set()
+
+
+# ---------------------------------------------------------------------------
+# Subject-aware matching
+# ---------------------------------------------------------------------------
+
+
+class TestSubjectQualified:
+    """A particle's subject lives in a field, not in its ``content``. Gold
+    prose restates it inline. Embedding bare ``content`` therefore scores the
+    pair on a difference the schema asked the extractor to make.
+    """
+
+    def test_absent_subject_is_prepended(self) -> None:
+        assert (
+            subject_qualified("Revenue for 2025 was $1.62 million.", ["Halcyon Grid"])
+            == "Halcyon Grid: Revenue for 2025 was $1.62 million."
+        )
+
+    def test_present_subject_is_left_alone(self) -> None:
+        """The guard is load-bearing, not an optimisation.
+
+        Qualifying unconditionally double-names the subject, which measured
+        *worse* than the guarded form on identical emissions (precision 0.825
+        / recall 0.829 against 0.887 / 0.857).
+        """
+        content = "Fernwood Systems is a 40-person infrastructure company."
+        assert subject_qualified(content, ["Fernwood Systems"]) is content
+
+    def test_subject_match_is_case_insensitive(self) -> None:
+        content = "fernwood systems shipped the cache in January."
+        assert subject_qualified(content, ["Fernwood Systems"]) is content
+
+    def test_no_subjects_is_identity(self) -> None:
+        assert subject_qualified("A claim.", []) == "A claim."
+
+    def test_only_the_absent_subjects_are_added(self) -> None:
+        """A multi-subject edge claim naming one endpoint gains only the other."""
+        out = subject_qualified("Acme acquired the smaller firm.", ["Acme", "Beta Corp"])
+        assert out == "Beta Corp: Acme acquired the smaller firm."
+
+    def test_blank_subject_names_are_ignored(self) -> None:
+        assert subject_qualified("A claim.", ["", "   "]) == "A claim."
+
+
+class TestSubjectAwareMatching:
+    async def test_both_renderings_are_scored_and_the_better_one_wins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare content is scored first, then the qualified rendering; the
+        pair keeps the higher similarity."""
+        e = _make_emitted("Revenue for 2025 was $1.62 million.")
+        x = _make_expected("Halcyon Grid's revenue for 2025 was $1.62 million.")
+        seen: list[list[str]] = []
+        scores = {
+            "Revenue for 2025 was $1.62 million.": 0.66,
+            "Halcyon Grid: Revenue for 2025 was $1.62 million.": 0.99,
+        }
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            seen.append(list(emitted_texts))
+            return [[scores[t]] for t in emitted_texts]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+        result = await match_emitted_to_expected([e], [x], subject_names={e.id: ["Halcyon Grid"]})
+        assert seen == [
+            ["Revenue for 2025 was $1.62 million."],
+            ["Halcyon Grid: Revenue for 2025 was $1.62 million."],
+        ]
+        # 0.66 would not have matched; 0.99 does.
+        assert len(result.matched) == 1
+
+    async def test_a_pair_that_cleared_the_threshold_still_clears_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pair-level monotonicity — the property the max actually buys.
+
+        A suite whose gold was copied verbatim from extractor output is
+        already subject-elided; prepending the subject *lowers* that pair's
+        similarity. Taking the max means the pair keeps its bare score, which
+        is what rules out the wholesale collapse unconditional qualification
+        caused on ``numismatic-seed-001`` (precision 1.00 -> 0.57).
+
+        This is a claim about one pair's score, **not** about the final
+        assignment — see
+        :meth:`test_raising_a_score_can_reshuffle_the_greedy_assignment`.
+        """
+        e = _make_emitted("Revenue for 2025 was $1.62 million.")
+        x = _make_expected("Revenue for 2025 was $1.62 million.")  # verbatim gold
+        scores = {
+            "Revenue for 2025 was $1.62 million.": 1.0,
+            "Halcyon Grid: Revenue for 2025 was $1.62 million.": 0.62,
+        }
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            return [[scores[t]] for t in emitted_texts]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+        result = await match_emitted_to_expected([e], [x], subject_names={e.id: ["Halcyon Grid"]})
+        assert len(result.matched) == 1
+        assert result.spurious == []
+
+    async def test_raising_a_score_can_reshuffle_the_greedy_assignment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pair-level monotonicity does **not** make the assignment monotone.
+
+        Raising one pair's similarity can reorder the greedy pass, so an
+        emitted claim is taken by a different gold and the gold it used to
+        match is stranded. Two matches become one, plus a spurious and a
+        missed — with no pair's score having fallen.
+
+        The claim "no pair that matched before can stop matching" was made in
+        an early draft and is false (D2); review of PR #504 produced
+        this counterexample. It is recorded as a test rather than only
+        reworded, so the claim cannot quietly come back. The measured suites show no such
+        regression — it needs this specific score configuration — but the
+        guarantee is pair-level, and the suites are measured, not assumed.
+        """
+        a, b = _make_emitted("A"), _make_emitted("B")
+        g1, g2 = _make_expected("gold-1"), _make_expected("gold-2")
+        bare = {"A": [0.85, 0.82], "B": [0.50, 0.83]}
+        qual = {"S: A": [0.70, 0.95]}  # A->g1 drops, A->g2 rises past everything
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            return [list((bare | qual)[t]) for t in emitted_texts]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+
+        before = await match_emitted_to_expected([a, b], [g1, g2])
+        assert len(before.matched) == 2
+        assert before.spurious == [] and before.missed_required == []
+
+        after = await match_emitted_to_expected([a, b], [g1, g2], subject_names={a.id: ["S"]})
+        assert [e.content for e, _ in after.matched] == ["gold-2"]
+        assert [p.id for p in after.spurious] == [b.id]
+        assert [e.content for e in after.missed_required] == ["gold-1"]
+
+    async def test_llm_judge_reads_the_winning_rendering_per_pair(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not per row: a pair the bare rendering won is judged on bare text.
+
+        The first implementation swapped the whole row to the qualified string
+        whenever any column improved, so a pair whose bare score won was still
+        judged on the qualified text (PR #504 review, finding 3).
+        """
+        e = _make_emitted("A")
+        x_bare_wins, x_qual_wins = _make_expected("gold-bare"), _make_expected("gold-qual")
+        scores = {"A": [0.70, 0.40], "S: A": [0.10, 0.70]}
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            return [list(scores[t]) for t in emitted_texts]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+        seen: list[str] = []
+
+        async def _fake_complete(purpose: str, prompt: str, **kw: object) -> str:
+            seen.append(prompt)
+            return "misaligned"  # reject both, so both pairs are adjudicated
+
+        monkeypatch.setattr("particles.llm.complete", _fake_complete)
+        await match_emitted_to_expected(
+            [e],
+            [x_bare_wins, x_qual_wins],
+            judge=EquivalenceJudge.LLM,
+            subject_names={e.id: ["S"]},
+        )
+        bare_prompt = next(p for p in seen if "gold-bare" in p)
+        qual_prompt = next(p for p in seen if "gold-qual" in p)
+        assert "CLAIM:        A" in bare_prompt  # bare won this column
+        assert "CLAIM:        S: A" in qual_prompt  # qualified won this one
+
+    async def test_omitting_subject_names_preserves_pre_0262_semantics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default embeds bare content, so historical runs stay reproducible."""
+        e = _make_emitted("Revenue for 2025 was $1.62 million.")
+        x = _make_expected("Halcyon Grid's revenue for 2025 was $1.62 million.")
+        seen: list[list[str]] = []
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            seen.append(list(emitted_texts))
+            return [[0.95]]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+        await match_emitted_to_expected([e], [x])
+        assert seen == [["Revenue for 2025 was $1.62 million."]]
+
+    async def test_particle_absent_from_the_map_is_embedded_bare(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A subjectless emission is not an error — it is just unqualified."""
+        e = _make_emitted("An unattributed claim.")
+        x = _make_expected("An unattributed claim.")
+        seen: list[list[str]] = []
+
+        def _spy(emitted_texts: list[str], expected_texts: list[str]) -> list[list[float]]:
+            seen.append(list(emitted_texts))
+            return [[0.99]]
+
+        monkeypatch.setattr("particles.benchmark.equivalence._similarity_matrix", _spy)
+        await match_emitted_to_expected([e], [x], subject_names={"some-other-id": ["X"]})
+        assert seen == [["An unattributed claim."]]
+
+    async def test_llm_judge_reads_the_same_text_the_cosine_scored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Otherwise the two judges disagree about what the claim says — on
+        exactly the claims the qualification exists for."""
+        e = _make_emitted("Revenue for 2025 was $1.62 million.")
+        x = _make_expected("Halcyon Grid's revenue for 2025 was $1.62 million.")
+        scores = {
+            "Revenue for 2025 was $1.62 million.": 0.40,  # below the prefilter
+            "Halcyon Grid: Revenue for 2025 was $1.62 million.": 0.70,  # contested band
+        }
+        monkeypatch.setattr(
+            "particles.benchmark.equivalence._similarity_matrix",
+            lambda et, xt: [[scores[t]] for t in et],
+        )
+        prompts: list[str] = []
+
+        async def _fake_complete(purpose: str, prompt: str, **kw: object) -> str:
+            prompts.append(prompt)
+            return "aligned"
+
+        monkeypatch.setattr("particles.llm.complete", _fake_complete)
+        result = await match_emitted_to_expected(
+            [e], [x], judge=EquivalenceJudge.LLM, subject_names={e.id: ["Halcyon Grid"]}
+        )
+        assert len(result.matched) == 1
+        assert "Halcyon Grid: Revenue for 2025 was $1.62 million." in prompts[0]

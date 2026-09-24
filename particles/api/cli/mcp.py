@@ -30,15 +30,41 @@ app.add_typer(mcp_app, name="mcp")
 
 
 @mcp_app.command("serve")
-def mcp_serve_cmd() -> None:
-    """Run the read-only Particles MCP server over stdio.
+def mcp_serve_cmd(
+    project_observer: str | None = typer.Option(
+        None,
+        "--project-observer",
+        metavar="cwd",
+        help=(
+            "Bind this server to the project of its working directory (the only value is "
+            "`cwd`): reads see global beliefs plus that project's, and writes are attributed "
+            "to it. Omit for the store-wide server."
+        ),
+    ),
+) -> None:
+    """Run the Particles MCP server over stdio.
 
     Typical install path on the operator's machine::
 
-        claude mcp add particles -- uv run particles mcp serve
+        claude mcp add particles -- uv run particles mcp serve --project-observer cwd
+
+    `--project-observer cwd` is a launch flag, not configuration, on purpose:
+    `config.yaml` is shared by every MCP client on the machine, and a client
+    started from your home directory should not be bound to it.
     """
+    # One import edge into `particles.mcp`, the one the acyclic contract pins.
+    from particles.mcp import bind_project
     from particles.mcp import main as serve_main
 
+    if project_observer is not None:
+        if project_observer != "cwd":
+            typer.echo("Error: --project-observer accepts only `cwd`.", err=True)
+            raise typer.Exit(2)
+        from pathlib import Path
+
+        from particles.api.cli._claude_code import claude_project_slug, repository_root
+
+        bind_project(claude_project_slug(repository_root(Path.cwd())))
     serve_main()
 
 
@@ -51,7 +77,7 @@ def mcp_tools_cmd(
     """Print the registered MCP tool surface (name, description, input schema).
 
     Used to verify the contract without spawning an MCP client. The JSON
-    output is what ``tests/mcp/tool-schema.json`` should match — drift
+    output is what ``tests/mcp/tool-schema.json`` should match; drift
     here means an ``operations/`` signature changed and the MCP surface
     needs review.
     """
@@ -98,7 +124,7 @@ def mcp_resources_cmd(
     The sibling of ``particles mcp tools`` for the *resources* primitive: the
     ``particles://digest/{store}`` template plus any concrete per-store digests
     listed for the write-enabled / opted-in memory stores. The JSON output is
-    what ``tests/mcp/resource-schema.json`` should match — drift here means the
+    what ``tests/mcp/resource-schema.json`` should match; drift here means the
     resource contract MCP clients see has changed.
     """
     from particles.mcp import build_server

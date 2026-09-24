@@ -31,6 +31,119 @@ from particles.extraction.general import (
 )
 
 
+class TestConfidenceClampADR0263:
+    """The parse clamps strictly inside (0, 1) (D1).
+
+    ``0.0`` and ``1.0`` are exact fixed points of the logit transform
+    temperature scaling runs in, so a particle minted at either is
+    uncalibratable for the rest of its life, and what is stored is immutable.
+    The rubric asks the model not to emit them; this is what makes
+    the invariant hold when a model does anyway — and whether a model
+    complies varies by model and by source genre, measured.
+    """
+
+    def _one(self, conf: object) -> float:
+        raw = json.dumps(
+            [
+                {
+                    "content": "A claim.",
+                    "confidence_value": conf,
+                    "uncertainty_nature": "EPISTEMIC",
+                    "subjects": ["S"],
+                }
+            ]
+        )
+        candidates, _notes = _parse_extraction_response(raw)
+        return candidates[0].confidence_value
+
+    def test_saturated_high_is_pulled_inside(self) -> None:
+        assert self._one(1.0) == 0.99
+
+    def test_saturated_low_is_pulled_inside(self) -> None:
+        assert self._one(0.0) == 0.01
+
+    def test_out_of_range_is_clamped_to_the_same_bounds(self) -> None:
+        assert self._one(4.2) == 0.99
+        assert self._one(-1.0) == 0.01
+
+    def test_interior_values_are_untouched(self) -> None:
+        """The clamp is a backstop, not a rescale — it must not move a value
+        the model was entitled to state."""
+        for v in (0.05, 0.35, 0.5, 0.93, 0.97):
+            assert self._one(v) == v
+
+    def test_every_clamped_value_is_fittable(self) -> None:
+        """The property the clamp exists for: nothing it emits is an exact
+        fixed point, so ``TemperatureScaler`` can move all of it."""
+        from particles.extraction.calibration import is_saturated
+
+        assert not is_saturated(self._one(1.0))
+        assert not is_saturated(self._one(0.0))
+
+    def test_nan_still_routes_to_the_safe_default_not_the_ceiling(self) -> None:
+        """Regression guard kept across the clamp change.
+
+        ``json.loads`` accepts the non-standard ``NaN`` literal, and
+        ``min(0.99, nan)`` evaluates to ``nan``'s partner rather than
+        propagating — so a poisoned source must keep hitting the explicit
+        non-finite branch, not the clamp.
+        """
+        raw = '[{"content": "A claim.", "confidence_value": NaN, '
+        raw += '"uncertainty_nature": "EPISTEMIC", "subjects": ["S"]}]'
+        candidates, notes = _parse_extraction_response(raw)
+        assert candidates[0].confidence_value == 0.5
+        assert any("non-finite" in n for n in notes)
+
+
+class TestConfidenceRubricADR0263:
+    """The elicitation half. The clamp guarantees calibratability; only the
+    rubric produces the *spread* that makes a calibration informative — a
+    near-constant predictor is uninformative for any monotone map.
+    """
+
+    def test_rubric_forbids_the_endpoints_in_words(self) -> None:
+        from particles.extraction.general import _EXTRACT_RULES
+
+        assert "Never emit exactly 1.0 or exactly 0.0" in _EXTRACT_RULES
+
+    def test_rubric_bands_do_not_overlap(self) -> None:
+        """The old rubric shared 0.9 and 0.7 between adjacent bands, which
+        invites snapping to a shared edge."""
+        import re
+
+        from particles.extraction.general import _EXTRACT_RULES
+
+        bands = re.findall(r"^  - (\d\.\d+)–(\d\.\d+):", _EXTRACT_RULES, re.MULTILINE)
+        assert len(bands) == 5, bands
+        edges = [(float(lo), float(hi)) for lo, hi in bands]
+        # Bands descend; each band's floor must sit strictly above the next
+        # band's ceiling. (zip is deliberately not strict: it pairs each band
+        # with its successor, so the last band has no partner.)
+        for (lo, _), (_, next_hi) in zip(edges, edges[1:]):  # noqa: B905
+            assert lo > next_hi, f"bands overlap or gap at {lo} / {next_hi}"
+
+    def test_rubric_guidance_stays_inside_the_clamp(self) -> None:
+        """The rubric is the target, the clamp the backstop — guidance that
+        fell outside the clamp would be silently overridden."""
+        import re
+
+        from particles.extraction.general import (
+            _CONFIDENCE_CEILING,
+            _CONFIDENCE_FLOOR,
+            _EXTRACT_RULES,
+        )
+
+        # Only the band table is guidance. The prohibition sentence names 0.0
+        # and 1.0 precisely because they are forbidden, so it is excluded.
+        bands = re.findall(r"^  - (\d\.\d+)–(\d\.\d+):", _EXTRACT_RULES, re.MULTILINE)
+        values = [float(v) for pair in bands for v in pair]
+        assert values, "no rubric values found"
+        assert min(values) >= _CONFIDENCE_FLOOR
+        assert max(values) <= _CONFIDENCE_CEILING
+        # And the guidance interval quoted in prose agrees with the table.
+        assert f"[{min(values):.2f}, {max(values):.2f}]" in _EXTRACT_RULES
+
+
 class TestParseExtractionResponse:
     def test_valid_json(self) -> None:
         raw = json.dumps(
@@ -76,11 +189,18 @@ class TestParseExtractionResponse:
         assert any("empty" in n for n in notes)
 
     def test_confidence_clamped(self) -> None:
+        """Out-of-range values are clamped to the interior bound, not to 1.0.
+
+        This asserted ``== 1.0`` until the clamp was tightened to
+        ``[0.01, 0.99]``: an out-of-range value landing exactly on 1.0 minted
+        an uncalibratable particle, which is the failure that ADR exists to
+        prevent. See :class:`TestConfidenceClampADR0263` for the full contract.
+        """
         raw = json.dumps(
             [{"content": "Test.", "confidence_value": 1.5, "uncertainty_nature": "EPISTEMIC"}]
         )
         candidates, _ = _parse_extraction_response(raw)
-        assert candidates[0].confidence_value == 1.0
+        assert candidates[0].confidence_value == 0.99
 
     def test_nan_confidence_defaults_not_max(self) -> None:
         """F12a: json.loads accepts the literal NaN, and max(0, min(1, nan)) is
@@ -1366,7 +1486,7 @@ async def test_chunked_partial_failure_keeps_snapshot_pending(
 
 
 # ---------------------------------------------------------------------------
-#: structural paragraph chunker + normalisation + carry-forward
+# : structural paragraph chunker + normalisation + carry-forward
 # ---------------------------------------------------------------------------
 
 
@@ -1477,8 +1597,7 @@ class TestNormaliseForHashing:
 
 
 class TestGeneralExtractorChunkedCarryForward:
-    """`_extract_html_chunked` routes through ``extract_with_carry_forward``
-    .
+    """`_extract_html_chunked` routes through ``extract_with_carry_forward``.
 
     These tests drive ``_extract_html_chunked`` directly with a mocked
     LLM seam so the carry-forward behaviour is observable without the

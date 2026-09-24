@@ -50,6 +50,7 @@ from pydantic import BaseModel
 
 from particles.config import get_config
 from particles.core.granularity import granularity_violation
+from particles.core.observer_scope import PROJECT_TAG_PREFIX, project_keys, project_tag
 from particles.core.schema import (
     Confidence,
     Particle,
@@ -70,7 +71,7 @@ from particles.store.event_store import EventRefKind, OperatorEventType, record_
 
 
 class AgentWriteResult(BaseModel):
-    """The §6.6 verdict of a belief write — a first-class result, not an error.
+    """The §6.6 verdict of a belief write: a first-class result, not an error.
 
     ``asserted_particle_id`` is always the *agent's* belief id (the constructed
     candidate), never the INCONSISTENCY meta-particle's id; on a conflict that
@@ -81,6 +82,9 @@ class AgentWriteResult(BaseModel):
 
     asserted_particle_id: str | None
     verdict: str
+    # the agent's own earlier belief this assertion replaced, on a
+    # ``SUPERSEDED_PRIOR`` verdict; ``None`` on every other verdict.
+    superseded_particle_id: str | None = None
     status: str | None = None
     inconsistency_id: str | None = None
 
@@ -124,6 +128,7 @@ async def _resolve_provenance(
     *,
     source_excerpt: str | None,
     corpus_entry_id: str | None,
+    project_key: str | None = None,
 ) -> tuple[str, str]:
     """Return (corpus_entry_id, snapshot_id) for the assertion's SOURCE ref (§3).
 
@@ -138,6 +143,7 @@ async def _resolve_provenance(
             source_excerpt,
             deposited_by=identity,
             source_type=SourceType.CONVERSATION,
+            tags=_scope_tags(None, project_key),
             author_id=identity,
         )
     if corpus_entry_id is not None:
@@ -146,11 +152,33 @@ async def _resolve_provenance(
         entry = await get_entry(session, corpus_entry_id)
         if entry is None or not entry.snapshots:
             raise ValueError(f"corpus_entry_id {corpus_entry_id!r} not found or has no snapshot.")
+        if project_key is not None and project_key not in project_keys(entry.tags):
+            # A belief's observer scope is read from its source. Letting a
+            # project-bound agent name any entry would let it choose that scope —
+            # a global entry would put its belief in front of every project.
+            # It may cite its own project's sources; for anything
+            # else it supplies the excerpt, which is deposited under its key.
+            raise ValueError(
+                f"corpus_entry_id {corpus_entry_id!r} is not a source of project "
+                f"{project_key!r}; pass `source_excerpt` instead."
+            )
         return corpus_entry_id, entry.snapshots[-1].snapshot_id
     raise ValueError(
         "An assertion requires provenance: pass `source_excerpt` (deposited as the "
         "belief's source) or an existing `corpus_entry_id`."
     )
+
+
+def _scope_tags(tags: list[str] | None, project_key: str | None) -> list[str] | None:
+    """Entry tags with the server-owned project key.
+
+    The key is never the caller's to name: any ``project:`` tag it supplied is
+    dropped, and the bound server's own key — if it has one — is added.
+    """
+    kept = [tag for tag in tags or [] if not tag.startswith(PROJECT_TAG_PREFIX)]
+    if project_key:
+        kept.append(project_tag(project_key))
+    return kept or (None if tags is None else [])
 
 
 async def _construct_and_insert(
@@ -169,6 +197,7 @@ async def _construct_and_insert(
     carry_over: Particle | None = None,
     subject_ids: list[str] | None = None,
     granularity: tuple[int, int] | None = None,
+    project_key: str | None = None,
 ) -> tuple[str, Particle | None]:
     """Server-side particle construction + §6.6 consensus/fail-closed insert (§4a/§6b).
 
@@ -243,7 +272,11 @@ async def _construct_and_insert(
         asserted_by = carry_over.asserted_by
     else:
         entry_id, snapshot_id = await _resolve_provenance(
-            session, identity, source_excerpt=source_excerpt, corpus_entry_id=corpus_entry_id
+            session,
+            identity,
+            source_excerpt=source_excerpt,
+            corpus_entry_id=corpus_entry_id,
+            project_key=project_key,
         )
         confidence = Confidence(
             value=_clamp_confidence(confidence_value),
@@ -283,13 +316,21 @@ async def _construct_and_insert(
     return particle.id, result
 
 
-def _map_result(candidate_id: str, returned: Particle | None) -> AgentWriteResult:
+def _map_result(
+    candidate_id: str, returned: Particle | None, *, report_supersession: bool = False
+) -> AgentWriteResult:
     """Map a reconcile result to the §6.6 verdict — a conflict is first-class.
 
     ``asserted_particle_id`` is always the agent's belief id (``candidate_id``),
     never the INCONSISTENCY meta-particle's id; on a conflict that belief is the
     quarantined ``CONFLICT_PENDING`` particle and ``inconsistency_id`` names the
     separate INCONSISTENCY record.
+
+    ``report_supersession`` is set by the *assert* path alone:
+    there, a ``supersedes`` edge on the result means the engine revised this
+    agent's own earlier belief, which the caller never asked for and must be
+    told about. On the explicit ``supersede`` verbs that edge is the caller's
+    own instruction, so the verdict stays ``ASSERTED``.
     """
     if returned is None:
         # Lower-trust drop — unreachable on a consensus write store (rung 2 is
@@ -301,6 +342,28 @@ def _map_result(candidate_id: str, returned: Particle | None) -> AgentWriteResul
             verdict="INCONSISTENCY_RAISED",
             status=StatusReason.CONFLICT_PENDING.value,
             inconsistency_id=returned.id,
+        )
+    if (
+        returned.status is Status.PROVENANCE_STALE
+        and returned.status_reason is StatusReason.CONFLICT_PENDING
+    ):
+        # the assertion re-stated a claim already held for review;
+        # the observation was recorded on that open hold rather than minting a
+        # second one. The belief the agent now owns is the hold itself.
+        return AgentWriteResult(
+            asserted_particle_id=returned.id,
+            verdict="HELD_FOR_REVIEW",
+            status=StatusReason.CONFLICT_PENDING.value,
+        )
+    if report_supersession and returned.status is Status.ACTIVE and returned.supersedes:
+        # the assertion revised this agent's own earlier belief.
+        # A distinct verdict, because a silent overwrite of a belief the agent
+        # itself asserted is exactly the kind of change §6 says must be visible.
+        return AgentWriteResult(
+            asserted_particle_id=candidate_id,
+            verdict="SUPERSEDED_PRIOR",
+            status=returned.status.value,
+            superseded_particle_id=returned.supersedes,
         )
     return AgentWriteResult(
         asserted_particle_id=candidate_id,  # == returned.id when it lands ACTIVE
@@ -363,6 +426,7 @@ async def assert_belief(
     identity: str | None = None,
     subject_ids: list[str] | None = None,
     granularity: tuple[int, int] | None = None,
+    project_key: str | None = None,
 ) -> AgentWriteResult:
     """Assert one belief through the §6.6 ladder (the flagship).
 
@@ -374,7 +438,8 @@ async def assert_belief(
 
     Args:
         identity: Overrides the server-bound asserting principal. Still
-            server-side — a *surface* selects it, never a client call. The façade passes its own principal so façade-origin claims
+            server-side — a *surface* selects it, never a client call. The
+            façade passes its own principal so façade-origin claims
             stay separately attributable from the native surface's.
         subject_ids: Pre-resolved Subject ids, used instead of resolving
             ``subject_names`` through the authority ladder. The façade
@@ -399,6 +464,7 @@ async def assert_belief(
         supersedes=None,
         subject_ids=subject_ids,
         granularity=granularity,
+        project_key=project_key,
     )
     await record_event(
         session,
@@ -408,7 +474,7 @@ async def assert_belief(
         refs=[(EventRefKind.PARTICLE, candidate_id)] if result is not None else [],
         payload={"store": store, "subjects": list(subject_names)},
     )
-    return _map_result(candidate_id, result)
+    return _map_result(candidate_id, result, report_supersession=True)
 
 
 async def supersede_belief(
@@ -425,6 +491,8 @@ async def supersede_belief(
     tags: list[str] | None = None,
     operator: bool = False,
     actor: str | None = None,
+    reason: str | None = None,
+    project_key: str | None = None,
 ) -> AgentWriteResult:
     """Revise a belief: retire the predecessor to SUPERSEDED, then assert a successor.
 
@@ -440,9 +508,20 @@ async def supersede_belief(
     ACTIVE guards still apply, and the surface keeps the
     ``mcp.write.enabled_stores`` + bearer gate. Does not commit — the caller owns
     the transaction.
+
+    ``reason`` is the free-text *why* of the revision, recorded on the
+    ``PARTICLE_SUPERSEDED`` audit event exactly as ``retract_belief`` records
+    its reason: a supersession is a judgment, and the more common of
+    the two operator corrections, so it is the one the event log must be able
+    to explain. **Required, non-empty, on the operator path**; optional on the
+    agent path, where a required reason would only suppress agent
+    self-corrections. Raises ``ValueError`` on an empty operator reason.
     """
     from particles.store.particle_store import update_particle_status
 
+    reason = reason.strip() if reason else None
+    if operator and not reason:
+        raise ValueError("An operator supersede requires a non-empty reason.")
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
     await _load_mutable_target(session, supersedes_id, identity, operator=operator)
@@ -463,11 +542,13 @@ async def supersede_belief(
         corpus_entry_id=corpus_entry_id,
         tags=tags,
         supersedes=supersedes_id,
+        project_key=project_key,
     )
     await record_event(
         session,
         actor=event_actor,
         event_type=OperatorEventType.PARTICLE_SUPERSEDED,
+        reason=reason,
         refs=[
             (EventRefKind.PARTICLE, supersedes_id),
             *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
@@ -557,6 +638,9 @@ async def assign_subject_belief(
         session,
         actor=event_actor,
         event_type=OperatorEventType.PARTICLE_SUPERSEDED,
+        # The why of this supersession is mechanical and known: the subject
+        # assignment itself.
+        reason=f"subject assigned: {subject.canonical_name} ({resolved_id})",
         refs=[
             (EventRefKind.PARTICLE, particle_id),
             *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
@@ -623,6 +707,7 @@ async def deposit_conversation_text(
     text: str,
     tags: list[str] | None = None,
     identity: str | None = None,
+    project_key: str | None = None,
 ) -> tuple[str, str]:
     """Deposit conversational material as a CONVERSATION corpus entry.
 
@@ -643,6 +728,6 @@ async def deposit_conversation_text(
         text,
         deposited_by=identity,
         source_type=SourceType.CONVERSATION,
-        tags=tags,
+        tags=_scope_tags(tags, project_key),
         author_id=identity,
     )

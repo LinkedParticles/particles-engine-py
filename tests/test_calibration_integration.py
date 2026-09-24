@@ -830,6 +830,127 @@ class TestCalibrateCLI:
 # ---------------------------------------------------------------------------
 
 
+class TestPooledCalibrationRuns:
+    """`--runs N` fits over the union of N passes.
+
+    Measured over 13 complete passes of `prose-calibration-001`: a single
+    pass's T ranges 1.8554–2.6001 (sd 0.2122) while every leave-one-out refit
+    over the other twelve lands in 2.12–2.18. The verb's own estimator is the
+    noisy one, so running it once persists a draw rather than the centre.
+    """
+
+    def _base_args(self) -> list[str]:
+        return [
+            "extractor",
+            "calibrate",
+            "numista-coin-extractor",
+            "--suites-dir",
+            str(_CALIBRATION_SUITES),
+            "--fixtures",
+            str(_FIXTURES),
+            "--dry-run",
+        ]
+
+    def _sample_n(self, output: str) -> int:
+        import re
+
+        m = re.search(r"sample N=(\d+)", output)
+        assert m, output
+        return int(m.group(1))
+
+    def test_pooled_run_multiplies_the_fitted_population(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        one = _invoke(runner, self._base_args())
+        assert one.exit_code == 0, one.output
+        three = _invoke(runner, [*self._base_args(), "--runs", "3", "--yes"])
+        assert three.exit_code == 0, three.output
+        assert self._sample_n(three.output) == 3 * self._sample_n(one.output)
+
+    def test_pooled_run_discloses_the_per_pass_spread(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        """The pooled fit is the estimate; the spread is the noise it averages,
+        and the operator has to be able to see it."""
+        _init_extractor_records_sync(cli_db)
+        result = _invoke(runner, [*self._base_args(), "--runs", "3", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "pooled into one fit" in result.output
+        assert "per-pass T:" in result.output
+
+    def test_single_run_output_is_unchanged(self, runner: CliRunner, cli_db: Path) -> None:
+        """The compatibility contract: N=1 behaves exactly as before the flag.
+
+        Mirrors the repeat-runs benchmark's own pin.
+        """
+        _init_extractor_records_sync(cli_db)
+        result = _invoke(runner, self._base_args())
+        assert result.exit_code == 0, result.output
+        assert "pooled into one fit" not in result.output
+        assert "per-pass T:" not in result.output
+        assert "pass 1/1" not in result.output
+
+    def test_pooled_run_is_cost_gated_without_yes(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N× the LLM calls, so the projection precedes the spend.
+
+        Non-interactive and over threshold without ``--yes`` aborts rather than
+        silently spending N times over.
+        """
+        from particles.config import reset_config
+
+        _init_extractor_records_sync(cli_db)
+        monkeypatch.setenv("BENCHMARK_CONFIRM_CALL_THRESHOLD", "0")
+        # The cli_db fixture resets the config singleton before this body runs,
+        # and table creation re-populates it — so the override needs its own
+        # reset to be seen.
+        reset_config()
+        result = _invoke(runner, [*self._base_args(), "--runs", "5"])
+        assert result.exit_code == 1, result.output
+        combined = result.output + (result.stderr or "")
+        assert "no --yes was given" in combined, combined
+
+    def test_single_run_is_never_cost_gated(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import reset_config
+
+        _init_extractor_records_sync(cli_db)
+        monkeypatch.setenv("BENCHMARK_CONFIRM_CALL_THRESHOLD", "0")
+        reset_config()
+        result = _invoke(runner, self._base_args())
+        assert result.exit_code == 0, result.output
+
+    def test_persisted_record_carries_the_pooled_sample_size(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        """What is written must describe what was actually fitted."""
+        import asyncio
+
+        _init_extractor_records_sync(cli_db)
+        one = _invoke(runner, self._base_args())
+        single_n = self._sample_n(one.output)
+
+        persist = [a for a in self._base_args() if a != "--dry-run"]
+        result = _invoke(runner, [*persist, "--runs", "2", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        async def _read() -> ExtractorCalibration | None:
+            from particles.db import session_scope
+            from particles.store.extractor_store import get_calibration
+
+            async with session_scope() as session:
+                return await get_calibration(
+                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
+                )
+
+        record = asyncio.run(_read())
+        assert record is not None
+        assert record.sample_size == 2 * single_n
+
+
 class TestDeleteCalibration:
     @pytest.mark.asyncio
     async def test_removes_the_pairing_and_returns_it(self, db_session: AsyncSession) -> None:

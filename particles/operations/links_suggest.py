@@ -127,7 +127,8 @@ async def suggest_co_evidential(
             are the full set, so ``REPORT`` callers and the store-wide total are
             unchanged). When set, only pairs with **at least one side** in this
             set are judged in ``LLM_JUDGE`` / linked in ``APPLY`` — bounding the
-            audit's ``--judge`` LLM cost to the harvest, symmetric with the contradiction probe — and the judge pass runs in two
+            audit's ``--judge`` LLM cost to the harvest, symmetric with the
+            contradiction probe — and the judge pass runs in two
             tiers: pairs with **both** sides in scope are judged
             before mixed pairs, highest similarity first within each tier, so
             a judge pass cut short (circuit breaker, transient LLM
@@ -670,8 +671,8 @@ async def find_exact_duplicate_groups(
 
     Members must be ACTIVE, truth-apt (co-evidence asserts shared
     *truth*), and asserted (rejected / hypothetical prose is off the
-    factual surface). Buckets are additionally keyed on ``stance:holder``
-    : two identical sentences held by *different* principals are
+    factual surface). Buckets are additionally keyed on ``stance:holder``:
+    two identical sentences held by *different* principals are
     different claims about who believes what, and merging them would collapse
     the per-holder distribution.
 
@@ -753,8 +754,7 @@ async def auto_merge_exact_duplicates(
 
     1. Links the survivor to each redundant copy with `CO_EVIDENTIAL`
        (``created_by = EXACT_DUPLICATE``) — this is what preserves the
-       corroboration structure the superseded copies' provenance carried
-       .
+       corroboration structure the superseded copies' provenance carried.
     2. Transitions each redundant copy ``ACTIVE → SUPERSEDED`` with
        ``status_reason = DUPLICATE_MERGED``, through the §6.6 validator.
     3. Records one ``DUPLICATES_MERGED`` event carrying the survivor, every
@@ -945,7 +945,8 @@ async def unmerge_exact_duplicates(
        this legal; the ``retired_at`` stamp is cleared
        with it (§4).
     2. Deletes the ``CO_EVIDENTIAL`` edge to the survivor **only** when it
-       carries ``created_by = EXACT_DUPLICATE`` — a link a human or the judge made for the same pair is never withdrawn (§5).
+       carries ``created_by = EXACT_DUPLICATE`` — a link a human or the
+       judge made for the same pair is never withdrawn (§5).
     3. Records one ``DUPLICATES_UNMERGED`` event. The merge event it reverts is
        never deleted or edited; the pair is the audit trail (§9).
 

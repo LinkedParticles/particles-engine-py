@@ -13,7 +13,8 @@ load-bearing — **credit action, not attention** (§1/§3). This is the
 reliable-signal constraint; it needs no user reaction, so the sentiment-guessing
 failure mode is structurally impossible.
 
-Two tiers, both over the distilled *tool-call* lines only (``[tool: Bash — git commit -s]``), never the conversational prose —
+Two tiers, both over the distilled *tool-call* lines only
+(``[tool: Bash — git commit -s]``), never the conversational prose —
 that is the "action, not attention" discipline:
 
 - **Literal (deterministic, zero-cost, always on):** a belief that names a
@@ -372,7 +373,8 @@ async def mine_session(
     is set, the bounded behavioural tier over the beliefs the literal tier did
     not catch. Records the union as utility events for ``session_id`` (idempotent).
 
-    ``behavioural_matching`` overrides the config knob for one run — the degraded consolidation pass forces the literal-only tier
+    ``behavioural_matching`` overrides the config knob for one run — the
+    degraded consolidation pass forces the literal-only tier
     (``False``) so a structural-only cycle never attempts an LLM call.
 
     ``latency_tolerant`` lets the behavioural tier's calls go out as

@@ -130,7 +130,7 @@ class TestExpandTags:
         assert "coins/by-region/germany" in expanded
         assert "ml/optimizers" in expanded
 
-    #: up-expansion over the parent chain.
+    # : up-expansion over the parent chain.
     @pytest.mark.asyncio
     async def test_include_ancestors_adds_parent_chain(self, db_session: AsyncSession) -> None:
         await insert_taxonomy(db_session, _coins_taxonomy())

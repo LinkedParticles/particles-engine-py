@@ -278,8 +278,10 @@ class TestMcpWriteRouting:
                 "Deploy key never rotates.", ["deploy key"], 0.9, source_excerpt="never rotates"
             )
         )
-        assert b["verdict"] == "INCONSISTENCY_RAISED"
-        assert b["inconsistency_id"] and b["asserted_particle_id"] != b["inconsistency_id"]
+        # the same agent revising its own belief supersedes it, and
+        # the verdict names what it replaced rather than overwriting silently.
+        assert b["verdict"] == "SUPERSEDED_PRIOR"
+        assert b["superseded_particle_id"] == a["asserted_particle_id"]
 
     def test_retract_routes_to_engine(
         self, engine: list[str], stub_subjects: None, similar_embeddings: None

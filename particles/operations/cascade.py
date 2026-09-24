@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.cascade_gate import apply_cascade_cap, cascade_gate_passes
+from particles.core.conflict_resolution import RETIRED_VALUE_KEY
 from particles.core.schema import (
     SCHEMA_VERSION,
     Confidence,
@@ -152,6 +153,15 @@ async def _try_resolve_inconsistency(
     # pre-0117 wrappers with a dangling B ref land here. They stay open for
     # manual review (PREFER_A / DEFER still work over them).
     if particle_a is None or particle_b is None:
+        return False
+
+    # a retired-value record is a question about a *judgment* ("does
+    # the retirement stand?"), not about which source outranks which. Source
+    # trust cannot answer it, so it is left for a person — as is any wrapper
+    # whose A has since left the surface by a terminal transition.
+    if (inconsistency.properties and inconsistency.properties.get(RETIRED_VALUE_KEY)) or (
+        particle_a.status in (Status.RETRACTED, Status.SUPERSEDED)
+    ):
         return False
 
     # Resolve trust ranks for both constituent particles

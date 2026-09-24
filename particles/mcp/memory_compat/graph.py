@@ -43,7 +43,8 @@ mechanisms and needs no schema change — which keeps its
 
 **The tag vocabulary itself is defined Client-side**, in
 ``particles.extraction.mcp_memory`` — the module that owns the reference
-*format* — and imported here (Surface → Client, the allowed direction). It moved there when inbound migration shipped: a migrated
+*format* — and imported here (Surface → Client, the allowed direction).
+It moved there when inbound migration shipped: a migrated
 ``memory.jsonl`` record and a record this façade writes must be *the same
 record*, so a user who migrates sees their history through these same reads.
 Two copies of the encoding kept in sync by hand would eventually diverge, and

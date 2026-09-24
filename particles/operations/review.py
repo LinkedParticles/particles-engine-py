@@ -34,12 +34,14 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.conflict_resolution import RETIRED_VALUE_KEY
 from particles.core.schema import (
     SCHEMA_VERSION,
     Confidence,
     Particle,
     ParticleType,
     PolicyProvenance,
+    ProvenanceRefType,
     ResolutionAction,
     ReviewParticle,
     SourceRef,
@@ -110,34 +112,51 @@ async def resolve(
     particle_b_id = particle_refs[1].corpus_entry_id if len(particle_refs) > 1 else None
 
     trust_statement_id: str | None = None
+    trust_stmt: SourceTrustStatement | None = None
+    # a retired-value record pairs a judgment-retired twin (A) with
+    # a held re-assertion (B). PREFER_A = the retirement stands; PREFER_B =
+    # lift it. Neither is a verdict on a *source*, so no trust statement is
+    # written and no cascade runs — the REVIEW particle and the event are the
+    # whole record.
+    retired_value = bool(inc.properties and inc.properties.get(RETIRED_VALUE_KEY))
 
     cascade_count = 0
     promoted_ids: list[str] = []
     if action == ResolutionAction.PREFER_A:
         await _demote_loser(session, particle_b_id)
-        trust_statement_id, trust_stmt = await _write_trust_statement(
-            session, domain, "preferred", particle_a_id, "demoted", particle_b_id, reviewer_id
-        )
+        preferred = await get_particle(session, particle_a_id) if particle_a_id else None
+        if not retired_value:
+            trust_statement_id, trust_stmt = await _write_trust_statement(
+                session, domain, preferred, particle_b_id, reviewer_id
+            )
         # Close the wrapper BEFORE the cascade runs: the cascade
         # scans open INCONSISTENCY particles in the domain, and must not
         # re-process — possibly contradicting — the resolution just made.
         await update_particle_status(
             session, inconsistency_particle_id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
         )
-        cascade_count = await run_trust_cascade(session, trust_stmt)
+        if trust_stmt is not None:
+            cascade_count = await run_trust_cascade(session, trust_stmt)
 
     elif action == ResolutionAction.PREFER_B:
         await _demote_loser(session, particle_a_id)
         promoted = await _recover_claim_b(session, particle_b_id)
         if promoted is not None:
             promoted_ids.append(promoted.id)
-        trust_statement_id, trust_stmt = await _write_trust_statement(
-            session, domain, "preferred", particle_b_id, "demoted", particle_a_id, reviewer_id
-        )
+        # The preferred claim is the minted ACTIVE particle when B was
+        # quarantined, else B as stored (an already-ACTIVE lint-built pair).
+        preferred = promoted
+        if preferred is None and particle_b_id:
+            preferred = await get_particle(session, particle_b_id)
+        if not retired_value:
+            trust_statement_id, trust_stmt = await _write_trust_statement(
+                session, domain, preferred, particle_a_id, reviewer_id
+            )
         await update_particle_status(
             session, inconsistency_particle_id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
         )
-        cascade_count = await run_trust_cascade(session, trust_stmt)
+        if trust_stmt is not None:
+            cascade_count = await run_trust_cascade(session, trust_stmt)
 
     elif action == ResolutionAction.BOTH_VALID:
         # Both claims stay queryable with uncertainty_nature=ALEATORY. A
@@ -224,6 +243,12 @@ async def _demote_loser(session: AsyncSession, loser_id: str | None) -> None:
     if loser is None:
         log.debug("Loser %s not in DB (pre-ADR-0117 wrapper); skipping demotion", loser_id)
         return
+    if loser.status in (Status.RETRACTED, Status.SUPERSEDED):
+        # the "loser" is a judgment-retired twin — already off the
+        # surface by an earlier judgment. There is no legal transition out of
+        # a terminal state and nothing further to demote.
+        log.debug("Loser %s is already %s; nothing to demote", loser_id, loser.status.value)
+        return
     if loser.status is Status.PROVENANCE_STALE:
         if loser.status_reason is StatusReason.CONFLICT_PENDING:
             await update_status_reason(session, loser_id, StatusReason.CONFLICT_RESOLVED)
@@ -261,23 +286,63 @@ async def _recover_claim_b(session: AsyncSession, particle_b_id: str | None) -> 
 async def _write_trust_statement(
     session: AsyncSession,
     domain: str,
-    preferred_label: str,
-    preferred_id: str | None,
-    demoted_label: str,
+    preferred: Particle | None,
     demoted_id: str | None,
     reviewer_id: str,
-) -> tuple[str, SourceTrustStatement]:
-    """Write a SourceTrustStatement encoding the PREFER judgment. Return (statement_id, stmt)."""
+) -> tuple[str | None, SourceTrustStatement | None]:
+    """Write the SourceTrustStatement encoding a PREFER judgment.
+
+    The statement is keyed on the **corpus entry of the preferred claim's
+    SOURCE provenance** — ``SourceRef(CORPUS_ENTRY, <entry_id>)`` — because
+    that is the key every consumer looks up: the §6.4 layered cascade
+    (``get_layered_trust_rank``, consulted by the ingest ladder and the
+    query path) and the reviewer-confirmation gate
+    (``count_reviewer_confirmations``) both match this column
+    against a corpus-entry id. Keying it on the particle id instead — which is
+    what this function did until 1.141.14 — produced a statement nothing could
+    ever find.
+
+    Returns ``(None, None)``, writing nothing, when there is no source to
+    prefer: the preferred particle is unknown (a pre-ADR-0117 dangling ref),
+    is not ACTIVE (a retired claim is not a source recommendation), or carries
+    no SOURCE provenance (an agent-asserted or derived claim has no corpus
+    entry a trust statement could name). A review without a statement is still
+    a complete resolution — the wrapper closes and the REVIEW particle records
+    the judgment — it simply drives no cascade.
+    """
+    if preferred is None:
+        log.debug("Review: preferred particle unknown; no trust statement written")
+        return None, None
+    if preferred.status is not Status.ACTIVE:
+        log.debug(
+            "Review: preferred particle %s is %s, not ACTIVE; no trust statement written",
+            preferred.id[:8],
+            preferred.status.value,
+        )
+        return None, None
+    source_ref = next(
+        (ref for ref in preferred.provenance if ref.type is ProvenanceRefType.SOURCE),
+        None,
+    )
+    if source_ref is None:
+        log.debug(
+            "Review: preferred particle %s has no SOURCE provenance; no trust statement written",
+            preferred.id[:8],
+        )
+        return None, None
     stmt = SourceTrustStatement(
         domain=domain,
         source_ref=SourceRef(
             type=SourceRefType.CORPUS_ENTRY,
-            value=preferred_id or "unknown",
+            value=source_ref.corpus_entry_id,
         ),
         trust_rank=get_config().trust.reviewer_trust_rank,  # reviewer-derived preference
         policy_provenance=PolicyProvenance.REVIEWER_DERIVED,
         asserted_by=reviewer_id,
-        basis=f"{preferred_label} preferred over {demoted_label} in conflict resolution",
+        basis=(
+            f"source of particle {preferred.id} preferred over particle "
+            f"{demoted_id or 'unknown'} in conflict resolution"
+        ),
     )
     await insert_trust_statement(session, stmt)
     return stmt.statement_id, stmt

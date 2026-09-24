@@ -74,18 +74,20 @@ def extractor_conform_cmd(
 ) -> None:
     """Run an extractor against the conformance fixture corpus.
 
-    Scores the fixtures the production registry routes to this extractor
-    . ``--all-accepted`` widens the run to every fixture the
-    extractor would take if handed it — for the fallback that is the
-    whole corpus, so the result is a deliberate probe, not the extractor's
+    Scores the fixtures the production registry routes to this extractor.
+    ``--all-accepted`` widens the run to every fixture the
+    extractor would take if handed it (for the fallback that is the
+    whole corpus), so the result is a deliberate probe, not the extractor's
     conformance score, and it never updates the stored conformance verdict.
 
-    Phase 1 (current): report-only. Exit code 0 unless --fail-on is given.
-    Exit code 1 indicates the contract failed (a REQUIRED field missing, or a
-    FAIL-severity diversity rule violated); --fail-on warn additionally treats
-    RECOMMENDED warnings as fatal. An ADVISORY diversity finding (
-    `uncertainty_nature` is the one shipped today) is reported and never
-    affects the exit code.
+    Phase 1 (current): report-only, in that no merge or registration is gated
+    on the result. The exit code still reflects it: under the default
+    --fail-on error, exit code 1 means the contract failed (a REQUIRED field
+    short of 100%, including every REQUIRED field when no fixture is scored,
+    or a FAIL-severity diversity rule violated on a REQUIRED field);
+    --fail-on warn additionally treats RECOMMENDED warnings as fatal. An
+    ADVISORY diversity finding (`uncertainty_nature` is the one
+    shipped today) is reported and never affects the exit code.
     """
     run(
         _extractor_conform(
@@ -569,7 +571,7 @@ def extractor_benchmark_cmd(
     """Run extraction-quality benchmarks against an extractor.
 
     Discovers every suite under --suites-dir that this extractor is the
-    production routing choice for — the registry ladder, read back
+    production routing choice for: the registry ladder, read back
     through ``select_extractor``, so the fallback extractor no
     longer inherits every domain suite. ``--suite`` runs a named suite
     regardless of routing. Emits one report per suite, and persists each
@@ -579,7 +581,7 @@ def extractor_benchmark_cmd(
     crosses the threshold.
 
     ``--runs N`` repeats each suite N times and reports each metric's mean,
-    range and standard deviation instead of a single point estimate — the
+    range and standard deviation instead of a single point estimate: the
     error bars a provider comparison needs. Every pass persists
     its own report file, so the series is still one run per JSON envelope.
     ``--fail-on`` is evaluated against the **mean** across runs.
@@ -860,7 +862,7 @@ def extractor_benchmark_modality_cmd(
         min=0.0,
         max=1.0,
         help="Cosine floor for aligning an emitted claim to a gold label "
-        "(looser than the content harness's 0.80 — journal claims are reified "
+        "(looser than the content harness's 0.80; journal claims are reified "
         "paraphrases of their gold labels)",
     ),
     output_format: _BenchmarkFormat = typer.Option(
@@ -873,7 +875,7 @@ def extractor_benchmark_modality_cmd(
     rate** the journal extractor's inverted default raises, and the
     whole-entry **narrative-emission rate**. Discovers every modality
     suite under --suites-dir the extractor is the production routing choice
-    for (or runs only --suite). Report-only and **integration-tier** — it drives the
+    for (or runs only --suite). Report-only and **integration-tier**: it drives the
     extractor's LLM call, so it needs ANTHROPIC_API_KEY.
     """
     run(
@@ -1034,7 +1036,7 @@ def extractor_benchmark_polarity_cmd(
         min=0.0,
         max=1.0,
         help="Cosine floor for aligning an emitted claim to a gold label "
-        "(looser than the content harness's 0.80 — the general extractor emits "
+        "(looser than the content harness's 0.80; the general extractor emits "
         "near-paraphrases of its gold labels)",
     ),
     output_format: _BenchmarkFormat = typer.Option(
@@ -1043,14 +1045,14 @@ def extractor_benchmark_polarity_cmd(
 ) -> None:
     """Measure claim-polarity classification quality.
 
-    Reports the dangerous **wrong-`DECLINED` rate** — a real current decision
+    Reports the dangerous **wrong-`DECLINED` rate**, a real current decision
     (ASSERTED) wrongly classified DECLINED and thereby silently hidden from the
     default surface (the headline, the README-projection-trust risk;
-    cap. 1) — plus its superset the wrong-hidden rate and per-polarity
+    cap. 1), plus its superset the wrong-hidden rate and per-polarity
     precision/recall. Discovers every polarity suite under --suites-dir the
     extractor is the production routing choice for (or runs only
     --suite). Report-only and
-    **integration-tier** — it drives the extractor's LLM call, so it needs
+    **integration-tier**: it drives the extractor's LLM call, so it needs
     ANTHROPIC_API_KEY.
     """
     run(
@@ -1215,7 +1217,7 @@ def extractor_benchmark_validity_cmd(
         min=0.0,
         max=1.0,
         help="Cosine floor for aligning an emitted claim to a gold label "
-        "(looser than the content harness's 0.80 — the general extractor emits "
+        "(looser than the content harness's 0.80; the general extractor emits "
         "near-paraphrases of its gold labels)",
     ),
     output_format: _BenchmarkFormat = typer.Option(
@@ -1224,14 +1226,14 @@ def extractor_benchmark_validity_cmd(
 ) -> None:
     """Measure event-anchored-validity quality.
 
-    Reports the dangerous **wrong-expiry rate** — of the aligned claims whose
+    Reports the dangerous **wrong-expiry rate**: of the aligned claims whose
     gold is durable (no boundary), the fraction the extractor wrongly assigned a
     ``valid_until`` and thereby set up for silent retirement by the §9.3
-    staleness lint (the headline, the over-eager-expiry risk) — plus existence
+    staleness lint (the headline, the over-eager-expiry risk). Also reports existence
     precision/recall of correct date-bounded extraction and date accuracy.
     Discovers every validity suite under --suites-dir the extractor is the
     production routing choice for (or runs only --suite). Report-only
-    and **integration-tier** — it drives the extractor's LLM call, so it needs
+    and **integration-tier**: it drives the extractor's LLM call, so it needs
     ANTHROPIC_API_KEY.
     """
     run(
@@ -1558,7 +1560,8 @@ def _selected_suite_ids(extractor: Any, suites_dir: Path) -> set[str] | None:
 
     ``None`` means the question could not be asked — the suites directory is
     absent or unreadable, which is the normal state of an *installed* SDK:
-    `tests/` ships in neither the wheel nor the sdist, so the staleness predicate is repo-only by construction. Callers degrade to an
+    `tests/` ships in neither the wheel nor the sdist, so the
+    staleness predicate is repo-only by construction. Callers degrade to an
     unannotated listing rather than failing; a missing suites tree is not an
     error, it is the absence of an input.
     """
@@ -1629,26 +1632,43 @@ def extractor_calibrate_cmd(
         help="Overwrite an existing calibration; without it, an extractor "
         "that already has one exits 1",
     ),
+    runs: int = typer.Option(
+        1,
+        "--runs",
+        min=1,
+        help="Fit over the pooled pairs from N independent passes instead of "
+        "one. A single pass is a noisy estimator (measured T "
+        "spread 1.86-2.60 against a pooled 2.15), so N>1 persists the centre "
+        "of the distribution rather than a draw from it. Small N is not enough: "
+        "~13 passes was the measured requirement on that suite, and a pooled fit "
+        "over 3 was still refused. Costs N× the LLM calls",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Pre-confirm the cost gate for a pooled fit (--runs N)",
+    ),
 ) -> None:
     """Fit a temperature-scaling calibration for an extractor.
 
-    Runs every applicable **calibration** suite — `tests/benchmark/calibration/`,
+    Runs every applicable **calibration** suite (`tests/benchmark/calibration/`,
     a sibling of the §13.3 `suites/` directory whose gold sets are deliberately
-    partial — collects (raw_confidence, correct) pairs from
+    partial), collects (raw_confidence, correct) pairs from
     emitted-vs-matched, fits a single T via NLL minimisation, and persists the
     result on the extractor record. Subsequent particles produced by this
     extractor carry calibration_source=CALIBRATED_BENCHMARK and a
     temperature-scaled confidence value. Pre-existing particles are
-    unaffected — operators who want retroactive application should run
+    unaffected; operators who want retroactive application should run
     `particles reindex --extractor-id <id>`.
 
-    The fit is refused rather than persisted when it cannot mean anything
-    : degenerate labels, a temperature on an
+    The fit is refused rather than persisted when it cannot mean anything:
+    degenerate labels, a temperature on an
     optimizer bound, fewer than two distinct movable confidences, or a
     calibration that does not reduce calibration error.
 
     Unlike `extractor benchmark`, this verb defaults to the **LLM** equivalence
-    judge — see `_extractor_calibrate` for why the calibration label
+    judge; see `_extractor_calibrate` for why the calibration label
     cannot afford the embedding judge's paraphrase misses.
     """
     run(
@@ -1660,6 +1680,8 @@ def extractor_calibrate_cmd(
             judge,
             dry_run,
             regenerate,
+            runs,
+            yes,
         )
     )
 
@@ -1672,6 +1694,8 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     judge: _BenchmarkJudge,
     dry_run: bool,
     regenerate: bool,
+    runs: int,
+    yes: bool,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -1796,8 +1820,8 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     # 0.5302, 0.4003. Every one became a label saying the extractor was wrong
     # when it was right, and across four runs of identical inputs the fitted T
     # moved 0.2486 → 0.7418 while the verdict flipped between refuse
-    # and persist. What gets persisted is immutable at particle creation
-    #, so that spread is not a reporting problem.
+    # and persist. What gets persisted is immutable at particle creation,
+    # so that spread is not a reporting problem.
     #
     # Hence the default is the LLM judge, unlike `extractor benchmark`. It costs
     # calls only in the contested band — `equivalence.py` accepts above the
@@ -1812,17 +1836,45 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     judge_enum = EquivalenceJudge(judge.value)
 
     # the pairs come off the report the run just produced (see above).
+    # A pooled fit costs N× the LLM calls, so it discloses the projection
+    # before spending anything — the same gate `extractor benchmark --runs`
+    # carries. N=1 is never gated: its behaviour and output are
+    # unchanged from before this flag existed.
+    if runs > 1:
+        _benchmark_cost_gate(suites, extractor, fixtures_dir, runs, False, yes)
+
+    # fit over the UNION of N passes, not one. Measured over 13
+    # complete passes of prose-calibration-001: a single run's T
+    # ranges 1.8554-2.6001 (sd 0.2122) while every leave-one-out refit over
+    # the other twelve lands in 2.12-2.18. The verb's own estimator is the
+    # noisy one, so an operator running it once persists a draw rather than
+    # the centre of the distribution — and 2 of those 13 draws are refused
+    # outright. Pooling is what turns this into a best estimate.
     raw_values: list[float] = []
     labels: list[bool] = []
     suite_ids: list[str] = []
-    for suite_obj in suites:
-        report = await run_benchmark(
-            suite_obj, extractor, fixture_dir=fixtures_dir, judge=judge_enum
-        )
-        suite_ids.append(suite_obj.suite_id)
-        suite_raws, suite_labels = graded_pairs(report)
-        raw_values.extend(suite_raws)
-        labels.extend(suite_labels)
+    per_run: list[tuple[list[float], list[bool]]] = []
+    for run_index in range(runs):
+        run_raws: list[float] = []
+        run_labels: list[bool] = []
+        for suite_obj in suites:
+            report = await run_benchmark(
+                suite_obj, extractor, fixture_dir=fixtures_dir, judge=judge_enum
+            )
+            if run_index == 0:
+                suite_ids.append(suite_obj.suite_id)
+            suite_raws, suite_labels = graded_pairs(report)
+            run_raws.extend(suite_raws)
+            run_labels.extend(suite_labels)
+        per_run.append((run_raws, run_labels))
+        raw_values.extend(run_raws)
+        labels.extend(run_labels)
+        if runs > 1:
+            typer.echo(
+                f"  pass {run_index + 1}/{runs}: {len(run_raws)} pair(s), "
+                f"{sum(run_labels)} matched",
+                err=True,
+            )
 
     sample_size = len(raw_values)
     if sample_size < 2:
@@ -1864,6 +1916,30 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         f"sample N={sample_size}"
     )
     typer.echo(f"  suites: {suite_id_label}")
+    if runs > 1:
+        # Disclose the spread pooling bought, and gate on the pooled fit only.
+        # This mirrors the call already made for `--fail-on`:
+        # requiring most individual runs to pass as well would make the gate
+        # trip more often the more samples you take, i.e. tie the refusal rate
+        # to N rather than to the extractor. The pooled fit is what gets
+        # persisted, so it is what the guards judge; the per-run spread is
+        # disclosed for the operator to read, exactly as the repeat-runs
+        # benchmark discloses its own.
+        per_run_t: list[float] = []
+        for run_raws, run_labels in per_run:
+            if len(run_raws) < 2:
+                continue
+            try:
+                per_run_t.append(TemperatureScaler().fit(run_raws, run_labels).temperature)
+            except (ValueError, RuntimeError):
+                continue  # a degenerate single pass informs the spread, not the fit
+        typer.echo(f"  passes: {runs} × {suite_id_label}, pooled into one fit")
+        if per_run_t:
+            typer.echo(
+                f"  per-pass T: {min(per_run_t):.4f}–{max(per_run_t):.4f} "
+                f"(spread {max(per_run_t) - min(per_run_t):.4f}, n={len(per_run_t)}) "
+                f"— the pooled fit above is the estimate; this is the noise it averages"
+            )
     # The judge decides every label, so two fits are only comparable when it
     # matches. Printed beside the labels it produced, not buried.
     typer.echo(f"  judge:  {judge_enum.value}")
@@ -2045,15 +2121,15 @@ def extractor_calibration_forget_cmd(
     """Retire one stored calibration record.
 
     The counterpart to `extractor calibrate`. Before this verb a stored
-    calibration could only be *replaced* — by re-fitting under the same
-    pairing — so a record fitted against a model no longer reachable (a local
+    calibration could only be *replaced*, by re-fitting under the same
+    pairing, so a record fitted against a model no longer reachable (a local
     endpoint since torn down) could not be retired at all without standing
     that model back up.
 
     Removing a record returns that pairing to `calibration_source=
     EXTRACTOR_DIRECT`, the documented fallback for an uncalibrated pairing.
-    Particles already in the store keep the confidence they were minted with
-    ; run `particles reindex --extractor-id <id>` to re-mint them.
+    Particles already in the store keep the confidence they were minted with;
+    run `particles reindex --extractor-id <id>` to re-mint them.
     """
     run(_extractor_calibration_forget(extractor_id, provider_model, yes))
 
@@ -2133,6 +2209,22 @@ def _print_benchmark_table(report: Any) -> None:
                 f"      ~ UNDER-CONFIDENCE ({stated:.2f} < {required_min:.2f}): "
                 f"{expected_content[:80]}"
             )
+        # Spurious claims are the half of `precision` an operator cannot
+        # otherwise read: the count alone does not say whether the extractor
+        # hallucinated or the gold set is incomplete, and only the text does.
+        # Capped like `matched` above — the full set is in the saved report.
+        # ``outcome`` is a StrEnum, so the literal compares exactly; this
+        # renderer keeps the report ``Any`` to avoid a module-top benchmark
+        # import, as every other benchmark helper in this file does.
+        spurious_claims = [
+            claim
+            for claim in c.emitted_claims
+            if claim.outcome == "spurious" and claim.content is not None
+        ]
+        for claim in spurious_claims[:5]:
+            typer.echo(f"      ! SPURIOUS ({claim.confidence:.2f}): {claim.content[:80]}")
+        if len(spurious_claims) > 5:
+            typer.echo(f"        … and {len(spurious_claims) - 5} more (see the saved report)")
     if report.quality_notes:
         typer.echo("")
         typer.echo("Notes:")

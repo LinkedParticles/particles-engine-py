@@ -70,10 +70,7 @@ _meter = metrics.get_meter("particles.db")
 _sqlite_busy_counter = _meter.create_counter(
     "particles.sqlite.busy",
     unit="1",
-    description=(
-        "SQLite 'database is locked' / busy events — cross-process write-lock "
-        "contention"
-    ),
+    description=("SQLite 'database is locked' / busy events — cross-process write-lock contention"),
 )
 
 

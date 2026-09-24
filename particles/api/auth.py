@@ -134,8 +134,8 @@ def _verify_key(
 ) -> None:
     api_key = get_particles_api_key()
     if api_key == _DEV_KEY:
-        # Bearer auth is disabled (local-dev affordance). Bound to loopback
-        #: never serve an unauthenticated request from a
+        # Bearer auth is disabled (local-dev affordance). Bound to loopback:
+        # never serve an unauthenticated request from a
         # non-loopback peer, even if the bind-host startup check was somehow
         # bypassed (e.g. uvicorn's --host drifted from api.bind_host). This is
         # the backstop; the startup check is authoritative. Refuse-to-serve

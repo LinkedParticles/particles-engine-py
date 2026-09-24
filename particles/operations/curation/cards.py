@@ -7,8 +7,7 @@
 Every finder's native output projects into one ``CurationCard``; each
 ``CardKind`` maps 1:1 to one existing finder, so the queue is a *projection* of
 work the store already knows about, not a new analysis. The card's ``key`` is a
-stable, finder-output-derived identity used by snooze / affirm filtering
-.
+stable, finder-output-derived identity used by snooze / affirm filtering.
 """
 
 from __future__ import annotations
@@ -88,9 +87,9 @@ def contested_gestures(bases: Sequence[str]) -> list[str]:
 class ParticleBrief(BaseModel):
     """A compact summary of one particle a card references.
 
-    Just enough context to judge the card's gesture — the claim ``content``, the
-    ``subject_labels`` it attaches to, its query-time ``effective_confidence``
-    , and its ``status`` — so a client (the bus-stop PWA) can
+    Just enough context to judge the card's gesture (the claim ``content``, the
+    ``subject_labels`` it attaches to, its query-time ``effective_confidence``,
+    and its ``status``) so a client (the bus-stop PWA) can
     decide *which* of a duplicate pair to keep without a second
     ``particles particle show <id>`` round-trip. Populated server-side when the queue is
     built; never stored. Deliberately **not** the full ``Particle`` (the
@@ -111,7 +110,7 @@ class DuplicateVerdict(BaseModel):
     in ``LLM_JUDGE`` mode (``semantic=True``): the per-pair same-claim
     ``verdict`` (``PARAPHRASE`` = same claim, safe to merge; ``DISTINCT`` = not a
     duplicate; ``UNSURE`` = ambiguous) plus its short ``rationale`` when the
-    candidate exposes one. **Advisory** — it informs the operator's Merge /
+    candidate exposes one. **Advisory**: it informs the operator's Merge /
     Dismiss gesture; it never mutates the store. ``None`` on
     every non-duplicate card and on duplicate cards built in ``REPORT`` mode
     (``semantic=False`` or the LLM unavailable).
@@ -174,7 +173,7 @@ class CurationCard(BaseModel):
         Finder-output-derived, so the same underlying problem yields the same
         key across sessions. Serialized into the queue response (a
         ``@computed_field``) so a client (PWA / Obsidian) can echo the exact
-        ``card_key`` back to ``POST /curation/affirm`` / ``snooze`` —
+        ``card_key`` back to ``POST /curation/affirm`` / ``snooze``;
         the snooze/affirm filter matches on it.
         """
         if self.kind is CardKind.UNCITED_URL:

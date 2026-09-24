@@ -22,7 +22,7 @@
 # Build:  pip install -r docs-requirements.txt && mkdocs build --strict
 
 site_name: Particles Docs
-site_description: Running and extending the Particles reference implementation — guides, CLI reference, and the HTTP API contract.
+site_description: "Running and extending the Particles reference implementation: guides, CLI reference, and the HTTP API contract."
 site_url: https://docs.linkedparticles.org
 repo_url: https://github.com/LinkedParticles/particles-engine-py
 repo_name: LinkedParticles/particles-engine-py
@@ -181,6 +181,7 @@ nav:
       - As-of time travel: user-guide/as-of.md
       - Exporting: user-guide/exporting.md
       - Graph view: user-guide/graph-view.md
+      - Connecting your coding agent: user-guide/coding-agents.md
       - Using from LangChain: user-guide/integrations.md
       - Claude Code memory: user-guide/claude-code.md
       - Swapping in for the reference memory server: user-guide/memory-server-swap.md
@@ -205,6 +206,7 @@ nav:
   - Plugin-author guide:
       - Overview: plugin-author-guide/index.md
       - Extractors: plugin-author-guide/extractors.md
+      - Subject authorities: plugin-author-guide/subject-authorities.md
       - Exporters: plugin-author-guide/exporters.md
       - Benchmark suites: plugin-author-guide/benchmark-suites.md
       - Conformance: plugin-author-guide/conformance.md
@@ -221,6 +223,9 @@ nav:
       - Export: api/export.md
   - Benchmarks:
       - Agent memory (LongMemEval): benchmarks.md
+      - Memory rot (currency, supersession, trust): benchmarks/rot.md
+      - Relevance floor (the query gate, real questions): benchmarks/relevance-floor.md
+      - Provider survey (2026-09): benchmarks/provider-survey-2026-09.md
       - Provider survey (2026-08): benchmarks/provider-survey-2026-08.md
   - The standard:
       - Whitepaper: https://linkedparticles.org/spec/whitepaper/

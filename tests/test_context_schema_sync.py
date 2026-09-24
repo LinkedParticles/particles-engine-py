@@ -5,7 +5,8 @@
 """Drift guard: the published JSON-LD context must cover every Core field.
 
 `artifacts/schemas/context.jsonld` is a normative, hand-maintained artifact.
-It silently fell behind the schema once already (it predated Subjects, and omitted many Particle fields — fixed in 0.49.5). This test
+It silently fell behind the schema once already (it predated Subjects,
+and omitted many Particle fields — fixed in 0.49.5). This test
 fails if a Core knowledge-graph field gains no context term, so the context
 can never drift behind the schema unnoticed again.
 

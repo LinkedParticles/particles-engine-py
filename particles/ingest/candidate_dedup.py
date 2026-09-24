@@ -35,10 +35,10 @@ Scope guardrails (this is deliberately narrow):
   untouched. This fold only collapses two *new* candidates minted in one pass.
 * **Exact content, conservative normalization.** Whitespace is collapsed and
   trailing punctuation trimmed; case and wording are left alone. Near-duplicates
-  and paraphrases are *not* folded here — that is the §6.6 / co-evidential job
-  , a separate concern.
-* **Plain claims only.** A candidate carrying a structural role — a stance
-  , a NARRATIVE container or constituent — is never dropped,
+  and paraphrases are *not* folded here — that is the §6.6 / co-evidential job,
+  a separate concern.
+* **Plain claims only.** A candidate carrying a structural role — a stance,
+  a NARRATIVE container or constituent — is never dropped,
   so the positional edge-writers downstream keep every endpoint they expect. A
   stance that *targeted* a dropped duplicate is repointed to the surviving twin.
 """

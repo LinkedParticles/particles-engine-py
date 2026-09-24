@@ -8,7 +8,8 @@ The query operation is covered by ``tests/test_query.py``; the flag-validation
 floor lives in ``tests/test_cli.py::TestQueryFlags`` and the ``--as-of`` parsing
 in ``tests/test_as_of.py``. This file pins the rest of the wrapper: subject
 resolution (local vs. remote), the ``--store`` federation guard, and the render
-branches — the hit table, the refusal relabel, contestedness, the structural shapes, and the stderr disclosures.
+branches — the hit table, the refusal relabel, contestedness, the
+structural shapes, and the stderr disclosures.
 
 The backend is patched at the module binding (``query.py`` imports
 ``get_backend`` at module top), so these run without a store.
@@ -301,6 +302,37 @@ class TestSemanticRendering:
         assert "top_k cutoff" in result.output
         assert "Coverage gap: 2 entries not yet extracted." in result.output
 
+    def test_budget_failure_names_the_knob_to_raise(self, backend: MagicMock) -> None:
+        """The typed cause turns the banner into advice the operator can act on.
+
+        The provider's message names what broke; only the cause says whether
+        the fix is the operator's own token cap or something outside it.
+        """
+        from particles.core.schema import AnswerFailureCause
+
+        backend.query.return_value = _response(
+            answer="Fallback listing.",
+            answer_generation_error="Anthropic response carried no text block",
+            answer_generation_error_cause=AnswerFailureCause.BUDGET,
+        )
+        result = runner.invoke(app, ["query", "anything?"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "BUDGET:" in result.output
+        assert "query.answer_max_tokens" in result.output
+
+    def test_provider_failure_says_it_is_not_a_budget_problem(self, backend: MagicMock) -> None:
+        from particles.core.schema import AnswerFailureCause
+
+        backend.query.return_value = _response(
+            answer="Fallback listing.",
+            answer_generation_error="credit balance is too low",
+            answer_generation_error_cause=AnswerFailureCause.PROVIDER,
+        )
+        result = runner.invoke(app, ["query", "anything?"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "PROVIDER:" in result.output
+        assert "not a token-budget problem" in result.output
+
 
 # ---------------------------------------------------------------------------
 # structural modes
@@ -403,3 +435,84 @@ class TestStructuralRendering:
         # §2.6 footer plus the §2.2 non-normalizable disclosure.
         assert "40" in result.output
         assert "2" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --show-source (source-passage hydration)
+# ---------------------------------------------------------------------------
+
+
+def _passage(pid: str, **kwargs: Any) -> Any:
+    from particles.operations.source_passage import PassageMatch, SourcePassage
+
+    defaults: dict[str, Any] = {
+        "particle_id": pid,
+        "match": PassageMatch.LOCATED,
+        "text": "- The nightly job runs at 02:00 UTC.\nsecond line",
+        "corpus_entry_id": "ce-00000001",
+        "snapshot_id": "sn-00000001",
+        "uri_r": "file:///notes/MEMORY.md",
+        "source_type": "LOCAL_MARKDOWN",
+        "locate_overlap": 0.8,
+    }
+    defaults.update(kwargs)
+    return SourcePassage(**defaults)
+
+
+class TestShowSource:
+    def test_off_by_default_reads_no_source(self, backend: MagicMock) -> None:
+        backend.query.return_value = _response(particles=[_claim()], effective_confidences=[0.9])
+        backend.particle_source = AsyncMock()
+        result = runner.invoke(app, ["query", "anything?"], catch_exceptions=False)
+        assert result.exit_code == 0
+        backend.particle_source.assert_not_awaited()
+
+    def test_passage_renders_after_the_answer_with_its_match_label(
+        self, backend: MagicMock
+    ) -> None:
+        backend.query.return_value = _response(particles=[_claim()], effective_confidences=[0.9])
+        backend.particle_source = AsyncMock(return_value=_passage(_P0))
+        result = runner.invoke(app, ["query", "anything?", "--show-source"], catch_exceptions=False)
+        assert result.exit_code == 0
+        out = result.output
+        assert out.index("The answer.") < out.index("Sources behind the top 1 of 1 hit(s):")
+        assert "located: best term overlap with the belief (80%); not hash-verified" in out
+        assert "file:///notes/MEMORY.md  (LOCAL_MARKDOWN)" in out
+        assert "│ - The nightly job runs at 02:00 UTC." in out
+        assert "│ second line" in out
+        backend.particle_source.assert_awaited_once_with(_P0)
+
+    def test_exact_match_says_it_is_verified(self, backend: MagicMock) -> None:
+        from particles.operations.source_passage import PassageMatch
+
+        backend.query.return_value = _response(particles=[_claim()], effective_confidences=[0.9])
+        backend.particle_source = AsyncMock(
+            return_value=_passage(_P0, match=PassageMatch.EXACT, locate_overlap=None)
+        )
+        result = runner.invoke(app, ["query", "anything?", "--show-source"], catch_exceptions=False)
+        assert "exact: the chunk the extractor saw, verified by its recorded hash" in result.output
+
+    def test_only_the_configured_number_of_top_hits_is_hydrated(
+        self, backend: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().source_passage, "query_show_limit", 2)
+        ids = [f"00000000-0000-0000-0000-00000000ab0{i}" for i in range(4)]
+        backend.query.return_value = _response(
+            particles=[_claim(pid=i) for i in ids], effective_confidences=[0.9] * 4
+        )
+        backend.particle_source = AsyncMock(side_effect=lambda pid: _passage(pid))
+        result = runner.invoke(app, ["query", "anything?", "--show-source"], catch_exceptions=False)
+        assert "Sources behind the top 2 of 4 hit(s):" in result.output
+        assert [c.args[0] for c in backend.particle_source.await_args_list] == ids[:2]
+
+    def test_refused_with_store_federation(self, backend: MagicMock) -> None:
+        result = runner.invoke(
+            app,
+            ["query", "anything?", "--show-source", "--store", "a", "--store", "b"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 1
+        assert "--show-source is not available with --store federation" in result.output
+        backend.query.assert_not_awaited()

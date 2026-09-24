@@ -13,7 +13,8 @@ model wording, which would make the tier flaky (tests/AGENTS.md § Integration
 tests).
 
 Sibling of tests/test_integration_journal_modality.py (the modality benchmark's
-live tier). Distinct from tests/test_integration_polarity.py, which is the cap. 1 *classifier* acceptance check (does rejected / deferred prose
+live tier). Distinct from tests/test_integration_polarity.py, which is the
+cap. 1 *classifier* acceptance check (does rejected / deferred prose
 land non-asserted through the real pipeline); this one exercises the
 *benchmark harness* over that classifier.
 

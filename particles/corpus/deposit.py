@@ -24,6 +24,7 @@ import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config, resolve_store_adjacent_path
+from particles.core.observer_scope import EntryScope, classify_entry, project_keys, project_tag
 from particles.core.schema import (
     CorpusEntry,
     ExtractionStatus,
@@ -36,6 +37,7 @@ from particles.core.schema import (
 from particles.corpus.store import (
     CorpusEntryRow,
     SnapshotRow,
+    add_entry_tags,
     get_entry_by_content_hash,
     get_entry_by_uri,
     list_snapshots_for_entry,
@@ -73,8 +75,8 @@ def blob_path(content_hash: str) -> Path:
         raise ValueError(
             f"content_hash must be a 64-char lowercase SHA-256 hex digest, got {content_hash!r}"
         )
-    # Store-adjacent: a relative blob_dir anchors to the store, not to cwd
-    # — otherwise an absolute DATABASE_URL plus the relative default
+    # Store-adjacent: a relative blob_dir anchors to the store, not to cwd—
+    # otherwise an absolute DATABASE_URL plus the relative default
     # scatters blobs across whichever directory each process ran in.
     blob_dir = resolve_store_adjacent_path(get_config().storage.blob_dir)
     return blob_dir / content_hash[:2] / content_hash
@@ -337,7 +339,7 @@ async def deposit_file(
     """Deposit a local file into the corpus.
 
     Source type is auto-detected from file extension. Deduplication is by
-    SHA-256 content hash — re-depositing the same file returns the existing entry.
+    SHA-256 content hash; re-depositing the same file returns the existing entry.
 
     ``content_published_at`` is captured at deposit time so an
     archival document is not stamped with the import date. Precedence (highest
@@ -1009,7 +1011,7 @@ async def deposit_url(
     ``None`` (the default) consults the importer's
     ``DEFAULT_FOLLOW_POST_LINKS`` / ``DEFAULT_FOLLOW_COMMENT_LINKS``
     constants. Explicit True / False overrides the importer default.
-    The recursive follow call hardcodes both flags to False — the
+    The recursive follow call hardcodes both flags to False, which is the
     depth-1 cap.
 
     ``out_follow_targets`` (optional): when supplied, each
@@ -1347,6 +1349,7 @@ async def deposit_text_versioned(
     existing = await get_entry_by_uri(session, uri_r)
     if existing is not None:
         await _reconcile_fetch_policy(session, existing, fetch_policy)
+        await _reconcile_project_keys(session, existing, tags)
         snapshots = await list_snapshots_for_entry(session, existing.entry_id)
         if snapshots:
             latest = max(snapshots, key=lambda s: s.captured_at)
@@ -1369,6 +1372,60 @@ async def deposit_text_versioned(
         content_published_at=content_published_at,
     )
     return entry_id, snapshot_id, False
+
+
+def _identified_by_uri_alone(mutability: Mutability, tags: list[str] | None) -> bool:
+    """Whether a deposit must never attach to another URI's entry by content hash.
+
+    A keyed ``MUTABLE`` source is one project's living file. Two projects'
+    byte-identical files are two sources: sharing an entry would give an edit
+    in one project both projects' keys, and let the unchanged project's next
+    re-deposit match an *old* snapshot of the shared entry. Duplicate
+    suppression folds their identical claims into one particle with two refs
+    instead, which is the right shape for one belief with two
+    sources. Keyless deposits keep
+    content-hash dedup — a file moved on disk is still one source.
+    """
+    return mutability == Mutability.MUTABLE and bool(project_keys(tags))
+
+
+def _keyed_deposit_onto_global_entry(existing: CorpusEntry, tags: list[str] | None) -> bool:
+    if not project_keys(tags):
+        return False
+    harness_tags = get_config().observer_scope.harness_tags
+    return classify_entry(existing.tags, harness_tags) is EntryScope.GLOBAL
+
+
+async def _reconcile_project_keys(
+    session: AsyncSession,
+    existing: CorpusEntry,
+    tags: list[str] | None,
+) -> None:
+    """Add a re-deposit's project keys to an entry that is already attributed.
+
+    Entry tags are otherwise written once, when the row is created, which
+    froze an entry's project at whoever deposited it first: a transcript the
+    audit stamped with nothing stayed keyless when the hook later saw the same
+    session, and a document observed in a second project never recorded it.
+
+    **Additive, and only among attributed entries.** A key is added when the
+    entry is already keyed or is a keyless harness deposit. It is never added
+    to a *global* entry — a hand deposit, a web page — because that would take
+    an operator's deposit out of view for every other project; narrowing is an
+    operator's act, not a side effect of someone re-depositing the same bytes.
+    Nothing is ever removed.
+    """
+    incoming = project_keys(tags)
+    if not incoming:
+        return
+    harness_tags = get_config().observer_scope.harness_tags
+    if classify_entry(existing.tags, harness_tags) is EntryScope.GLOBAL:
+        return
+    missing = sorted(incoming - project_keys(existing.tags))
+    if not missing:
+        return
+    await add_entry_tags(session, existing.entry_id, [project_tag(key) for key in missing])
+    log.info("Added project key(s) %s to entry %s", missing, existing.entry_id)
 
 
 async def _reconcile_fetch_policy(
@@ -1421,17 +1478,25 @@ async def write_entry_and_snapshot(
 ) -> tuple[str, str]:
     """Core deposit logic: check for existing entry, create/update, return IDs."""
     # Check for existing entry: URI-R first, then content hash (deduplicates same
-    # file deposited from different paths or re-deposited after a move).
+    # file deposited from different paths or re-deposited after a move) — except
+    # for a keyed MUTABLE deposit, which is one project's own file.
     existing: CorpusEntry | None = None
     if uri_r:
         existing = await get_entry_by_uri(session, uri_r)
-    if existing is None:
+    if existing is None and not _identified_by_uri_alone(mutability, tags):
         existing = await get_entry_by_content_hash(session, content_hash)
+        if existing is not None and _keyed_deposit_onto_global_entry(existing, tags):
+            # A project's deposit must not ride an operator's global entry into
+            # view for every project just because the bytes match:
+            # it gets an entry of its own, carrying its own key.
+            existing = None
         if existing is not None:
             log.info(
                 "Deposit matched existing entry %s by content hash (skipping duplicate)",
                 existing.entry_id,
             )
+    if existing is not None:
+        await _reconcile_project_keys(session, existing, tags)
 
     now = datetime.now(UTC)
 

@@ -2,8 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mastodon importer (Engine layer; moved from particles.extraction.mastodon
-).
+"""Mastodon importer (Engine layer; moved from particles.extraction.mastodon).
 
 Accepts the three Mastodon URL shapes (local status, federated status, raw
 API URL), fetches the status + its context tree (``ancestors`` +

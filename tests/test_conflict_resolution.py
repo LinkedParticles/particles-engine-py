@@ -468,8 +468,8 @@ class TestResolveConflictDefault:
 class TestResolveConflictConsensusMode:
     """``single_trust_order=False`` suppresses rung 2.
 
-    In a multi-contributor / consensus store there is no global trust order
-    , so auto-supersede must never fire: a confirmed contradiction
+    In a multi-contributor / consensus store there is no global trust order,
+    so auto-supersede must never fire: a confirmed contradiction
     surfaces as INCONSISTENCY (both claims stay ACTIVE), and a contributor's
     claim is never dropped by another contributor's trust.
     """

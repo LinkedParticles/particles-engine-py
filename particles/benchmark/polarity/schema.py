@@ -8,7 +8,8 @@ These are **not** the techspec §13.3 schema — that one
 (:mod:`particles.benchmark.schema`) is frozen and carries no polarity field.
 This is a parallel, SDK-local suite shape whose gold standard is a list of
 *claim text → expected claim-polarity* labels per source passage, mirroring the
-modality sibling harness (:mod:`particles.benchmark.modality.schema`). A polarity suite targets the general extractor (cap. 1),
+modality sibling harness (:mod:`particles.benchmark.modality.schema`).
+A polarity suite targets the general extractor (cap. 1),
 which accepts any ``source_type``, so it declares the single ``source_type`` the
 runner feeds to ``extract``.
 

@@ -160,7 +160,7 @@ def corpus_cat_cmd(
         help="Write the raw stored bytes to stdout instead of the text preview.",
     ),
 ) -> None:
-    """Dump a snapshot's stored content — the exact bytes the extractor saw.
+    """Dump a snapshot's stored content: the exact bytes the extractor saw.
 
     Accepts a snapshot ID or a corpus-entry ID (prefix OK); an entry resolves to
     its most-recent snapshot. By default renders the same text the extractor
@@ -743,7 +743,7 @@ def corpus_refresh_cmd(
         "--backfill-cascade",
         help=(
             "Instead of re-checking sources, apply the generation "
-            "cascade to MUTABLE entries whose snapshots already moved — demoting "
+            "cascade to MUTABLE entries whose snapshots already moved, demoting "
             "ACTIVE particles anchored to a superseded snapshot. Stores that "
             "predate the change carry a backlog of these; the forward-looking "
             "cascade only fires on newly-extracted snapshots."
@@ -759,7 +759,7 @@ def corpus_refresh_cmd(
     a new PENDING snapshot; ``particles extract --all-pending`` (or tonight's
     consolidation run) turns that into current beliefs.
 
-    This is the on-demand form of consolidation pass 0.5 — the scheduled cycle
+    This is the on-demand form of consolidation pass 0.5; the scheduled cycle
     runs the same sweep nightly.
     """
     configure_logging(verbose, False)
@@ -886,7 +886,7 @@ def corpus_fsck_cmd(
         [],
         "--search",
         help=(
-            "Also look for strays under this blob root — the directory holding the "
+            "Also look for strays under this blob root, the directory holding the "
             "two-character shards (repeatable). Nothing is inferred: the audit tells "
             "you what is missing so you can point --search at where you think it went."
         ),
@@ -902,7 +902,7 @@ def corpus_fsck_cmd(
 ) -> None:
     """Audit every blob the store references; optionally re-home the strays.
 
-    Read-only by default and exhaustive — the operator-invoked sibling of the
+    Read-only by default and exhaustive: the operator-invoked sibling of the
     sampled probe ``config validate`` runs. Reports three disjoint counts:
     **present** in the resolved blob dir, **found elsewhere** under a
     ``--search`` root, and **missing**.
@@ -1014,15 +1014,13 @@ def _echo_fsck_missing(missing: Sequence[BlobRef]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# corpus links — audit follow-edges written by deposit-time URL following
-#. The edges are write-only today; this verb is the first
+# corpus links — audit follow-edges written by deposit-time URL following.
+# The edges are write-only today; this verb is the first
 # downstream consumer, surfacing them so operators can see the curation
 # graph their corpus actually carries.
 # ---------------------------------------------------------------------------
 
-corpus_links_app = typer.Typer(
-    help="Inspect cross-entry follow edges.", no_args_is_help=True
-)
+corpus_links_app = typer.Typer(help="Inspect cross-entry follow edges.", no_args_is_help=True)
 corpus_app.add_typer(corpus_links_app, name="links")
 
 
@@ -1136,8 +1134,8 @@ async def _corpus_links_list(entry_id_prefix: str | None, direction: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# corpus links suggest / dismiss — citation-signal deposit suggestions
-#. Rank URLs the corpus cites but has not deposited, so the
+# corpus links suggest / dismiss — citation-signal deposit suggestions.
+# Rank URLs the corpus cites but has not deposited, so the
 # operator can ground hearsay in the primary source. Suggestion-only: nothing
 # is fetched or deposited here.
 # ---------------------------------------------------------------------------
@@ -1156,7 +1154,7 @@ def corpus_links_suggest_cmd(
     """Suggest undeposited URLs the corpus frequently cites.
 
     Ranks URLs mentioned across the corpus but not yet deposited, by
-    trust-weighted distinct-source diversity × recency. Suggestion-only —
+    trust-weighted distinct-source diversity × recency. Suggestion-only:
     nothing is fetched or crawled. Deposit one with ``particles deposit <url>``;
     silence one with ``particles corpus links dismiss <url>``.
     """

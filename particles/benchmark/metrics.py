@@ -72,8 +72,8 @@ def compute_calibration_error(
     over-fit on small per-case populations.
 
     Adapter over the canonical
-    :func:`particles.extraction.calibration.expected_calibration_error`
-    : it maps each emitted particle to
+    :func:`particles.extraction.calibration.expected_calibration_error`:
+    it maps each emitted particle to
     ``(confidence.value, matched?)`` and delegates the binning math, so the
     benchmark harness and the extractor calibration tooling share one
     implementation.

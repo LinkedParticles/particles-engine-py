@@ -32,8 +32,7 @@ def query_answer_text(response: QueryResponse) -> str:
     ``QueryResponse.answer`` is already the cited-prose answer the query
     operation synthesises. When the response carries coverage gaps or a
     ``top_k`` truncation warning, a short trailing ``Note:`` is appended so the
-    agent sees retrieval limits rather than silently trusting a thin answer
-    .
+    agent sees retrieval limits rather than silently trusting a thin answer.
     """
     notes: list[str] = []
     if response.truncation_warning:

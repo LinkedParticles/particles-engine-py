@@ -133,7 +133,8 @@ async def render_article(
     Returns ``(body, used_synthesis)``. ``used_synthesis=True`` means the
     LLM produced a body that passed Layer A and (if enabled) Layer B.
 
-    When ``without_synthesis`` is True (the ``--without-synthesis`` gate), the deterministic structured listing is returned
+    When ``without_synthesis`` is True (the ``--without-synthesis`` gate),
+    the deterministic structured listing is returned
     immediately — no DB-cache lookup and no LLM call — so the export is
     reproducible and needs no API key. ``used_synthesis`` is always False.
     ``False`` means we wrote the deterministic structured-listing
@@ -160,7 +161,7 @@ async def render_article(
     ``config.wiki.layer_b_enabled`` and the frontmatter records the gap.
 
     ``sequence_mode``, ``flowing`` / ``direction`` / ``framing``
-     steer the first-attempt prompt only — the citation guard rails
+    steer the first-attempt prompt only — the citation guard rails
     (Layer A/B) and the strict-retry prompts are unchanged. ``flowing`` selects
     the heading-suppressing prose variant; ``direction`` is the per-section
     authoring brief; ``framing`` is the document-level narrative spine prepended
@@ -176,7 +177,7 @@ async def render_article(
     the rendered body is stored for future cross-exporter reuse.
     Pass ``session=None`` to opt out (no DB roundtrips, no caching).
     """
-    #: the deterministic no-LLM gate. Short-circuit before
+    # : the deterministic no-LLM gate. Short-circuit before
     # the cache lookup so a prior LLM-synthesised body is not reused either —
     # the operator asked for reproducible, key-free output, not a cache hit.
     if without_synthesis:

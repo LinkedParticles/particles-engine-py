@@ -4,7 +4,8 @@
 
 """``HttpBackend`` — the remote backend.
 
-Each method issues an HTTP/JSON request to the FastAPI engine over the OpenAPI contract and parses the response back into the *same* core Pydantic
+Each method issues an HTTP/JSON request to the FastAPI engine over the
+OpenAPI contract and parses the response back into the *same* core Pydantic
 models the local backend returns. It is **store-free**: it never opens a
 session or imports ``operations`` — the engine runs that code server-side.
 
@@ -69,6 +70,7 @@ from particles.secrets import get_engine_token_optional
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
 
 log = logging.getLogger(__name__)
@@ -351,6 +353,7 @@ class HttpBackend:
         as_of: datetime | None = None,
         max_nodes: int | None = None,
         store: str = "default",
+        observer_project: str | None = None,
     ) -> GraphData:
         if subject_id is not None:
             scope = "subject"
@@ -380,6 +383,8 @@ class HttpBackend:
             params["as_of"] = as_of.isoformat()
         if max_nodes is not None:
             params["max_nodes"] = max_nodes
+        if observer_project is not None:
+            params["observer_project"] = observer_project
         body = await self._get("/graph", params)
         return GraphData.model_validate(body)
 
@@ -508,6 +513,12 @@ class HttpBackend:
             content_hash=resp.headers.get("X-Content-Hash", ""),
         )
 
+    async def particle_source(self, particle_id: str) -> SourcePassage | None:
+        from particles.operations.source_passage import SourcePassage
+
+        body = await self._get_optional(f"/particles/{particle_id}/source")
+        return SourcePassage.model_validate(body) if body is not None else None
+
     # ------------------------------------------------------------------
     # MCP-read surface — thin GETs against the engine's read
     # endpoints. Store-only enrichment (subject names, provenance URIs) degrades
@@ -545,20 +556,31 @@ class HttpBackend:
         return ParticleDetail(particle=particle, subjects=[], provenance=provenance)
 
     async def particles_list(
-        self, *, status: str | None, subject_id: str | None, limit: int, offset: int
+        self,
+        *,
+        status: str | None,
+        subject_id: str | None,
+        limit: int,
+        offset: int,
+        observer_project: str | None = None,
     ) -> list[Particle]:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if status is not None:
             params["status"] = status
         if subject_id is not None:
             params["subject_id"] = subject_id
+        if observer_project is not None:
+            params["observer_project"] = observer_project
         body = await self._get("/particles", params=params)
         return [Particle.model_validate(p) for p in body]
 
-    async def particles_by_fingerprint(self, fingerprint: str, *, limit: int) -> list[Particle]:
-        body = await self._get(
-            "/particles/search", params={"fingerprint": fingerprint, "limit": limit}
-        )
+    async def particles_by_fingerprint(
+        self, fingerprint: str, *, limit: int, observer_project: str | None = None
+    ) -> list[Particle]:
+        params: dict[str, Any] = {"fingerprint": fingerprint, "limit": limit}
+        if observer_project is not None:
+            params["observer_project"] = observer_project
+        body = await self._get("/particles/search", params=params)
         return [Particle.model_validate(p) for p in body]
 
     async def subject_detail(self, subject_id: str, *, particle_id_limit: int) -> SubjectDetail:
@@ -592,8 +614,10 @@ class HttpBackend:
         body = await self._get("/corpus", params=params)
         return [CorpusEntry.model_validate(e) for e in body]
 
-    async def digest(self, store: str) -> str:
-        body = await self._get(f"/digest/{store}")
+    async def digest(self, store: str, project: str | None = None) -> str:
+        # The engine evaluates the observer against ITS entry tags.
+        params = {"project": project} if project is not None else None
+        body = await self._get(f"/digest/{store}", params=params)
         return str(body["markdown"])
 
     async def events_list(
@@ -801,6 +825,7 @@ class HttpBackend:
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        project_key: str | None = None,
     ) -> AgentWriteResult:
         from particles.operations.agent_write import AgentWriteResult
 
@@ -814,6 +839,7 @@ class HttpBackend:
                 "corpus_entry_id": corpus_entry_id,
                 "uncertainty_nature": uncertainty_nature,
                 "tags": tags,
+                "project_key": project_key,
             },
         )
         return AgentWriteResult.model_validate(body)
@@ -830,6 +856,8 @@ class HttpBackend:
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        reason: str | None = None,
+        project_key: str | None = None,
     ) -> AgentWriteResult:
         from particles.operations.agent_write import AgentWriteResult
 
@@ -844,6 +872,8 @@ class HttpBackend:
                 "corpus_entry_id": corpus_entry_id,
                 "uncertainty_nature": uncertainty_nature,
                 "tags": tags,
+                "reason": reason,
+                "project_key": project_key,
             },
         )
         return AgentWriteResult.model_validate(body)
@@ -859,15 +889,22 @@ class HttpBackend:
         store: str,
         deposited_by: str | None = None,
         source_type: str | None = None,
+        project_key: str | None = None,
     ) -> tuple[str, str]:
-        # The agent-attributed deposit reuses the generic corpus deposit endpoint
-        #, carrying the asserter identity as deposited_by + author_id so
+        # The agent-attributed deposit reuses the generic corpus deposit endpoint,
+        # carrying the asserter identity as deposited_by + author_id so
         # the CONVERSATION entry is attributed exactly as the local path attributes
         # it. The engine governs write-enablement at the belief layer; a deposit is
         # benign archival, gated by the local offering allowlist + bearer auth.
         # An explicit deposited_by is the operator path and attributes
         # to that principal instead — same endpoint, different identity.
         identity = deposited_by or get_config().mcp.write.asserter_identity
+        if deposited_by is None:
+            # Agent path: the project key is the bound server's, never the
+            # caller's — the same rule the local path applies.
+            from particles.operations.agent_write import _scope_tags
+
+            tags = _scope_tags(tags, project_key)
         body = await self._post(
             "/corpus/deposit/text",
             {

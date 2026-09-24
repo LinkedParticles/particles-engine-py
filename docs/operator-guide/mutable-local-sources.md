@@ -1,7 +1,7 @@
 # Refreshing mutable local sources
 
 A file you deposit is frozen at deposit time. That is the right default for an
-archived PDF, and the wrong one for a file you keep editing — a project's
+archived PDF, and the wrong one for a file you keep editing: a project's
 `AGENTS.md`, a `CLAUDE.md`, an agent-memory note. Those get revised, and without
 a refresh loop the store keeps asserting whatever the file said the day it was
 deposited, at full confidence, long after the rule changed.
@@ -17,7 +17,7 @@ refresh tells it what the standing rules currently are.
 
 Why bother: a store fed only by conversation harvest ends up holding claims
 *about* your rules rather than the rules themselves. Measured on this project's
-own store before — 34 ACTIVE particles mentioned the
+own store before, 34 ACTIVE particles mentioned the
 never-prepend-`export PATH` rule, and not one of them stated it.
 
 ## What "refreshable" means
@@ -26,7 +26,7 @@ An entry is re-checked when **both** are true:
 
 | Property | Value | Why |
 |---|---|---|
-| `fetch_policy` | `LAZY` | The gate. Local deposits default to `NEVER`, so nothing starts refreshing on upgrade — you opt in per source. |
+| `fetch_policy` | `LAZY` | The gate. Local deposits default to `NEVER`, so nothing starts refreshing on upgrade; you opt in per source. |
 | `mutability` | `MUTABLE` | The promise that content may change anywhere, so a new version *replaces* the previous one rather than adding to it. |
 
 Both are promises you make about the source; the SDK does not guess them.
@@ -44,14 +44,14 @@ snapshot_id: cdcf456c-21d3-46a5-a897-b32b9d664fd4
 
 Both flags are **local-file only**. A URL deposit takes its class from the
 importer that handles it, and a deposit against a remote engine uploads the
-bytes rather than the path — the engine has no file to re-read later — so both
+bytes rather than the path (the engine has no file to re-read later), so both
 cases refuse the flags rather than silently ignoring them.
 
 ## Tracking the whole set at once
 
 Depositing rule files one flag-pair at a time gets tedious, and the point of
 having them in the store is that *all* of them are there. `particles rules`
- treats the operating documents as a set:
+treats the operating documents as a set:
 
 ```bash
 particles rules
@@ -86,9 +86,10 @@ Run `particles extract --all-pending` to turn the new snapshots into beliefs.
 
 ### Why the tag matters beyond addressability
 
-The `rule-file` tag each entry carries is also what lifts the document-meta exclusion for that source. Without it, a rules
-document's *prescriptions* — "commits must be made with `uv run git commit -s`"
-— are liable to be classified `DOCUMENT_META` and kept off the default query
+The `rule-file` tag each entry carries is also what lifts the
+document-meta exclusion for that source. Without it, a rules
+document's *prescriptions* ("commits must be made with `uv run git commit -s`")
+are liable to be classified `DOCUMENT_META` and kept off the default query
 and projection surfaces, which delivers the descriptive half of a rules
 document and silently drops the imperative half.
 
@@ -106,7 +107,7 @@ particles rules sync --restamp-only
 --restamp-only: 23 rule source(s) checked, 178 particle(s) restamped.
 ```
 
-It is idempotent — a second run reports 0 — and it never touches
+It is idempotent (a second run reports 0) and it never touches
 `confidence`. See
 [Troubleshooting → My `AGENTS.md` rules were extracted but never show
 up](troubleshooting.md#my-agentsmd-rules-were-extracted-but-never-show-up).
@@ -122,7 +123,7 @@ it is in the refresh loop from the first sweep:
 2 rule source(s): 2 tracked, 2 enrolled in the refresh loop (fetch_policy=LAZY).
 ```
 
-Re-running is a no-op — identity is the `file://` path, so unchanged content
+Re-running is a no-op: identity is the `file://` path, so unchanged content
 writes nothing. `--dry-run` resolves and prints without touching the store, and
 `particles rules sync <path>…` overrides the configured set for one run.
 
@@ -148,7 +149,7 @@ Knobs, all under `rule_sources` in `config.yaml`:
 
 ### A rule file that carries a projected region
 
-If a rule file self-hosts a projected region (the pattern — sentinels
+If a rule file self-hosts a projected region (the pattern: sentinels
 that the store re-renders into), it is deposited with that region stripped: the
 corpus must never archive the store's own output. Its snapshot bytes therefore
 differ from the file's bytes, and the refresh ladder above compares exactly
@@ -197,12 +198,12 @@ The check is a two-step ladder, so a sweep over a large vault stays cheap:
    writes a zero-byte `REVISIT` snapshot ("as of now, still the same content");
    a differing one writes a `RESPONSE` snapshot marked `PENDING`.
 
-There is no network involved — no DNS, no redirects, no SSRF surface.
+There is no network involved: no DNS, no redirects, no SSRF surface.
 
 !!! note "An unchanged mtime is a heuristic, not proof"
     Every ordinary editor, `git` operation, and formatter moves a file's mtime,
-    and the comparison treats *any* difference — including one that moves
-    backwards, as a backup restore can — as "re-read". But a tool that
+    and the comparison treats *any* difference (including one that moves
+    backwards, as a backup restore can) as "re-read". But a tool that
     deliberately preserves mtime while changing content (`touch -r`) will be
     missed. `particles corpus refresh --force` skips both the mtime check and
     the per-source-type re-fetch floor, and is the escape hatch for that case.
@@ -239,7 +240,7 @@ Two properties of that demotion are worth knowing:
 - **It keys on document generation, not on meaning.** The lint's contradiction
   probe cannot do this job: a rule that was simply *deleted* produces nothing to
   contradict it, and "prefixing PATH works" and "prefixing PATH is forbidden"
-  are both true and not logically inconsistent — only the document version says
+  are both true and not logically inconsistent; only the document version says
   which one is operative. Because it needs no semantic judgement, the demotion
   costs no LLM calls.
 - **It runs after extraction, not before.** A paragraph you did not touch keeps
@@ -250,10 +251,54 @@ Two properties of that demotion are worth knowing:
 confidence are intact, the particles drop out of query results and the
 projection, and they surface in `particles curate` if you want to look at them.
 
+### Only the newest pending version is extracted
+
+Deposits are free and extraction runs when you choose, so a file edited five
+times since the last pass has five pending snapshots. Four of them describe a
+file that no longer exists: everything they would produce is demoted the moment
+the fifth is extracted. The bulk paths therefore extract only the newest, and
+say so:
+
+```
+Skipped 4 superseded snapshot(s) across 1 MUTABLE entry: a newer snapshot of the same source replaces them.
+Extracting 1 pending snapshot(s)…
+```
+
+This applies to `particles extract --all-pending`, `particles memory
+consolidate`, `particles reindex` (when it retries pending and failed snapshots)
+and `particles audit`. On the project's own store it removed about one
+extraction call in six from a backlog, and it means an edited file's beliefs
+are current after one pass, where the nightly cycle used to work through the
+old versions one per night.
+
+What to know about it:
+
+- **`MUTABLE` sources only.** An `APPEND_ONLY` source (a session transcript, the
+  archive file) and a `STABLE` one are always extracted snapshot by snapshot:
+  their older snapshots are history, not superseded drafts.
+- **A skipped snapshot is marked, not deleted.** It is recorded as `COMPLETE`
+  with the id of the snapshot that replaced it, and its content stays in the
+  corpus. To extract an intermediate version on purpose, name it: `particles
+  extract <entry> --snapshot-id <id>`.
+- **A newer snapshot only counts if it can be extracted.** One that failed, or
+  whose blob is missing from disk, never causes an older one to be skipped.
+- **To extract every version**, set `extraction.collapse_superseded_pending:
+  false`. Each intermediate version is then extracted, at one LLM call apiece,
+  and kept as `PROVENANCE_STALE` history.
+
+To see what a backlog will cost before you pay for it, with and without this
+behaviour, run the read-only replay:
+
+```bash
+uv run python scripts/measure_pending_backlog.py
+```
+
+It makes no LLM calls and writes nothing.
+
 ## Running it unattended
 
 The scheduled consolidation cycle runs the same sweep as its first pass, ahead
-of extraction — so an edit made today is re-snapshotted, extracted, reconciled,
+of extraction, so an edit made today is re-snapshotted, extracted, reconciled,
 and reflected in `MEMORY.md` in a single nightly run. See
 [Scheduled consolidation](scheduled-consolidation.md) for the launchd/cron
 recipe; nothing extra is needed to enable the refresh.
@@ -279,8 +324,8 @@ Knobs, all under `local_refresh` in `config.yaml`:
 ## One-time cleanup for existing stores
 
 The demotion above only fires on snapshots extracted from now on. A store that
-has been running for a while — in particular one using the Claude Code session
-hooks, which have always re-deposited memory files as `MUTABLE` — carries a
+has been running for a while (in particular one using the Claude Code session
+hooks, which have always re-deposited memory files as `MUTABLE`) carries a
 backlog of beliefs from document versions that were superseded long ago and were
 never retired.
 
@@ -302,7 +347,7 @@ Demote 2 particle(s)? [y/N]:
 ```
 
 Answering `n` changes nothing. `--yes` skips the prompt for scripted use. The
-command is idempotent — a second run reports `No particles are anchored to a
+command is idempotent; a second run reports `No particles are anchored to a
 superseded snapshot. Nothing to do.`
 
 Two things to expect before you run it:
@@ -321,7 +366,7 @@ neither. Extract first, then backfill.
 ## Deleted files
 
 If a deposited file has moved or been deleted, the refresh reports it as
-`missing` and does nothing else — the beliefs stay ACTIVE. This is deliberate:
+`missing` and does nothing else; the beliefs stay ACTIVE. This is deliberate:
 "the file is gone" is not "the claims are false", and a `stat` taken during a
 `git` operation is not evidence of a deletion. Retire those deliberately with
 `particles corpus retract`, or re-deposit the file at its new path.

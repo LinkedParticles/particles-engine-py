@@ -1,6 +1,6 @@
 # As-of time travel
 
-*What did the store believe at instant T — and why did it stop believing
+*What did the store believe at instant T, and why did it stop believing
 it?* The `--as-of` query lens answers that question live, on any
 past instant, with the supersession chain visible. It is the sharpest
 expression of "AI memory you can audit and trust": every belief already
@@ -12,9 +12,9 @@ uv run particles query "How many planets are in the Solar System?" --as-of 2000-
 ```
 
 A bare date means the start of that day, UTC; any ISO-8601 datetime works. A
-future instant is rejected — as-of is a historical lens. The same parameter
+future instant is rejected; as-of is a historical lens. The same parameter
 exists on all three surfaces: the CLI flag, `QueryRequest.as_of` on
-`POST /query`, and `as_of` on the MCP `query` tool — and on
+`POST /query`, and `as_of` on the MCP `query` tool, and also on
 [`export graph`](graph-view.md#history-and-time-travel), which renders the
 same lens as a picture. Everything else about the ordinary query path
 (ranking, tag and structural filters) is unchanged: see
@@ -25,21 +25,21 @@ same lens as a picture. Everything else about the ordinary query path
 With `--as-of T`, the query answers from the beliefs **believed at T**:
 
 - A particle counts as believed at T when it had been asserted
-  (`asserted_at <= T`) and had not yet been retired — a belief superseded or
+  (`asserted_at <= T`) and had not yet been retired. A belief superseded or
   retracted *after* T still answers, which is the whole point.
-- **Recency decay and the recency window are evaluated at T** — content that
+- **Recency decay and the recency window are evaluated at T**: content that
   was fresh at T scores fresh, exactly as the store would have scored it
   then. Your *trust* policy stays current: trust is your present judgment
   applied to historical beliefs.
 - Each hit whose belief has since ended carries an **as-of note**: its
   current status and reason, the retirement instant, the *basis* for that
-  instant (`stored` / `successor` / `event` / `valid_until` — so the
+  instant (`stored` / `successor` / `event` / `valid_until`, so the
   timestamp is itself auditable), and, when a successor exists, the id,
   content, and assertion instant of the replacing belief.
   `particles particle show <successor-id>` is the drill-down.
 - Retired particles whose retirement instant the store **cannot
   reconstruct** (some pre-ADR-0191 automated demotions) are excluded
-  fail-closed, with a disclosure line — the lens discloses a gap rather than
+  fail-closed, with a disclosure line: the lens discloses a gap rather than
   manufacture history. The companion `UNDATED_RETIREMENT` lint finding counts
   such rows at hygiene time (see
   [Operator guide → lint and review](../operator-guide/lint-and-review.md));
@@ -51,10 +51,10 @@ honestly says the store held no beliefs at T.
 
 ## Live walkthrough
 
-The demo is a real supersession chain — no backdating needed, just two steps
+The demo is a real supersession chain, with no backdating needed, just two steps
 separated in time:
 
-1. **t₀ — learn the old truth.** Deposit and extract a pre-2006 source:
+1. **t₀: learn the old truth.** Deposit and extract a pre-2006 source:
 
     ```bash
     uv run particles deposit ./pluto-1996-excerpt.txt
@@ -63,8 +63,8 @@ separated in time:
     # → answers from "Pluto is the ninth planet …"
     ```
 
-2. **t₁ — record the revision.** The epistemically correct mechanism for
-   "the IAU redefined the term" is the explicit supersede — the
+2. **t₁: record the revision.** The epistemically correct mechanism for
+   "the IAU redefined the term" is the explicit supersede: the
    `particle_supersede` MCP write tool, which retires the
    predecessor and asserts the successor with the `supersedes` pointer in one
    transaction:
@@ -86,11 +86,11 @@ separated in time:
     # → answers from the dwarf-planet claim
     ```
 
-## The picturesque version — `--as-of 2000-01-01`
+## The picturesque version: `--as-of 2000-01-01`
 
 For a demo whose instants span real history (belief asserted 1996, retired
 on the actual IAU date), a seed script writes the backdated Pluto chain into
-a **throwaway** store — a script, not a CLI verb, because backdating is a
+a **throwaway** store. It is a script, not a CLI verb, because backdating is a
 capability the normal write path deliberately lacks:
 
 ```bash
@@ -114,7 +114,7 @@ DATABASE_URL="sqlite+aiosqlite:///$PWD/pluto-demo.db" \
 The lens is the **assertion-time** (transaction-time) axis of a bitemporal
 system: *what did the store believe at T*, not *what was true of the world
 at T*. The Pluto store believed "planet" between the instants it *learned*
-the two claims — not between 1930 and 2006. Retirement instants are exact for
+the two claims, not between 1930 and 2006. Retirement instants are exact for
 everything the SDK writes going forward and for reconstructible history
 (explicit supersessions, operator retractions, validity expiry); the rest is
 disclosed, never guessed.

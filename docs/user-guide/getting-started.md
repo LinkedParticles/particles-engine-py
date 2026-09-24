@@ -1,7 +1,7 @@
 # Getting started
 
 Install, initialise a store, deposit your first source, extract
-particles, and query — with citations.
+particles, and query, with citations.
 
 ## Install
 
@@ -14,14 +14,14 @@ That installs the `particles` CLI and the full engine. (Python 3.11+;
 too and keep it isolated.)
 
 Working on the engine itself, or want the bleeding edge? See
-[Development setup](#development-setup) below — everything else on this
+[Development setup](#development-setup) below. Everything else on this
 page assumes the installed package.
 
 ### Or run it as a service
 
 The pip install gives you the CLI against a local store. To run the engine
-as a resident service instead — HTTP API, web UI, scheduled consolidation,
-one data volume — pull the published image:
+as a resident service instead (HTTP API, web UI, scheduled consolidation,
+one data volume), pull the published image:
 
 ```bash
 export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -32,9 +32,9 @@ docker run -d --name particles \
 ```
 
 Then `http://localhost:8000/health`, and the web UI at
-`http://localhost:8000/app` (it asks for the bearer). The full recipe —
-auth, volumes, the daemon, compose, Helm, verifying the image's provenance —
-is in [Running in a container](../operator-guide/container-deployment.md).
+`http://localhost:8000/app` (it asks for the bearer). The full recipe,
+including auth, volumes, the daemon, compose, Helm, and verifying the image's
+provenance, is in [Running in a container](../operator-guide/container-deployment.md).
 
 ## Configure an LLM
 
@@ -45,8 +45,8 @@ default provider is Anthropic:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Providers are configuration, never code: any OpenAI-compatible endpoint —
-including a local model — can serve any purpose via `config.yaml`
+Providers are configuration, never code: any OpenAI-compatible endpoint,
+including a local model, can serve any purpose via `config.yaml`
 (see the [operator guide](../operator-guide/configuration.md)). Everything
 else stays on your machine: the store is a local SQLite database, and only
 the source text being extracted (or a question being answered) goes to the
@@ -76,12 +76,12 @@ particles deposit ./article.pdf
 
 For link-shaped sources (Reddit / Hacker News / Mastodon), the
 deposit also follows the post's primary URL and records the
-relationship — see the [operator guide](../operator-guide/troubleshooting.md)
+relationship; see the [operator guide](../operator-guide/troubleshooting.md)
 for the follow-edges behaviour.
 
 ### Depositing RDF
 
-An RDF document — Turtle, N-Triples, TriG, N-Quads, JSON-LD or RDF/XML —
+An RDF document (Turtle, N-Triples, TriG, N-Quads, JSON-LD or RDF/XML)
 is recognised by its extension and parsed rather than read by an LLM:
 
 ```bash
@@ -99,7 +99,7 @@ imported graph is still findable by ordinary semantic query instead of sitting
 in the store as opaque URIs. Labels come from the document itself, so a graph
 that carries `rdfs:label`s reads as prose (`5 Pfennigs was minted at: Berlin
 Mint`) while a bare triple dump reads as URIs. Entity URIs from a recognised
-namespace — Wikidata, for instance — bind straight to the matching Subject
+namespace (Wikidata, for instance) bind straight to the matching Subject
 rather than being name-matched, which is why imported RDF tends to align with
 what you already know instead of forking it.
 
@@ -107,7 +107,7 @@ Confidence comes from your trust policy rather than from the file, since a
 parser has no opinion of its own. The exception is a document that annotates
 its own confidence (an RDF 1.1 reification bundle or a named graph carrying a
 confidence predicate); those values are read directly. Configure which
-predicates count under `rdf.confidence_predicates` — there is no standard one
+predicates count under `rdf.confidence_predicates`; there is no standard one
 in RDF, so publishers differ.
 
 ## Extract particles
@@ -129,7 +129,7 @@ particles query "What was Lenat's role in building Cyc?" --show-particles
 ```
 
 `--show-particles` prints the retrieved claims above the answer, ranked by
-effective confidence — each one traceable to the exact snapshot it came
+effective confidence, each one traceable to the exact snapshot it came
 from. The [walkthrough](https://linkedparticles.org/walkthrough/) runs this
 same example end to end, including setting per-source trust and watching
 the ranking follow.
@@ -153,13 +153,16 @@ options each exporter supports.
 
 ## What next
 
-- [Concepts](concepts.md) — particle, subject, status, confidence,
+- [Concepts](concepts.md): particle, subject, status, confidence,
   provenance.
-- [Querying](querying.md) — tag filters, structural filters, MCP, ranking.
-- [Exporting](exporting.md) — exporter-specific workflows.
-- [Graph view](graph-view.md) — the store's epistemics as a picture.
-- [Claude Code memory](claude-code.md) — wire the store into an agent so
-  deposits and recall happen without you running the verbs.
+- [Querying](querying.md): tag filters, structural filters, MCP, ranking.
+- [Exporting](exporting.md): exporter-specific workflows.
+- [Graph view](graph-view.md): the store's epistemics as a picture.
+- [Claude Code memory](claude-code.md): wire the store into an agent so
+  deposits and recall happen without you running the verbs. By default one
+  store serves every project; read
+  [One store serves every project](claude-code.md#one-store-serves-every-project)
+  before installing.
 - The full CLI reference is at [`cli-reference.md`](../cli-reference.md);
   the workflow-oriented index at [`cli.md`](../cli.md).
 
@@ -172,7 +175,7 @@ Running this long-term rather than trying it out? The
 ## Development setup
 
 To work on the engine itself, install [uv](https://docs.astral.sh/uv/) and
-run from a checkout — and prefix every command above with `uv run`:
+run from a checkout, then prefix every command above with `uv run`:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh

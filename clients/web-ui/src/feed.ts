@@ -538,6 +538,7 @@ export class CurationFeed {
             { name: "content", label: "Revised claim", type: "textarea" },
             { name: "subjects", label: "Subjects (comma-separated)", type: "text" },
             { name: "confidence", label: "Confidence (0–1)", type: "text", value: "0.8" },
+            { name: "reason", label: "Reason", type: "text", value: "curation edit" },
           ],
           confirmLabel: "Supersede",
         });
@@ -551,6 +552,9 @@ export class CurationFeed {
             .map((s) => s.trim())
             .filter(Boolean),
           confidence: Number(out.confidence) || 0.8,
+          // Recorded on the PARTICLE_SUPERSEDED event; required
+          // on the operator path.
+          reason: (out.reason || "").trim() || "curation edit",
         });
         return true;
       }

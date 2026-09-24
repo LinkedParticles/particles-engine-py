@@ -127,7 +127,7 @@ def test_mixed_independence_and_corroboration() -> None:
 
 
 # ---------------------------------------------------------------------------
-#: validate the merge's interaction with content-age decay
+# : validate the merge's interaction with content-age decay
 # and the source-trust cascade. The deferred
 # question left open was whether the merge composes correctly once its
 # inputs are the *fully-modulated* effective confidences. It does: the query

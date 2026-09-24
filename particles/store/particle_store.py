@@ -710,6 +710,41 @@ async def get_active_particles_by_content_hashes(
     return out
 
 
+async def get_particles_by_content_hashes_and_state(
+    session: AsyncSession,
+    content_hashes: Sequence[str],
+    states: Sequence[tuple[Status, StatusReason]],
+) -> list[Particle]:
+    """Particles in any of ``states`` whose normalized-content hash is in ``content_hashes``.
+
+    The retired-value lookup — the same indexed probe as
+    :func:`get_active_particles_by_content_hashes`, keyed on the
+    ``(status, content_norm_hash)`` index, but over the *retired* rows that
+    carry a judgment about the value (``states`` is the caller's list of
+    ``(Status, StatusReason)`` pairs; see
+    :data:`particles.ingest.duplicate_suppression.JUDGMENT_RETIREMENTS`).
+
+    Returns *candidates*, not matches, exactly as its ACTIVE sibling does: the
+    caller still applies the full identity key and the eligibility
+    gates. Rows with a NULL hash (pre-migration-031) are not returned.
+    """
+    keys = [h for h in dict.fromkeys(content_hashes) if h]
+    if not keys or not states:
+        return []
+    out: list[Particle] = []
+    for status, reason in states:
+        for start in range(0, len(keys), 500):
+            result = await session.execute(
+                select(ParticleRow).where(
+                    ParticleRow.status == status.value,
+                    ParticleRow.status_reason == reason.value,
+                    ParticleRow.content_norm_hash.in_(keys[start : start + 500]),
+                )
+            )
+            out.extend(row.to_model() for row in result.scalars())
+    return out
+
+
 async def append_provenance_ref(
     session: AsyncSession, particle_id: str, ref: ProvenanceRef
 ) -> bool:
@@ -800,7 +835,8 @@ async def get_particle_ids_changed_since(session: AsyncSession, since: datetime)
     "Created" = ``asserted_at``; "modified" = ``retired_at`` (the write-once
     departure-from-ACTIVE stamp — the only mutation the delta scope
     cares about, since content is immutable and edits are supersessions, which
-    mint a new ``asserted_at``). Feeds ``scope_particle_ids`` on the seams so a scheduled census probes only what moved since the
+    mint a new ``asserted_at``). Feeds ``scope_particle_ids`` on the
+    seams so a scheduled census probes only what moved since the
     previous run's watermark.
     """
     result = await session.execute(
@@ -890,7 +926,7 @@ async def list_particles_filtered(
     *,
     status: Status | None = None,
     subject_id: str | None = None,
-    limit: int = 50,
+    limit: int | None = 50,
     offset: int = 0,
 ) -> list[Particle]:
     """Paginated, status/subject-filtered particle listing — no embeddings.
@@ -906,7 +942,8 @@ async def list_particles_filtered(
         status: Optional ``Status`` filter (e.g. ``Status.INCONSISTENCY``).
         subject_id: Optional subject filter via the ``particle_subjects``
             join table.
-        limit: Maximum particles to return (default 50). Must be > 0.
+        limit: Maximum particles to return (default 50). Must be > 0; ``None`` is
+            no limit, for a caller that filters the listing before paging it.
         offset: Number of particles to skip before returning results
             (default 0). Combine with ``limit`` to page through the full set.
 
@@ -938,7 +975,8 @@ async def compute_context_fingerprint(session: AsyncSession) -> str:
       3. SHA-256 of the concatenated sorted UUIDs (no delimiter).
 
     Step 1 is the query below; steps 2–3 are
-    :func:`particles.core.fingerprint.context_fingerprint`, shared with the conformance runner so the procedure exists once.
+    :func:`particles.core.fingerprint.context_fingerprint`, shared with the
+    conformance runner so the procedure exists once.
 
     Returns a 64-character hex digest. An empty store returns the SHA-256
     of the empty string, which is the canonical baseline for a fresh store.
@@ -969,8 +1007,8 @@ async def get_inconsistency_backrefs(session: AsyncSession) -> dict[str, str]:
     The §6.6 INCONSISTENCY particle records its conflicting pair as PARTICLE-type
     provenance refs whose ``corpus_entry_id`` carries the referenced particle
     UUID (the field name is legacy; see ``build_inconsistency_particle``). This
-    backref lets a read surface mark a returned ACTIVE belief as *contested*
-    : the surviving (ACTIVE) side of a conflict is referenced here;
+    backref lets a read surface mark a returned ACTIVE belief as *contested*:
+    the surviving (ACTIVE) side of a conflict is referenced here;
     the quarantined loser is PROVENANCE_STALE and never reaches a query result.
     Cost is one INCONSISTENCY-status scan — acceptable at memory-store scale
     (is the general scaling lever).
@@ -1138,7 +1176,8 @@ async def get_particles_with_embeddings_as_of(
     Sibling of :func:`get_active_particles_with_embeddings` (which remains the
     ``as_of=None`` fast path, so the default query plan is untouched): loads
     every particle **across statuses** with an embedding present whose
-    ``asserted_at <= as_of`` — the "it had been asserted" half of the visibility predicate. A timezone-naive stored ``asserted_at`` is
+    ``asserted_at <= as_of`` — the "it had been asserted" half of the
+    visibility predicate. A timezone-naive stored ``asserted_at`` is
     assumed UTC, matching the query path's existing comparison. The
     "not yet retired" half (the §2 reconstruction ladder) is the
     ``AsOfView``'s job in ``operations/query/as_of.py`` — this loader is
@@ -1406,13 +1445,30 @@ async def get_active_particles_for_chunk_hash(
 ) -> list[Particle]:
     """Return ACTIVE particles eligible for chunk-hash carry-forward.
 
-    Filters by (corpus_entry_id, chunk_hash) via the indexed edge table and
-    ParticleRow.status=ACTIVE, then exact-matches the parsed ``extractor_ref``
-    ``name``/``version`` fields in Python. The SQL ``contains`` clauses are a
-    superset prefilter only — substring matching alone would false-hit on ids
-    that contain other ids (e.g. ``gist`` inside ``github-gist-extractor``).
-    A name or version mismatch is treated as a cache miss so that
-    EXTRACTOR_VERSION bumps still force re-extraction.
+    A particle matches when **any** of its provenance refs names
+    ``(corpus_entry_id, chunk_hash)`` — read from the refs themselves, not from
+    the edge index, whose one row per (particle, entry) keeps the *first*
+    chunk hash and is never re-pointed. A claim folded in from another source,
+    or re-observed after its line moved into a different chunk,
+    carries the chunk it is in now only on its refs; an edge-keyed lookup
+    missed it, so it was neither carried nor re-emitted and the generation
+    cascade retired a line the file still stated. The edge join
+    narrows to the entry, and the SQL ``contains`` clauses are a superset
+    prefilter; both the ref and the ``extractor_ref`` name/version are matched
+    exactly in Python (substring matching alone would false-hit on ids that
+    contain other ids, e.g. ``gist`` inside ``github-gist-extractor``). A name
+    or version mismatch is a cache miss so that EXTRACTOR_VERSION bumps still
+    force re-extraction.
+
+    **A chunk whose claims are not all still ACTIVE is a miss.** When a
+    particle this chunk stated was retired because its source moved on — the
+    generation cascade, or a same-lineage update (``RETRACTED_DEPENDENCY`` /
+    ``SUPERSEDED_BY_UPDATE``) — and the chunk's text is back, carrying the
+    survivors forward would leave the restated claim retired for as long as
+    the chunk stays unchanged. Re-extracting costs one call and lets the
+    survivors fold by duplicate suppression and the restated claim mint again.
+    Once an ACTIVE particle of the chunk holds the same content,
+    the retired one no longer forces a miss, so the cost is paid once.
     """
     result = await session.execute(
         select(ParticleRow)
@@ -1422,19 +1478,37 @@ async def get_active_particles_for_chunk_hash(
         )
         .where(
             ProvenanceEdgeRow.corpus_entry_id == corpus_entry_id,
-            ProvenanceEdgeRow.chunk_hash == chunk_hash,
-            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.provenance_json.contains(chunk_hash),
             ParticleRow.extractor_ref_json.contains(extractor_id),
             ParticleRow.extractor_ref_json.contains(extractor_version),
         )
     )
     particles: list[Particle] = []
+    moved_on: set[str] = set()
     for row in result.scalars():
         p = row.to_model()
         ref = p.extractor_ref
-        if ref is not None and ref.name == extractor_id and ref.version == extractor_version:
+        if ref is None or ref.name != extractor_id or ref.version != extractor_version:
+            continue
+        if not any(
+            r.corpus_entry_id == corpus_entry_id and r.chunk_hash == chunk_hash
+            for r in p.provenance
+        ):
+            continue
+        if p.status is Status.ACTIVE:
             particles.append(p)
+        elif p.status_reason in _SOURCE_MOVED_ON:
+            moved_on.add(p.content)
+    # A retired claim an ACTIVE particle of this chunk already restates (the
+    # re-extraction that followed the last miss) no longer forces one.
+    if moved_on - {p.content for p in particles}:
+        return []
     return particles
+
+
+#: Retirements that say "the source stopped stating this", which a restatement
+#: of the same chunk reverses (see :func:`get_active_particles_for_chunk_hash`).
+_SOURCE_MOVED_ON = frozenset({StatusReason.RETRACTED_DEPENDENCY, StatusReason.SUPERSEDED_BY_UPDATE})
 
 
 # Inverted carry-forward coupling: the Engine registers this
@@ -1730,8 +1804,8 @@ async def set_structured_claim(
     """Write (or replace) a particle's annotation. Flushes.
 
     Touches the payload column and the three stamp columns and **nothing
-    else** — never ``content``, ``confidence``, provenance, or ``status``
-    . ``canonical_form`` is not written here either: which form
+    else** — never ``content``, ``confidence``, provenance, or ``status``.
+    ``canonical_form`` is not written here either: which form
     is the assertion is decided at creation, not by annotating.
 
     Raises:

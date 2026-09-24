@@ -700,3 +700,42 @@ class TestInitProjectionProvisioning:
         assert not (init_env["home"] / ".particles" / "claude-code" / "memory.yaml").exists()
         assert memory_md.read_text() == "- a note\n"
         assert "would insert the projected region" in result.output
+
+
+class TestProjectInstallNarrowsItsSideEffects:
+    """`--project` used to narrow nothing but the settings file."""
+
+    def test_only_this_projects_memory_file_is_seeded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli._claude_code import claude_project_slug
+        from particles.api.cli.init import _memory_files_without_region
+        from tests._claude_projects import make_repo
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = make_repo(tmp_path / "src" / "repo")
+        projects = tmp_path / ".claude" / "projects"
+        mine = projects / claude_project_slug(repo) / "memory"
+        other = projects / "-some-other-project" / "memory"
+        for memory_dir in (mine, other):
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "MEMORY.md").write_text("- a note\n")
+
+        assert _memory_files_without_region(mine) == [mine / "MEMORY.md"]
+        assert len(_memory_files_without_region()) == 2  # the user-level install: everything
+
+    def test_only_this_projects_rule_documents_are_registered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli.init import _resolved_rule_sources
+        from tests._claude_projects import make_repo
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo = make_repo(tmp_path / "src" / "repo")
+        (repo / "AGENTS.md").write_text("# rules\n")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "CLAUDE.md").write_text("# my rules\n")
+        monkeypatch.chdir(repo)
+
+        assert [p.name for p in _resolved_rule_sources(repo)] == ["AGENTS.md"]
+        assert {p.name for p in _resolved_rule_sources()} == {"AGENTS.md", "CLAUDE.md"}

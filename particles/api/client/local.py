@@ -59,6 +59,7 @@ from particles.extraction.general import PageStat
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
 
 
@@ -196,6 +197,7 @@ class LocalBackend:
         as_of: datetime | None = None,
         max_nodes: int | None = None,
         store: str = "default",
+        observer_project: str | None = None,
     ) -> GraphData:
         from particles.operations.graph_view import build_graph_data
 
@@ -211,6 +213,7 @@ class LocalBackend:
                 history=history,
                 as_of=as_of,
                 max_nodes=max_nodes,
+                observer_project=observer_project,
             )
 
     async def lint(self, *, fix: bool, semantic: bool, low_coverage_threshold: int) -> LintReport:
@@ -339,6 +342,12 @@ class LocalBackend:
             content_hash=snap.content_hash,
         )
 
+    async def particle_source(self, particle_id: str) -> SourcePassage | None:
+        from particles.operations.source_passage import hydrate_source_passage
+
+        async with session_scope() as session:
+            return await hydrate_source_passage(session, particle_id)
+
     # ------------------------------------------------------------------
     # MCP-read surface — each lifts the routed MCP tool's store
     # call behind the protocol, behaviour-preserving for the local default path.
@@ -424,10 +433,16 @@ class LocalBackend:
         return ParticleDetail(particle=particle, subjects=subjects, provenance=provenance)
 
     async def particles_list(
-        self, *, status: str | None, subject_id: str | None, limit: int, offset: int
+        self,
+        *,
+        status: str | None,
+        subject_id: str | None,
+        limit: int,
+        offset: int,
+        observer_project: str | None = None,
     ) -> list[Particle]:
         from particles.core.status import Status
-        from particles.store.particle_store import list_particles_filtered
+        from particles.operations.query.observer_scope import list_particles_in_view
 
         status_enum: Status | None = None
         if status is not None:
@@ -438,13 +453,21 @@ class LocalBackend:
                 raise ValueError(f"Unknown status {status!r}. Allowed: {allowed}.") from exc
 
         async with session_scope() as session:
-            return await list_particles_filtered(
-                session, status=status_enum, subject_id=subject_id, limit=limit, offset=offset
+            return await list_particles_in_view(
+                session,
+                status=status_enum,
+                subject_id=subject_id,
+                limit=limit,
+                offset=offset,
+                observer_project=observer_project,
             )
 
-    async def particles_by_fingerprint(self, fingerprint: str, *, limit: int) -> list[Particle]:
+    async def particles_by_fingerprint(
+        self, fingerprint: str, *, limit: int, observer_project: str | None = None
+    ) -> list[Particle]:
         from sqlalchemy import select
 
+        from particles.operations.query.observer_scope import in_view
         from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
         from particles.store.particle_store import ParticleRow
 
@@ -457,8 +480,13 @@ class LocalBackend:
                 )
             )
         async with session_scope() as session:
-            result = await session.execute(stmt.limit(limit))
-            return [row.to_model() for row in result.scalars()]
+            if observer_project is None:
+                result = await session.execute(stmt.limit(limit))
+                return [row.to_model() for row in result.scalars()]
+            # Under an observer the cut comes after the predicate.
+            result = await session.execute(stmt)
+            found = [row.to_model() for row in result.scalars()]
+            return (await in_view(session, found, observer_project))[:limit]
 
     async def subject_detail(self, subject_id: str, *, particle_id_limit: int) -> SubjectDetail:
         from particles.store.subject_store import (
@@ -495,10 +523,10 @@ class LocalBackend:
         async with session_scope() as session:
             return await list_entries(session, limit=limit, source_type=source_type)
 
-    async def digest(self, store: str) -> str:
+    async def digest(self, store: str, project: str | None = None) -> str:
         from particles.operations.digest import build_digest
 
-        return await build_digest(store)
+        return await build_digest(store, project)
 
     async def events_list(
         self,
@@ -735,6 +763,7 @@ class LocalBackend:
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        project_key: str | None = None,
     ) -> AgentWriteResult:
         from particles.operations.agent_write import assert_belief
 
@@ -749,6 +778,7 @@ class LocalBackend:
                 corpus_entry_id=corpus_entry_id,
                 uncertainty_nature=uncertainty_nature,
                 tags=tags,
+                project_key=project_key,
             )
             await session.commit()
             return result
@@ -765,6 +795,8 @@ class LocalBackend:
         uncertainty_nature: str,
         tags: list[str] | None,
         store: str,
+        reason: str | None = None,
+        project_key: str | None = None,
     ) -> AgentWriteResult:
         from particles.operations.agent_write import supersede_belief
 
@@ -780,6 +812,8 @@ class LocalBackend:
                 corpus_entry_id=corpus_entry_id,
                 uncertainty_nature=uncertainty_nature,
                 tags=tags,
+                reason=reason,
+                project_key=project_key,
             )
             await session.commit()
             return result
@@ -799,6 +833,7 @@ class LocalBackend:
         store: str,
         deposited_by: str | None = None,
         source_type: str | None = None,
+        project_key: str | None = None,
     ) -> tuple[str, str]:
         from particles.core.schema import SourceType
         from particles.operations.agent_write import deposit_conversation_text
@@ -809,7 +844,7 @@ class LocalBackend:
                 # Agent path: the asserter identity is resolved inside
                 # deposit_conversation_text and stamped as deposited_by + author_id.
                 entry_id, snapshot_id = await deposit_conversation_text(
-                    session, text=text, tags=tags
+                    session, text=text, tags=tags, project_key=project_key
                 )
             else:
                 # Operator path. Attribute to the named principal on

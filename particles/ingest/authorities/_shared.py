@@ -87,7 +87,8 @@ class PatternAuthority:
 
     For parity with the old ``_detect_namespace_pattern`` the recognized
     ``ExternalRef`` carries **no** ``uri`` (``uri`` defaults to ``None``); the
-    canonical URI is available separately via :meth:`uri_for` (the IRI-template capability).
+    canonical URI is available separately via :meth:`uri_for` (the
+    IRI-template capability).
     """
 
     LIVE = False

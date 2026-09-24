@@ -261,8 +261,8 @@ async def _resolved_since(session: AsyncSession, built_at: datetime) -> tuple[se
     subject assignment or a deposit that happened at 09:00 — but the operator
     event log does, because every resolving gesture records one. Returns
     ``(card_keys, particle_ids)``: URL cards suppress by key (they carry no
-    particle, and reuse the deposit-suggestion path already built for them
-    ), while belief cards suppress by *membership* — a card is keyed by
+    particle, and reuse the deposit-suggestion path already built for them),
+    while belief cards suppress by *membership* — a card is keyed by
     kind plus its sorted particle ids, so the key cannot be reconstructed from
     an event ref alone, but "does this card name a touched belief?" answers the
     same question for every kind at once.

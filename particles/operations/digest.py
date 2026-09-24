@@ -23,17 +23,18 @@ here; the terse one-line-per-belief formatting is
 from __future__ import annotations
 
 from particles.config import get_config
-from particles.core.schema import ContestedBadge
+from particles.core.schema import ContestedBadge, ObserverScopeNote
 from particles.core.status import Status
 from particles.db import session_scope
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.effective_confidence import score_confidence_and_rank
+from particles.operations.query.observer_scope import filter_visible
 from particles.render.markdown import DigestEntry, render_digest
 from particles.store.particle_store import get_inconsistency_backrefs, get_particles_by_status
 from particles.store.subject_store import list_all_subjects
 
 
-async def build_digest(store: str) -> str:
+async def build_digest(store: str, observer_project: str | None = None) -> str:
     """Render the session-start memory digest for one store.
 
     Gathers the store's ACTIVE beliefs, scores each with the query-path effective
@@ -41,9 +42,15 @@ async def build_digest(store: str) -> str:
     embedding), orders them descending, caps at ``mcp.recall.digest_max_beliefs``
     (top-N; 0 = no cap), marks every contested belief with the composed badge's
     fired bases (gated by ``contestedness.badge_enabled`` and computed
-    for the rendered top-N only) plus the open-INCONSISTENCY drill-down id
-    , and hands the ordered data to
+    for the rendered top-N only) plus the open-INCONSISTENCY drill-down id,
+    and hands the ordered data to
     :func:`particles.render.markdown.render_digest`.
+
+    ``observer_project`` reads the store through a project observer:
+    only beliefs that are global, observed in that project, or widened are
+    ranked, and the digest says so in one line. The predicate runs before
+    scoring and the cap, so a project's 200 lines are its own. ``None`` is the
+    store-wide digest, unchanged.
 
     Read fresh on every call — the digest is never cached, so it can never serve
     a stale recall.
@@ -51,6 +58,11 @@ async def build_digest(store: str) -> str:
     max_beliefs = get_config().mcp.recall.digest_max_beliefs
     async with session_scope(store) as session:
         actives = await get_particles_by_status(session, Status.ACTIVE)
+        observer: ObserverScopeNote | None = None
+        if observer_project is not None:
+            scope = await filter_visible(session, actives, observer_project)
+            actives = [p for p in actives if p.id in scope.visible_ids]
+            observer = scope.note(observer_project)
         total = len(actives)
         # The digest is a projection-path recall surface, so it
         # ranks with the usefulness rank-lift applied — unlike the semantic-search
@@ -89,4 +101,4 @@ async def build_digest(store: str) -> str:
         )
         for p, badge in zip(ordered, badges, strict=True)
     ]
-    return render_digest(store, entries, total)
+    return render_digest(store, entries, total, observer)

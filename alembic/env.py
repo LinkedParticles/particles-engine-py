@@ -35,8 +35,7 @@ target_metadata = Base.metadata
 
 # A caller (particles.db.create_tables) may target a specific store by setting
 # config.attributes["store_url"]; it takes precedence over the DATABASE_URL env
-# var so multi-store `create_tables(store=...)` migrates the right database
-#.
+# var so multi-store `create_tables(store=...)` migrates the right database.
 store_url = config.attributes.get("store_url")
 database_url = store_url or os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./particles.db")
 config.set_main_option("sqlalchemy.url", database_url)
