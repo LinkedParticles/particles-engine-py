@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import SuggestMode, WarcRecordType
+from particles.core.schema import SuggestMode
 from particles.core.status import Status
 from particles.llm.errors import AccountLevelLLMError
 from particles.operations._llm import llm_circuit_open
@@ -570,6 +570,8 @@ async def run_consolidation(
     # audit writes the same event type but runs none of the cross-session
     # passes). A degraded run still satisfies cadence: deliberate, so a
     # key-less setup retries next interval instead of hot-looping.
+    # Known deviation: the cadence check below is a decision inline in the orchestrator. Extract
+    # it with the next substantive change here (D2).
     if if_due:
         last_for_cadence = await latest_run_event(session, actor=actor, successful_only=True)
         last_completed = (
@@ -859,43 +861,30 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
     entry plus a read + SHA-256 only for the files whose mtime moved.
     Per-entry failures are disclosed and never fatal (§8).
     """
-    from particles.corpus.fetch import maybe_refetch
+    from particles.corpus.refresh_outcome import RefreshOutcome
     from particles.corpus.store import list_refreshable_local_entries
+    from particles.operations.corpus_refresh import refresh_entries
 
     entries = await list_refreshable_local_entries(session)
     cap = get_config().local_refresh.max_entries
     report.refresh_remaining = max(0, len(entries) - cap)
 
-    for entry_id, _uri_r in entries[:cap]:
+    async for result in refresh_entries(session, (entry_id for entry_id, _ in entries[:cap])):
         report.refresh_checked += 1
-        try:
-            prior_before = await _latest_snapshot_id(session, entry_id)
-            snap = await maybe_refetch(session, entry_id)
-            if snap is None:
+        match result.outcome:
+            case None:  # §8: continue the sweep, disclose
+                log.warning(
+                    "consolidation: refresh failed for %s: %s", result.entry_id[:8], result.error
+                )
+            case RefreshOutcome.MISSING:
                 report.refresh_missing += 1
-            elif snap.snapshot_id == prior_before:
-                # maybe_refetch returned the existing snapshot untouched: the
-                # tier-1 mtime compare short-circuited before any read.
+            case RefreshOutcome.UNCHANGED_MTIME:
                 report.refresh_unchanged_mtime += 1
-            elif snap.warc_record_type is WarcRecordType.REVISIT:
+            case RefreshOutcome.UNCHANGED_HASH:
                 report.refresh_unchanged_hash += 1
-            else:
+            case RefreshOutcome.CHANGED:
                 report.refresh_updated += 1
-            await session.commit()
-        except Exception as exc:  # noqa: BLE001 — §8: continue the sweep, disclose
-            await session.rollback()
-            log.warning("consolidation: refresh failed for %s: %s", entry_id[:8], exc)
     return 0
-
-
-async def _latest_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:
-    """The newest snapshot id for an entry, or None when it has none yet."""
-    from particles.corpus.store import list_snapshots_for_entry
-
-    snapshots = await list_snapshots_for_entry(session, entry_id)
-    if not snapshots:
-        return None
-    return max(snapshots, key=lambda s: s.captured_at).snapshot_id
 
 
 async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> int:
@@ -1370,6 +1359,7 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
                 "abstraction_proposed": len(report.abstraction.proposed_event_ids),
                 "abstraction_rejected_entailment": report.abstraction.rejected_entailment,
                 "abstraction_rejected_duplicate": report.abstraction.rejected_duplicate,
+                # Same-text successors minted by rungs 1–3.
                 "abstraction_revalidated": (
                     report.abstraction.revalidation.refreshed_structural
                     + report.abstraction.revalidation.refreshed_entailed
@@ -1377,6 +1367,9 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
                 ),
                 "abstraction_superseded": report.abstraction.revalidation.superseded,
                 "abstraction_retired": report.abstraction.revalidation.retired,
+                "abstraction_deferred_in_review": (
+                    report.abstraction.revalidation.deferred_in_review
+                ),
             }
             if report.abstraction is not None
             else {}
@@ -1542,6 +1535,8 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             parts.append(f"{reval.superseded} superseded")
         if reval.retired:
             parts.append(f"{reval.retired} retired")
+        if reval.deferred_in_review:
+            parts.append(f"{reval.deferred_in_review} held for review")
         if not parts:
             parts.append("nothing to do")
         lines.append(f"  abstraction      {', '.join(parts)}")

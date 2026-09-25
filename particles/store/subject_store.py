@@ -16,7 +16,7 @@ from collections.abc import Collection
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import DateTime, String, Text, select
+from sqlalchemy import ColumnElement, DateTime, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1012,14 +1012,16 @@ async def get_low_coverage_subjects(
     if threshold <= 1:
         return []
     count_sq = _active_claim_count_subquery()
+    # Typed so the row unpacks as (SubjectRow, int): the subquery is ``Any``.
+    cnt: ColumnElement[int] = count_sq.c.cnt
     stmt = (
-        select(SubjectRow, count_sq.c.cnt)
+        select(SubjectRow, cnt)
         .join(count_sq, count_sq.c.subject_id == SubjectRow.id)
-        .where(count_sq.c.cnt < threshold)
+        .where(cnt < threshold)
     )
     if canonical_only:
         # external_ids_json defaults to "[]"; treat any non-empty-list value
         # as canonical. Avoids a JSON1 extension dependency on SQLite.
         stmt = stmt.where(SubjectRow.external_ids_json != "[]")
     result = await session.execute(stmt)
-    return [(row.to_model(), int(cnt)) for row, cnt in result]
+    return [(row.to_model(), int(count)) for row, count in result]

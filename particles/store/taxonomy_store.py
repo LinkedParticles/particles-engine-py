@@ -237,6 +237,18 @@ async def expand_tags(
     return expanded
 
 
+async def link_particle_to_tags(session: AsyncSession, particle_id: str, tags: list[str]) -> None:
+    """Write the edge rows for a newly inserted particle's tags. Does not flush.
+
+    The insert-time counterpart of ``set_particle_tags``: ``insert_particle``
+    persists ``Particle.tags`` into ``ParticleRow.tags_json`` and calls this so
+    the edge table that tag-filtered reads use agrees with it. Duplicate tags
+    collapse to one edge (the edge table is keyed on ``(particle_id, tag)``).
+    """
+    for tag in dict.fromkeys(tags):
+        session.add(ParticleTagEdgeRow(particle_id=particle_id, tag=tag))
+
+
 async def set_particle_tags(session: AsyncSession, particle_id: str, tags: list[str]) -> None:
     """Replace the particle's tags (canonical JSON + edge table) in one shot.
 

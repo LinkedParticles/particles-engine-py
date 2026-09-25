@@ -9,7 +9,7 @@ The pass list, in order:
 
 1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, oldest first,
    capped at `consolidation.max_pending_entries` per run. A capped run
-   discloses the remainder ("12 remain — next run continues").
+   discloses the remainder (`12 remain — next run continues`).
 2. **Reconcile** *(LLM, capped)*: the cross-entry document-supersession
    sweep. Each candidate pair costs one
    replacement-signal probe, spent highest-similarity-first under
@@ -80,7 +80,7 @@ you install the job by hand, once.
     **`DATABASE_URL` pins only the `default` store.** It overrides
     `storage.database_url`, and that is the `default` handle's DSN. Any other
     handle resolves from `storage.stores[<handle>]` in `config.yaml` and
-    ignores `DATABASE_URL` completely (`particles/db.py`). So:
+    ignores `DATABASE_URL` completely (`particles/db.py`). In practice:
 
     - running against **`default`** (the example below): set both
       `PARTICLES_CONFIG` *and* `DATABASE_URL`;
@@ -188,7 +188,7 @@ The semantic passes read **`ANTHROPIC_API_KEY` from the process environment**.
 There is no secrets *file* and no `PARTICLES_SECRETS` variable
 (`particles/secrets.py` is an internal module that calls
 `os.environ.get("ANTHROPIC_API_KEY")`; it is deliberately absent from
-`config.yaml`, because secrets never live in config). And **launchd does not
+`config.yaml`, because secrets never live in config), and **launchd does not
 source shell files**: `EnvironmentVariables` is a literal key→value dict, so
 pointing it at `~/.zshenv` or `~/.zprofile` sets a useless string and the job
 runs key-less. Three honest options:
@@ -449,7 +449,7 @@ cross-session passes, so it cannot stand in for a consolidation run).
 
 - **One cycle at a time.** A `consolidate.lock` file in the integration state
   directory (`claude_code.state_dir`) serializes cycles; a held lock exits 0
-  with "already running — skipped". A lock whose pid is dead or older than
+  with `already running — skipped`. A lock whose pid is dead or older than
   `consolidation.lock_timeout_minutes` (default 120) is stale and reclaimed.
 - **Interactive sessions interleave safely.** The lockfile serializes
   *cycles*, not writes: each pass takes the cross-process write lock

@@ -335,6 +335,7 @@ class ParticleRow(Base):
             assertion_modality=p.assertion_modality.value,
             valid_until=p.valid_until,
             supersedes=p.supersedes,
+            # Row creation: a sanctioned provenance_json write (D1).
             provenance_json=json.dumps(prov_list),
             extractor_ref_json=(
                 json.dumps(p.extractor_ref.model_dump(mode="json")) if p.extractor_ref else None
@@ -403,7 +404,7 @@ async def insert_particle(
     embedding: list[float] | None = None,
     domain_hint: str | None = None,
 ) -> None:
-    """Persist a particle and its provenance edges. Flushes but does not commit.
+    """Persist a particle and its provenance, subject, and tag edges. Flushes but does not commit.
 
     Args:
         session: Active async SQLAlchemy session.
@@ -446,6 +447,11 @@ async def insert_particle(
         from particles.store.subject_store import link_particle_to_subjects
 
         await link_particle_to_subjects(session, particle.id, particle.subject_ids)
+    if particle.tags:
+        # defer: cycle — taxonomy_store imports ParticleRow from this module.
+        from particles.store.taxonomy_store import link_particle_to_tags
+
+        await link_particle_to_tags(session, particle.id, particle.tags)
     await session.flush()
 
 
@@ -760,7 +766,8 @@ async def append_provenance_ref(
     observation: re-reading a claim must not silently refresh its age. An
     identical ref already present is a no-op, which is what makes re-harvesting
     an unchanged snapshot safe (runs a level-triggered catch-up sweep,
-    so the same snapshot is re-offered routinely).
+    so the same snapshot is re-offered routinely). The one sanctioned removal
+    is :func:`strip_entry_provenance_refs`, for an operator hard-delete.
 
     Nothing else about the particle is touched — in particular
     ``confidence.value`` stays immutable and ``asserted_at`` /
@@ -792,6 +799,7 @@ async def append_provenance_ref(
     if any(existing == incoming for existing in refs):
         return False
     refs.append(incoming)
+    # Append-only: a sanctioned provenance_json write (D1).
     row.provenance_json = json.dumps(refs)
     existing_edge = await session.get(ProvenanceEdgeRow, (particle_id, ref.corpus_entry_id))
     if existing_edge is None:
@@ -805,6 +813,67 @@ async def append_provenance_ref(
         )
     await session.flush()
     return True
+
+
+async def strip_entry_provenance_refs(
+    session: AsyncSession, particle_id: str, corpus_entry_id: str
+) -> int:
+    """Remove a deleted corpus entry's ``SOURCE`` refs from a surviving particle.
+
+    **The one sanctioned exception to append-only provenance** (D1).
+    :func:`append_provenance_ref` is otherwise the only writer of an existing
+    particle's source refs, and it never removes, rewrites or reorders one.
+    This function exists only for the operator hard-delete
+    (``particles corpus delete``): a ref's location and chunk hash describe
+    exactly the content the operator asked to remove, so leaving it in place
+    would keep a pointer to deleted content. Nothing else calls it.
+
+    The remaining refs keep their original order. When a removed ref was
+    ``provenance[0]``, the next-earliest ref becomes the first element and so
+    the decay anchor, which can change the claim's age; that is the
+    accepted cost of the delete. ``PARTICLE``-type refs (a derived claim's
+    premises) are never removed here. ``confidence.value``, ``asserted_at`` and
+    ``asserted_by`` are untouched.
+
+    The particle's row for the entry in ``particle_provenance_edges`` is
+    deleted with the refs.
+
+    Raises:
+        ValueError: If the particle does not exist, or if removing the refs
+            would leave it with no ``SOURCE`` ref. A particle the entry solely
+            supports is deleted with the entry, never stripped.
+
+    Returns:
+        The number of refs removed (``0`` when the particle cited the entry
+        only through its edge row).
+    """
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        raise ValueError(f"Particle not found: {particle_id}")
+    refs: list[dict[str, Any]] = json.loads(row.provenance_json)
+    source = ProvenanceRefType.SOURCE.value
+    kept = [
+        ref
+        for ref in refs
+        if not (ref.get("type") == source and ref.get("corpus_entry_id") == corpus_entry_id)
+    ]
+    if not any(ref.get("type") == source for ref in kept):
+        raise ValueError(
+            f"Particle {particle_id} has no SOURCE ref beyond entry {corpus_entry_id};"
+            " a solely supported particle is deleted, not stripped"
+        )
+    removed = len(refs) - len(kept)
+    if removed:
+        # Hard-delete exception: a sanctioned provenance_json write (D1).
+        row.provenance_json = json.dumps(kept)
+    await session.execute(
+        delete(ProvenanceEdgeRow).where(
+            ProvenanceEdgeRow.particle_id == particle_id,
+            ProvenanceEdgeRow.corpus_entry_id == corpus_entry_id,
+        )
+    )
+    await session.flush()
+    return removed
 
 
 async def get_particle_ids_for_entries(
@@ -1589,48 +1658,6 @@ async def get_superseding_particle(session: AsyncSession, superseded_id: str) ->
     )
     row = result.scalars().first()
     return row.to_model() if row else None
-
-
-async def update_particle_provenance(
-    session: AsyncSession, particle_id: str, provenance: list[ProvenanceRef]
-) -> None:
-    """Replace a particle's provenance refs (premise-ref refresh).
-
-    Used by the revalidation ladder to point a still-valid derived particle at
-    its updated premise set (retracted premises dropped, superseded premises
-    replaced by their successors). Touches only ``provenance_json`` and the
-    denormalised edge index — never content, status, or the immutable
-    ``confidence.value``.
-
-    Raises:
-        ValueError: If the particle does not exist.
-    """
-    row = await session.get(ParticleRow, particle_id)
-    if row is None:
-        raise ValueError(f"Particle not found: {particle_id}")
-    row.provenance_json = json.dumps(
-        [
-            {
-                "type": ref.type.value,
-                "corpus_entry_id": ref.corpus_entry_id,
-                "snapshot_id": ref.snapshot_id,
-                "location": ref.location,
-                "chunk_hash": ref.chunk_hash,
-            }
-            for ref in provenance
-        ]
-    )
-    # Rebuild this particle's rows in the denormalised provenance-edge index.
-    await session.execute(
-        delete(ProvenanceEdgeRow).where(ProvenanceEdgeRow.particle_id == particle_id)
-    )
-    seen: set[str] = set()
-    for ref in provenance:
-        if ref.corpus_entry_id in seen:
-            continue
-        seen.add(ref.corpus_entry_id)
-        session.add(ProvenanceEdgeRow(particle_id=particle_id, corpus_entry_id=ref.corpus_entry_id))
-    await session.flush()
 
 
 async def get_active_particles_with_valid_until(session: AsyncSession) -> list[Particle]:

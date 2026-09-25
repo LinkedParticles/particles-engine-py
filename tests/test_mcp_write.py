@@ -127,6 +127,25 @@ class TestServerSideConstruction:
         assert p.provenance and p.provenance[0].type == ProvenanceRefType.SOURCE
 
     @pytest.mark.asyncio
+    async def test_asserted_tags_visible_to_tag_filtered_reads(
+        self, db_session: Any, stub_subjects: None
+    ) -> None:
+        from particles.mcp.tools.write import particle_assert
+        from particles.store.taxonomy_store import get_particle_ids_for_tags
+
+        _enable_writes()
+        res = await particle_assert(
+            "The deploy key rotates monthly.",
+            ["deploy key"],
+            0.8,
+            source_excerpt="we agreed the deploy key rotates monthly",
+            tags=["ops/secrets"],
+        )
+        async with session_scope(DEFAULT_STORE) as s:
+            ids = await get_particle_ids_for_tags(s, {"ops/secrets"})
+        assert res["asserted_particle_id"] in ids
+
+    @pytest.mark.asyncio
     async def test_unprovenanced_assertion_rejected(
         self, db_session: Any, stub_subjects: None
     ) -> None:

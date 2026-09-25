@@ -998,7 +998,7 @@ class TestAbstractionPass:
             clusters_found=2,
             candidates_synthesized=1,
             proposed_event_ids=["ev-1"],
-            revalidation=RevalidationCounts(checked=1, refreshed_entailed=1),
+            revalidation=RevalidationCounts(checked=2, refreshed_entailed=1, deferred_in_review=1),
             llm_calls=3,
         )
         mock_pass = AsyncMock(return_value=fake)
@@ -1019,9 +1019,10 @@ class TestAbstractionPass:
         assert census["abstraction_proposed"] == 1
         assert census["abstraction_clusters"] == 2
         assert census["abstraction_revalidated"] == 1
+        assert census["abstraction_deferred_in_review"] == 1
 
         rendered = render_consolidation_report(report)
-        assert "abstraction      1 proposed, 1 revalidated" in rendered
+        assert "abstraction      1 proposed, 1 revalidated, 1 held for review" in rendered
 
     @pytest.mark.asyncio
     async def test_semantic_degraded_skips_abstraction(

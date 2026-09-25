@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Index, String, Text, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
+from sqlalchemy.orm.attributes import flag_modified
 
 from particles.core.schema import (
     ContributorRef,
@@ -234,6 +235,10 @@ async def claim_snapshot_for_extraction(
         # on it is an extracted generation, or on failure a PENDING one the
         # next bulk pass is free to collapse again.
         row.superseded_by_snapshot_id = None
+        # Forced into the UPDATE: the mark may have been written by another
+        # process's bulk UPDATE, leaving this row's loaded value a stale None
+        # that the assignment above would not register as a change.
+        flag_modified(row, "superseded_by_snapshot_id")
         await session.flush()
 
 
@@ -854,6 +859,12 @@ async def mark_snapshot_superseded(
     collapsed, so a snapshot another runner claimed between the candidate read
     and this write is left alone. Returns whether the row was marked. Caller
     commits.
+
+    ``synchronize_session="fetch"`` keeps this session's identity map in step
+    with the write: the session factory does not expire on commit, so a
+    ``SnapshotRow`` already loaded here would otherwise keep reading as
+    uncollapsed, and a later in-session write of ``superseded_by = None``
+    would compare equal to that stale value and be dropped from the flush.
     """
     result = await session.execute(
         update(SnapshotRow)
@@ -869,7 +880,7 @@ async def mark_snapshot_superseded(
             extraction_started_at=None,
             superseded_by_snapshot_id=superseded_by,
         )
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
     return bool(getattr(result, "rowcount", 0) == 1)
 

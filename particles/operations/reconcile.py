@@ -342,6 +342,8 @@ async def _set_supersedes_if_unset(session: AsyncSession, winner_id: str, loser_
         await session.flush()
 
 
+# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
+# next substantive change here (D2).
 async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     session: AsyncSession,
     *,

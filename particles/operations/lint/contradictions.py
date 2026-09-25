@@ -37,23 +37,19 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.equivalence import co_evidential_components
 from particles.core.schema import (
     LintFinding,
-    Particle,
     RelationCreatedBy,
     RelationType,
-    is_truth_apt,
 )
-from particles.core.stance import stance_holder
 from particles.core.status import Status
-from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
 from particles.operations._llm import _llm_call, _llm_call_many
-from particles.operations._scope import pair_scope_tier
+from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
 from particles.store.particle_store import (
     get_active_particles_with_embeddings,
     get_particles_by_ids,
@@ -194,91 +190,51 @@ async def _check_contradictions(
     mixed pairs, so a binding cap goes to the intra-harvest pairs a memory
     audit is about instead of coincidental cross-store neighbours.
     """
-    from particles.store.relation_store import get_co_evidential_group
+    from particles.store.relation_store import get_all_relations
 
     if control is None:
         control = ContradictionProbeControl()
     threshold = get_config().lint.contradiction_candidate_threshold
 
-    # ACTIVE particles carrying a current-model embedding (the similarity gate
-    # needs a vector), minus DOCUMENT_META, non-asserted,
-    # and non-truth-apt particles. A rejected / deferred / counterfactual claim
-    # must not manufacture an INCONSISTENCY against the chosen decision.
+    # Gather. ACTIVE particles carrying a current-model embedding (the
+    # similarity gate needs a vector), minus DOCUMENT_META,
+    # non-asserted, and non-truth-apt particles. A rejected /
+    # deferred / counterfactual claim must not manufacture an INCONSISTENCY
+    # against the chosen decision.
     candidates = [
         (p, emb)
         for p, emb in await get_active_particles_with_embeddings(session)
-        if not is_excluded_document_meta(p.properties)
-        and not is_non_asserted(p.properties)
-        and is_truth_apt(p)
+        if not is_excluded_document_meta(p.properties) and is_pair_eligible(p)
     ]
     if len(candidates) < 2:
         return []
-
-    # Row-normalise once so cosine reduces to a dot product. The stored vectors
-    # are already unit-norm; normalise defensively, mirroring ``_find_conflict``.
-    emb_matrix: np.ndarray[Any, np.dtype[np.float32]] = np.asarray(
-        [emb for _, emb in candidates], dtype=np.float32
+    # Pairs linked CO_EVIDENTIAL are paraphrases, not contradictions: the
+    # components are read once, not walked per particle.
+    linked = co_evidential_components(
+        await get_all_relations(session, RelationType.CO_EVIDENTIAL), 0.0
     )
-    emb_matrix = emb_matrix / (np.linalg.norm(emb_matrix, axis=1, keepdims=True) + 1e-10)
-
-    # Per-particle co-evidential cluster cache to avoid repeated BFS.
-    cluster_for: dict[str, set[str]] = {}
     # A recorded contradiction is reported by _check_recorded_contradictions
     # without a probe; probing it again would pay twice and
     # report it twice.
     recorded = await _recorded_pairs(session)
 
-    async def _cluster(pid: str) -> set[str]:
-        if pid not in cluster_for:
-            cluster_for[pid] = await get_co_evidential_group(session, pid)
-        return cluster_for[pid]
-
-    # Phase 1 — enumerate the candidate-pair set (no LLM). Knowing the full
-    # set before the first probe is what makes the cap, the "probed X of Y"
+    # Decide — enumerate the candidate-pair set (no LLM). Knowing the full set
+    # before the first probe is what makes the cap, the "probed X of Y"
     # disclosure, and per-pair done/total progress possible.
-    pairs: list[tuple[int, float, Particle, Particle]] = []
-    n = len(candidates)
-    for i in range(n):
-        p_a = candidates[i][0]
-        # Cosine of i against every later particle in one vectorized product;
-        # the upper triangle (j > i) visits each unordered pair exactly once.
-        # clamp negatives to 0 so this stays on the normative [0, 1]
-        # similarity scale (vectorized analogue of embeddings.cosine_similarity;
-        # inert for the positive ``threshold`` gate, kept for contract uniformity).
-        sims = np.clip(emb_matrix[i + 1 :] @ emb_matrix[i], 0.0, 1.0)
-        for offset in np.flatnonzero(sims >= threshold).tolist():
-            j = i + 1 + offset
-            p_b = candidates[j][0]
-
-            # Scope gate: at least one side must be in scope. The
-            # tier — 0 both sides, 1 one side — also drives the probe order
-            # below; store-wide (no scope) reads tier 0 throughout.
-            tier = pair_scope_tier(control.scope_particle_ids, p_a.id, p_b.id)
-            if tier > 1:
-                continue
-
-            # Skip pairs linked CO_EVIDENTIAL — paraphrases, not contradictions.
-            if p_b.id in await _cluster(p_a.id):
-                continue
-            if frozenset((p_a.id, p_b.id)) in recorded:
-                continue
-
-            # a stance only contradicts a same-holder stance; a
-            # stance never contradicts its target, and different-holder stances
-            # never contradict. Two non-stances both read None and pass through.
-            if stance_holder(p_a) != stance_holder(p_b):
-                continue
-
-            pairs.append((tier, float(sims[offset]), p_a, p_b))
-
-    # Intra-scope pairs first, then mixed; highest similarity first
-    # within each tier (ids as a deterministic tie-break). Under a cap the LLM
-    # budget goes to the harvest's own pairs before coincidental cross-pairs;
-    # with no scope every tier is 0 and this is the pure similarity order.
-    pairs.sort(key=lambda t: (t[0], -t[1], t[2].id, t[3].id))
+    # Intra-scope pairs come first, then mixed; highest similarity
+    # first within each tier. Under a cap the LLM budget goes to the harvest's
+    # own pairs before coincidental cross-pairs; with no scope every tier is 0
+    # and this is the pure similarity order.
+    pairs = enumerate_candidate_pairs(
+        candidates,
+        threshold=threshold,
+        linked=linked,
+        exclude=recorded,
+        scope=control.scope_particle_ids,
+    )
     control.candidate_pairs = len(pairs)
     if control.scope_particle_ids is not None:
-        control.intra_scope_pairs = sum(1 for t in pairs if t[0] == 0)
+        control.intra_scope_pairs = sum(1 for c in pairs if c.tier == 0)
     planned = len(pairs) if control.max_probes is None else min(len(pairs), control.max_probes)
 
     # Phase 2 — probe the planned prefix. Two shapes, one verdict list: N
@@ -291,7 +247,7 @@ async def _check_contradictions(
     verdicts: list[str | None] = []
     if control.latency_tolerant:
         verdicts = await _batch_check_contradictions(
-            [(p_a.content, p_b.content) for _tier, _sim, p_a, p_b in probe_pairs]
+            [(c.a.content, c.b.content) for c in probe_pairs]
         )
         control.probes_run = len(probe_pairs)
         if control.on_progress is not None and probe_pairs:
@@ -299,14 +255,15 @@ async def _check_contradictions(
             # per-pair completion moment to report.
             control.on_progress(len(probe_pairs), planned)
     else:
-        for done, (_tier, _sim, p_a, p_b) in enumerate(probe_pairs, start=1):
-            verdicts.append(await _llm_check_contradiction(p_a.content, p_b.content))
+        for done, c in enumerate(probe_pairs, start=1):
+            verdicts.append(await _llm_check_contradiction(c.a.content, c.b.content))
             control.probes_run = done
             if control.on_progress is not None:
                 control.on_progress(done, planned)
 
     findings: list[LintFinding] = []
-    for (_tier, _sim, p_a, p_b), contradiction in zip(probe_pairs, verdicts, strict=True):
+    for c, contradiction in zip(probe_pairs, verdicts, strict=True):
+        p_a, p_b = c.a, c.b
         if contradiction:
             findings.append(
                 LintFinding(

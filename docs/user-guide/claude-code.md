@@ -30,7 +30,7 @@ difference shows up exactly where file memory hurts:
   decreed after something went wrong once. As a particle it carries *when* it
   was asserted and *which session* it came from, so a future session asking
   "does this still apply, and what was it protecting against?" is one hop
-  from the answer instead of archaeology. And if a later session writes
+  from the answer instead of archaeology. If a later session writes
   "push automatically after each commit," that isn't a silent second line in
   a file; it's a detected contradiction, queued for your ruling.
 - **Flaky-infrastructure facts age honestly.** "Sometimes the tailscale link
@@ -167,8 +167,8 @@ sees:
 It does not see another project's beliefs, and it does not see harvested
 material that could not be attributed to any project. Nothing is stored on the
 belief to make this work: a belief's projects are read from the `project:` tag
-on the sources it came from, each time it is read. So this is a reading lens,
-not a partition. Storage is shared, maintenance (`lint`, `review`, `curate`,
+on the sources it came from, each time it is read. That makes it a reading
+lens, not a partition. Storage is shared, maintenance (`lint`, `review`, `curate`,
 the nightly consolidation) still sees everything, and switching back is the
 same one line. The digest header says which view it is and how many beliefs
 are in scope, and the `MEMORY.md` region ends with a comment naming its
@@ -199,8 +199,8 @@ particles memory rescope --default-key .                 # all of them: this dir
 particles memory rescope --assign <entry-id> <project>   # or one at a time
 ```
 
-And sources whose only project no longer exists on this machine are listed so
-you can give them a live one.
+Sources whose only project no longer exists on this machine are also listed
+so you can give them a live one.
 
 **Make a belief global.** "This rule I learned in one project is how I work
 everywhere" is your call, so it is yours to record:

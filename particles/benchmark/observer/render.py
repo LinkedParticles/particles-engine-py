@@ -33,7 +33,7 @@ def _metrics_rows(m: ObserverMetrics) -> list[str]:
     ]
     for kind in ("fact", "rule", "own"):
         if kind in m.by_kind:
-            rows.append(f"| In view — `{kind}` lines | {_rate(m.by_kind[kind])} |")
+            rows.append(f"| In view, `{kind}` lines | {_rate(m.by_kind[kind])} |")
     return rows
 
 

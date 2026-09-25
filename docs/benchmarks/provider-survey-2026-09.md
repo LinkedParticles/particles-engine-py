@@ -23,7 +23,7 @@ page. Different system under test, different verb group.
     bias applies to **every** non-Sonnet row here, including both Fireworks
     rows, and it is not small or quantified.
 
-    So these numbers measure **how well each model drives this extractor, on
+    These numbers therefore measure **how well each model drives this extractor, on
     this prompt, under this judge**, a procurement question about our own
     pipeline. They are *not* a comparative statement about model capability,
     and a lower row is not a worse model. Publishing them as a ranking of
@@ -163,7 +163,7 @@ recording, because both make it optimistic:
   per-model price table the SDK does not have.
 - **It undercounts input by roughly 3.8×.** It derives tokens from the source
   bytes and ignores the extraction system prompt, which is the larger half
-  (33 556 of 42 124 prompt characters per run). And it cannot project output
+  (33 556 of 42 124 prompt characters per run). It also cannot project output
   tokens, which are **94 % of the bill** for `claude-sonnet-5` and **96 %** for
   `glm-5p3-flash`. The estimate is a useful floor on call volume and close to
   useless as a cost forecast.
@@ -176,8 +176,8 @@ and a new tokenizer landed. **One landed and one did not.** The tokenizer
 changed. The price did not: Anthropic's pricing page states that the $2/$10
 introductory price became the standard price and that the increase to $3/$15
 scheduled for 2026-09-01 will not occur (verified 2026-09-17; an earlier
-revision of this page assumed it had). So the only cost change to account
-for is the tokenizer. The arithmetic it asked for:
+revision of this page assumed it had). The only cost change to account
+for is therefore the tokenizer. The arithmetic it asked for:
 
 **The tokenizer change is real and larger than the ~30 % the earlier page
 estimated.** Measured exactly and free of sampling noise with the token-counting
@@ -190,7 +190,7 @@ endpoint, over the byte-identical extraction prompt for one run of this suite
 | `claude-sonnet-4-6` | 11 396 | 3.70 | 1.000× |
 | `claude-haiku-4-5` | 11 392 | 3.70 | 0.9996× |
 
-So the same text costs **+36.9 % more tokens** on `claude-sonnet-5` than on
+The same text therefore costs **+36.9 % more tokens** on `claude-sonnet-5` than on
 `claude-sonnet-4-6`, and `claude-haiku-4-5` is on the older tokenizer (matching
 sonnet-4-6 to within 4 tokens in 11 396). Both sides of the bill inflate (a
 re-tokenized output is billed the same way), so the multiple applies to the
@@ -282,7 +282,7 @@ not by choice:
   Anthropic rows were therefore run at **16 384**, where they truncate nothing
   (0 of 12 calls).
 
-So a budget that satisfies the Fireworks reasoning models is rejected outright
+A budget that satisfies the Fireworks reasoning models is therefore rejected outright
 by the Anthropic route, and the harness has no per-route budget knob: the
 setting is global. **This is a comparability caveat on the tables above**: the
 Fireworks rows had twice the completion budget of the Anthropic rows. It

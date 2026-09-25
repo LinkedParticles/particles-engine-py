@@ -115,7 +115,7 @@ def init_claude_code_cmd(
         True,
         "--skills/--no-skills",
         help=(
-            "Also install the shipped agent-onboarding skill files "
+            "Install the shipped agent-onboarding skill files too, "
             "into the harness's skills directory (a Particles-owned subdirectory; "
             "--remove deletes exactly that). Default on: an agent that has the "
             "tools but not the guidance is the gap these close."

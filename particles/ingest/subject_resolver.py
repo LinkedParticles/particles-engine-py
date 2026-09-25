@@ -19,7 +19,6 @@ alias-merge / cache); authorities only recognize and resolve.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 
@@ -48,6 +47,11 @@ log = logging.getLogger(__name__)
 
 #: Actor on the ``SUBJECT_ALIASED`` event a recorded persona form carries.
 PERSONA_FOLD_ACTOR = "persona-fold"
+
+#: Actor on the ``SUBJECT_ALIASED`` event recorded when the cascade attaches an
+#: extracted name to an existing Subject (a live-authority or dedup attach). A
+#: process write, not an operator one (D1).
+RESOLVER_ALIAS_ACTOR = "subject-resolver"
 
 #: Persona forms some *other* Subject already answers to, per store — skipped
 #: by :func:`_record_persona_alias`, and remembered so a split store does not
@@ -90,17 +94,21 @@ def _skip_live_authorities(source_type: str | None) -> bool:
     return source_type in get_config().subjects.skip_live_authorities_source_types
 
 
-async def _merge_alias_into(session: AsyncSession, subject: Subject, name: str) -> None:
-    """Add ``name`` as an alias of an existing subject if not already present."""
-    if name in subject.aliases or name == subject.canonical_name:
-        return
-    subject.aliases.append(name)
-    from particles.store.subject_store import SubjectRow
+async def _attach_alias(session: AsyncSession, subject: Subject, name: str) -> Subject:
+    """Record ``name`` as an alias of the existing ``subject`` it resolved to.
 
-    row = await session.get(SubjectRow, subject.id)
-    if row:
-        row.aliases_json = json.dumps(subject.aliases)
-        await session.flush()
+    Routed through :func:`~particles.store.subject_store.add_aliases`,
+    so the write carries a ``SUBJECT_ALIASED`` event under
+    :data:`RESOLVER_ALIAS_ACTOR` and clears the resolution cache like every
+    other alias write. A name the subject already answers to returns early, so a
+    repeat attach records nothing. Returns the updated Subject; the caller
+    caches that one, *after* the clear.
+    """
+    folded = name.casefold()
+    if folded in {subject.canonical_name.casefold(), *(a.casefold() for a in subject.aliases)}:
+        return subject
+    updated, _ = await add_aliases(session, subject.id, [name], actor=RESOLVER_ALIAS_ACTOR)
+    return updated
 
 
 def _persona_canonical(name: str, source_type: str | None) -> str:
@@ -203,6 +211,8 @@ async def resolve_subject(
     return recorded
 
 
+# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
+# next substantive change here (D2).
 async def _resolve(
     session: AsyncSession,
     name: str,
@@ -268,9 +278,9 @@ async def _resolve(
                 continue
             all_missed = False
             if res.existing is not None:
-                await _merge_alias_into(session, res.existing, name)
-                subject_cache.cache_set(cache_key, res.existing)
-                return res.existing
+                attached = await _attach_alias(session, res.existing, name)
+                subject_cache.cache_set(cache_key, attached)
+                return attached
             # Build a new Subject from the authority's resolution.
             assert res.external_ref is not None  # resolve() contract: existing xor new
             # resolver abstention. An external-authority candidate scored
@@ -307,10 +317,10 @@ async def _resolve(
             if dup is None and resolved_name.lower() != name.lower():
                 dup = await _find_local(session, resolved_name, source_type)
             if dup is not None:
-                await _merge_alias_into(session, dup, name)
-                subject_cache.cache_set(cache_key, dup)
-                log.debug("Subject deduped on insert: %r → %s", name, dup.id)
-                return dup
+                attached = await _attach_alias(session, dup, name)
+                subject_cache.cache_set(cache_key, attached)
+                log.debug("Subject deduped on insert: %r → %s", name, attached.id)
+                return attached
             subject = Subject(
                 canonical_name=resolved_name,
                 description=res.description,

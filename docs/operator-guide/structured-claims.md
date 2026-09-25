@@ -28,7 +28,8 @@ This is the rule everything else follows from.
 
 `content`, `confidence` and provenance are **asserted**: a source said them,
 and they are never rewritten. The triple is **derived**: tooling produced it
-from `content`, and it can be regenerated at any time. So:
+from `content`, and it can be regenerated at any time. Three things
+follow from that:
 
 - Generating, regenerating, or failing to generate a triple **cannot change a
   belief**. Confidence is untouched, status is untouched, contradiction
@@ -46,7 +47,7 @@ is a real claim and not a relation between two things. The extractor and the
 backfill are both told to emit nothing rather than invent one, because a
 fabricated triple is a false statement the exporters will publish.
 
-So there is **no coverage target and no lint finding for a missing
+That is why there is **no coverage target and no lint finding for a missing
 annotation**. Nothing in the system degrades without it. Coverage is a number
 you can look at, not a goal you have to hit.
 

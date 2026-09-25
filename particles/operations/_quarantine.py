@@ -26,23 +26,38 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.core.conflict_review import Demotion, is_quarantined
 from particles.core.schema import Particle, UncertaintyNature
 from particles.core.status import Status, StatusReason, validate_transition
 from particles.store.particle_store import (
     copy_particle_embedding,
     insert_particle,
     update_particle_status,
+    update_status_reason,
 )
+
+__all__ = ["apply_demotion", "is_quarantined", "promote_quarantined"]
 
 log = logging.getLogger(__name__)
 
 
-def is_quarantined(particle: Particle) -> bool:
-    """True for a §6.6 quarantined conflict loser."""
-    return (
-        particle.status is Status.PROVENANCE_STALE
-        and particle.status_reason is StatusReason.CONFLICT_PENDING
-    )
+async def apply_demotion(session: AsyncSession, loser_id: str, demotion: Demotion) -> None:
+    """Write the demotion :func:`~particles.core.conflict_review.decide_demotion` chose.
+
+    Args:
+        session: Active session — the caller commits.
+        loser_id: The losing claim.
+        demotion: The decided move; ``NONE`` writes nothing.
+    """
+    match demotion:
+        case Demotion.REASON_FLIP:
+            await update_status_reason(session, loser_id, StatusReason.CONFLICT_RESOLVED)
+        case Demotion.TRANSITION:
+            await update_particle_status(
+                session, loser_id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
+            )
+        case Demotion.NONE:
+            log.debug("Loser %s needs no demotion", loser_id)
 
 
 async def promote_quarantined(

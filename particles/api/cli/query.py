@@ -68,7 +68,7 @@ def query_cmd(
     include_ancestors: bool = typer.Option(
         False,
         "--include-ancestors",
-        help="Also match particles tagged with a broader ancestor of each --tag "
+        help="Match particles tagged with a broader ancestor of each --tag as well "
         "(up-expansion over taxonomy parent links)",
     ),
     show_particles: bool = typer.Option(

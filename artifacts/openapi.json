@@ -2656,6 +2656,7 @@
         "description": "The kind of operator action an event records.\n\nOne value per distinct *outcome*: opposite outcomes get distinct types\n(``PARTICLE_TAGGED`` vs ``PARTICLE_UNTAGGED``) so ``--type`` is a precise\nfilter; the *same* outcome reached two ways (``trust set`` /\n``trust statement-set`` both write a SourceTrustStatement) shares one type,\nwith ``actor`` recording which verb. Extensible for later verbs that meet\nthe inclusion criterion.",
         "enum": [
           "SOURCE_RETRACTED",
+          "CORPUS_ENTRY_DELETED",
           "CONFLICT_CANDIDATE_DROPPED",
           "SUBJECTS_SPLIT",
           "SUBJECTS_MERGED",
@@ -7849,7 +7850,7 @@
     },
     "/particles/{particle_id}/source": {
       "get": {
-        "description": "Return the source passage behind a particle, with how it was found.\n\n``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),\n``LOCATED`` (best term-overlap paragraph \u2014 a reading aid, not\nverification), ``WHOLE`` (the snapshot text), or ``UNAVAILABLE`` with a\n``note``. Display only: never a ranking input. 404 if the particle does\nnot exist.",
+        "description": "Return the source passage behind a particle, with how it was found.\n\n``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),\n``LOCATED`` (best term-overlap paragraph; a reading aid, not\nverification), ``WHOLE`` (the snapshot text), or ``UNAVAILABLE`` with a\n``note``. Display only: never a ranking input. 404 if the particle does\nnot exist.",
         "operationId": "get_particle_source_particles__particle_id__source_get",
         "parameters": [
           {

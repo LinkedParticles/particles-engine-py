@@ -203,10 +203,11 @@ There is no network involved: no DNS, no redirects, no SSRF surface.
 !!! note "An unchanged mtime is a heuristic, not proof"
     Every ordinary editor, `git` operation, and formatter moves a file's mtime,
     and the comparison treats *any* difference (including one that moves
-    backwards, as a backup restore can) as "re-read". But a tool that
-    deliberately preserves mtime while changing content (`touch -r`) will be
-    missed. `particles corpus refresh --force` skips both the mtime check and
-    the per-source-type re-fetch floor, and is the escape hatch for that case.
+    backwards, as a backup restore can) as "re-read". A tool that
+    deliberately preserves mtime while changing content (`touch -r`), however,
+    will be missed. `particles corpus refresh --force` skips both the mtime
+    check and the per-source-type re-fetch floor, and is the escape hatch for
+    that case.
 
 ## What happens to the old beliefs
 

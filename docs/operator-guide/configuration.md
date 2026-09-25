@@ -63,7 +63,7 @@ Env-var overrides are registered in `_ENV_OVERRIDES` in
 |---|---|---|
 | `DATABASE_URL` | `database_url` | SQLite path |
 | `PARTICLES_BLOB_DIR` | `blob_dir` | Where deposited blobs are stored |
-| `PARTICLES_CONFIG` | — (bootstrap) | Path to a non-default `config.yaml` |
+| `PARTICLES_CONFIG` | none (bootstrap) | Path to a non-default `config.yaml` |
 | `TRUST_DIFFERENTIAL_THRESHOLD` | `trust.differential_threshold` | When trust differences flag inconsistencies |
 | `RECONCILIATION_STORE_MODE` | `reconciliation.store_mode` | `single` (default) or `multi`, the consensus-store reconciliation regime |
 
@@ -111,7 +111,7 @@ set here; it is per-call and lives with each call site
 Those per-call budgets are **total output** allowances on the wire, not
 response-length caps: an extended-thinking model spends its thinking tokens
 from the same number. A budget sized to the expected prose therefore returns a
-reply with no text in it at all — extraction reports a truncated JSON array,
+reply with no text in it at all: extraction reports a truncated JSON array,
 and `query` degrades to its deterministic belief listing with
 `answer_generation_error_cause: BUDGET`. `query` retries that case once at
 `query.answer_retry_max_tokens` before degrading; the others do not.
@@ -198,8 +198,8 @@ extraction:
 Confidence calibration is **per `(extractor, model)` pairing**:
 each `particles extractor calibrate` run stores a record keyed by the
 extraction model it ran under, and the pipeline applies the one matching the
-configured model. So a *newly* pointed model, including any
-`<provider>:<model>`, is uncalibrated until you benchmark it (queries fall
+configured model. A *newly* pointed model, including any
+`<provider>:<model>`, is therefore uncalibrated until you benchmark it (queries fall
 back to the `EXTRACTOR_DIRECT` disclosure meanwhile), but switching **back**
 to a model you calibrated before restores its calibration with no re-fit.
 List the stored pairings with `particles extractor calibrations
@@ -217,8 +217,8 @@ List the stored pairings with `particles extractor calibrations
 >
 > Note the scope change: `llm.default.model` is the fallback for *every*
 > purpose, including semantic lint and the benchmark judge, which were
-> previously hard-wired to `claude-sonnet-4-6`. So if you set a non-default
-> `extraction.model` (now `llm.default.model`), it will also drive lint and
+> previously hard-wired to `claude-sonnet-4-6`. That means a non-default
+> `extraction.model` (now `llm.default.model`) will also drive lint and
 > benchmark. To keep those on a cheaper model, set `llm.semantic_lint.model`
 > / `llm.benchmark.model` explicitly.
 

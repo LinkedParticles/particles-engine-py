@@ -48,12 +48,12 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.equivalence import co_evidential_components
 from particles.core.schema import (
     ContestedBadge,
     ContestednessReading,
     LintFinding,
     Particle,
-    ParticleRelation,
     RelationType,
 )
 from particles.core.stance import stance_holder
@@ -104,38 +104,6 @@ def _histogram(spreads: list[float]) -> dict[str, int]:
                 counts[_bucket_label(lo, hi, last)] += 1
                 break
     return counts
-
-
-def _components(edges: list[ParticleRelation], min_confidence: float) -> dict[str, frozenset[str]]:
-    """Group ids into CO_EVIDENTIAL components from the whole edge list at once.
-
-    The in-memory equivalent of running ``get_co_evidential_group`` per particle,
-    honouring the same ``effective_equivalence >= min_confidence`` gate. Ids with
-    no qualifying edge are simply absent — their component is the singleton the
-    caller supplies.
-    """
-    from particles.core.equivalence import effective_equivalence
-
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for e in edges:
-        if effective_equivalence(e.confidence) < min_confidence:
-            continue
-        a, b = find(e.particle_a), find(e.particle_b)
-        if a != b:
-            parent[a] = b
-
-    groups: dict[str, set[str]] = {}
-    for node in list(parent):
-        groups.setdefault(find(node), set()).add(node)
-    return {node: frozenset(members) for members in groups.values() for node in members}
 
 
 @dataclass(frozen=True)
@@ -189,7 +157,7 @@ async def compute_store_contested(session: AsyncSession) -> ContestedCensus:
     policy_names: list[str] = []
     if len(members) >= 2 and measurable:
         policy_names = [m.name for m in members]
-        coev = _components(
+        coev = co_evidential_components(
             await get_all_relations(session, RelationType.CO_EVIDENTIAL),
             cfg.query.equivalence_threshold,
         )
@@ -223,7 +191,7 @@ async def compute_store_contested(session: AsyncSession) -> ContestedCensus:
         if live:
             # The dispute travels across the target's co-evidential group, the
             # same closure `_dispute_presence` walks (ungated, min_confidence=0).
-            groups_all = _components(
+            groups_all = co_evidential_components(
                 await get_all_relations(session, RelationType.CO_EVIDENTIAL), 0.0
             )
             for target in live:

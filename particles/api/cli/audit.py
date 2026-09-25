@@ -99,7 +99,7 @@ def audit_cmd(
         ),
     ),
     output: Path | None = typer.Option(
-        None, "--output", help="Also write the Markdown report to FILE."
+        None, "--output", help="Write the Markdown report to FILE as well."
     ),
     format_: str = typer.Option(
         "markdown", "--format", help="Terminal format: markdown (default) or json."

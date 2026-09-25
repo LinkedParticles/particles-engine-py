@@ -1,7 +1,7 @@
 # Citation-signal deposit suggestions
 
 Particles never crawls the web; deposit is operator-driven
-([how to deposit](../user-guide/getting-started.md#deposit-a-source)). But a
+([how to deposit](../user-guide/getting-started.md#deposit-a-source)), but a
 URL **mentioned repeatedly** across your corpus is a strong curation signal: a
 primary source many of your already-deposited discussions lean on, that the
 corpus itself doesn't contain. Until you deposit it, the database represents
@@ -51,7 +51,7 @@ When you do, two things reconcile automatically:
 2. Each source that cited it gains a `COMMENT_LINK` follow edge to the new
    entry (visible via `corpus links list`).
 
-Now the corpus holds the primary source. At query time, §6.6 conflict
+The corpus now holds the primary source. At query time, §6.6 conflict
 resolution and `effective_confidence` prefer the higher-trust primary over the
 hearsay: the database's **accuracy** improves, not just its size.
 

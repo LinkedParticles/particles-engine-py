@@ -26,7 +26,7 @@ class MyExporter:
         return MyFormatSummary(...)
 ```
 
-Plus a Pydantic `MyFormatSummary(BaseExporterSummary)` in
+Add a Pydantic `MyFormatSummary(BaseExporterSummary)` too, in
 `particles/exporters/summaries.py`. Add one line to
 `particles/exporters/registry.py::_make_exporters()`. A new option or an
 API target also needs the `particles export` command edited; the next

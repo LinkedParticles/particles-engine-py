@@ -171,8 +171,8 @@ created in. A store has no single creation order to preserve once other
 Particles surfaces write to it too.
 
 Two smaller differences are invisible to a tool call. The server reports the
-Particles package version as its `serverInfo.version`, not the reference's. And
-where the reference queues mutations behind one lock, here each tool call is
+Particles package version as its `serverInfo.version`, not the reference's.
+Where the reference queues mutations behind one lock, here each tool call is
 its own database transaction.
 
 ## What is not different
@@ -302,8 +302,8 @@ brings across only what is new.
 ### Your migrated memories will look less confident. That is deliberate.
 
 They are second-hand: this store never saw the claim made, cannot check it, and
-did not calibrate any number attached to it. So every migrated belief gets one
-flat, low confidence (`migration.import_confidence`, default `0.35`) and is
+did not calibrate any number attached to it. Every migrated belief therefore
+gets one flat, low confidence (`migration.import_confidence`, default `0.35`) and is
 labelled `IMPORTED`, which is also what lets you tell **what you brought with
 you** apart from **what your agent has learned since**.
 

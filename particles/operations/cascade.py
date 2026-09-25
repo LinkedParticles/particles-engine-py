@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.cascade_gate import apply_cascade_cap, cascade_gate_passes
-from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+from particles.core.conflict_review import cascade_pair, conflict_pair_ids, decide_cascade
 from particles.core.schema import (
     SCHEMA_VERSION,
     Confidence,
@@ -37,13 +37,12 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason, validate_transition
-from particles.operations._quarantine import is_quarantined, promote_quarantined
+from particles.operations._quarantine import apply_demotion, promote_quarantined
 from particles.store.particle_store import (
     get_inconsistency_particles_by_domain,
     get_particle,
     insert_particle,
     update_particle_status,
-    update_status_reason,
 )
 from particles.store.trust_store import (
     count_reviewer_confirmations,
@@ -137,65 +136,48 @@ async def _try_resolve_inconsistency(
     inconsistency: Particle,
     statement: SourceTrustStatement,
 ) -> bool:
-    """Attempt to auto-resolve one INCONSISTENCY particle. Returns True if resolved."""
-    particle_refs = [r for r in inconsistency.provenance if r.type == ProvenanceRefType.PARTICLE]
-    if len(particle_refs) < 2:
-        return False
+    """Attempt to auto-resolve one INCONSISTENCY particle. Returns True if resolved.
 
-    particle_a_id = particle_refs[0].corpus_entry_id
-    particle_b_id = particle_refs[1].corpus_entry_id
+    Gather, decide, apply (D2). The structural check runs before the
+    trust ranks are looked up, so a wrapper left for a person costs no rank
+    lookups; the verdict itself is :func:`particles.core.conflict_review.decide_cascade`.
+    """
+    particle_a_id, particle_b_id = conflict_pair_ids(inconsistency)
+    if particle_a_id is None or particle_b_id is None:
+        return False
 
     particle_a = await get_particle(session, particle_a_id)
     particle_b = await get_particle(session, particle_b_id)
 
-    # Genuinely exceptional since (the INCONSISTENT-verdict loser is
-    # persisted quarantined, so both constituents normally exist): only
-    # pre-0117 wrappers with a dangling B ref land here. They stay open for
-    # manual review (PREFER_A / DEFER still work over them).
-    if particle_a is None or particle_b is None:
-        return False
-
-    # a retired-value record is a question about a *judgment* ("does
-    # the retirement stand?"), not about which source outranks which. Source
-    # trust cannot answer it, so it is left for a person — as is any wrapper
-    # whose A has since left the surface by a terminal transition.
-    if (inconsistency.properties and inconsistency.properties.get(RETIRED_VALUE_KEY)) or (
-        particle_a.status in (Status.RETRACTED, Status.SUPERSEDED)
-    ):
+    # Left open for manual review: a pre-ADR-0117 wrapper with a dangling B
+    # ref, a retired-value record, or a wrapper whose A has since left the
+    # surface.
+    pair = cascade_pair(inconsistency, particle_a, particle_b)
+    if pair is None:
         return False
 
     # Resolve trust ranks for both constituent particles
-    rank_a = await _particle_trust_rank(session, particle_a, statement.domain)
-    rank_b = await _particle_trust_rank(session, particle_b, statement.domain)
+    rank_a = await _particle_trust_rank(session, pair[0], statement.domain)
+    rank_b = await _particle_trust_rank(session, pair[1], statement.domain)
 
-    if rank_a is None or rank_b is None:
+    verdict = decide_cascade(
+        inconsistency,
+        particle_a,
+        particle_b,
+        rank_a,
+        rank_b,
+        differential_threshold=get_config().trust.differential_threshold,
+    )
+    if verdict is None:
         return False
+    winner_id, loser_id = verdict.winner.id, verdict.loser.id
 
-    diff = rank_a - rank_b
-    if abs(diff) < get_config().trust.differential_threshold:
-        return False
-
-    if diff > 0:
-        winner_id, loser_id = particle_a_id, particle_b_id
-        winner, loser = particle_a, particle_b
-    else:
-        winner_id, loser_id = particle_b_id, particle_a_id
-        winner, loser = particle_b, particle_a
-
-    # Demote loser. A quarantined loser is already
-    # PROVENANCE_STALE — flip its reason in place instead of re-transitioning.
-    if loser.status is Status.PROVENANCE_STALE:
-        if loser.status_reason is StatusReason.CONFLICT_PENDING:
-            await update_status_reason(session, loser_id, StatusReason.CONFLICT_RESOLVED)
-    else:
-        await update_particle_status(
-            session, loser_id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
-        )
+    await apply_demotion(session, loser_id, verdict.loser_demotion)
     # Promote a quarantined winner: a cascade resolving in favour
     # of the quarantined candidate mints the new ACTIVE particle exactly as a
     # PREFER_B review would.
-    if is_quarantined(winner):
-        await promote_quarantined(session, winner)
+    if verdict.promote_winner:
+        await promote_quarantined(session, verdict.winner)
     # Mark INCONSISTENCY resolved
     await update_particle_status(
         session, inconsistency.id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED

@@ -1070,7 +1070,7 @@ async def get_particle_source(
     """Return the source passage behind a particle, with how it was found.
 
     ``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),
-    ``LOCATED`` (best term-overlap paragraph — a reading aid, not
+    ``LOCATED`` (best term-overlap paragraph; a reading aid, not
     verification), ``WHOLE`` (the snapshot text), or ``UNAVAILABLE`` with a
     ``note``. Display only: never a ranking input. 404 if the particle does
     not exist."""

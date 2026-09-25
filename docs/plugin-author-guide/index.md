@@ -3,7 +3,7 @@
 You're writing a new extractor, Subject Authority, exporter, benchmark
 suite, or conformance fixture. Each page below is that family's
 contract: what to build, where it plugs in, and the rules no function
-signature states — identity constants you must never change, naming,
+signature states: identity constants you must never change, naming,
 registration, lifecycle.
 
 | You want to | Start here | Protocol lives in |
@@ -24,7 +24,7 @@ you import it.
 ## The guide is the contract
 
 Each family page states that family's contract in full: the protocol's
-shape, and the normative rules around it that a signature cannot carry —
+shape, and the normative rules around it that a signature cannot carry:
 which module constants are identity and must stay stable across versions,
 how a plugin is named and registered, what it may and may not do at
 extraction or export time, and what a change to an existing plugin
@@ -35,7 +35,7 @@ The protocol itself lives once, in `particles/<package>/registry.py` (or
 the family's `schema.py` / `contract.py`), and the guide links it rather
 than copying it. Read the two together: the page for the rules, the source
 for the exact signatures. If they ever disagree, that is a bug in one of
-them — please report it.
+them. Please report it.
 
 ## Where the plumbing lives
 

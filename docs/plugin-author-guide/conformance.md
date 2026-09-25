@@ -58,14 +58,16 @@ with exactly three files:
 | `content.bin` | Raw bytes the extractor receives (API response / HTML / etc.) |
 | `snapshot.json` | Serialised `Snapshot` (sha256, etag, content_published_at, …) |
 
-Plus an entry in the top-level `tests/conformance/fixtures/MANIFEST.yaml`.
+Each fixture also needs an entry in the top-level
+`tests/conformance/fixtures/MANIFEST.yaml`.
 
 Discovery does **not** read `MANIFEST.yaml`. The loader walks the
 directory and loads every subdirectory that has a `manifest.yaml`,
 sorted by name. It skips hidden directories (`.`-prefixed),
 `__`-prefixed directories, and subdirectories with no `manifest.yaml`.
 A subdirectory that has a `manifest.yaml` but lacks `content.bin` or
-`snapshot.json` raises an error and stops the run. So:
+`snapshot.json` raises an error and stops the run. Two
+things follow from that:
 
 - A fixture you forget to list in `MANIFEST.yaml` is still live in every
   run and still counts toward the corpus hash. Keep the list complete

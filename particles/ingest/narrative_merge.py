@@ -11,13 +11,17 @@ would fragment into N disconnected narratives — and the pipeline's NARRATIVE
 edge-writer fires only when exactly one NARRATIVE candidate is present, so it
 would write nothing.
 
-:func:`collapse_chunk_narratives` is the bridge. It consumes the *accumulated
-output of all passes* and arbitrates one canonical structure from it — choosing
-(synthesizing) the single whole-entry label and re-deriving a global
-``SEQUENCE_IN`` order no single pass could see. That is "reasoning over
-accumulated state", so it is **Engine** and lives here in
-``ingest/``, adjacent to the edge-writer it feeds. The Client extractor stays a
-clean per-pass candidate producer.
+The merge is the bridge. It consumes the *accumulated output of all passes* and
+arbitrates one canonical structure from it — synthesizing the single whole-entry
+label and re-deriving a global ``SEQUENCE_IN`` order no single pass could see.
+That is "reasoning over accumulated state", so it is **Engine** and
+lives here in ``ingest/``, adjacent to the edge-writer it feeds. The Client
+extractor stays a clean per-pass candidate producer.
+
+The label is the merge's one model call, and it stays in the shell: the pipeline
+gathers :func:`narrative_labels`, awaits :func:`_merge_label` only when there are
+two or more, and hands the result to the pure :func:`collapse_narratives`, which
+decides the rest (D2).
 
 The merge runs *before* embedding / §6.6 / the write loop, so the rest of the
 pipeline sees output shaped exactly like single-pass journal output (one
@@ -43,16 +47,30 @@ log = logging.getLogger(__name__)
 _MERGE_LABEL_MAX_TOKENS = 256
 
 
-async def collapse_chunk_narratives(
+def narrative_labels(candidates: list[CandidateParticle]) -> list[str]:
+    """Return the NARRATIVE candidates' labels, in candidate-list order.
+
+    The labels :func:`_merge_label` synthesizes from. A merge is needed only when
+    there are two or more; the caller calls the model on that condition alone and
+    hands the result to :func:`collapse_narratives` (D2).
+    """
+    return [c.content for c in candidates if c.particle_type == ParticleType.NARRATIVE]
+
+
+def collapse_narratives(
     candidates: list[CandidateParticle],
+    label: str,
 ) -> tuple[list[CandidateParticle], list[str]]:
     """Collapse per-chunk NARRATIVE fragments into one whole-entry NARRATIVE.
 
+    Pure: ``label`` is the whole-entry label, already synthesized by
+    :func:`_merge_label` (or its first-label fallback), so the decision takes the
+    model's output as a value and never calls it (D2).
+
     Returns ``(candidates, notes)``. For **≤ 1** NARRATIVE candidate the input
-    list is returned unchanged (the no-op case). For **≥ 2** the NARRATIVE
-    candidates are collapsed to one (the first), its ``content`` set to a
-    synthesized whole-entry label (deterministic first-label fallback, §
-    :func:`_merge_label`), the rest dropped, and every constituent's
+    list is returned unchanged and ``label`` is ignored (the no-op case). For
+    **≥ 2** the NARRATIVE candidates are collapsed to one (the first), its
+    ``content`` set to ``label``, the rest dropped, and every constituent's
     ``narrative_index`` reassigned to a global monotonic order following
     candidate-list position — which is whole-entry document order, because
     ``extract_with_carry_forward`` processes chunks in order and appends their
@@ -64,9 +82,7 @@ async def collapse_chunk_narratives(
     if len(narr_positions) <= 1:
         return candidates, []
 
-    notes: list[str] = []
-    labels = [candidates[i].content for i in narr_positions]
-    candidates[narr_positions[0]].content = await _merge_label(labels, notes)
+    candidates[narr_positions[0]].content = label
 
     drop = set(narr_positions[1:])
     merged = [c for i, c in enumerate(candidates) if i not in drop]
@@ -81,10 +97,10 @@ async def collapse_chunk_narratives(
             c.narrative_index = global_index
             global_index += 1
 
-    notes.append(
+    notes = [
         f"NARRATIVE_MERGE: collapsed {len(narr_positions)} per-chunk narrative "
         f"fragments into one whole-entry NARRATIVE over {global_index} constituents"
-    )
+    ]
     return merged, notes
 
 

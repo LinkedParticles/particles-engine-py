@@ -71,7 +71,7 @@ review) already retired: a source still says a value that was retracted or
 superseded by judgment, and the pipeline held the new copy for you instead of
 re-minting it. Their headline reads *"a candidate re-asserts a claim retired by
 judgment"* and Particle A is the retired original. Read the actions as:
-`PREFER_A` — the retirement stands; `PREFER_B` — lift it (a fresh ACTIVE
+`PREFER_A`: the retirement stands; `PREFER_B`: lift it (a fresh ACTIVE
 particle is minted from the held copy; the original stays retired). Neither
 writes a trust statement or triggers a cascade, because the question was
 about a value, not a source. Set `extraction.retired_value_quarantine.enabled:

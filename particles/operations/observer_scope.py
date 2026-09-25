@@ -52,6 +52,8 @@ class RescopeReport:
     keys still name a live project needs to find entries no session can see."""
 
 
+# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
+# next substantive change here (D2).
 async def rescope(
     session: AsyncSession,
     *,
