@@ -1,7 +1,7 @@
 # The relevance floor, measured on real questions
 
 A query against a store always retrieves *something*: top-k similarity search
-has no notion of "nothing was close". So the query operation holds the best
+has no notion of "nothing was close", so the query operation holds the best
 retrieved cosine to a **relevance floor** (`query.relevance_floor`, default
 0.25). Below it, the answer step is skipped and a server-built refusal is
 returned, with the nearest beliefs still listed and the similarity disclosed.
@@ -92,7 +92,7 @@ of 27,980 active beliefs. Encoder `all-MiniLM-L6-v2`, `top_k` 40, stock
 configuration. No LLM call was made.
 
 **Nothing in the transcripts had ever been refused.** Of the explicit query
-calls whose result a transcript captured (5), none carried the refusal. So
+calls whose result a transcript captured (5), none carried the refusal, so
 there was no recorded population of refused questions to study; the refusals
 below come from replaying real questions, which is the only way to find the
 ones the gate would turn away.

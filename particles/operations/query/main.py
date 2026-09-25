@@ -163,6 +163,8 @@ async def _expand_narratives(
     return out
 
 
+# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
+# next substantive change here (D2).
 async def _gather_scored(
     session: AsyncSession,
     request: QueryRequest,

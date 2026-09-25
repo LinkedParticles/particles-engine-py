@@ -30,7 +30,7 @@ attestation you can check:
 gh attestation verify oci://ghcr.io/linkedparticles/engine:latest --owner LinkedParticles
 ```
 
-Each platform image also carries a signed **SBOM** — a CycloneDX 1.6
+Each platform image also carries a signed **SBOM**, a CycloneDX 1.6
 inventory of its Debian packages, its Python closure, and the exact revision of
 the embedding encoder baked into it (see [What is in the image](#what-is-in-the-image)).
 Verify it and print it in one step:
@@ -200,7 +200,7 @@ The same two facts, without a browser:
 curl -s http://localhost:8000/health
 ```
 
-And from outside the container, including for an image that is not running:
+The same facts from outside the container, including for an image that is not running:
 
 ```bash
 docker image inspect ghcr.io/linkedparticles/engine:dev --format '{{json .Config.Labels}}'

@@ -474,7 +474,7 @@ notes, so the dry run and the real run disclose the same losses.
 is no subject-only candidate, so two things follow for a format whose entities
 can be empty. Put an entity's metadata (`subject_classes`, `external_refs`) on
 *every* candidate that names it, edges included, because for an entity with no
-records of its own the edge is the only candidate that will. And an entity no
+records of its own the edge is the only candidate that will. An entity no
 candidate names does not migrate: do not invent a placeholder claim to carry
 it, which would be a belief the source never held. Report it by name in
 `quality_notes` instead, as `mcp_memory.py` does.

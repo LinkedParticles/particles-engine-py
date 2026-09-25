@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -87,21 +88,21 @@ class CollapseReport:
         )
 
 
-def plan_collapse(generations: list[GenerationRow]) -> list[tuple[str, str]]:
+def plan_collapse(
+    generations: list[GenerationRow], present_blobs: AbstractSet[str]
+) -> list[tuple[str, str]]:
     """``(snapshot_id, superseded_by)`` for one entry's RESPONSE snapshots, oldest first.
 
-    Pure apart from the blob ``stat``: the superseding snapshot is the entry's
-    **newest** eligible generation, so every collapsed row names the snapshot
-    that will actually be extracted rather than an intermediate one that is
-    itself about to be collapsed.
+    Pure (D2): ``present_blobs`` is the set of content hashes whose
+    blob the caller found on disk, so the decision reads no filesystem. The
+    superseding snapshot is the entry's **newest** eligible generation whose
+    blob is present, so every collapsed row names the snapshot that will
+    actually be extracted rather than an intermediate one that is itself about
+    to be collapsed.
     """
     superseder: GenerationRow | None = None
     for row in reversed(generations):
-        if (
-            row.extraction_status in _CAN_SUPERSEDE
-            and not row.collapsed
-            and blob_path(row.content_hash).exists()
-        ):
+        if _is_eligible_superseder(row) and row.content_hash in present_blobs:
             superseder = row
             break
     if superseder is None:
@@ -112,6 +113,11 @@ def plan_collapse(generations: list[GenerationRow]) -> list[tuple[str, str]]:
         for row in generations[:cut]
         if row.extraction_status in _UNEXTRACTED and not row.collapsed
     ]
+
+
+def _is_eligible_superseder(row: GenerationRow) -> bool:
+    """Whether ``row`` may supersede older snapshots, blob presence aside."""
+    return row.extraction_status in _CAN_SUPERSEDE and not row.collapsed
 
 
 async def collapse_superseded_pending(
@@ -140,10 +146,17 @@ async def collapse_superseded_pending(
         return report
 
     grouped = await list_generations_with_unextracted_snapshots(session, entry_ids=entry_ids)
+    # Gather: stat only the rows that could supersede, as the decision needs.
+    present_blobs = {
+        row.content_hash
+        for generations in grouped.values()
+        for row in generations
+        if _is_eligible_superseder(row) and blob_path(row.content_hash).exists()
+    }
     planned = [
         (entry_id, snapshot_id, superseded_by)
         for entry_id, generations in grouped.items()
-        for snapshot_id, superseded_by in plan_collapse(generations)
+        for snapshot_id, superseded_by in plan_collapse(generations, present_blobs)
     ]
     if not planned:
         return report

@@ -244,6 +244,8 @@ async def load_retirement_index(session: AsyncSession) -> RetirementIndex:
         ).where(ParticleRow.supersedes.isnot(None))
     )
     for succ_id, content, predecessor_id, asserted_at in result.all():
+        if predecessor_id is None:  # excluded by the WHERE; narrows the type
+            continue
         current = successor_by_predecessor.get(predecessor_id)
         # Multiple successors are unexpected but legal data; the retirement
         # instant is the *first* replacement.
@@ -253,7 +255,7 @@ async def load_retirement_index(session: AsyncSession) -> RetirementIndex:
             )
 
     event_retired_at: dict[str, datetime] = {}
-    result = await session.execute(
+    event_result = await session.execute(
         select(OperatorEventRefRow.ref_id, OperatorEventRow.occurred_at)
         .join(OperatorEventRow, OperatorEventRow.event_id == OperatorEventRefRow.event_id)
         .where(
@@ -261,7 +263,7 @@ async def load_retirement_index(session: AsyncSession) -> RetirementIndex:
             OperatorEventRow.event_type.in_(RETIREMENT_EVENT_TYPES),
         )
     )
-    for ref_id, occurred_at in result.all():
+    for ref_id, occurred_at in event_result.all():
         occurred = ensure_utc(occurred_at)
         current_at = event_retired_at.get(ref_id)
         # "The latest such event": a re-touched particle dates by the last

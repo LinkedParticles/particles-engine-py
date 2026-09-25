@@ -355,99 +355,58 @@ def corpus_delete_cmd(
     entry_id: str = typer.Argument(..., help="Entry ID (prefix OK)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
-    """Delete a corpus entry, its snapshots, and all particles sourced from it."""
+    """Delete a corpus entry, its snapshots, and the particles only it supports.
+
+    A particle that another entry also supports is kept, with this entry's
+    source refs removed. When the removed ref was its earliest source, the
+    next-earliest one becomes the age anchor. The delete is recorded as a
+    CORPUS_ENTRY_DELETED event that holds the entry id and counts, not the
+    deleted content.
+    """
     run(_corpus_delete(entry_id, yes))
 
 
 async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
-    from sqlalchemy import delete, select
-
     from particles.api.cli._remote import ensure_local
-    from particles.corpus.store import CorpusEntryRow, SnapshotRow, get_entry
-    from particles.store.particle_store import ParticleRow, ProvenanceEdgeRow
-    from particles.store.subject_store import ParticleSubjectRow
+    from particles.corpus.store import get_entry
+    from particles.operations.corpus_delete import delete_entry, plan_entry_deletion
 
     ensure_local("corpus delete")
 
     async with session_scope() as session:
-        if len(entry_id_prefix) < 36:
-            result = await session.execute(
-                select(CorpusEntryRow).where(
-                    CorpusEntryRow.entry_id.like(
-                        f"{escape_like_pattern(entry_id_prefix)}%", escape=LIKE_ESCAPE
-                    )
-                )
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
-                raise typer.Exit(1)
-            entry_id = row.entry_id
-        else:
-            entry_id = entry_id_prefix
-
+        entry_id = await _resolve_entry_id(session, entry_id_prefix)
         entry = await get_entry(session, entry_id)
         if entry is None:
             typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
             raise typer.Exit(1)
 
-        # Count particles to be deleted
-        particle_ids_result = await session.execute(
-            select(ProvenanceEdgeRow.particle_id).where(
-                ProvenanceEdgeRow.corpus_entry_id == entry_id
-            )
-        )
-        particle_ids = list(particle_ids_result.scalars())
+        plan = await plan_entry_deletion(session, entry_id)
+        n_delete = len(plan.decision.to_delete)
+        n_strip = len(plan.decision.to_strip)
+        n_moved = sum(1 for s in plan.decision.to_strip if s.anchor_moved)
 
         label = (entry.uri_r or entry_id).replace("file://", "")
         typer.echo(f"Entry:     {entry_id[:8]}…  {label}")
-        typer.echo(f"Snapshots: {len(entry.snapshots)}")
-        typer.echo(f"Particles: {len(particle_ids)} will be deleted")
+        typer.echo(f"Snapshots: {plan.snapshots}")
+        typer.echo(f"Particles: {n_delete} will be deleted (this entry is their only source)")
+        strip_line = f"           {n_strip} kept, other sources remain; this entry's refs removed"
+        if n_moved:
+            strip_line += f" ({n_moved} with a new earliest source)"
+        typer.echo(strip_line)
 
         if not yes:
             typer.confirm("Delete this entry and all its data?", abort=True)
 
-        # Subjects linked to the doomed particles — captured *before* we drop
-        # the join rows, so afterwards we can re-check each for orphanhood.
-        candidate_subject_ids: set[str] = set()
-        if particle_ids:
-            candidate_subject_ids = set(
-                (
-                    await session.execute(
-                        select(ParticleSubjectRow.subject_id).where(
-                            ParticleSubjectRow.particle_id.in_(particle_ids)
-                        )
-                    )
-                ).scalars()
-            )
-
-        # Delete particles + every index row keyed on them. These tables carry
-        # no FK to ``particles`` (SQLite FK enforcement is off), so they would
-        # otherwise be left dangling.
-        if particle_ids:
-            await session.execute(delete(ParticleRow).where(ParticleRow.id.in_(particle_ids)))
-            await _purge_particle_index_rows(session, particle_ids)
-
-        # Subjects that lost their last link become orphans; drop them and any
-        # synthesis-cache rows keyed on them. A subject still linked to a
-        # surviving particle is left untouched.
-        subj_removed, synth_removed = await _purge_orphan_subjects(session, candidate_subject_ids)
-
-        # Delete provenance edges
-        await session.execute(
-            delete(ProvenanceEdgeRow).where(ProvenanceEdgeRow.corpus_entry_id == entry_id)
-        )
-        # Delete snapshots
-        await session.execute(delete(SnapshotRow).where(SnapshotRow.entry_id == entry_id))
-        # Delete entry
-        await session.execute(delete(CorpusEntryRow).where(CorpusEntryRow.entry_id == entry_id))
+        result = await delete_entry(session, entry_id)
         await session.commit()
 
-    parts = [f"{len(particle_ids)} particles removed"]
-    if subj_removed:
-        parts.append(f"{subj_removed} orphaned subjects")
-    if synth_removed:
-        parts.append(f"{synth_removed} synthesis-cache rows")
+    parts = [f"{result.particles_deleted} particles removed"]
+    if result.particles_stripped:
+        parts.append(f"{result.particles_stripped} kept with refs stripped")
+    if result.subjects_orphaned:
+        parts.append(f"{result.subjects_orphaned} orphaned subjects")
+    if result.synthesis_rows_deleted:
+        parts.append(f"{result.synthesis_rows_deleted} synthesis-cache rows")
     typer.echo(f"Deleted entry {entry_id[:8]}… ({', '.join(parts)}).")
 
 
@@ -555,83 +514,6 @@ async def _corpus_retract(
     )
 
 
-# ---------------------------------------------------------------------------
-# Orphan cleanup — shared by ``corpus delete`` and ``corpus prune-orphans``.
-# None of the index tables (particle_subjects, particle_tag_edges,
-# particle_relations, synthesis_cache) declare a foreign key, and SQLite FK
-# enforcement is off, so deleting particles or subjects elsewhere leaves
-# dangling rows unless they are swept explicitly here.
-# ---------------------------------------------------------------------------
-
-
-async def _purge_particle_index_rows(session: AsyncSession, particle_ids: list[str]) -> None:
-    """Delete every index row keyed on one of ``particle_ids``.
-
-    Sweeps the ``particle_subjects`` join, ``particle_tag_edges``, and
-    ``particle_relations`` (either endpoint). Caller deletes the
-    ``ParticleRow`` rows themselves.
-    """
-    from sqlalchemy import delete, or_
-
-    from particles.store.relation_store import ParticleRelationRow
-    from particles.store.subject_store import ParticleSubjectRow
-    from particles.store.taxonomy_store import ParticleTagEdgeRow
-
-    if not particle_ids:
-        return
-    await session.execute(
-        delete(ParticleSubjectRow).where(ParticleSubjectRow.particle_id.in_(particle_ids))
-    )
-    await session.execute(
-        delete(ParticleTagEdgeRow).where(ParticleTagEdgeRow.particle_id.in_(particle_ids))
-    )
-    await session.execute(
-        delete(ParticleRelationRow).where(
-            or_(
-                ParticleRelationRow.particle_a.in_(particle_ids),
-                ParticleRelationRow.particle_b.in_(particle_ids),
-            )
-        )
-    )
-
-
-async def _purge_orphan_subjects(
-    session: AsyncSession, candidate_ids: set[str] | None
-) -> tuple[int, int]:
-    """Delete subjects with no remaining ``particle_subjects`` link.
-
-    Also drops any ``synthesis_cache`` rows keyed on the removed subjects.
-    Returns ``(subjects_removed, synthesis_rows_removed)``.
-
-    ``candidate_ids`` restricts the orphan check to a known set — the subjects
-    that were linked to a just-deleted entry's particles — so a subject still
-    linked to surviving particles is never touched. Pass ``None`` to scan
-    every subject (the whole-DB ``prune-orphans`` sweep).
-    """
-    from sqlalchemy import delete, select
-    from sqlalchemy.engine import CursorResult
-
-    from particles.store.subject_store import ParticleSubjectRow, SubjectRow
-    from particles.store.synthesis_cache_store import SynthesisCacheRow
-
-    if candidate_ids is not None and not candidate_ids:
-        return (0, 0)
-
-    linked = select(ParticleSubjectRow.subject_id).distinct()
-    stmt = select(SubjectRow.id).where(SubjectRow.id.not_in(linked))
-    if candidate_ids is not None:
-        stmt = stmt.where(SubjectRow.id.in_(candidate_ids))
-    orphan_ids = list((await session.execute(stmt)).scalars())
-    if not orphan_ids:
-        return (0, 0)
-
-    synth_result: CursorResult[None] = await session.execute(  # type: ignore[assignment]
-        delete(SynthesisCacheRow).where(SynthesisCacheRow.subject_id.in_(orphan_ids))
-    )
-    await session.execute(delete(SubjectRow).where(SubjectRow.id.in_(orphan_ids)))
-    return (len(orphan_ids), synth_result.rowcount or 0)
-
-
 @corpus_app.command("prune-orphans")
 def corpus_prune_orphans_cmd(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -652,6 +534,7 @@ async def _corpus_prune_orphans(yes: bool) -> None:
     from sqlalchemy.engine import CursorResult
 
     from particles.api.cli._remote import ensure_local
+    from particles.operations.corpus_delete import purge_orphan_subjects
     from particles.store.particle_store import ParticleRow
     from particles.store.relation_store import ParticleRelationRow
     from particles.store.subject_store import ParticleSubjectRow, SubjectRow
@@ -711,7 +594,7 @@ async def _corpus_prune_orphans(yes: bool) -> None:
         await session.execute(delete(ParticleRelationRow).where(dangling_rel_q))
         # Orphan-subject removal must run *after* the dangling join rows are
         # gone, so a subject linked only via a now-deleted row is detected.
-        subj_removed, synth_from_subj = await _purge_orphan_subjects(session, None)
+        subj_removed, synth_from_subj = await purge_orphan_subjects(session, None)
         synth_res: CursorResult[None] = await session.execute(  # type: ignore[assignment]
             delete(SynthesisCacheRow).where(dangling_synth_q)
         )
@@ -820,13 +703,9 @@ async def _corpus_refresh(
     entry_id: str | None, force: bool, backfill_cascade: bool, yes: bool
 ) -> None:
     from particles.api.cli._remote import ensure_local
-    from particles.core.schema import WarcRecordType
-    from particles.corpus.fetch import maybe_refetch
-    from particles.corpus.store import (
-        list_refreshable_local_entries,
-        list_snapshots_for_entry,
-        resolve_entry_id,
-    )
+    from particles.corpus.refresh_outcome import RefreshOutcome
+    from particles.corpus.store import list_refreshable_local_entries, resolve_entry_id
+    from particles.operations.corpus_refresh import refresh_entries
 
     if backfill_cascade:
         await _corpus_refresh_backfill(yes)
@@ -853,24 +732,23 @@ async def _corpus_refresh(
             return
 
         changed = unchanged = missing = 0
-        for target_id, _uri in targets:
-            snapshots = await list_snapshots_for_entry(session, target_id)
-            before = max(snapshots, key=lambda s: s.captured_at).snapshot_id if snapshots else None
-            try:
-                snap = await maybe_refetch(session, target_id, force=force)
-            except Exception as exc:  # noqa: BLE001 — one bad source must not stop the sweep
-                typer.echo(f"  {target_id[:8]}  error: {exc}", err=True)
-                await session.rollback()
-                continue
-            if snap is None:
-                missing += 1
-                typer.echo(f"  {target_id[:8]}  missing (source unavailable)")
-            elif snap.snapshot_id == before or snap.warc_record_type is WarcRecordType.REVISIT:
-                unchanged += 1
-            else:
-                changed += 1
-                typer.echo(f"  {target_id[:8]}  changed → snapshot {snap.snapshot_id[:8]} PENDING")
-            await session.commit()
+        async for result in refresh_entries(
+            session, (target_id for target_id, _uri in targets), force=force
+        ):
+            short = result.entry_id[:8]
+            match result.outcome:
+                case None:
+                    typer.echo(f"  {short}  error: {result.error}", err=True)
+                case RefreshOutcome.MISSING:
+                    missing += 1
+                    typer.echo(f"  {short}  missing (source unavailable)")
+                case RefreshOutcome.UNCHANGED_MTIME | RefreshOutcome.UNCHANGED_HASH:
+                    unchanged += 1
+                case RefreshOutcome.CHANGED:
+                    changed += 1
+                    typer.echo(
+                        f"  {short}  changed → snapshot {(result.snapshot_id or '')[:8]} PENDING"
+                    )
 
     typer.echo(
         f"\nChecked {len(targets)} local source(s): {changed} changed, "
@@ -886,7 +764,7 @@ def corpus_fsck_cmd(
         [],
         "--search",
         help=(
-            "Also look for strays under this blob root, the directory holding the "
+            "Look for strays under this blob root too, the directory holding the "
             "two-character shards (repeatable). Nothing is inferred: the audit tells "
             "you what is missing so you can point --search at where you think it went."
         ),

@@ -62,12 +62,13 @@ from particles.extraction.polarity import is_non_asserted
 from particles.operations._llm import _llm_call
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
+    copy_particle_embedding,
     get_active_derived_particles,
     get_active_particles_with_embeddings,
     get_inconsistency_backrefs,
     get_particles_by_ids,
     get_superseding_particle,
-    update_particle_provenance,
+    insert_particle,
     update_particle_status,
 )
 from particles.store.subject_store import list_all_subjects
@@ -113,15 +114,20 @@ _PARAPHRASE_SCHEMA: dict[str, Any] = {
 
 
 class RevalidationCounts(BaseModel):
-    """§5 ladder outcomes for one pass run."""
+    """§5 ladder outcomes for one pass run.
+
+    The three ``refreshed_*`` counters count D superseded by a same-text
+    successor D* on the updated premises; none rewrites D.
+    """
 
     checked: int = 0  # derived particles with a non-ACTIVE premise
-    refreshed_structural: int = 0  # rung 1: content-preserving change
-    refreshed_entailed: int = 0  # rung 2: entailment re-confirmed
-    refreshed_paraphrase: int = 0  # rung 3: D′ ≈ D, refs refreshed
+    refreshed_structural: int = 0  # rung 1: content-preserving change → same-text D*
+    refreshed_entailed: int = 0  # rung 2: entailment re-confirmed → same-text D*
+    refreshed_paraphrase: int = 0  # rung 3: D′ ≈ D → same-text D*
     superseded: int = 0  # rung 3: D′ DISTINCT → D superseded by D′
     retired: int = 0  # rung 4: PROVENANCE_STALE / RETRACTED_DEPENDENCY
-    deferred: int = 0  # budget exhausted or LLM unavailable; next cycle
+    deferred: int = 0  # budget exhausted, LLM unavailable, or UNSURE; next cycle
+    deferred_in_review: int = 0  # D is a side of an open INCONSISTENCY; after the ruling
 
 
 class AbstractionReport(BaseModel):
@@ -405,6 +411,7 @@ def _build_derived_particle(
     premises: list[Particle],
     subject_ids: list[str],
     supersedes: str | None = None,
+    tags: list[str] | None = None,
 ) -> Particle:
     """Construct the derived Particle per the §3 lineage contract."""
     now = datetime.now(UTC)
@@ -419,6 +426,7 @@ def _build_derived_particle(
         asserted_by=ABSTRACTION_ACTOR,
         subject_ids=subject_ids,
         supersedes=supersedes,
+        tags=tags,
         extractor_ref=None,
         contributors=[ContributorRef(id=ABSTRACTION_ACTOR, role="agent", at=now)],
     )
@@ -633,6 +641,8 @@ async def _duplicate_of(
 # ---------------------------------------------------------------------------
 
 
+# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
+# next substantive change here (D2).
 async def _updated_premises(
     session: AsyncSession, premise_ids: list[str]
 ) -> tuple[list[Particle], bool, bool]:
@@ -640,7 +650,8 @@ async def _updated_premises(
 
     Returns ``(premises, changed, content_preserving)``:
     - ``premises``: ACTIVE premises, with SUPERSEDED ones replaced by their
-      ACTIVE successors and retracted/stale/missing ones dropped;
+      ACTIVE successors (each successor once) and retracted/stale/missing
+      ones dropped;
     - ``changed``: True when any premise is non-ACTIVE (revalidation due);
     - ``content_preserving``: True when nothing was dropped and every
       replacement's content is byte-identical (§5 rung 1).
@@ -676,7 +687,43 @@ async def _updated_premises(
                     content_preserving = False
                 continue
         content_preserving = False  # dropped (retracted / stale / dead chain)
-    return premises, changed, content_preserving
+    # A premise superseded into another premise (or two merged into one
+    # successor) counts once: S′ is a set, and D*'s provenance edges are keyed
+    # on the premise id.
+    unique = list({p.id: p for p in premises}.values())
+    return unique, changed, content_preserving
+
+
+async def _refresh_by_supersession(
+    session: AsyncSession, d: Particle, premises: list[Particle]
+) -> None:
+    """Supersede D with a same-text successor D* on the updated premises.
+
+    Rungs 1, 2 (still entailed) and 3 (PARAPHRASE) keep D's claim but change
+    its premise set, so the assertion record is replaced rather than edited
+    (D1): D goes ``SUPERSEDED / EXPLICIT_SUPERSESSION`` and D* is a
+    new assertion whose confidence is recomputed from S′.
+
+    D* is written directly, not through §6.6: its text already
+    passed §6.6 when D was promoted, and running it again would make rung 1
+    depend on the contradiction probe. The embedding is copied (identical
+    text, so identical vector; the model marker travels with it), and D's
+    tags carry over as in the subject-assign. ``insert_particle``
+    indexes them into the tag edge table, so a tag filter still finds the
+    successor.
+    """
+    await update_particle_status(
+        session, d.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+    )
+    successor = _build_derived_particle(
+        claim=d.content,
+        premises=premises,
+        subject_ids=d.subject_ids or _shared_subject_ids(premises, ""),
+        supersedes=d.id,
+        tags=list(d.tags) if d.tags else None,
+    )
+    await insert_particle(session, successor)
+    await copy_particle_embedding(session, d.id, successor.id)
 
 
 async def _revalidate(
@@ -687,15 +734,17 @@ async def _revalidate(
     """Run the §5 ladder over every ACTIVE derived particle with stale support."""
     cfg = get_config().consolidation.abstraction
     counts = report.revalidation
+    in_review: dict[str, str] | None = None  # loaded on first need
     for d in sorted(await get_active_derived_particles(session), key=lambda p: p.id):
         premise_ids = premise_ids_of(d)
         premises, changed, content_preserving = await _updated_premises(session, premise_ids)
         if not changed:
             continue
         counts.checked += 1
-        new_ids = [p.id for p in premises]
 
-        # Rung 4 (no LLM): support collapsed below the floor → retire.
+        # Rung 4 (no LLM): support collapsed below the floor → retire. Not
+        # deferred under review: it mints no successor, so a later ruling
+        # still finds a PROVENANCE_STALE claim to act on.
         if len(premises) < cfg.min_cluster_size:
             update = await get_particles_by_ids(session, [d.id])  # re-check still ACTIVE
             if update.get(d.id) is not None:
@@ -705,9 +754,18 @@ async def _revalidate(
             counts.retired += 1
             continue
 
-        # Rung 1 (no LLM): content-preserving change → refresh refs.
+        # Deferred while under review: superseding a side of an
+        # open INCONSISTENCY would leave its successor ACTIVE past a ruling
+        # against it, since review skips an already-SUPERSEDED loser.
+        if in_review is None:
+            in_review = await get_inconsistency_backrefs(session)
+        if d.id in in_review:
+            counts.deferred_in_review += 1
+            continue
+
+        # Rung 1 (no LLM): content-preserving change → same-text successor.
         if content_preserving:
-            await update_particle_provenance(session, d.id, _premise_refs(new_ids))
+            await _refresh_by_supersession(session, d, premises)
             counts.refreshed_structural += 1
             continue
 
@@ -723,7 +781,7 @@ async def _revalidate(
             counts.deferred += 1  # LLM unavailable; leave discounted for next cycle
             continue
         if entailed:
-            await update_particle_provenance(session, d.id, _premise_refs(new_ids))
+            await _refresh_by_supersession(session, d, premises)
             counts.refreshed_entailed += 1
             continue
 
@@ -737,16 +795,18 @@ async def _revalidate(
         report.llm_calls += 1
         verdict = await _paraphrase_verdict(claim, d.content)
         if verdict is JudgeVerdictKind.PARAPHRASE:
-            await update_particle_provenance(session, d.id, _premise_refs(new_ids))
+            await _refresh_by_supersession(session, d, premises)
             counts.refreshed_paraphrase += 1
             continue
         if verdict is JudgeVerdictKind.UNSURE:
             counts.deferred += 1  # keep the read-time discount; retry next cycle
             continue
 
-        # DISTINCT → supersede D with D′ through the normal path. The status
-        # flip is what lets the one-hop lint flag D's own dependents next
-        # cycle — propagation is this ladder recursing one level per run.
+        # DISTINCT → supersede D with D′ through the normal path: a new claim,
+        # so §6.6 applies, and no tags carry over — a tag is a
+        # curation judgement about the claim it was put on. The
+        # status flip is what lets the one-hop lint flag D's own dependents
+        # next cycle — propagation is this ladder recursing one level per run.
         from particles.ingest.pipeline import reconcile_and_insert
 
         await update_particle_status(

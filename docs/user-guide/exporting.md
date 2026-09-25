@@ -38,7 +38,7 @@ linking template; everything else gets the generic callout template.
 - `--with-synthesis`: splice an LLM-synthesised prose article into
   each note. Requires `ANTHROPIC_API_KEY`. Shares the article-cache
   with `export wiki`, so running both pays the LLM cost once per
-  subject. Also emits one cited-prose note per NARRATIVE
+  subject. It also emits one cited-prose note per NARRATIVE
   under `Narratives/`, a journal entry rendered as its whole-entry
   narrative. Disable with `obsidian.emit_narrative_notes:
   false`; with no key these notes fall back to a deterministic cited
@@ -79,7 +79,7 @@ uv run particles export wiki ./my-wiki
 
 Writes a flat directory of per-Subject Markdown articles, each with
 LLM-synthesised prose and inline citations back to the corpus
-entries. Plus a top-level `index.md`.
+entries, plus a top-level `index.md`.
 
 **Useful flags:**
 

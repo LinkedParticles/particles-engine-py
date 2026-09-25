@@ -345,7 +345,7 @@ sweep's ceiling is what is binding for you, the fix is deduplication (see
 a smaller `rank_lift`; tuning it down only hides the duplicates in the surface
 where they are most visible. `0` disables the lift entirely.
 
-**But check that your dedup pass can reach the clusters setting the ceiling.**
+**Check, however, that your dedup pass can reach the clusters setting the ceiling.**
 On the dogfood store it could not. `particles links dedup` collapsed 181
 exact-duplicate groups (775 redundant ACTIVE copies), cutting near-duplicate
 mass from 16.0% to 3.1% of ACTIVE, and the ceiling *fell*, `0.0190 → 0.0165` at
@@ -354,7 +354,7 @@ mass from 16.0% to 3.1% of ACTIVE, and the ceiling *fell*, `0.0190 → 0.0165` a
 The reason is a finder gap, not a matching-strictness one. The two clusters that
 set the new ceiling are **21 byte-identical copies each** (well within an
 exact-match merge's reach), but they carry 1/21 and 0/21 subject links, and the
-duplicate finder iterates Subjects. So the verb reports *zero remaining groups*
+duplicate finder iterates Subjects, which is why the verb reports *zero remaining groups*
 while 211 exact-duplicate groups and 534 redundant ACTIVE copies are still
 there, 87% of all redundant copies left in the store. The pass drained the
 subject-linked low-reinforcement tail; the projection head is exactly where the

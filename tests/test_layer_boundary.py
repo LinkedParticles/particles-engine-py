@@ -4,13 +4,13 @@
 
 """Layer-boundary regression tests.
 
-The *authoritative* gate is the three ``import-linter`` contracts in
+The *authoritative* gate is the four ``import-linter`` contracts in
 ``pyproject.toml`` (run by pre-commit and CI via ``lint-imports``). This module
 mirrors them inside the pytest suite so the guards are covered by ``pytest``
 too, and — via the ``*_is_not_vacuous`` tests — proves each check fails on the
 shape it is meant to catch rather than passing trivially.
 
-The three contracts, each guarding a different layering regression:
+The four contracts, each guarding a different layering regression:
 
 1. ``forbidden`` — the Client substrate (the genuinely store-free surface: what
    a downstream needs to produce a candidate particle without a graph)
@@ -26,6 +26,10 @@ The three contracts, each guarding a different layering regression:
    subpackages of ``particles``. The cycles that exist today are pinned in
    ``SANCTIONED_CYCLE_SEAMS`` (mirroring the contract's ``ignore_imports``);
    removing exactly those edges must leave the subpackage graph acyclic.
+4. ``forbidden`` (external) — ``particles.core`` imports none of the database,
+   network, LLM or surface libraries in ``CORE_BANNED_LIBRARIES`` (
+   D6). It checks libraries, not I/O: a file read or a stdlib socket in
+   ``core/`` passes it.
 """
 
 from __future__ import annotations
@@ -99,6 +103,19 @@ CLIENT_TIER = [
     "particles.render.markdown",
 ]
 
+# Third-party libraries the pure core may not import. Mirrors the ``forbidden``
+# contract on ``particles.core`` in ``pyproject.toml`` (D6).
+CORE_BANNED_LIBRARIES = [
+    "sqlalchemy",
+    "aiosqlite",
+    "httpx",
+    "anthropic",
+    "openai",
+    "fastapi",
+    "typer",
+    "mcp",
+]
+
 # Sanctioned subpackage-cycle seams (mirrors ``ignore_imports`` on the
 # ``acyclic_siblings`` contract). Removing exactly these edges makes the
 # top-level subpackage graph acyclic. The first four are permanent deferred
@@ -131,6 +148,13 @@ def _fresh_graph() -> grimp.ImportGraph:
     # Tests that mutate the graph (remove_import) build their own so they do not
     # contaminate the module-scoped ``graph`` fixture shared by the others.
     return grimp.build_graph("particles")
+
+
+@pytest.fixture(scope="module")
+def external_graph() -> grimp.ImportGraph:
+    # Third-party top-level packages appear as squashed nodes (``mcp``, distinct
+    # from ``particles.mcp``), which the core library ban needs to name.
+    return grimp.build_graph("particles", include_external_packages=True)
 
 
 def test_client_substrate_never_imports_engine(graph: grimp.ImportGraph) -> None:
@@ -192,3 +216,26 @@ def test_acyclic_check_is_not_vacuous() -> None:
     # cycles — proving nominate_cycle_breakers is a live detector.
     breakers = _fresh_graph().nominate_cycle_breakers("particles")
     assert breakers, "expected real subpackage cycles before removing sanctioned seams"
+
+
+def test_core_imports_no_banned_library(external_graph: grimp.ImportGraph) -> None:
+    # Mirrors the ``core/`` library-ban contract (transitive). A library
+    # nothing in ``particles`` imports statically (``aiosqlite`` is loaded by
+    # SQLAlchemy from the URL scheme) has no node, so no chain can reach it.
+    violations = [
+        lib
+        for lib in CORE_BANNED_LIBRARIES
+        if lib in external_graph.modules
+        and external_graph.chain_exists(importer="particles.core", imported=lib, as_packages=True)
+    ]
+    assert not violations, "particles.core imports banned libraries (D6): " + ", ".join(violations)
+
+
+def test_core_library_ban_is_not_vacuous(external_graph: grimp.ImportGraph) -> None:
+    # The Engine does import these libraries, so the detector sees external edges.
+    assert external_graph.chain_exists(
+        importer="particles.store", imported="sqlalchemy", as_packages=True
+    ), "expected the store to import sqlalchemy"
+    assert external_graph.chain_exists(
+        importer="particles.api", imported="typer", as_packages=True
+    ), "expected the api surface to import typer"

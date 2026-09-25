@@ -695,13 +695,13 @@ def benchmark_observer_cmd(
         "suppression); `chunked` sends two lines per chunk through carry-forward.",
     ),
 ) -> None:
-    """The two-project observer fixture — zero LLM calls.
+    """The two-project observer fixture, with zero LLM calls.
 
     Two repositories' memory files, sharing generic subjects, evolve over
     `--days` and are harvested into one scratch store through the real
     pipeline with scripted extraction and a scripted contradiction probe.
     Each day, every line a project currently states is checked through that
-    project's observer: in view, or not — and if not, which mechanism retired
+    project's observer: in view, or not, and if not, which mechanism retired
     it (cross-project supersession, the generation cascade, or a surviving
     particle attested only by the other project) and whether the winner is in
     view. Report-only; the only number the default flip is decided
@@ -765,7 +765,7 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
         "--arm",
         help="Perception arm: oracle (scripted extraction + scripted §6.6 probe; "
         "zero LLM calls, deterministic), probe (scripted extraction, live "
-        "contradiction probe), or live (the general extractor — the product).",
+        "contradiction probe), or live (the general extractor, i.e. the product).",
     ),
     seed: list[int] | None = typer.Option(
         None,
@@ -792,7 +792,7 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
         False, "--yes", "-y", help="Skip the confirmation above the call threshold."
     ),
     output: Path | None = typer.Option(
-        None, "--output", "-o", help="Also write the rendered report to this path."
+        None, "--output", "-o", help="Write the rendered report to this path as well."
     ),
     output_format: _Format = typer.Option(
         _Format.table, "--format", help="table (default) or json (the report of record)."
@@ -823,7 +823,7 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
     checkpoint, probes every attribute through the query op's selection half.
     Reports currency (recall_current@k, current_first), supersession
     (stale_over_current, stale_retained@k), and poison leakage across three
-    untrusted channels — separately, with no aggregate score.
+    untrusted channels, each reported separately, with no aggregate score.
     """
     if ctx.invoked_subcommand is not None:
         # ``benchmark rot rescore …`` owns the invocation.
@@ -941,7 +941,7 @@ def benchmark_rot_rescore_cmd(
 ) -> None:
     """Re-classify a saved rot report under the current scorer.
 
-    Free: retrieval is taken as recorded — no store, encoder, or LLM call. The
+    Free: retrieval is taken as recorded, with no store, encoder, or LLM call. The
     output is a complete report of record with ``selection.scorer_version`` set
     to what ran and a first note naming the source and both versions.
     """
@@ -1028,8 +1028,8 @@ def benchmark_floor_harvest_cmd(
     prompts: bool = typer.Option(
         True,
         "--prompts/--no-prompts",
-        help="Also harvest question-shaped sentences the operator typed to the "
-        "agent: a proxy source, reported apart. --no-prompts keeps explicit "
+        help="Harvest question-shaped sentences the operator typed to the agent "
+        "as well: a proxy source, reported apart. --no-prompts keeps explicit "
         "memory queries only.",
     ),
     allow_in_repo: bool = typer.Option(
@@ -1147,7 +1147,7 @@ def benchmark_floor_cmd(  # noqa: PLR0913 — CLI option list is the API
     judge: bool = typer.Option(
         False,
         "--judge",
-        help="Also run the LLM-priced stage: answer every question with the gate "
+        help="Run the LLM-priced stage too: answer every question with the gate "
         "disabled, then judge the answer grounded-and-useful. Estimate-gated.",
     ),
     estimate: bool = typer.Option(
@@ -1160,7 +1160,7 @@ def benchmark_floor_cmd(  # noqa: PLR0913 — CLI option list is the API
         False, "--yes", "-y", help="Skip the confirmation above the call threshold."
     ),
     output: Path | None = typer.Option(
-        None, "--output", "-o", help="Also write the rendered report to this path."
+        None, "--output", "-o", help="Write the rendered report to this path as well."
     ),
     output_format: _Format = typer.Option(
         _Format.table,

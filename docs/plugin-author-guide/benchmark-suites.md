@@ -48,7 +48,7 @@ warrant a conformance fixture.
 |---|---|---|---|
 | suite | `suite_id` | yes | Lowercase-kebab, unique across the project. `--suite <id>` selects on it. |
 | suite | `name`, `version`, `domain` | yes | Free text; `version` is reported beside every result. |
-| suite | `source_types` | yes | A list. Decides which extractor owns the suite — see [below](#which-suites-run-against-which-extractor). |
+| suite | `source_types` | yes | A list. Decides which extractor owns the suite; see [below](#which-suites-run-against-which-extractor). |
 | suite | `cases` | yes | A list of cases. |
 | suite | `metrics` | no | A list of `{name, definition}` mappings documenting extra metrics; see [Three normative metrics](#three-normative-metrics). |
 | suite | `published_by`, `published_at` | no | Attribution; `published_at` is ISO-8601. |
@@ -62,7 +62,7 @@ warrant a conformance fixture.
 | expected | `uncertainty_nature` | yes | A valid `UncertaintyNature` value (e.g. `EPISTEMIC`). |
 | expected | `required` | no | Defaults to `true`. |
 
-A case must set exactly one of `fixture` or `source_snapshot` — both, or
+A case must set exactly one of `fixture` or `source_snapshot`; both, or
 neither, is a load error. An inline case looks like this:
 
 ```yaml
@@ -82,8 +82,8 @@ neither, is a load error. An inline case looks like this:
 The loader is strict where silence would lose gold data: an unknown key
 inside `cases[]` or `expected[]` fails the suite. An unknown key at the
 suite root only logs a warning, so a suite can carry a field a newer runner
-understands. A suite that fails to load is logged and **skipped** — the run
-carries on without it — so check the log if a suite you expect is missing
+understands. A suite that fails to load is logged and **skipped** (the run
+carries on without it), so check the log if a suite you expect is missing
 from the output. Suites are discovered in filename order.
 
 Only the suite-level `source_types` routes an inline case; the case itself
@@ -97,7 +97,7 @@ quality note.
 suites that extractor is the **production routing choice** for: a suite
 matches if the registry would route at least one of its `source_types`
 to that extractor (first registered plugin with no MUST_NOT clause for the
-type whose `accepts()` returns true — the same selection the extract
+type whose `accepts()` returns true, the same selection the extract
 pipeline makes; see [Writing an extractor](extractors.md)).
 
 What that means for an author:
@@ -115,9 +115,9 @@ What that means for an author:
 - **A suite in the tree must auto-match exactly one extractor.** The
   registry tests (`tests/test_extractor_registry.py`) enforce this for
   both `tests/benchmark/suites/` and `tests/benchmark/calibration/`, and
-  pin which suites the general extractor owns — a new `WEB_PAGE`-style
+  pin which suites the general extractor owns; a new `WEB_PAGE`-style
   suite means updating that expectation deliberately.
-- **`--suite <id>` bypasses routing** — use it to deliberately measure
+- **`--suite <id>` bypasses routing**: use it to deliberately measure
   one extractor against another's suite.
 - `extractor calibrate` uses the same routing rule;
   `benchmark-compare` deliberately does not (a named cross-extractor
@@ -131,7 +131,7 @@ What that means for an author:
 3. If the source already has a conformance fixture, reference it by
    `fixture: <fixture-id>`. Otherwise add an inline `source_snapshot` +
    `inline_content` block. Adding a *new* conformance fixture just to
-   serve a benchmark has a cost — it changes the fixture-corpus hash every
+   serve a benchmark has a cost: it changes the fixture-corpus hash every
    stored conformance report carries (see
    [Adding or modifying a fixture invalidates prior reports](conformance.md#adding-or-modifying-a-fixture-invalidates-prior-reports)),
    so prefer the inline form unless the fixture belongs in the conformance
@@ -159,7 +159,7 @@ historical anecdote").
 Precision is computed over **every** emitted particle, so an emission the
 gold set does not name counts against precision even when it is true. Aim
 for gold coverage of everything the extractor legitimately emits from the
-fixture — mark the less important ones `required: false` rather than
+fixture; mark the less important ones `required: false` rather than
 leaving them out.
 
 ## `confidence_min` is a floor, not a target
@@ -185,15 +185,15 @@ and vice versa.
 **Subject-aware matching.** A particle's subjects are a separate field, so
 a well-behaved extractor may emit "Operating costs for 2025 were
 $940,000." and link the subject rather than restate it. The judge
-therefore scores each emitted claim twice — as its bare `content`, and
-with the subject names it does not already mention prepended — and keeps
+therefore scores each emitted claim twice (as its bare `content`, and
+with the subject names it does not already mention prepended) and keeps
 the higher similarity. For you as an author this means:
 
 - **Both gold styles work.** Gold copied verbatim from subject-elided
   extractor output, and human-written gold that names the subject inline,
   both match. You do not need to restate or strip subjects.
 - **Don't write the subject twice** into gold that the extractor will
-  also prefix — the qualified rendering only adds subjects the content
+  also prefix: the qualified rendering only adds subjects the content
   omits, and doubled naming measures worse than either clean form.
 - **Don't lower the threshold to rescue near-misses.** It admits unrelated
   claims rather than reading related ones correctly. A restatement that
@@ -221,7 +221,7 @@ anything else in it is not computed.
 
 ## Repeat runs
 
-Extraction is a sampling process, so one run is one sample — the same
+Extraction is a sampling process, so one run is one sample: the same
 fixture can score noticeably different recall on back-to-back runs.
 `particles extractor benchmark <id> --runs N` repeats each suite N times
 and reports each metric's mean, range and standard deviation. `--fail-on`
@@ -240,8 +240,8 @@ report files.
 
 ## What the frozen schema covers
 
-The suite *input* schema — suite, case, expected particle and metric
-declaration — is frozen by the techspec. You cannot add a field to an
+The suite *input* schema (suite, case, expected particle and metric
+declaration) is frozen by the techspec. You cannot add a field to an
 expected particle (a modality label, a validity date, a polarity) for your
 extractor's purposes; the loader will reject it. Properties the §13.3
 shape cannot express are measured by separate harnesses with their own
@@ -269,8 +269,8 @@ from a separate directory, `tests/benchmark/calibration/`, and
 and matching are exactly the ones above; only the directory and the
 authoring rules differ, because the two purposes want different gold
 coverage. A benchmark suite wants near-total coverage (a sparse gold set
-reads as imprecision). A temperature fit needs **both** labels — correct
-and incorrect emissions — and a gold set that names everything leaves
+reads as imprecision). A temperature fit needs **both** labels (correct
+and incorrect emissions), and a gold set that names everything leaves
 nothing to fit against.
 
 ### Authoring contract
@@ -278,20 +278,20 @@ nothing to fit against.
 - **`confidence_min: 0.0` on every expectation.** A floor is a claim
   about correctness a calibration suite should not make. (For calibration
   a timid-but-correct match counts as correct anyway.)
-- **Deterministic extractors: make gold coverage deliberately partial** —
+- **Deterministic extractors: make gold coverage deliberately partial**:
   roughly two-thirds to three-quarters of what the extractor emits, so
   both labels are present with margin. Say in the file header *which*
   emission is deliberately unnamed, so nobody "completes" the gold set
   and silently makes the suite unusable. This works because a parser
-  emits the same set every run, so the omission — and the base rate it
-  implies — is a fixed property of the file.
-- **LLM extractors: do the opposite — name every claim the fixtures
+  emits the same set every run, so the omission (and the base rate it
+  implies) is a fixed property of the file.
+- **LLM extractors: do the opposite and name every claim the fixtures
   support.** For an LLM extractor an omission labels a claim *incorrect*
   that you know is correct, and the fit then learns your chosen coverage
   fraction instead of the extractor's calibration. Accept a refusal as the
   honest verdict rather than engineering one away.
   `prose-calibration-001` is the worked example; read its header.
-- **Span several fixtures** where the corpus allows it — a single fixture
+- **Span several fixtures** where the corpus allows it; a single fixture
   yields few fittable pairs.
 - **Inline the source bytes** (`source_snapshot:` + `inline_content:`)
   when a fixture exists only to calibrate, rather than adding a
@@ -308,10 +308,10 @@ names the reason:
 
 | Refusal | Can the suite fix it? |
 |---|---|
-| degenerate labels (every fittable emission matched, or none did) | Yes — adjust gold coverage per the contract above. |
+| degenerate labels (every fittable emission matched, or none did) | Yes: adjust gold coverage per the contract above. |
 | predictor degeneracy (fewer than two distinct movable confidences, including all-saturated 0.0 / 1.0 output) | Not by the gold set. It *can* be moved by **fixture** design: prose in which the author's own certainty varies (a firm count beside a provisional one, two sources that disagree, a printed correction) draws a spread out of the same extractor that flatly stated prose never does. |
-| fit landed on the optimizer bound | No — a property of the data, not the file. |
-| non-improving fit | No — a property of the extractor. |
+| fit landed on the optimizer bound | No: a property of the data, not the file. |
+| non-improving fit | No: a property of the extractor. |
 
 If you are editing a suite to make a refusal go away, check which
 condition fired first.
@@ -338,7 +338,7 @@ emitted particles: `particles extractor benchmark-modality`
 (`tests/benchmark/modality/`), `benchmark-polarity`
 (`tests/benchmark/polarity/`), and `benchmark-validity`
 (`tests/benchmark/validity/`). They share the routing rule above. Never
-put their files in `tests/benchmark/suites/` — each discovery walker
+put their files in `tests/benchmark/suites/`: each discovery walker
 would log-and-skip the other's files. The whole-pipeline memory benchmark
 (`particles benchmark memory`) is not an extractor benchmark at all; see
 [Agent memory benchmarks](../benchmarks.md).

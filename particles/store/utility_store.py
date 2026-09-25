@@ -252,18 +252,14 @@ async def get_reinforcement_scores(
         explicit_weight if explicit_weight is not None else get_config().utility.explicit_weight
     )
     rows = (
-        (
-            await session.execute(
-                select(
-                    UtilityEventRow.particle_id,
-                    UtilityEventRow.observed_at,
-                    UtilityEventRow.source,
-                ).where(UtilityEventRow.particle_id.in_(particle_ids))
-            )
+        await session.execute(
+            select(
+                UtilityEventRow.particle_id,
+                UtilityEventRow.observed_at,
+                UtilityEventRow.source,
+            ).where(UtilityEventRow.particle_id.in_(particle_ids))
         )
-        .tuples()
-        .all()
-    )
+    ).all()
     by_particle: dict[str, list[tuple[datetime, float]]] = {}
     for pid, observed, source in rows:
         by_particle.setdefault(pid, []).append((observed, channel_weight(source, weight)))

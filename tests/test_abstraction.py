@@ -34,14 +34,15 @@ from particles.core.status import Status, StatusReason
 from particles.operations import abstraction as ab
 from particles.store.event_store import OperatorEventType, list_events
 from particles.store.particle_store import (
+    ParticleRow,
     get_active_derived_particles,
     get_particle,
     get_particles_by_ids,
     get_superseding_particle,
     insert_particle,
-    update_particle_provenance,
     update_particle_status,
 )
+from particles.store.taxonomy_store import get_particle_ids_for_tags
 
 OLD = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -208,21 +209,6 @@ class TestStoreHelpers:
         assert found is not None and found.id == successor.id
         assert await get_superseding_particle(db_session, "nope") is None
 
-    @pytest.mark.asyncio
-    async def test_update_particle_provenance(self, db_session) -> None:
-        premises = [_specific("a"), _specific("b"), _specific("c")]
-        for p in premises:
-            await insert_particle(db_session, p)
-        d = _derived(premises)
-        await insert_particle(db_session, d)
-        new_refs = ab._premise_refs([premises[0].id, premises[1].id])
-        await update_particle_provenance(db_session, d.id, new_refs)
-        reloaded = await get_particle(db_session, d.id)
-        assert reloaded is not None
-        assert ab.premise_ids_of(reloaded) == [premises[0].id, premises[1].id]
-        with pytest.raises(ValueError, match="not found"):
-            await update_particle_provenance(db_session, "missing", new_refs)
-
 
 # ---------------------------------------------------------------------------
 # Revalidation ladder (§5)
@@ -252,6 +238,33 @@ def _enable(**overrides: object) -> None:
     cfg.enabled = True
     for key, value in overrides.items():
         setattr(cfg, key, value)
+
+
+async def _supersede_premise(db_session, old: Particle, content: str, **kw: object) -> Particle:
+    """Supersede one premise with a revision carrying ``content``."""
+    successor = _specific(content, **kw).model_copy(update={"supersedes": old.id})  # type: ignore[arg-type]
+    await insert_particle(db_session, successor)
+    await update_particle_status(
+        db_session, old.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+    )
+    return successor
+
+
+async def _assert_refreshed(db_session, d: Particle, expected_premise_ids: list[str]) -> Particle:
+    """§2: D is SUPERSEDED; an ACTIVE same-text D* names S′."""
+    old_d = await get_particle(db_session, d.id)
+    assert old_d is not None and old_d.status is Status.SUPERSEDED
+    assert old_d.status_reason is StatusReason.EXPLICIT_SUPERSESSION
+    assert ab.premise_ids_of(old_d) == ab.premise_ids_of(d)  # D never edited
+    new_d = await get_superseding_particle(db_session, d.id)
+    assert new_d is not None and new_d.status is Status.ACTIVE
+    assert new_d.content == d.content
+    assert new_d.supersedes == d.id
+    assert ab.is_derived(new_d)
+    assert new_d.asserted_by == ab.ABSTRACTION_ACTOR
+    assert new_d.subject_ids == d.subject_ids
+    assert sorted(ab.premise_ids_of(new_d)) == sorted(expected_premise_ids)
+    return new_d
 
 
 class TestRevalidationLadder:
@@ -284,45 +297,209 @@ class TestRevalidationLadder:
         d, premises = await _seed_derived(db_session)
         # Supersede one premise with a content-identical revision.
         old = premises[0]
-        successor = _specific(old.content).model_copy(update={"supersedes": old.id})
-        await insert_particle(db_session, successor)
-        await update_particle_status(
-            db_session, old.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
-        )
+        successor = await _supersede_premise(db_session, old, old.content)
         report = ab.AbstractionReport()
         await ab._revalidate(db_session, report, ab._Budget(5))
         assert report.revalidation.refreshed_structural == 1
         assert report.llm_calls == 0
-        reloaded = await get_particle(db_session, d.id)
-        assert reloaded is not None and reloaded.status is Status.ACTIVE
-        assert successor.id in ab.premise_ids_of(reloaded)
-        assert old.id not in ab.premise_ids_of(reloaded)
+        new_d = await _assert_refreshed(
+            db_session, d, [successor.id, premises[1].id, premises[2].id]
+        )
+        assert old.id not in ab.premise_ids_of(new_d)
 
     @pytest.mark.asyncio
     async def test_rung2_entailment_refresh(self, db_session) -> None:
         _enable()
         d, premises = await _seed_derived(db_session)
         old = premises[0]
-        successor = _specific("reworded but compatible claim").model_copy(
-            update={"supersedes": old.id}
-        )
-        await insert_particle(db_session, successor)
-        await update_particle_status(
-            db_session, old.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
-        )
+        successor = await _supersede_premise(db_session, old, "reworded but compatible claim")
         entailed = json.dumps({"entailed": True, "reason": "still supported"})
         with patch.object(ab, "_llm_call", new=AsyncMock(return_value=entailed)):
             report = ab.AbstractionReport()
             await ab._revalidate(db_session, report, ab._Budget(5))
         assert report.revalidation.refreshed_entailed == 1
-        reloaded = await get_particle(db_session, d.id)
-        assert reloaded is not None
-        assert successor.id in ab.premise_ids_of(reloaded)
+        await _assert_refreshed(db_session, d, [successor.id, premises[1].id, premises[2].id])
+
+    @pytest.mark.asyncio
+    async def test_rung3_paraphrase_refresh(self, db_session) -> None:
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        successor = await _supersede_premise(db_session, premises[0], "a different specific")
+        responses = iter(
+            [
+                json.dumps({"entailed": False, "reason": "unclear"}),
+                json.dumps({"claim": "General claim, restated.", "rationale": "r"}),
+                json.dumps({"verdict": "PARAPHRASE"}),
+            ]
+        )
+
+        async def fake_llm(*args, **kwargs):
+            return next(responses)
+
+        with patch.object(ab, "_llm_call", new=fake_llm):
+            report = ab.AbstractionReport()
+            await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.refreshed_paraphrase == 1
+        new_d = await _assert_refreshed(
+            db_session, d, [successor.id, premises[1].id, premises[2].id]
+        )
+        assert new_d.content == "General claim."  # D's text, not the re-synthesis
+
+    @pytest.mark.asyncio
+    async def test_refresh_recomputes_confidence_upward(self, db_session) -> None:
+        """Dropping the weakest premise raises D*'s §4 value."""
+        _enable(min_cluster_size=2)
+        premises = [
+            _specific("weak specific", value=0.4),
+            _specific("strong specific 1", value=0.9),
+            _specific("strong specific 2", value=0.8),
+        ]
+        for p in premises:
+            await insert_particle(db_session, p)
+        d = _derived(premises)
+        await insert_particle(db_session, d)
+        await update_particle_status(db_session, premises[0].id, Status.RETRACTED)
+        entailed = json.dumps({"entailed": True})
+        with patch.object(ab, "_llm_call", new=AsyncMock(return_value=entailed)):
+            report = ab.AbstractionReport()
+            await ab._revalidate(db_session, report, ab._Budget(5))
+        new_d = await _assert_refreshed(db_session, d, [premises[1].id, premises[2].id])
+        expected = ab.derive_abstraction_confidence([0.9, 0.8])
+        assert new_d.confidence.value == pytest.approx(expected)
+        assert new_d.confidence.value > d.confidence.value
+        old_d = await get_particle(db_session, d.id)
+        assert old_d is not None and old_d.confidence.value == d.confidence.value
+
+    @pytest.mark.asyncio
+    async def test_refresh_recomputes_confidence_downward(self, db_session) -> None:
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        successor = await _supersede_premise(db_session, premises[0], "weaker revision", value=0.3)
+        entailed = json.dumps({"entailed": True})
+        with patch.object(ab, "_llm_call", new=AsyncMock(return_value=entailed)):
+            await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+        new_d = await _assert_refreshed(
+            db_session, d, [successor.id, premises[1].id, premises[2].id]
+        )
+        assert new_d.confidence.value == pytest.approx(
+            ab.derive_abstraction_confidence([0.3, 0.9, 0.9])
+        )
+        assert new_d.confidence.value < d.confidence.value
+
+    @pytest.mark.asyncio
+    async def test_refresh_carries_tags_and_embedding(self, db_session) -> None:
+        _enable()
+        premises = [_specific(f"specific claim {i}") for i in range(3)]
+        for p in premises:
+            await insert_particle(db_session, p)
+        d = _derived(premises).model_copy(update={"tags": ["topic/x", "keep"]})
+        await insert_particle(db_session, d, embedding=[0.1, 0.2, 0.3])
+        # Pin a non-current model marker: it must travel, never be re-stamped.
+        row = await db_session.get(ParticleRow, d.id)
+        assert row is not None
+        row.embedding_model_id = "legacy-encoder"
+        await db_session.flush()
+        await _supersede_premise(db_session, premises[0], premises[0].content)
+
+        await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+
+        new_d = await get_superseding_particle(db_session, d.id)
+        assert new_d is not None and new_d.tags == ["topic/x", "keep"]
+        assert new_d.id in await get_particle_ids_for_tags(db_session, {"topic/x"})
+        new_row = await db_session.get(ParticleRow, new_d.id)
+        assert new_row is not None
+        assert json.loads(new_row.embedding_json or "null") == [0.1, 0.2, 0.3]
+        assert new_row.embedding_model_id == "legacy-encoder"
+
+    @pytest.mark.asyncio
+    async def test_merged_premises_count_once(self, db_session) -> None:
+        """Two premises superseded into one successor: S′ names it once."""
+        _enable(min_cluster_size=2)
+        d, premises = await _seed_derived(db_session)
+        merged = _specific("merged specific").model_copy(update={"supersedes": premises[0].id})
+        await insert_particle(db_session, merged)
+        for p in premises[:2]:
+            await update_particle_status(
+                db_session, p.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+            )
+        # premises[1]'s chain also resolves to ``merged``.
+        with patch.object(
+            ab,
+            "get_superseding_particle",
+            new=AsyncMock(
+                side_effect=lambda _s, pid: (
+                    merged if pid in {premises[0].id, premises[1].id} else None
+                )
+            ),
+        ):
+            entailed = json.dumps({"entailed": True})
+            with patch.object(ab, "_llm_call", new=AsyncMock(return_value=entailed)):
+                report = ab.AbstractionReport()
+                await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.refreshed_entailed == 1
+        await _assert_refreshed(db_session, d, [merged.id, premises[2].id])
+
+    @pytest.mark.asyncio
+    async def test_rung1_needs_no_llm_even_with_near_neighbour(self, db_session) -> None:
+        """Rung 1 bypasses §6.6, so an LLM outage cannot touch it."""
+        _enable()
+        premises = [_specific(f"specific claim {i}") for i in range(3)]
+        for p in premises:
+            await insert_particle(db_session, p)
+        d = _derived(premises)
+        await insert_particle(db_session, d, embedding=[1.0, 0.0, 0.0])
+        neighbour = _specific("General claim, nearly.")
+        await insert_particle(db_session, neighbour, embedding=[1.0, 0.0, 0.0])
+        await _supersede_premise(db_session, premises[0], premises[0].content)
+
+        no_llm = AsyncMock(return_value=None)  # the LLM is unavailable
+        no_reconcile = AsyncMock(side_effect=AssertionError("§6.6 must not run"))
+        with (
+            patch.object(ab, "_llm_call", new=no_llm),
+            patch("particles.ingest.pipeline.reconcile_and_insert", new=no_reconcile),
+        ):
+            report = ab.AbstractionReport()
+            await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.refreshed_structural == 1
+        assert report.llm_calls == 0
+        no_llm.assert_not_called()
+        no_reconcile.assert_not_called()
+        new_d = await get_superseding_particle(db_session, d.id)
+        assert new_d is not None and new_d.status is Status.ACTIVE
+        reloaded_neighbour = await get_particle(db_session, neighbour.id)
+        assert reloaded_neighbour is not None and reloaded_neighbour.status is Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_dependent_refreshed_at_rung1(self, db_session) -> None:
+        """A derived F citing D is flagged once D is superseded, and takes rung 1 (§5)."""
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        others = [_specific("other specific x"), _specific("other specific y")]
+        for p in others:
+            await insert_particle(db_session, p)
+        f = _derived([d, *others], content="More general claim.")
+        await insert_particle(db_session, f)
+        await _supersede_premise(db_session, premises[0], premises[0].content)
+
+        no_llm = AsyncMock(side_effect=AssertionError("no LLM on rung 1"))
+        total = ab.AbstractionReport()
+        with patch.object(ab, "_llm_call", new=no_llm):
+            for _ in range(2):  # at most one level per cycle
+                await ab._revalidate(db_session, total, ab._Budget(5))
+        assert total.revalidation.refreshed_structural == 2
+        assert total.llm_calls == 0
+        d_star = await get_superseding_particle(db_session, d.id)
+        assert d_star is not None
+        await _assert_refreshed(db_session, f, [d_star.id, others[0].id, others[1].id])
 
     @pytest.mark.asyncio
     async def test_rung3_distinct_supersedes(self, db_session) -> None:
         _enable()
-        d, premises = await _seed_derived(db_session)
+        premises = [_specific(f"specific claim {i}") for i in range(3)]
+        for p in premises:
+            await insert_particle(db_session, p)
+        d = _derived(premises).model_copy(update={"tags": ["topic/x"]})
+        await insert_particle(db_session, d)
         old = premises[0]
         successor = _specific("materially different claim").model_copy(
             update={"supersedes": old.id}
@@ -365,6 +542,7 @@ class TestRevalidationLadder:
         assert new_d.content == "Updated general claim."
         assert ab.is_derived(new_d)
         assert new_d.supersedes == d.id
+        assert new_d.tags is None  # a different claim: no tag carry-over
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_defers(self, db_session) -> None:
@@ -399,6 +577,101 @@ class TestRevalidationLadder:
             report = ab.AbstractionReport()
             await ab._revalidate(db_session, report, ab._Budget(5))
         assert report.revalidation.deferred == 1
+
+
+async def _open_inconsistency(db_session, d: Particle) -> tuple[Particle, Particle]:
+    """Make D side A of an open INCONSISTENCY against an ACTIVE rival B."""
+    rival = _specific("A rival general claim.")
+    await insert_particle(db_session, rival)
+    inc = build_inconsistency_particle(d, rival, corpus_entry_id="e9", snapshot_id="s9")
+    await insert_particle(db_session, inc)
+    return inc, rival
+
+
+class TestReviewDeferral:
+    """rungs 1–3 wait for the operator's ruling; rung 4 does not."""
+
+    @pytest.mark.asyncio
+    async def test_open_inconsistency_defers_refresh(self, db_session) -> None:
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        await _open_inconsistency(db_session, d)
+        await _supersede_premise(db_session, premises[0], premises[0].content)
+        report = ab.AbstractionReport()
+        await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.deferred_in_review == 1
+        assert report.revalidation.deferred == 0
+        assert report.revalidation.refreshed_structural == 0
+        reloaded = await get_particle(db_session, d.id)
+        assert reloaded is not None and reloaded.status is Status.ACTIVE
+        assert await get_superseding_particle(db_session, d.id) is None
+
+    @pytest.mark.asyncio
+    async def test_open_inconsistency_defers_before_llm(self, db_session) -> None:
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        await _open_inconsistency(db_session, d)
+        await _supersede_premise(db_session, premises[0], "reworded claim")
+        no_llm = AsyncMock(side_effect=AssertionError("deferral spends no budget"))
+        budget = ab._Budget(1)
+        with patch.object(ab, "_llm_call", new=no_llm):
+            report = ab.AbstractionReport()
+            await ab._revalidate(db_session, report, budget)
+        assert report.revalidation.deferred_in_review == 1
+        assert budget.take()  # the one unit is still there
+
+    @pytest.mark.asyncio
+    async def test_rung4_retires_under_review(self, db_session) -> None:
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        await _open_inconsistency(db_session, d)
+        for p in premises[:2]:
+            await update_particle_status(db_session, p.id, Status.RETRACTED)
+        report = ab.AbstractionReport()
+        await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.retired == 1
+        assert report.revalidation.deferred_in_review == 0
+        reloaded = await get_particle(db_session, d.id)
+        assert reloaded is not None and reloaded.status is Status.PROVENANCE_STALE
+
+    @pytest.mark.asyncio
+    async def test_prefer_a_ruling_releases_refresh(self, db_session) -> None:
+        from particles.core.schema import ResolutionAction
+        from particles.operations.review import resolve
+
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        inc, rival = await _open_inconsistency(db_session, d)
+        successor = await _supersede_premise(db_session, premises[0], premises[0].content)
+        await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+        await resolve(db_session, inc.id, ResolutionAction.PREFER_A, "reviewer-1")
+
+        report = ab.AbstractionReport()
+        await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.deferred_in_review == 0
+        assert report.revalidation.refreshed_structural == 1
+        await _assert_refreshed(db_session, d, [successor.id, premises[1].id, premises[2].id])
+        loser = await get_particle(db_session, rival.id)
+        assert loser is not None and loser.status is Status.PROVENANCE_STALE
+
+    @pytest.mark.asyncio
+    async def test_prefer_b_ruling_leaves_d_demoted(self, db_session) -> None:
+        from particles.core.schema import ResolutionAction
+        from particles.operations.review import resolve
+
+        _enable()
+        d, premises = await _seed_derived(db_session)
+        inc, _rival = await _open_inconsistency(db_session, d)
+        await _supersede_premise(db_session, premises[0], premises[0].content)
+        await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+        await resolve(db_session, inc.id, ResolutionAction.PREFER_B, "reviewer-1")
+
+        report = ab.AbstractionReport()
+        await ab._revalidate(db_session, report, ab._Budget(5))
+        assert report.revalidation.checked == 0  # D is no longer ACTIVE derived
+        reloaded = await get_particle(db_session, d.id)
+        assert reloaded is not None and reloaded.status is Status.PROVENANCE_STALE
+        assert await get_superseding_particle(db_session, d.id) is None
 
 
 # ---------------------------------------------------------------------------

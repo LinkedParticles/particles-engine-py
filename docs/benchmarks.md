@@ -263,22 +263,46 @@ are two non-abstention questions; no verdict moved downward.
 stored answers; step 4 is the `top_k` 10 point of the sweep, which paid for
 fresh answer calls under that identical scaffold-2 / protocol-2 tuple, and it
 came back 0.787 against 0.780. One question, in the same direction and of the
-same size as step 1. The table quotes 0.787 because it is the sweep's own
-`top_k` 10 point and therefore like-for-like with the 20 and 40 rows beside
-it; the two are never averaged.
+same size as step 1. The decomposition quotes 0.787 because it is the
+`top_k` 10 point of the single-run `uuids` sweep that step 5 continues, and
+therefore like-for-like with the step after it; 0.780 and 0.787 are never
+averaged. The headline table's `top_k` 10 row is a different measurement: the
+mean of three later runs under the `names` rendering, 0.800.
 
-**The judge lifted the ceiling more than it lifted Particles.** This is
-the sentence a sceptical reader would otherwise have to find alone, so it is
-stated here. Across steps 2 and 3 together, `qa_full_context` went 0.793 to
-0.878 while `qa_particles` at the same `top_k` 10 went 0.740 to 0.787. **At
-`top_k` 10, Particles is now 89.6% of the ceiling, down from 92.4% in the
-inaugural table.** The better judge was worth more to the baseline than to
-us, which is what you would expect: the full-context condition had the
-evidence in front of it and was being marked down for rubric mismatches,
-while the particles condition often did not have the evidence at all. At the
-shipped `top_k` 40 the ratio is 93.4%, slightly above the inaugural 92.4%,
-but that gain is bought with configuration (four times the read budget) and
-not with any improvement in the memory.
+**The rescoring lifted the ceiling more than it lifted Particles, and the
+scaffold did it, not the judge.** This is the sentence a sceptical reader
+would otherwise have to find alone, so it is stated here. Across steps 2 and 3
+together, `qa_full_context` went 0.793 to 0.878 (+0.085) while `qa_particles`
+at `top_k` 10 went 0.740 to 0.780 (+0.040). The judge is not what did it: the
+judge (step 3) was worth +0.040 to Particles and
++0.020 to the ceiling, and the whole of the difference is step 2, where the
+scaffold moved the ceiling 0.793 to 0.858 and Particles not at all. Part of
+that step is a denominator change, since step 2 is where the ceiling's two
+unscored answers first appear; counted as wrong over all 150 it is 0.847,
+still +0.053.
+
+**On the three-run mean the headline table quotes, Particles at `top_k` 10 is
+91.1% of the ceiling (0.800 over 150 questions, against 0.878 over 148), down
+from 92.4% in the inaugural table (0.733 against 0.793, both over 150); on
+the single `uuids` sweep run the decomposition walks (0.787) it is 89.6%.**
+How much of that is real: the three current runs (0.793, 0.800, 0.807) are
+90.3%, 91.1% and 91.8% of the ceiling, so every one of them sits below the
+inaugural share, by 0.6 to 2.1 points. On the mean the gap is 1.4 points,
+which is 1.8 questions of 150 on the Particles side. That is smaller than the
+movement this page measures between repeats of one configuration (a total that
+moves by up to 5 questions, § The subject rendering), and both ceilings it
+divides by, 0.793 and 0.878, are single runs, where one question on the
+current ceiling moves the share by 0.7 points. The direction is consistent; a
+drop of this size is not distinguishable from run-to-run noise at this n.
+
+At `top_k` 40 the share depends on the rendering. Under the `uuids` rendering
+of step 5 (0.820, identical on all three runs of the ablation below) it is
+93.4%, above the inaugural 92.4%; under the shipped `names` rendering the
+headline table quotes (0.804, the mean of three runs) it is 91.6%, below it,
+with the runs spanning 91.1% to 91.8%. Neither figure measures an improvement
+in the memory: the gap between them is a rendering choice, and both ride four
+times the read budget of `top_k` 10, which the depth sweep above found buys no
+measurable accuracy.
 
 The floor moved too, downward: 0.080 to 0.047. That is the scaffold, not the
 judge. In August the no-memory condition got the 7 abstention questions plus
@@ -368,7 +392,7 @@ Read plainly:
 - **The decay arms came out degenerate, and the way they did is the
   finding.** Stock configuration has no decay rule for conversation
   sources, so a decay arm needs one added; with that done the arm does
-  differ from the control. But decay is evaluated at the run's wall-clock
+  differ from the control. Decay, however, is evaluated at the run's wall-clock
   instant, the haystack sessions are dated 2022 to 2023, and the rank score
   is a sum, so it is not scale-invariant. Under any half-life of a year or
   less every recency factor lands between 0.15 and effectively zero, the
@@ -439,8 +463,8 @@ Read plainly, and published as-is:
   flipped: 3 right-to-wrong and 2 wrong-to-right at `top_k` 10, 5 and 1 at
   40. Where the cycle changed the context (22 questions at 10, 34 at 40),
   verdicts went right-to-wrong 5 times at each depth and wrong-to-right 0
-  and 1 times, 4 of the 5 losses `multi-session` both times. So the
-  headline drops of 4.0 and 5.3 points overstate the effect. About 3 points
+  and 1 times, 4 of the 5 losses `multi-session` both times. The
+  headline drops of 4.0 and 5.3 points therefore overstate the effect. About 3 points
   are attributable, all in one direction, and **a single-run QA difference
   under roughly 3 points on this subset is inside the noise**. The
   retrieval columns are deterministic and carry no such caveat.
@@ -523,8 +547,8 @@ flip counts established nothing. What the repeats show instead:
   rendering always gets right while another always gets wrong is **one**, in
   each direction, for both comparisons.
 
-**So the honest reading is that a third to a half of this context is free to
-drop.** Removing the subject field entirely cuts the read budget by 52.2%,
+**The honest reading is therefore that a third to a half of this context is
+free to drop.** Removing the subject field entirely cuts the read budget by 52.2%,
 which would take the shipped default from 1.95% of the full history's tokens
 to 0.93%, and costs nothing this measurement can detect. That the *larger*
 saving (`none`) scores closer to the default than the smaller one (`names`) is
@@ -538,10 +562,10 @@ share a `canonical_name` with another subject in the same store.
 **The default moved to `names` in 1.148.2, and not to `none`.** Taking a
 third of the read budget for no measurable accuracy cost is worth doing, and
 the table of record above is now measured that way. `none` is the larger
-saving and was not taken, for two reasons that are not statistical. The
+saving and was not taken, for two reasons that are not statistical. First, the
 `qa_particles` context is specified as "claim text, subjects, dates", so
 rendering the subject readably is a **correction** while removing the field is
-a redefinition of what the benchmark measures. And `none` scoring above
+a redefinition of what the benchmark measures. Second, `none` scoring above
 `names` is exactly the noise these repeats established: choosing between them
 on a 0.7-point gap would be selecting on sampling, which is the error this
 whole section exists to avoid. `none` stays available for anyone who wants to
@@ -562,7 +586,8 @@ free).
 
 The four conditions above anchor Particles against *no memory* and *the whole
 haystack*. They say nothing about how it compares with the memory an agent
-harness already gives you. So the same 150 questions were re-run with the
+harness already gives you. To answer that, the same 150 questions were re-run
+with the
 particle store swapped for two **comparator memories**
 (`particles benchmark memory --memory chunks|notes --no-baselines`): the same
 selection tuple, the same answer scaffold, the same answering model, the same
@@ -623,7 +648,7 @@ this page published before 1.148.2.
 memories do not tokenize alike: 1.97 characters per token for particles
 (subject UUIDs), 2.8 for transcript chunks, 2.7 for notes. A single character
 budget would therefore hand the three memories different amounts of the thing
-that actually costs money. So the budget was set per arm to land each
+that actually costs money. To avoid that, the budget was set per arm to land each
 comparator's *delivered token count* on the particles context it is being
 compared with, and the delivered size is measured and printed on every row
 above rather than assumed from the flag. The match is within 2% on both arms
@@ -690,7 +715,7 @@ Read plainly, and published as-is:
   those notes in August cost ≈ US$70, and building the particle stores
   ≈ US$2.70 per question.
 
-So the table says one thing precisely: **Particles' advantage is information
+The table therefore says one thing precisely: **Particles' advantage is information
 density, the most answer per read-time token, and it grows as the budget
 tightens.** Its deficit is coverage: given several times the budget,
 whole-session distillation recovers what claim extraction paraphrased away and

@@ -37,7 +37,12 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.corpus.store import CorpusEntryRow, SnapshotRow
-from particles.operations.reindex import _identify_scope, _reindex_snapshot, reindex
+from particles.operations.reindex import (
+    _collapse_for_auto_discovery,
+    _identify_scope,
+    _reindex_snapshot,
+    reindex,
+)
 from particles.store.particle_store import get_particle, insert_particle
 
 # ---------------------------------------------------------------------------
@@ -470,10 +475,15 @@ class TestIdentifyScopeAuto:
         save_blob(content, newest.content_hash)
         await db_session.commit()
 
+        # The collapse is its own step before scope gathering (D2);
         # --dry-run promises zero writes: it reports the narrowed scope, marks nothing.
         lines: list[str] = []
+        planned = await _collapse_for_auto_discovery(
+            db_session, None, True, progress=lines.append, dry_run=True
+        )
+        assert planned == {stale.snapshot_id}
         dry = await _identify_scope(
-            db_session, None, None, None, include_failed=True, progress=lines.append, dry_run=True
+            db_session, None, None, None, include_failed=True, collapsed=planned
         )
         assert dry == [(entry.entry_id, newest.snapshot_id)]
         assert any("Skipped 1 superseded snapshot(s)" in line for line in lines)
@@ -482,11 +492,55 @@ class TestIdentifyScopeAuto:
         assert stale_row.extraction_status == ExtractionStatus.FAILED.value
         assert stale_row.superseded_by_snapshot_id is None
 
-        # The real run marks it.
+        # The real run marks it, so the scope gather no longer even lists it.
+        applied = await _collapse_for_auto_discovery(db_session, None, True)
+        assert applied == {stale.snapshot_id}
         scope = await _identify_scope(db_session, None, None, None, include_failed=True)
         assert scope == [(entry.entry_id, newest.snapshot_id)]
         await db_session.refresh(stale_row)
         assert stale_row.extraction_status == ExtractionStatus.COMPLETE.value
+        assert stale_row.superseded_by_snapshot_id == newest.snapshot_id
+
+    @pytest.mark.asyncio
+    async def test_reindex_runs_the_collapse_before_scoping(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``reindex`` wires the collapse step: planned on --dry-run, applied live."""
+        from particles.core.schema import Mutability
+        from particles.corpus.deposit import save_blob, sha256
+
+        entry = await _add_entry(db_session)
+        row = await db_session.get(CorpusEntryRow, entry.entry_id)
+        row.mutability = Mutability.MUTABLE.value
+        stale = await _add_snapshot(
+            db_session,
+            entry,
+            extraction_status=ExtractionStatus.FAILED,
+            captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        content = b"the newest generation, reindexed"
+        newest = await _add_snapshot(
+            db_session,
+            entry,
+            extraction_status=ExtractionStatus.PENDING,
+            captured_at=datetime(2026, 5, 1, tzinfo=UTC),
+            content_hash=sha256(content),
+        )
+        save_blob(content, newest.content_hash)
+        await db_session.commit()
+        _patch_extract(monkeypatch)
+
+        lines: list[str] = []
+        dry = await reindex(db_session, run_post_lint=False, dry_run=True, progress=lines.append)
+        assert dry["scope"] == 1
+        assert any("Skipped 1 superseded snapshot(s)" in line for line in lines)
+        stale_row = await db_session.get(SnapshotRow, stale.snapshot_id)
+        await db_session.refresh(stale_row)
+        assert stale_row.superseded_by_snapshot_id is None
+
+        live = await reindex(db_session, run_post_lint=False)
+        assert live["scope"] == 1
+        await db_session.refresh(stale_row)
         assert stale_row.superseded_by_snapshot_id == newest.snapshot_id
 
     @pytest.mark.asyncio

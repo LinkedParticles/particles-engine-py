@@ -21,7 +21,7 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.149.0"
+version = "1.151.18"
 description = "Auditable, provenance-tracked memory for AI agents — the Particles engine and its API, CLI, and MCP surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -69,8 +69,12 @@ classifiers = [
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.149.0",
-    "sqlalchemy>=2.0",
+    "linkedparticles-core==1.151.18",
+    # `[asyncio]` because 2.1 stopped installing greenlet by default and every
+    # `sqlalchemy.ext.asyncio` import needs it. Bounded below the next minor:
+    # 2.1 changed ORM and typing behaviour this code depends on, so a 2.2 must
+    # be vetted before adoption rather than pulled in by a fresh resolve.
+    "sqlalchemy[asyncio]>=2.0,<2.2",
     "alembic>=1.13",
     "aiosqlite>=0.20",
     "greenlet>=3.5.0",

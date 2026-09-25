@@ -170,6 +170,21 @@ class TestTagExists:
 
 class TestParticleTagging:
     @pytest.mark.asyncio
+    async def test_insert_with_tags_creates_edges(self, db_session: AsyncSession) -> None:
+        # Tags supplied at creation must reach the edge table the tag-filtered
+        # reads use, not only ``tags_json``.
+        p = _make_particle().model_copy(update={"tags": ["coins", "ml", "coins"]})
+        await insert_particle(db_session, p)
+
+        assert p.id in await get_particle_ids_for_tags(db_session, {"coins"})
+        assert p.id in await get_particle_ids_for_tags(db_session, {"ml"})
+
+        # A later replace still converges on one edge per tag.
+        await set_particle_tags(db_session, p.id, ["ml"])
+        assert await get_particle_ids_for_tags(db_session, {"coins"}) == set()
+        assert p.id in await get_particle_ids_for_tags(db_session, {"ml"})
+
+    @pytest.mark.asyncio
     async def test_set_creates_edges_and_round_trips(self, db_session: AsyncSession) -> None:
         p = _make_particle()
         await insert_particle(db_session, p)

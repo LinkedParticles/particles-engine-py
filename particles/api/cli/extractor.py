@@ -1229,7 +1229,7 @@ def extractor_benchmark_validity_cmd(
     Reports the dangerous **wrong-expiry rate**: of the aligned claims whose
     gold is durable (no boundary), the fraction the extractor wrongly assigned a
     ``valid_until`` and thereby set up for silent retirement by the §9.3
-    staleness lint (the headline, the over-eager-expiry risk). Also reports existence
+    staleness lint (the headline, the over-eager-expiry risk). It also reports existence
     precision/recall of correct date-bounded extraction and date accuracy.
     Discovers every validity suite under --suites-dir the extractor is the
     production routing choice for (or runs only --suite). Report-only

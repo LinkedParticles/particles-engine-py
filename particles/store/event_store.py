@@ -48,6 +48,12 @@ class OperatorEventType(StrEnum):
     """
 
     SOURCE_RETRACTED = "SOURCE_RETRACTED"
+    # D1: an operator hard-deleted a corpus entry (`corpus delete`).
+    # The CORPUS_ENTRY ref names the entry; PARTICLE refs name the particles
+    # deleted with it and those stripped of its refs. The payload carries
+    # counts only, never deleted content (no claim text, URI or chunk hash),
+    # which would defeat the delete's privacy purpose.
+    CORPUS_ENTRY_DELETED = "CORPUS_ENTRY_DELETED"
     # system-emitted (not operator-initiated) — the §6.6
     # SUPERSEDED_BY_EXISTING verdict drops the candidate without persisting
     # it, and the drop must be auditable: the event carries the candidate
@@ -481,7 +487,7 @@ async def list_particle_events(
         )
         .order_by(OperatorEventRow.occurred_at, OperatorEventRow.event_id)
     )
-    return [
-        (pid, occurred, payload)
-        for pid, occurred, payload in (await session.execute(stmt)).tuples().all()
-    ]
+    rows = (await session.execute(stmt)).all()
+    # Indexed rather than unpacked: SQLAlchemy 2.1 types this row as
+    # ``Row[*tuple[Any, ...]]``, whose unpacking mypy widens to ``object``.
+    return [(row[0], row[1], row[2]) for row in rows]

@@ -52,7 +52,7 @@ look like genuine paraphrases, judge them:
 particles links suggest --subject "1 Pfennig (1948-1950) GDR" --llm-judge
 ```
 
-Now each pair carries a verdict. When you trust the verdicts, apply:
+Each pair now carries a verdict. When you trust the verdicts, apply:
 
 ```bash
 particles links suggest --subject "1 Pfennig (1948-1950) GDR" --apply
@@ -102,7 +102,7 @@ duplicate-likelihood at all: the 0.97–0.99 band hand-scores **worse** (56.7 %
 true duplicates) than the 0.95–0.97 band beneath it (73.3 %), and the worst
 false positive (`claude-opus-4-6` vs `claude-opus-4-5`) sits at **0.9951**,
 above where anyone would set a "very high similarity" threshold by intuition.
-So there is deliberately no middle tier: everything short of identity stays
+That is why there is deliberately no middle tier: everything short of identity stays
 advisory under `links suggest`.
 
 **What a merge does, and the three things it never does.** Per group (one
@@ -115,7 +115,7 @@ DUPLICATE_MERGED`. One `DUPLICATES_MERGED` operator event per group records the
 survivor, every superseded id, and the config in force. It never **deletes**:
 supersession is a ledger transition, so every copy stays readable via
 `particle show` and recoverable from the event. It never **mutates the
-survivor**. And it never touches a non-truth-apt or non-asserted particle.
+survivor**, and it never touches a non-truth-apt or non-asserted particle.
 
 Because the merge is idempotent (a merged copy is no longer ACTIVE), a second
 run is a no-op.
@@ -139,7 +139,8 @@ run is a no-op.
     suppression cannot drop a distinct fact. Turn it off with
     `extraction.duplicate_suppression.enabled: false`.
 
-    So on a current store you should need `links dedup` once, for the backlog.
+    On a current store you should therefore need `links dedup` once, for the
+    backlog.
 
 !!! warning "Read this before turning it on"
 
@@ -194,7 +195,8 @@ The undo is *exact* rather than approximate: the retained copies return to
 ACTIVE **keeping their ids** and with their `status_reason` cleared, only the
 merge's own `EXACT_DUPLICATE` links are dropped (a co-evidential link you or
 the judge made on the same pair survives), and the survivor is never touched.
-So `merge` followed by `unmerge` leaves the store exactly as it started: no
+Running `merge` and then `unmerge` therefore leaves the store exactly as it
+started: no
 new rows, no tombstones.
 
 To undo a whole run rather than one group, use `--run <run-id>`; every event

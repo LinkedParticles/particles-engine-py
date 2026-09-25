@@ -25,7 +25,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -36,11 +36,16 @@ import particles.store.taxonomy_store  # noqa: F401  # register taxonomy sink
 import particles.store.wikidata_cache  # noqa: F401  # register wikidata label cache
 from particles.config import get_config
 from particles.core.conflict_resolution import (
-    ConflictVerdict,
-    build_inconsistency_particle,
-    resolve_conflict,
+    RungInputs,
+    UpdateOrderSource,
+    decide_ladder,
+    effective_single_trust_order,
+    forces_inconsistent,
+    needs_rung_inputs,
+    update_order_source,
 )
 from particles.core.observer_scope import BeliefScope, PairPrecondition
+from particles.core.provenance import reobservation_ref
 from particles.core.schema import (
     AssertionModality,
     Confidence,
@@ -48,7 +53,6 @@ from particles.core.schema import (
     ExtractionStatus,
     ExtractorRef,
     Particle,
-    ParticleType,
     ProvenanceRef,
     ProvenanceRefType,
     RelationCreatedBy,
@@ -73,15 +77,18 @@ from particles.db import write_lock
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.calibration import scaler_for_record
 from particles.extraction.general import CandidateParticle, PageStat, candidate_to_particle
-from particles.extraction.polarity import is_non_asserted
 from particles.extraction.registry import ExtractorPlugin, infer_domain, select_extractor
 from particles.extraction.scope import (
     apply_source_exemption,
-    is_excluded_document_meta,
     is_scope_exempt_source,
 )
 from particles.extraction.subject_gate import gate_candidate_subjects
 from particles.ingest.candidate_dedup import dedupe_exact_candidates
+from particles.ingest.conflict_plan import (
+    ConflictWritePlan,
+    plan_conflict_writes,
+    plan_retired_hold,
+)
 from particles.ingest.duplicate_suppression import (
     DuplicateIndex,
     build_duplicate_index,
@@ -91,8 +98,24 @@ from particles.ingest.duplicate_suppression import (
     suppression_note,
 )
 from particles.ingest.generation import cascade_superseded_generation
-from particles.ingest.narrative_merge import collapse_chunk_narratives
+from particles.ingest.narrative_merge import (
+    _merge_label,
+    collapse_narratives,
+    narrative_labels,
+)
 from particles.ingest.observer_gate import DivergenceTally, ObserverGate, divergence_note
+from particles.ingest.pair_selection import (
+    CandidatePairs,
+    PairRole,
+    PairSelection,
+    first_source_ref_entry_id,
+    plan_probes,
+    plan_update_extras,
+    select_pairs,
+)
+from particles.ingest.routing import Route, route_particle
+from particles.ingest.routing import skips_conflict_resolution as _skips_conflict_resolution
+from particles.ingest.structure_edges import plan_structure_edges
 from particles.ingest.subject_resolver import (
     _persona_canonical,
     find_existing_subject,
@@ -107,14 +130,13 @@ from particles.ingest.update_supersession import (
     update_order,
 )
 from particles.llm import CompletionPool
-from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+from particles.store.event_store import record_event
 from particles.store.extractor_store import get_calibration
 from particles.store.particle_store import (
     append_provenance_ref,
     compute_context_fingerprint,
     get_active_particles_for_entry,
     get_active_particles_with_embeddings,
-    get_particle,
     get_particles_by_ids,
     insert_particle,
     update_particle_status,
@@ -138,25 +160,6 @@ _embed_duration = _meter.create_histogram(
 _extracted_counter = _meter.create_counter(
     "particles.extracted", unit="1", description="Particles written by an extract pass"
 )
-
-
-def _skips_conflict_resolution(properties: dict[str, object] | None) -> bool:
-    """True for particles §6.6 conflict resolution must ignore.
-
-    Two off-the-conflict-surface classes share the same treatment — kept out of
-    the candidate set and written straight to ACTIVE without conflict-checking:
-
-    * **DOCUMENT_META** — claims about a document's own apparatus,
-      not about the world.
-    * **non-asserted** (cap. 1) — a document's rejected / superseded /
-      deferred / counterfactual prose (``polarity`` DECLINED / HYPOTHETICAL). A
-      rejected alternative must not manufacture an ``INCONSISTENCY`` against the
-      chosen decision.
-
-    Both stay stored and ACTIVE (label, never delete); the query / lint / export
-    layers apply the visibility exclusion.
-    """
-    return is_excluded_document_meta(properties) or is_non_asserted(properties)
 
 
 # A particle paired with its embedding vector — the unit of the §6.6
@@ -427,8 +430,14 @@ async def _extract_snapshot_impl(
     # SEQUENCE_IN order, before embedding / §6.6 / the write loop see the
     # candidate list. No-op for ≤1 NARRATIVE candidate (single-pass journal,
     # every other extractor), so behaviour is unchanged outside the multi-chunk
-    # journal path.
-    result.candidates, merge_notes = await collapse_chunk_narratives(result.candidates)
+    # journal path. The label is the one model call, made here only when a merge
+    # is needed; the collapse itself is pure (D2).
+    merge_notes: list[str] = []
+    fragment_labels = narrative_labels(result.candidates)
+    if len(fragment_labels) > 1:
+        merge_label = await _merge_label(fragment_labels, merge_notes)
+        result.candidates, collapse_notes = collapse_narratives(result.candidates, merge_label)
+        merge_notes.extend(collapse_notes)
     if merge_notes:
         log.info("Narrative-merge notes for %s: %s", snapshot_id, merge_notes)
 
@@ -623,96 +632,55 @@ async def _extract_snapshot_impl(
     # candidate set is the pre-loop ``existing`` snapshot, which is exactly what
     # the write loop uses (the loop does not reconcile a candidate against its
     # same-run siblings), so precomputing here is behaviour-preserving.
-    # ``prechecks[i]`` is the (conflict, has_contradiction_signal) pair for
-    # ``result.candidates[i]``; DOCUMENT_META / non-asserted candidates skip
-    # §6.6 and need no signal (mirrors the write-loop guard below).
+    # ``selections[i]`` is the pair selection for ``result.candidates[i]``;
+    # DOCUMENT_META / non-asserted candidates skip §6.6 and pair with nothing
+    # (mirrors the write-loop guard below).
     await session.commit()
     # the observer precondition, one gate for every route that can
     # pair a candidate with an existing claim. Open (and free) until the store
     # has been rescoped; every candidate of this pass shares the entry's scope.
     gate = await ObserverGate.open(session)
     candidate_scope = await gate.entry_scope(session, entry_id) if gate.engaged else None
+    # The §6.6 pair selection, in ``ingest.pair_selection`` (D2).
+    # Gather what every candidate could pair with: the same-entry nearest
+    # claim, the subject pool, one batched observer-scope read, and
+    # the lineage facts in a ``multi`` store. Then decide which
+    # pairs to probe, probe exactly those, and decide the primary pair, the
+    # rung 2.5 extras and the declined pairs. ``entries`` caches the corpus
+    # entries the lineage read and the extras' apply share.
+    entries: dict[str, CorpusEntry | None] = {}
+    candidate_pairs = await _gather_candidate_pairs(
+        session,
+        result.candidates,
+        embeddings,
+        existing,
+        existing_embs,
+        subject_index=subject_index,
+        gate=gate,
+        candidate_scope=candidate_scope,
+        entry=entry,
+        snapshot_id=snapshot_id,
+        updates_only=updates_only,
+        entries=entries,
+    )
+    selections: list[PairSelection] = []
+    for candidate, pairs in zip(result.candidates, candidate_pairs, strict=True):
+        probes = await _probe_pairs(candidate.content, plan_probes(pairs))
+        selections.append(select_pairs(pairs, probes))
     # Per candidate: existing claims the precondition declined and the probe
-    # confirmed — recorded as CONTRADICTS once the candidate has an id.
-    divergent: list[list[Particle]] = []
-    prechecks: list[tuple[Particle | None, bool]] = []
-    # further *confirmed* same-subject pairs per candidate, beyond
-    # the primary conflict in ``prechecks`` — resolved by rung 2.5 only.
-    update_extras: list[list[Particle]] = []
-    about_ids: dict[str, str | None] = {}
-    for i, candidate in enumerate(result.candidates):
-        declined: list[Particle] = []
-        divergent.append(declined)
-        if _skips_conflict_resolution(candidate.properties):
-            prechecks.append((None, False))
-            update_extras.append([])
-            continue
-        cand_emb = embeddings[i] if i < len(embeddings) else None
-        holder = holder_from_properties(candidate.properties)
-        conflict = _find_conflict(
-            cand_emb,
-            existing,
-            existing_embs,
-            candidate_stance_holder=holder,
-        )
-        # Extraction is fail-open: a probe that could not complete (None) maps to
-        # "no contradiction" (today's behaviour). The assertion pathway
-        # fails closed instead, but it does not precompute the signal here.
-        signal = (
-            bool(await _has_contradiction_signal(candidate.content, conflict.content))
-            if conflict is not None
-            else False
-        )
-        # The same-entry pool reaches a claim another project also states (one
-        # particle, folded from both files): the precondition applies here too.
-        if (
-            conflict is not None
-            and signal
-            and candidate_scope is not None
-            and await gate.verdict(session, candidate_scope, conflict) is PairPrecondition.DECLINE
-        ):
-            declined.append(conflict)
-            conflict, signal = None, False
-        confirmed: list[Particle] = []
-        if (
-            subject_index is not None
-            and cand_emb is not None
-            and holder is None
-            and candidate.assertion_modality == AssertionModality.FALSIFIABLE
-        ):
-            subject_ids = await _candidate_subject_ids_readonly(
-                session, candidate, about_ids, source_type=entry.source_type
-            )
-            if subject_ids:
-                for other in subject_index.candidates(
-                    subject_ids,
-                    cand_emb,
-                    floor=update_cfg.subject_floor,
-                    limit=update_cfg.max_candidates,
-                    skip_ids=() if conflict is None else (conflict.id,),
-                ):
-                    if (
-                        candidate_scope is not None
-                        and await gate.verdict(session, candidate_scope, other)
-                        is PairPrecondition.DECLINE
-                    ):
-                        # Declined whichever regime: never offered to a rung,
-                        # but a confirmed contradiction is recorded (§2).
-                        if await _has_contradiction_signal(candidate.content, other.content):
-                            declined.append(other)
-                        continue
-                    if updates_only and not await _pair_can_update(
-                        session, entry, snapshot_id, candidate, other
-                    ):
-                        continue
-                    if await _has_contradiction_signal(candidate.content, other.content):
-                        confirmed.append(other)
-        # The primary pair is the same-entry conflict when it is confirmed;
-        # otherwise the best confirmed same-subject pair takes its place.
-        if (conflict is None or not signal) and confirmed:
-            conflict, signal = confirmed.pop(0), True
-        prechecks.append((conflict, signal))
-        update_extras.append(confirmed)
+    # confirmed, recorded as CONTRADICTS once the candidate has an id.
+    divergent = [list(selection.declined) for selection in selections]
+    # The rung 2.5 extras' entries, read here rather than inside the write lock.
+    # In a ``multi`` store the lineage gather has already read every one.
+    for pairs, selection in zip(candidate_pairs, selections, strict=True):
+        for other in selection.extras:
+            key = first_source_ref_entry_id(other)
+            if (
+                key is not None
+                and key not in entries
+                and pairs.precondition_of(other) is PairPrecondition.RECONCILE
+            ):
+                entries[key] = await get_entry(session, key)
 
     # non-entity subject gate. Drop doc-ID / enum / filename / CLI /
     # snake_case tokens from each candidate's subjects (and the parallel
@@ -828,52 +796,65 @@ async def _extract_snapshot_impl(
             else:
                 emb_list = list(emb)
 
-            # DOCUMENT_META and non-asserted candidates skip
-            # §6.6 entirely — they would only manufacture spurious INCONSISTENCY.
-            # Write straight to ACTIVE (stored, label-not-delete).
-            if _skips_conflict_resolution(particle.properties):
+            # The rungs above §6.6 (D2): one pure router shared with
+            # ``reconcile_and_insert``, so "duplicate" means one thing on both
+            # write paths. The §6.6 conflict candidate and its
+            # contradiction signal were precomputed before the write loop
+            # (F4.3), keeping the LLM call out of the write transaction. A
+            # candidate earlier in this pass may already have demoted that
+            # conflict (many claims about one subject per session);
+            # it is then no longer ACTIVE and routes to a plain insert.
+            selection = selections[i]
+            retired = subject_index.retired if subject_index is not None else set()
+            route, target = route_particle(
+                particle,
+                duplicates=dup_index,
+                retired_values=retired_index,
+                conflict=selection.primary,
+                retired_ids=retired,
+            )
+
+            if route is Route.UNCHECKED:
+                # DOCUMENT_META and non-asserted candidates
+                # skip §6.6 entirely — they would only manufacture spurious
+                # INCONSISTENCY. Write straight to ACTIVE (stored, label-not-delete).
                 validate_transition(None, Status.ACTIVE)
                 await insert_particle(session, particle, emb_list)
                 written.append(particle)
                 index_to_id[i] = particle.id
-                continue
-
-            # the exact-duplicate rung, ABOVE §6.6. If this claim is
-            # already held verbatim by an ACTIVE particle with the same subjects
-            # and stance holder, don't mint a second one — record this source on
-            # the existing particle and move on. Deterministic (content identity,
-            # not similarity), so nothing distinguishable leaves the ACTIVE
-            # surface: the claim is on it character for character. Note the
-            # stance/narrative edge-writers below bind through ``index_to_id``,
-            # which maps this candidate's position onto the surviving particle,
-            # so an edge whose endpoint was suppressed still lands correctly.
-            duplicate_of = dup_index.find(particle)
-            if duplicate_of is not None:
+            elif route is Route.SUPPRESS:
+                # this claim is already held verbatim by an ACTIVE
+                # particle with the same subjects and stance holder, so don't
+                # mint a second one — record this source on the existing
+                # particle and move on. Deterministic (content identity, not
+                # similarity), so nothing distinguishable leaves the ACTIVE
+                # surface. The stance/narrative edge-writers below bind through
+                # ``index_to_id``, which maps this candidate's position onto the
+                # surviving particle, so an edge whose endpoint was suppressed
+                # still lands correctly.
+                assert target is not None
                 for prov_ref in particle.provenance:
-                    await append_provenance_ref(session, duplicate_of.id, prov_ref)
-                suppressed_into.append(duplicate_of.id)
-                index_to_id[i] = duplicate_of.id
+                    await append_provenance_ref(session, target.id, prov_ref)
+                suppressed_into.append(target.id)
+                index_to_id[i] = target.id
                 log.info(
                     "Duplicate suppressed: candidate %d already ACTIVE as %s",
                     i,
-                    duplicate_of.id[:8],
+                    target.id[:8],
                 )
-                continue
-
-            # the retired-value rung — after exact-duplicate suppression,
-            # before §6.6. If
-            # this exact claim was retired by an operator's or reviewer's
-            # judgment, it does not walk back onto the ACTIVE surface because
-            # a source still says it: the candidate is stored quarantined
-            # behind an INCONSISTENCY record for review, or — when a hold for
-            # this claim is already open — recorded on that hold.
-            retired_twin = retired_index.find(particle)
-            if retired_twin is not None:
+            elif route is Route.RETIRED_TWIN:
+                # this exact claim was retired by an operator's or
+                # reviewer's judgment, so it does not walk back onto the ACTIVE
+                # surface because a source still says it: the candidate is
+                # stored quarantined behind an INCONSISTENCY record for review,
+                # or — when a hold for this claim is already open — recorded on
+                # that hold.
+                assert target is not None
                 held = await _hold_retired_reassertion(
                     session,
                     particle,
                     emb_list,
-                    retired_twin,
+                    target,
                     corpus_entry_id=entry_id,
                     snapshot_id=snapshot_id,
                     domain=infer_domain(entry.source_type),
@@ -884,19 +865,7 @@ async def _extract_snapshot_impl(
                 else:
                     retired_absorbed.append(held.id)
                 index_to_id[i] = held.id
-                continue
-
-            # §6.6 conflict candidate + contradiction signal were precomputed before
-            # the write loop (F4.3), keeping the LLM call out of the write transaction.
-            conflict, has_signal = prechecks[i]
-            retired = subject_index.retired if subject_index is not None else set()
-            # A candidate earlier in this pass may already have demoted this
-            # conflict (many claims about one subject per session);
-            # it is no longer ACTIVE, so there is nothing left to reconcile.
-            if conflict is not None and conflict.id in retired:
-                conflict = None
-
-            if conflict is None:
+            elif route is Route.INSERT:
                 # No conflict — write as ACTIVE
                 validate_transition(None, Status.ACTIVE)
                 await insert_particle(session, particle, emb_list)
@@ -907,13 +876,14 @@ async def _extract_snapshot_impl(
             else:
                 # Conflict found — apply resolution ladder
                 # Returns None when trust resolution kept existing particle (new is dropped)
+                assert target is not None
                 resolved = await _resolve_conflict(
                     session,
                     particle,
-                    conflict,
+                    target,
                     entry_id,
                     snapshot_id,
-                    has_signal=has_signal,
+                    probe=selection.signal,
                     new_embedding=emb,
                     allow_update_supersession=True,
                     retired_out=retired,
@@ -930,10 +900,10 @@ async def _extract_snapshot_impl(
                             resolved,
                             entry,
                             snapshot_id,
-                            [p for p in update_extras[i] if p.id not in retired],
+                            [p for p in selection.extras if p.id not in retired],
                             retired,
-                            observer=gate,
-                            candidate_scope=candidate_scope,
+                            entries=entries,
+                            precondition=candidate_pairs[i].precondition,
                         )
 
         # record every declined, probe-confirmed pair once the claim
@@ -942,60 +912,12 @@ async def _extract_snapshot_impl(
         declined_total = sum(len(others) for others in divergent)
         divergences += await _record_divergences(session, gate, divergent, index_to_id)
 
-        # create the ENDORSES/DISPUTES edges now that every candidate's
-        # stored id is known. A stance binds to the sibling claim it endorses /
-        # disputes; if either endpoint was dropped (conflict-superseded) or the
-        # target resolves to the stance itself, the edge is skipped (no identifiable
-        # target — an unbound stance has nothing to aggregate).
-        for stance_idx, target_idx, kind in stance_specs:
-            s_id = index_to_id.get(stance_idx)
-            t_id = index_to_id.get(target_idx)
-            if s_id is not None and t_id is not None and s_id != t_id:
-                await create_relation(session, s_id, t_id, kind, RelationCreatedBy.EXTRACTOR_DIRECT)
-
-        # write the entry-level NARRATIVE graph. The journal extractor
-        # emits exactly one NARRATIVE candidate (particle_type == NARRATIVE) plus a
-        # narrative_index on each constituent claim. Link every constituent to the
-        # narrative via PART_OF (constituent → narrative) and consecutive
-        # constituents via SEQUENCE_IN (predecessor → successor), in narrative_index
-        # order — the same index_to_id → create_relation pattern the stance edges
-        # use above. Edges are written only when both endpoints landed; a
-        # conflict-dropped constituent is simply absent from the chain.
-        narrative_ids = [
-            index_to_id[i]
-            for i, c in enumerate(result.candidates)
-            if c.particle_type == ParticleType.NARRATIVE and i in index_to_id
-        ]
-        if len(narrative_ids) == 1:
-            narrative_id = narrative_ids[0]
-            constituents: list[tuple[int, int]] = []
-            for i, c in enumerate(result.candidates):
-                ni = c.narrative_index
-                if ni is None or c.particle_type == ParticleType.NARRATIVE or i not in index_to_id:
-                    continue
-                constituents.append((ni, i))
-            constituents.sort()
-            prev_id: str | None = None
-            for _ni, i in constituents:
-                cid = index_to_id[i]
-                if cid == narrative_id:
-                    continue
-                await create_relation(
-                    session,
-                    cid,
-                    narrative_id,
-                    RelationType.PART_OF,
-                    RelationCreatedBy.EXTRACTOR_DIRECT,
-                )
-                if prev_id is not None and prev_id != cid:
-                    await create_relation(
-                        session,
-                        prev_id,
-                        cid,
-                        RelationType.SEQUENCE_IN,
-                        RelationCreatedBy.EXTRACTOR_DIRECT,
-                    )
-                prev_id = cid
+        # now that every candidate's stored id is known,
+        # write the stance edges and the entry-level NARRATIVE graph. The plan is
+        # a pure function of the candidates and ``index_to_id``
+        # (``ingest.structure_edges``); this is its apply step.
+        for a_id, b_id, kind in plan_structure_edges(result.candidates, index_to_id, stance_specs):
+            await create_relation(session, a_id, b_id, kind, RelationCreatedBy.EXTRACTOR_DIRECT)
 
         # capture every URL mentioned in this snapshot as a citation
         # signal (best-effort; never fails extraction). Runs once extraction has
@@ -1105,26 +1027,14 @@ async def _record_carry_forward(
     index gains no row, and ``confidence.value`` / ``asserted_at`` are untouched.
     Returns how many refs were added.
     """
+    ids = list(dict.fromkeys(particle_ids))
+    particles_by_id = await get_particles_by_ids(session, ids)
     added = 0
-    for particle_id in dict.fromkeys(particle_ids):
-        particle = await get_particle(session, particle_id)
+    for particle_id in ids:
+        particle = particles_by_id.get(particle_id)
         if particle is None:
             continue
-        prior = next(
-            (
-                r
-                for r in reversed(particle.provenance)
-                if r.type is ProvenanceRefType.SOURCE and r.corpus_entry_id == entry_id
-            ),
-            None,
-        )
-        ref = (
-            prior.model_copy(update={"snapshot_id": snapshot_id})
-            if prior is not None
-            else ProvenanceRef(
-                type=ProvenanceRefType.SOURCE, corpus_entry_id=entry_id, snapshot_id=snapshot_id
-            )
-        )
+        ref = reobservation_ref(particle, entry_id, snapshot_id)
         if await append_provenance_ref(session, particle_id, ref):
             added += 1
     return added
@@ -1240,54 +1150,70 @@ async def reconcile_and_insert(
                 particle.content[:80],
             )
 
-    # DOCUMENT_META and non-asserted never participate in
-    # §6.6 (mirrors extract_snapshot). They are also excluded from the
-    # conflict-candidate set, so neither is ever appended to ``candidate_cache``.
-    if _skips_conflict_resolution(particle.properties):
+    # The rungs above §6.6 route through the one pure router the extract loop
+    # uses (D2), so "duplicate" means one thing on both write paths.
+    # The conflict search is the expensive gather here, so it runs
+    # only when the cheap rungs miss: the router is called once without a
+    # conflict, then again with the search's result.
+    duplicates = (
+        await build_duplicate_index(session, [particle.content])
+        if get_config().extraction.duplicate_suppression.enabled
+        else DuplicateIndex()
+    )
+    retired_values = (
+        await build_retired_value_index(session, [particle.content])
+        if get_config().extraction.retired_value_quarantine.enabled
+        else DuplicateIndex()
+    )
+    route, target = route_particle(
+        particle,
+        duplicates=duplicates,
+        retired_values=retired_values,
+        conflict=None,
+        retired_ids=frozenset(),
+    )
+
+    if route is Route.UNCHECKED:
+        # DOCUMENT_META and non-asserted never participate
+        # in §6.6 (mirrors extract_snapshot). They are also excluded from the
+        # conflict-candidate set, so neither is ever appended to ``candidate_cache``.
         validate_transition(None, Status.ACTIVE)
         await insert_particle(session, particle, emb_list)
         return particle
 
-    # the exact-duplicate rung runs here too, above §6.6, so
-    # "duplicate" means one thing on both write paths. Without it an exact
-    # duplicate reaches the ladder, finds no contradiction signal, returns
-    # CORROBORATES, and is written as a second ACTIVE particle — which is why
-    # ``particle_assert`` was not idempotent before this ADR.
-    if get_config().extraction.duplicate_suppression.enabled:
-        dup_index = await build_duplicate_index(session, [particle.content])
-        duplicate_of = dup_index.find(particle)
-        if duplicate_of is not None:
-            for ref in particle.provenance:
-                await append_provenance_ref(session, duplicate_of.id, ref)
-            log.info(
-                "Duplicate suppressed: assertion already ACTIVE as %s",
-                duplicate_of.id[:8],
-            )
-            return duplicate_of
+    if route is Route.SUPPRESS:
+        # without this rung an exact duplicate reaches the ladder,
+        # finds no contradiction signal, returns CORROBORATES, and is written as
+        # a second ACTIVE particle — which is why ``particle_assert`` was not
+        # idempotent before this ADR.
+        assert target is not None
+        for ref in particle.provenance:
+            await append_provenance_ref(session, target.id, ref)
+        log.info(
+            "Duplicate suppressed: assertion already ACTIVE as %s",
+            target.id[:8],
+        )
+        return target
 
-    # the retired-value rung runs here too — after exact-duplicate
-    # suppression, above §6.6 — so a re-asserted retired claim is
-    # held on both write paths.
-    if get_config().extraction.retired_value_quarantine.enabled:
-        retired_index = await build_retired_value_index(session, [particle.content])
-        retired_twin = retired_index.find(particle)
-        if retired_twin is not None:
-            corpus_entry_id, snapshot_id, trigger_ref_type = _trigger_ref_for(particle)
-            entry = (
-                await get_entry(session, corpus_entry_id)
-                if trigger_ref_type is ProvenanceRefType.SOURCE
-                else None
-            )
-            return await _hold_retired_reassertion(
-                session,
-                particle,
-                emb_list,
-                retired_twin,
-                corpus_entry_id=corpus_entry_id,
-                snapshot_id=snapshot_id,
-                trigger_ref_type=trigger_ref_type,
-                domain=infer_domain(entry.source_type) if entry else None,
-            )
+    if route is Route.RETIRED_TWIN:
+        # a re-asserted retired claim is held on both write paths.
+        assert target is not None
+        corpus_entry_id, snapshot_id, trigger_ref_type = _trigger_ref_for(particle)
+        entry = (
+            await get_entry(session, corpus_entry_id)
+            if trigger_ref_type is ProvenanceRefType.SOURCE
+            else None
+        )
+        return await _hold_retired_reassertion(
+            session,
+            particle,
+            emb_list,
+            target,
+            corpus_entry_id=corpus_entry_id,
+            snapshot_id=snapshot_id,
+            trigger_ref_type=trigger_ref_type,
+            domain=infer_domain(entry.source_type) if entry else None,
+        )
 
     if candidate_cache is None:
         pairs = await load_active_conflict_candidates(session)
@@ -1311,20 +1237,38 @@ async def reconcile_and_insert(
                 limit=1,
             )
             conflict = nearest[0] if nearest else None
-    if conflict is None:
+    # This path's candidacy policy, stated as arguments (``ingest.pair_selection``):
+    # one pair, always primary. No subject pool, no precondition pre-screen (the
+    # ladder applies it) and no lineage filter. The probe keeps its tri-state for
+    # the ladder, where ``fail_closed`` reads an incomplete probe as a signal.
+    candidacy = CandidatePairs(nearest=conflict)
+    probe_results: dict[str, bool | None] = {}
+    for other, _role in plan_probes(candidacy):
+        probe_results[other.id] = await _has_contradiction_signal(particle.content, other.content)
+    selection = select_pairs(candidacy, {pid: bool(p) for pid, p in probe_results.items()})
+    route, target = route_particle(
+        particle,
+        duplicates=duplicates,
+        retired_values=retired_values,
+        conflict=selection.primary,
+        retired_ids=frozenset(),
+    )
+    if route is Route.INSERT:
         validate_transition(None, Status.ACTIVE)
         await insert_particle(session, particle, emb_list)
         if candidate_cache is not None and emb is not None:
             candidate_cache.append((particle, emb))
         return particle
 
+    assert route is Route.LADDER and target is not None
     corpus_entry_id, snapshot_id, trigger_ref_type = _trigger_ref_for(particle)
     return await _resolve_conflict(
         session,
         particle,
-        conflict,
+        target,
         corpus_entry_id,
         snapshot_id,
+        probe=probe_results[target.id],
         candidate_cache=candidate_cache,
         new_embedding=emb,
         single_trust_order=single_trust_order,
@@ -1531,35 +1475,73 @@ async def _hold_retired_reassertion(
         )
         return twin
 
-    held = particle.model_copy(
-        update={
-            "status": Status.PROVENANCE_STALE,
-            "status_reason": StatusReason.CONFLICT_PENDING,
-        }
-    )
-    validate_transition(None, Status.PROVENANCE_STALE)
-    await insert_particle(session, held, emb_list)
-    inc_particle = build_inconsistency_particle(
+    plan = plan_retired_hold(
         twin,
-        held,
+        particle,
         corpus_entry_id=corpus_entry_id,
         snapshot_id=snapshot_id,
-        asserted_by="extract-pipeline",
         trigger_ref_type=trigger_ref_type,
-        retired_twin=True,
+        domain=domain,
     )
-    validate_transition(None, Status.INCONSISTENCY)
-    await insert_particle(session, inc_particle, domain_hint=domain)
-    log.info(
-        "Retired-value hold: candidate %r re-asserts %s (%s); stored quarantined"
-        " as %s behind INCONSISTENCY %s",
-        particle.content[:60],
-        twin.id[:8],
-        twin.status_reason.value if twin.status_reason else twin.status.value,
-        held.id[:8],
-        inc_particle.id[:8],
-    )
-    return inc_particle
+    held = await _apply_conflict_plan(session, plan, existing=twin, embedding=emb_list)
+    assert held is not None
+    return held
+
+
+async def _apply_conflict_plan(
+    session: AsyncSession,
+    plan: ConflictWritePlan,
+    *,
+    existing: Particle,
+    embedding: Any,
+    candidate_cache: list[EmbeddingPair] | None = None,
+    retired_out: set[str] | None = None,
+    observer: ObserverGate | None = None,
+) -> Particle | None:
+    """Perform a :class:`~particles.ingest.conflict_plan.ConflictWritePlan`, in its order.
+
+    Insert, then demote (the mirror verdicts demote the row just inserted),
+    then the INCONSISTENCY record, the dropped-candidate event and the observer
+    divergence. ``embedding`` is stored with the inserted row, and joins a batch
+    caller's ``candidate_cache`` beside it (F4.3), so a later item in the batch
+    reconciles against this verdict.
+    """
+    if plan.insert is not None:
+        validate_transition(None, plan.insert.status)
+        await insert_particle(session, plan.insert, _storable(embedding))
+    if plan.demote is not None:
+        demote_id, reason = plan.demote
+        await update_particle_status(session, demote_id, Status.PROVENANCE_STALE, reason)
+    if plan.wrapper is not None:
+        validate_transition(None, Status.INCONSISTENCY)
+        await insert_particle(session, plan.wrapper, domain_hint=plan.wrapper_domain_hint)
+    if plan.dropped_event is not None:
+        event = plan.dropped_event
+        await record_event(
+            session,
+            actor=event.actor,
+            event_type=event.event_type,
+            reason=event.reason,
+            refs=list(event.refs),
+            payload=dict(event.payload),
+        )
+    if plan.record_divergence and observer is not None and plan.insert is not None:
+        await observer.record(session, plan.insert.id, [existing])
+    if plan.cache_drop_existing:
+        if candidate_cache is not None:
+            candidate_cache[:] = [pair for pair in candidate_cache if pair[0].id != existing.id]
+        if retired_out is not None:
+            retired_out.add(existing.id)
+    if (
+        plan.cache_add_new
+        and plan.insert is not None
+        and candidate_cache is not None
+        and embedding is not None
+    ):
+        candidate_cache.append((plan.insert, embedding))
+    if plan.log_message is not None:
+        log.info(plan.log_message, *plan.log_args)
+    return plan.result
 
 
 async def _resolve_conflict(
@@ -1569,7 +1551,7 @@ async def _resolve_conflict(
     corpus_entry_id: str,
     snapshot_id: str,
     *,
-    has_signal: bool | None = None,
+    probe: bool | None,
     candidate_cache: list[EmbeddingPair] | None = None,
     new_embedding: np.ndarray[Any, np.dtype[np.float32]] | None = None,
     single_trust_order: bool | None = None,
@@ -1583,21 +1565,26 @@ async def _resolve_conflict(
 ) -> Particle | None:
     """Apply the §6.6 conflict-resolution ladder for one (existing, new) pair.
 
-    Splits cleanly between the pure decision (delegated to
-    :func:`particles.core.conflict_resolution.resolve_conflict`) and the
-    side-effecting parts that touch the DB / LLM (handled here):
+    Gather, decide, apply (D2):
 
-      - Resolve the contradiction signal via the attribution-pattern and LLM
-        gate.
-      - Look up trust scores via the Extension B layered lookup, falling
-        back to the URL baseline.
-      - Persist whatever the verdict says: insert the new particle as
-        ACTIVE, demote the existing particle to PROVENANCE_STALE, or
-        build & insert the INCONSISTENCY particle (with ``domain_hint``).
+      - **Gather** (here): the observer precondition, and, when
+        :func:`~particles.core.conflict_resolution.needs_rung_inputs`, the
+        rung inputs (the supersession prior, the Extension B trust scores with
+        the URL baseline, the rung 2.5 order).
+      - **Decide** (pure):
+        :func:`~particles.core.conflict_resolution.decide_ladder` applies the
+        overrides and the §6.4 verdict, and
+        :func:`~particles.ingest.conflict_plan.plan_conflict_writes` maps the
+        outcome to writes.
+      - **Apply**: :func:`_apply_conflict_plan` performs them in plan order.
 
-    ``has_signal`` may be supplied by a caller that precomputed the
-    contradiction signal outside the write transaction (F4.3); when ``None``
-    the LLM gate runs here. ``new_embedding`` is the candidate's embedding —
+    ``probe`` is the contradiction probe (attribution pattern and LLM gate)
+    the caller ran when it selected the pair (``ingest.pair_selection``),
+    outside the write transaction (F4.3). It is tri-state: ``None`` means the
+    probe could not complete, which only the ``fail_closed`` assertion pathway
+    distinguishes from ``False``; extraction passes a bool.
+
+    ``new_embedding`` is the candidate's embedding —
     stored alongside whichever row this verdict persists, and used with
     ``candidate_cache`` (when given) to mirror the write in place: the new
     particle is appended when it lands ACTIVE and a trust-superseded existing
@@ -1614,8 +1601,8 @@ async def _resolve_conflict(
     verdict demoted, so a caller reconciling several claims in one pass never
     offers — or demotes — it twice.
 
-    ``observer`` is the precondition, checked here — after the
-    probe, before any rung — so it covers every route that reaches the ladder.
+    ``observer`` is the precondition, checked here before any rung,
+    so it covers every route that reaches the ladder.
     A pair another project observes is **declined**: the candidate is written
     ``ACTIVE`` beside the existing claim, and a confirmed contradiction is
     recorded as ``CONTRADICTS``. A global existing claim contested by a
@@ -1636,25 +1623,8 @@ async def _resolve_conflict(
         ``status_reason = CONFLICT_PENDING`` — so Review can
         recover it and the wrapper's B ref resolves.
     """
-    # Tri-state contradiction signal. A precomputed ``has_signal``
-    # is always a bool (extraction coerces None→False before passing). When not
-    # precomputed, run the probe here: True/False is a verdict; None means the
-    # probe could not complete, and ``fail_closed`` decides — extraction stays
-    # fail-open (None→False), the assertion pathway quarantines (force INCONSISTENT).
-    force_inconsistent = False
-    if has_signal is None:
-        probe = await _has_contradiction_signal(new_particle.content, existing.content)
-        if probe is None:
-            if fail_closed:
-                force_inconsistent = True
-                has_signal = True  # run the trust/domain lookup; verdict overridden below
-            else:
-                has_signal = False
-        else:
-            has_signal = probe
-
-    # the observer precondition — a property of the pair, checked
-    # once here, after the verdict the probe paid for and before any rung.
+    # the observer precondition, a property of the pair (it does
+    # not depend on the probe), checked once here before any rung.
     precondition = PairPrecondition.RECONCILE
     if observer is not None and observer.engaged:
         scope = (
@@ -1663,372 +1633,173 @@ async def _resolve_conflict(
             else await observer.candidate_scope(session, new_particle)
         )
         precondition = await observer.verdict(session, scope, existing)
-    if precondition is PairPrecondition.DECLINE:
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, _storable(new_embedding))
-        if candidate_cache is not None and new_embedding is not None:
-            candidate_cache.append((new_particle, new_embedding))
-        if has_signal and observer is not None:
-            await observer.record(session, new_particle.id, [existing])
-        log.info(
-            "Observer precondition: new %s left standing beside %s, which another project observes",
-            new_particle.id[:8],
-            existing.id[:8],
-        )
-        return new_particle
-    if precondition is PairPrecondition.REVIEW and has_signal:
-        # A project contesting a global claim: to review, never rung 2.5.
-        force_inconsistent = True
 
-    # Resolve trust inputs up front when the ladder might consult them.
-    # Skip the lookup entirely for the gate-corroborates case — it ignores
-    # trust scores. Also resolve domain for the INCONSISTENCY domain_hint
-    # (used by the Extension B cascade).
-    domain: str | None = None
-    score_new: float | None = None
-    score_existing: float | None = None
     # The effective trust regime, resolved before
     # the rung inputs: the attribution requirement keys on it —
     # in a ``multi`` store an anonymous lineage is not one principal.
-    effective_single = (
-        single_trust_order
-        if single_trust_order is not None
-        else (get_config().reconciliation.store_mode == "single")
+    effective_single = effective_single_trust_order(
+        single_trust_order, get_config().reconciliation.store_mode
     )
-    # cap. 2 rung-1.5 inputs (default off → no prior). Only resolved
-    # when there is a confirmed conflict to adjudicate (inside ``if has_signal``).
+
+    # Gather the rung inputs only when the ladder can consult them. The domain
+    # read here is also the INCONSISTENCY record's ``domain_hint`` (the
+    # Extension B cascade).
+    domain: str | None = None
+    rung_inputs: RungInputs | None = None
+    if needs_rung_inputs(probe, fail_closed=fail_closed, precondition=precondition):
+        rung_inputs, domain = await _gather_rung_inputs(
+            session,
+            new_particle,
+            existing,
+            corpus_entry_id,
+            snapshot_id,
+            order_source=update_order_source(
+                allow_update=allow_update_supersession
+                and get_config().reconciliation.update_supersession.enabled,
+                allow_own_assertion=allow_own_assertion_supersession,
+                forced=forces_inconsistent(
+                    probe, fail_closed=fail_closed, precondition=precondition
+                ),
+            ),
+            effective_single=effective_single,
+        )
+
+    outcome = decide_ladder(
+        existing,
+        new_particle,
+        probe=probe,
+        fail_closed=fail_closed,
+        precondition=precondition,
+        rung_inputs=rung_inputs,
+        single_trust_order=effective_single,
+        trust_differential_threshold=get_config().trust.differential_threshold,
+    )
+    plan = plan_conflict_writes(
+        outcome,
+        new_particle,
+        existing,
+        corpus_entry_id=corpus_entry_id,
+        snapshot_id=snapshot_id,
+        trigger_ref_type=trigger_ref_type,
+        scores=(
+            (rung_inputs.trust_score_new, rung_inputs.trust_score_existing)
+            if rung_inputs is not None
+            else (None, None)
+        ),
+        domain=domain,
+    )
+    return await _apply_conflict_plan(
+        session,
+        plan,
+        existing=existing,
+        embedding=new_embedding,
+        candidate_cache=candidate_cache,
+        retired_out=retired_out,
+        observer=observer,
+    )
+
+
+async def _gather_rung_inputs(
+    session: AsyncSession,
+    new_particle: Particle,
+    existing: Particle,
+    corpus_entry_id: str,
+    snapshot_id: str,
+    *,
+    order_source: UpdateOrderSource | None,
+    effective_single: bool,
+) -> tuple[RungInputs, str | None]:
+    """Read the §6.4 rung inputs for a signalled pair, and the candidate's domain.
+
+    A staged gather: the supersession prior only when enabled, the trust
+    scores from the Extension B layered lookup (the URL baseline as
+    fallback), and the rung 2.5 order from whichever source applies.
+    """
+    existing_source_ref = next(
+        (ref for ref in existing.provenance if ref.type == ProvenanceRefType.SOURCE),
+        None,
+    )
+    existing_entry_id = existing_source_ref.corpus_entry_id if existing_source_ref else None
+    existing_snapshot_id = existing_source_ref.snapshot_id if existing_source_ref else None
+
+    # cap. 2: document-supersession prior. Resolve whether either
+    # side's provenance corpus entry (transitively) supersedes the other's,
+    # so rung 1.5 can prefer the superseding document's claim. Gated by
+    # config; needs the existing particle's source entry to compare against.
     new_supersedes_existing = False
     existing_supersedes_new = False
+    if get_config().document_supersession.enabled and existing_entry_id:
+        from particles.corpus.supersession import entry_supersedes
+
+        new_supersedes_existing = await entry_supersedes(
+            session,
+            superseding_entry_id=corpus_entry_id,
+            superseded_entry_id=existing_entry_id,
+        )
+        existing_supersedes_new = await entry_supersedes(
+            session,
+            superseding_entry_id=existing_entry_id,
+            superseded_entry_id=corpus_entry_id,
+        )
+    new_entry = await get_entry(session, corpus_entry_id)
+    existing_entry = await get_entry(session, existing_entry_id) if existing_entry_id else None
+    domain = infer_domain(new_entry.source_type) if new_entry else None
+
+    # §6.4 AUTHOR tier inputs — each side's author_id from its SOURCE
+    # snapshot, read off the entries already fetched above.
+    new_author_id = _snapshot_author_id(new_entry, snapshot_id)
+    existing_author_id = _snapshot_author_id(existing_entry, existing_snapshot_id)
+
+    # Trust scores are only consulted if neither particle is ALEATORY,
+    # but resolving them unconditionally keeps the call shape simple and
+    # the result is just dropped on the ALEATORY path inside
+    # resolve_conflict().
+    score_new, score_existing = await _resolve_trust_scores(
+        session,
+        domain,
+        new_entry_id=corpus_entry_id,
+        new_source_type=new_entry.source_type if new_entry else "",
+        new_uri=new_entry.uri_r if new_entry else None,
+        new_author_id=new_author_id,
+        existing_entry_id=existing_entry_id,
+        existing_source_type=existing_entry.source_type if existing_entry else "",
+        existing_uri=existing_entry.uri_r if existing_entry else None,
+        existing_author_id=existing_author_id,
+    )
+
     # rung 2.5 input; ``None`` unless the pair qualifies (see
     # :func:`particles.ingest.update_supersession.update_order`).
     order: int | None = None
-    if has_signal:
-        existing_source_ref = next(
-            (ref for ref in existing.provenance if ref.type == ProvenanceRefType.SOURCE),
-            None,
-        )
-        existing_entry_id = existing_source_ref.corpus_entry_id if existing_source_ref else None
-        existing_snapshot_id = existing_source_ref.snapshot_id if existing_source_ref else None
-
-        # cap. 2: document-supersession prior. Resolve whether either
-        # side's provenance corpus entry (transitively) supersedes the other's,
-        # so rung 1.5 can prefer the superseding document's claim. Gated by
-        # config; needs the existing particle's source entry to compare against.
-        if get_config().document_supersession.enabled and existing_entry_id:
-            from particles.corpus.supersession import entry_supersedes
-
-            new_supersedes_existing = await entry_supersedes(
-                session,
-                superseding_entry_id=corpus_entry_id,
-                superseded_entry_id=existing_entry_id,
-            )
-            existing_supersedes_new = await entry_supersedes(
-                session,
-                superseding_entry_id=existing_entry_id,
-                superseded_entry_id=corpus_entry_id,
-            )
-        new_entry = await get_entry(session, corpus_entry_id)
-        existing_entry = await get_entry(session, existing_entry_id) if existing_entry_id else None
-        domain = infer_domain(new_entry.source_type) if new_entry else None
-
-        # §6.4 AUTHOR tier inputs — each side's author_id from its SOURCE
-        # snapshot, read off the entries already fetched above.
-        new_author_id = _snapshot_author_id(new_entry, snapshot_id)
-        existing_author_id = _snapshot_author_id(existing_entry, existing_snapshot_id)
-
-        # Trust scores are only consulted if neither particle is ALEATORY,
-        # but resolving them unconditionally keeps the call shape simple and
-        # the result is just dropped on the ALEATORY path inside
-        # resolve_conflict().
-        score_new, score_existing = await _resolve_trust_scores(
-            session,
-            domain,
-            new_entry_id=corpus_entry_id,
-            new_source_type=new_entry.source_type if new_entry else "",
-            new_uri=new_entry.uri_r if new_entry else None,
-            new_author_id=new_author_id,
-            existing_entry_id=existing_entry_id,
-            existing_source_type=existing_entry.source_type if existing_entry else "",
-            existing_uri=existing_entry.uri_r if existing_entry else None,
-            existing_author_id=existing_author_id,
-        )
-
-        if (
-            allow_update_supersession
-            and not force_inconsistent
-            and get_config().reconciliation.update_supersession.enabled
-        ):
-            # A claim re-observed since its first extraction carries the date
-            # of that latest observation (folds the
-            # repeat into this same particle, in a later entry).
-            existing_latest = await latest_source_date(session, existing)
-            order = update_order(
-                new_particle,
-                new_entry,
-                snapshot_id,
-                existing,
-                existing_entry,
-                existing_snapshot_id,
-                require_attribution=not effective_single,
-                existing_date=existing_latest,
-            )
-        elif allow_own_assertion_supersession and not force_inconsistent:
-            # the assertion pathway's one carve-out — an agent
-            # revising its own earlier assertion.
-            order = own_assertion_order(new_particle, existing)
-
-    if force_inconsistent:
-        # Probe could not complete and the assertion pathway fails closed: skip
-        # trust resolution and quarantine the candidate.
-        verdict = ConflictVerdict.INCONSISTENT
-    else:
-        verdict = resolve_conflict(
-            existing,
+    if order_source is UpdateOrderSource.UPDATE:
+        # A claim re-observed since its first extraction carries the date
+        # of that latest observation (folds the
+        # repeat into this same particle, in a later entry).
+        existing_latest = await latest_source_date(session, existing)
+        order = update_order(
             new_particle,
-            has_contradiction_signal=has_signal,
+            new_entry,
+            snapshot_id,
+            existing,
+            existing_entry,
+            existing_snapshot_id,
+            require_attribution=not effective_single,
+            existing_date=existing_latest,
+        )
+    elif order_source is UpdateOrderSource.OWN_ASSERTION:
+        # the assertion pathway's one carve-out — an agent
+        # revising its own earlier assertion.
+        order = own_assertion_order(new_particle, existing)
+
+    return (
+        RungInputs(
             new_supersedes_existing=new_supersedes_existing,
             existing_supersedes_new=existing_supersedes_new,
-            trust_score_existing=score_existing,
             trust_score_new=score_new,
-            trust_differential_threshold=get_config().trust.differential_threshold,
-            single_trust_order=effective_single,
+            trust_score_existing=score_existing,
             update_order=order,
-        )
-
-    # The candidate's embedding, in storable form — persisted with whichever
-    # row this verdict writes so conflict-path particles stay searchable.
-    # Mirrors the tolist/list dance in extract_snapshot: a mocked embedding
-    # model may yield plain lists instead of numpy arrays.
-    new_emb_list = _storable(new_embedding)
-
-    # Keep a batch caller's ``candidate_cache`` consistent with the writes below
-    # (F4.3): a newly-ACTIVE particle joins the candidate set; a trust-superseded
-    # one (no longer ACTIVE) leaves it. No-ops when no cache was passed.
-    def _cache_add_new() -> None:
-        if candidate_cache is not None and new_embedding is not None:
-            candidate_cache.append((new_particle, new_embedding))
-
-    def _cache_drop_existing() -> None:
-        if candidate_cache is not None:
-            candidate_cache[:] = [pair for pair in candidate_cache if pair[0].id != existing.id]
-        if retired_out is not None:
-            retired_out.add(existing.id)
-
-    if verdict is ConflictVerdict.CORROBORATES:
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        _cache_add_new()
-        log.info(
-            "High-similarity pair without contradiction signal — new %s written as"
-            " ACTIVE alongside existing %s (no §6.6 conflict)",
-            new_particle.id[:8],
-            existing.id[:8],
-        )
-        return new_particle
-
-    if verdict is ConflictVerdict.SUPERSEDES:
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        await update_particle_status(
-            session,
-            existing.id,
-            Status.PROVENANCE_STALE,
-            StatusReason.LOWER_TRUST_SOURCE,
-        )
-        _cache_drop_existing()
-        _cache_add_new()
-        log.info(
-            "Trust resolution: new %s (%.2f) preferred over existing %s (%.2f)",
-            new_particle.id[:8],
-            score_new if score_new is not None else float("nan"),
-            existing.id[:8],
-            score_existing if score_existing is not None else float("nan"),
-        )
-        return new_particle
-
-    if verdict is ConflictVerdict.SUPERSEDED_BY_EXISTING:
-        # The candidate stays a drop — it is redundant with a strictly
-        # better existing claim — but an audited one: the event
-        # log keeps the excerpt, verdict, and winning particle id. The
-        # candidate is never persisted, so it appears in the payload only,
-        # not as a record ref.
-        await record_event(
-            session,
-            actor="extract-pipeline",
-            event_type=OperatorEventType.CONFLICT_CANDIDATE_DROPPED,
-            reason="§6.6 trust resolution preferred the existing particle",
-            refs=[(EventRefKind.PARTICLE, existing.id)],
-            payload={
-                "verdict": verdict.value,
-                "candidate_id": new_particle.id,
-                "candidate_excerpt": new_particle.content[:240],
-                "winning_particle_id": existing.id,
-                "trust_score_new": score_new,
-                "trust_score_existing": score_existing,
-            },
-        )
-        log.info(
-            "Trust resolution: existing %s (%.2f) preferred over new %s (%.2f);"
-            " new particle dropped (event logged)",
-            existing.id[:8],
-            score_existing if score_existing is not None else float("nan"),
-            new_particle.id[:8],
-            score_new if score_new is not None else float("nan"),
-        )
-        return None
-
-    if verdict is ConflictVerdict.DOCUMENT_SUPERSEDES:
-        # Rung 1.5 (cap. 2): new's provenance document (transitively)
-        # supersedes existing's. Insert new ACTIVE; demote the existing claim
-        # ACTIVE → PROVENANCE_STALE / DOCUMENT_SUPERSEDED — reusing the trust
-        # rung's demotion machinery and demotion-only invariant, so
-        # the retired decision stays in the store, auditable and off the default
-        # surface. No INCONSISTENCY is queued.
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        await update_particle_status(
-            session,
-            existing.id,
-            Status.PROVENANCE_STALE,
-            StatusReason.DOCUMENT_SUPERSEDED,
-        )
-        _cache_drop_existing()
-        _cache_add_new()
-        log.info(
-            "Document-supersession (rung 1.5): new %s supersedes existing %s"
-            " → existing demoted DOCUMENT_SUPERSEDED",
-            new_particle.id[:8],
-            existing.id[:8],
-        )
-        return new_particle
-
-    if verdict is ConflictVerdict.DOCUMENT_SUPERSEDED_BY_EXISTING:
-        # Rung 1.5 mirror: existing's document supersedes new's. The new
-        # candidate is a retired-document decision; existing stays ACTIVE. Store
-        # the loser but demote it — insert ACTIVE then transition (the insert
-        # seam forbids a born-PROVENANCE_STALE row except for the CONFLICT_PENDING
-        # quarantine birth), landing it PROVENANCE_STALE / DOCUMENT_SUPERSEDED
-        # (auditable, off the default surface, never an ACTIVE candidate).
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        await update_particle_status(
-            session,
-            new_particle.id,
-            Status.PROVENANCE_STALE,
-            StatusReason.DOCUMENT_SUPERSEDED,
-        )
-        log.info(
-            "Document-supersession (rung 1.5): existing %s supersedes new %s"
-            " → new stored DOCUMENT_SUPERSEDED",
-            existing.id[:8],
-            new_particle.id[:8],
-        )
-        return new_particle.model_copy(
-            update={
-                "status": Status.PROVENANCE_STALE,
-                "status_reason": StatusReason.DOCUMENT_SUPERSEDED,
-            }
-        )
-
-    if verdict is ConflictVerdict.UPDATE_SUPERSEDES:
-        # Rung 2.5: a same-lineage update. Insert the newer claim
-        # ACTIVE, pointing ``supersedes`` at the claim it replaces (the as-of
-        # lens dates the retirement from it), and demote the older one
-        # PROVENANCE_STALE / SUPERSEDED_BY_UPDATE — rung 1.5's demotion shape
-        # (demotion-only). Not a judgment on the value, so a later
-        # revert re-mints normally (outside the judgment set).
-        if new_particle.supersedes is None:
-            new_particle = new_particle.model_copy(update={"supersedes": existing.id})
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        await update_particle_status(
-            session,
-            existing.id,
-            Status.PROVENANCE_STALE,
-            StatusReason.SUPERSEDED_BY_UPDATE,
-        )
-        _cache_drop_existing()
-        _cache_add_new()
-        log.info(
-            "Update supersession (rung 2.5): new %s supersedes existing %s",
-            new_particle.id[:8],
-            existing.id[:8],
-        )
-        return new_particle
-
-    if verdict is ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING:
-        # Rung 2.5 mirror: the candidate is the *older* claim (an out-of-order
-        # deposit, e.g. a backfilled transcript). Store it demoted — insert then
-        # transition, as the rung 1.5 mirror does — so it stays auditable and is
-        # never an ACTIVE candidate; existing stays ACTIVE.
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, new_particle, new_emb_list)
-        await update_particle_status(
-            session,
-            new_particle.id,
-            Status.PROVENANCE_STALE,
-            StatusReason.SUPERSEDED_BY_UPDATE,
-        )
-        log.info(
-            "Update supersession (rung 2.5): existing %s is newer than new %s"
-            " → new stored SUPERSEDED_BY_UPDATE",
-            existing.id[:8],
-            new_particle.id[:8],
-        )
-        return new_particle.model_copy(
-            update={
-                "status": Status.PROVENANCE_STALE,
-                "status_reason": StatusReason.SUPERSEDED_BY_UPDATE,
-            }
-        )
-
-    if verdict is ConflictVerdict.INCONSISTENT:
-        # persist the losing candidate as a real particle born
-        # quarantined — full content, provenance (incl. chunk_hash),
-        # confidence, subjects, and embedding intact. PROVENANCE_STALE keeps
-        # it out of query/lint by the existing status filters; the
-        # CONFLICT_PENDING reason carries the real semantics and is what the
-        # insert seam requires for this birth. Review recovers it on
-        # PREFER_B / BOTH_VALID; the wrapper's B ref below points at this
-        # persisted row instead of a dangling UUID (P4-2).
-        quarantined = new_particle.model_copy(
-            update={
-                "status": Status.PROVENANCE_STALE,
-                "status_reason": StatusReason.CONFLICT_PENDING,
-            }
-        )
-        validate_transition(None, Status.PROVENANCE_STALE)
-        await insert_particle(session, quarantined, new_emb_list)
-
-        inc_particle = build_inconsistency_particle(
-            existing,
-            quarantined,
-            corpus_entry_id=corpus_entry_id,
-            snapshot_id=snapshot_id,
-            asserted_by="extract-pipeline",
-            trigger_ref_type=trigger_ref_type,
-        )
-        validate_transition(None, Status.INCONSISTENCY)
-        await insert_particle(session, inc_particle, domain_hint=domain)
-        log.info(
-            "INCONSISTENCY particle %s created (conflicts: %s ↔ quarantined %s,"
-            " domain=%s, subject_ids=%d inherited)",
-            inc_particle.id,
-            existing.id,
-            quarantined.id,
-            domain,
-            len(inc_particle.subject_ids),
-        )
-        return inc_particle
-
-    # ConflictVerdict.NO_CONFLICT — reachable only if a caller starts using
-    # resolve_conflict for below-threshold pairs. The pipeline gates on
-    # similarity in _find_conflict, so we never get here today — but treat
-    # the candidate as ACTIVE for safety rather than dropping it.
-    validate_transition(None, Status.ACTIVE)
-    await insert_particle(session, new_particle, new_emb_list)
-    _cache_add_new()
-    return new_particle
+        ),
+        domain,
+    )
 
 
 def _storable(embedding: Any) -> list[float] | None:
@@ -2040,12 +1811,122 @@ def _storable(embedding: Any) -> list[float] | None:
     return list(embedding)
 
 
+async def _gather_candidate_pairs(
+    session: AsyncSession,
+    candidates: Sequence[CandidateParticle],
+    embeddings: Sequence[Any],
+    existing: Sequence[Particle],
+    existing_embs: Sequence[np.ndarray[Any, np.dtype[np.float32]] | None],
+    *,
+    subject_index: SubjectIndex | None,
+    gate: ObserverGate,
+    candidate_scope: BeliefScope | None,
+    entry: CorpusEntry,
+    snapshot_id: str,
+    updates_only: bool,
+    entries: dict[str, CorpusEntry | None],
+) -> list[CandidatePairs]:
+    """Gather 1 of the §6.6 pair selection: every existing claim each candidate could pair with.
+
+    Three stages, each a batch over the whole pass:
+
+      1. per candidate, the same-entry nearest claim (pure over the loaded
+         embeddings) and, when the candidate is eligible for the
+         subject-keyed search, its read-only subject ids and the pool (the
+         nearest claim excluded);
+      2. one ``gate.prime`` over every pairable claim, then the
+         precondition of each (a no-op until the store is rescoped);
+      3. in a ``multi`` store only, whether rung 2.5 could act on each pool
+         member the precondition does not decline.
+
+    ``entries`` collects the corpus entries stage 3 reads.
+    """
+    update_cfg = get_config().reconciliation.update_supersession
+    about_ids: dict[str, str | None] = {}
+    found: list[tuple[Particle | None, list[Particle]]] = []
+    for i, candidate in enumerate(candidates):
+        if _skips_conflict_resolution(candidate.properties):
+            found.append((None, []))
+            continue
+        cand_emb = embeddings[i] if i < len(embeddings) else None
+        holder = holder_from_properties(candidate.properties)
+        nearest = _find_conflict(
+            cand_emb,
+            existing,
+            existing_embs,
+            candidate_stance_holder=holder,
+        )
+        pool: list[Particle] = []
+        if (
+            subject_index is not None
+            and cand_emb is not None
+            and holder is None
+            and candidate.assertion_modality == AssertionModality.FALSIFIABLE
+        ):
+            subject_ids = await _candidate_subject_ids_readonly(
+                session, candidate, about_ids, source_type=entry.source_type
+            )
+            if subject_ids:
+                pool = subject_index.candidates(
+                    subject_ids,
+                    cand_emb,
+                    floor=update_cfg.subject_floor,
+                    limit=update_cfg.max_candidates,
+                    skip_ids=() if nearest is None else (nearest.id,),
+                )
+        found.append((nearest, pool))
+
+    precondition: dict[str, PairPrecondition] = {}
+    if candidate_scope is not None:
+        pairable = [p for nearest, pool in found for p in ([nearest] if nearest else []) + pool]
+        await gate.prime(session, pairable)
+        for other in pairable:
+            precondition[other.id] = await gate.verdict(session, candidate_scope, other)
+
+    out: list[CandidatePairs] = []
+    for candidate, (nearest, pool) in zip(candidates, found, strict=True):
+        can_update: dict[str, bool] | None = None
+        if updates_only:
+            can_update = {
+                other.id: await _pair_can_update(
+                    session, entry, snapshot_id, candidate, other, entries
+                )
+                for other in pool
+                if precondition.get(other.id) is not PairPrecondition.DECLINE
+            }
+        out.append(
+            CandidatePairs(
+                nearest=nearest,
+                subject_pool=tuple(pool),
+                precondition=precondition,
+                can_update=can_update,
+            )
+        )
+    return out
+
+
+async def _probe_pairs(
+    content: str, planned: Sequence[tuple[Particle, PairRole]]
+) -> dict[str, bool]:
+    """Gather 2 of the §6.6 pair selection: exactly the probes ``plan_probes`` named.
+
+    Extraction is fail-open: a probe that could not complete (``None``) reads
+    as no contradiction. The assertion pathway fails closed instead,
+    and keeps the tri-state (``reconcile_and_insert``).
+    """
+    results: dict[str, bool] = {}
+    for other, _role in planned:
+        results[other.id] = bool(await _has_contradiction_signal(content, other.content))
+    return results
+
+
 async def _pair_can_update(
     session: AsyncSession,
     entry: CorpusEntry,
     snapshot_id: str,
     candidate: CandidateParticle,
     other: Particle,
+    entries: dict[str, CorpusEntry | None],
 ) -> bool:
     """Whether rung 2.5 could act on this cross-entry pair.
 
@@ -2053,6 +1934,7 @@ async def _pair_can_update(
     update rung cannot settle has no outcome but a review item. The candidate
     is not a ``Particle`` yet, and only lineage and dates matter here, so the
     check runs against a stand-in carrying the candidate's provenance.
+    ``entries`` caches the other side's entry, which the rung 2.5 extras reuse.
     """
     stand_in = Particle(
         content=candidate.content,
@@ -2068,9 +1950,12 @@ async def _pair_can_update(
         ],
     )
     other_ref = next((r for r in other.provenance if r.type is ProvenanceRefType.SOURCE), None)
-    other_entry = (
-        await get_entry(session, other_ref.corpus_entry_id) if other_ref is not None else None
-    )
+    other_entry = None
+    if other_ref is not None:
+        key = other_ref.corpus_entry_id
+        if key not in entries:
+            entries[key] = await get_entry(session, key)
+        other_entry = entries[key]
     order = update_order(
         stand_in,
         entry,
@@ -2137,48 +2022,35 @@ async def _apply_update_extras(
     others: list[Particle],
     retired: set[str],
     *,
-    observer: ObserverGate | None = None,
-    candidate_scope: BeliefScope | None = None,
+    entries: Mapping[str, CorpusEntry | None],
+    precondition: Mapping[str, PairPrecondition],
 ) -> None:
     """Resolve further confirmed same-subject pairs by rung 2.5 alone.
 
-    The primary pair went through the full ladder. A slot that already carries
-    several stale values (every store written before) converges here:
-    each other confirmed pair that qualifies for rung 2.5 is settled by source
-    date. A pair that does not qualify is left exactly as it was — no second
-    INCONSISTENCY is manufactured for one claim.
+    The second apply after the ladder: the demotions are planned by the pure
+    :func:`~particles.ingest.pair_selection.plan_update_extras` over the
+    entries and preconditions read before the write lock. A slot that already
+    carries several stale values (every store written before)
+    converges here; a pair that does not qualify is left as it was.
     """
-    for other in others:
-        ref = next((r for r in other.provenance if r.type is ProvenanceRefType.SOURCE), None)
-        if ref is None:
-            continue
-        # The precondition covers this route too: an extra pair
-        # another project observes, or a global claim, is left as it was.
-        if (
-            observer is not None
-            and candidate_scope is not None
-            and await observer.verdict(session, candidate_scope, other)
-            is not PairPrecondition.RECONCILE
-        ):
-            continue
-        other_entry = await get_entry(session, ref.corpus_entry_id)
-        order = update_order(
-            winner, winner_entry, winner_snapshot_id, other, other_entry, ref.snapshot_id
-        )
-        if order is None:
-            continue
-        loser = other if order > 0 else winner
+    for loser_id in plan_update_extras(
+        winner, winner_entry, winner_snapshot_id, others, entries, precondition
+    ):
         await update_particle_status(
-            session, loser.id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
+            session, loser_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
         )
-        retired.add(loser.id)
-        log.info(
-            "Update supersession (rung 2.5, extra pair): %s superseded by %s",
-            loser.id[:8],
-            (winner if loser is other else other).id[:8],
-        )
-        if loser is winner:
-            return
+        retired.add(loser_id)
+        if loser_id == winner.id:
+            log.info(
+                "Update supersession (rung 2.5, extra pair): %s superseded by a newer extra pair",
+                loser_id[:8],
+            )
+        else:
+            log.info(
+                "Update supersession (rung 2.5, extra pair): %s superseded by %s",
+                loser_id[:8],
+                winner.id[:8],
+            )
 
 
 def _snapshot_author_id(entry: CorpusEntry | None, snapshot_id: str | None) -> str | None:

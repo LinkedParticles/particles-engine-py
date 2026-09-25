@@ -15,8 +15,8 @@ What *is* harness-specific is the part above the protocol: whether your store's
 standing context is **pushed into the session** without anyone asking for it,
 and whether what happened in the session is **harvested back** without the
 agent choosing to save it. Those two behaviours ride the harness's own session
-lifecycle hooks, and harnesses differ. So this page says plainly, per harness,
-what you get.
+lifecycle hooks, and harnesses differ, which is why this page says plainly, per
+harness, what you get.
 
 ## What each harness gets
 

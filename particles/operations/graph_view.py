@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import combinations
 from typing import Literal
@@ -48,6 +51,7 @@ from particles.core.schema import (
     Particle,
     ProvenanceRefType,
     QueryRequest,
+    Subject,
 )
 from particles.core.status import Status, StatusReason
 from particles.corpus.store import get_entry_uri_map
@@ -260,8 +264,108 @@ async def build_graph_data(
 
     source_uris = await _load_source_uris(session, list(particles.values()))
 
-    # disambiguated node labels, computed on the FULL subject set.
     subjects_by_id = {s.id: s for s in await list_all_subjects(session)}
+    owner_policy = await load_owner_policy(session)
+
+    graph = layout_graph(
+        GraphLayoutInputs(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            scope_desc=scope_desc,
+            as_of=as_of,
+            history=history,
+            particles=particles,
+            ghosts=frozenset(ghosts),
+            hit_ids=frozenset(hit_ids),
+            hit_rank=hit_rank,
+            hop_by_subject=hop_by_subject,
+            eff=eff,
+            badges=badges,
+            utility=utility,
+            source_uris=source_uris,
+            as_of_notes=as_of_notes,
+            subjects_by_id=subjects_by_id,
+            viewer_subject_ids=owner_policy.viewer_subject_ids,
+            min_particle_confidence=min_particle_confidence,
+            dropped_below_threshold=dropped_below_threshold,
+            excluded_undatable=excluded_undatable,
+            missing_disputants=missing_disputants,
+        ),
+        max_nodes=node_cap,
+        max_particles_per_subject=cfg.max_particles_per_subject,
+    )
+    log.info(
+        "graph build: %s → %d nodes, %d edges, %d particles",
+        scope_desc,
+        len(graph.nodes),
+        len(graph.edges),
+        len(graph.particles),
+    )
+    return graph
+
+
+@dataclass(frozen=True)
+class GraphLayoutInputs:
+    """Everything :func:`layout_graph` reads, gathered by :func:`build_graph_data`.
+
+    Plain values only: the scope's particles already lens-filtered, observer-
+    filtered and floored, and every read-time epistemic annotation already
+    computed. Layout performs no I/O (D2).
+    """
+
+    scope_type: Literal["subject", "query", "inconsistency", "projection"]
+    scope_ref: str
+    scope_desc: str
+    as_of: datetime | None
+    history: bool
+    particles: Mapping[str, Particle]
+    ghosts: AbstractSet[str]
+    #: The scope's foreground set: query hits, inconsistency evidence, or a
+    #: projection selection. Empty for subject scope.
+    hit_ids: AbstractSet[str]
+    hit_rank: Mapping[str, int]
+    hop_by_subject: Mapping[str, int]
+    eff: Mapping[str, float]
+    badges: Mapping[str, ContestedBadge | None]
+    utility: Mapping[str, float]
+    source_uris: Mapping[str, str]
+    as_of_notes: Mapping[str, AsOfNote]
+    #: The full subject set; node labels are disambiguated against all of it
+    #:, not just the rendered nodes.
+    subjects_by_id: Mapping[str, Subject]
+    viewer_subject_ids: frozenset[str]
+    # Disclosure inputs: counts the gather step already settled.
+    min_particle_confidence: float
+    dropped_below_threshold: int
+    excluded_undatable: int
+    missing_disputants: int
+
+
+def layout_graph(
+    inputs: GraphLayoutInputs,
+    *,
+    max_nodes: int,
+    max_particles_per_subject: int,
+) -> GraphData:
+    """Lay out one gathered scope as a :class:`GraphData`.
+
+    Pure: node ranking (hop, viewer adjacency, hit rank, support), the
+    ``max_nodes`` cut, edge-versus-cargo assignment, the per-subject cargo cap
+    with foreground priority, lineage edges, and the truncation disclosures.
+    ``max_nodes`` is the already-clamped node cap.
+    """
+    particles = inputs.particles
+    ghosts = inputs.ghosts
+    hit_ids = inputs.hit_ids
+    hit_rank = inputs.hit_rank
+    hop_by_subject = inputs.hop_by_subject
+    eff = inputs.eff
+    badges = inputs.badges
+    utility = inputs.utility
+    subjects_by_id = inputs.subjects_by_id
+    node_cap = max_nodes
+
+    # disambiguated node labels, computed on the FULL subject set.
     naming = build_subject_naming(subjects_by_id.values())
 
     def _node_support(sid: str) -> float:
@@ -289,11 +393,11 @@ async def build_graph_data(
     candidate_subject_ids = {
         sid for p in particles.values() for sid in p.subject_ids if sid in hop_by_subject
     }
-    if subject_id is not None:
+    if inputs.scope_type == "subject":
         # The RESOLVED anchor, never the caller's argument: `subject_id` may be
         # a canonical name or alias, and adding that raw token here minted a
         # second, empty node labelled with the name alongside the real subject.
-        candidate_subject_ids.add(scope_ref)  # the anchor always renders
+        candidate_subject_ids.add(inputs.scope_ref)  # the anchor always renders
     candidate_particles = len(particles)
 
     # on the graph: this surface's unit is a Subject, not a belief, so
@@ -307,12 +411,11 @@ async def build_graph_data(
     # which is the correct conservative answer rather than a missing one. Inert
     # (a constant key element, so the order is byte-identical) when no viewer
     # resolves.
-    owner_policy = await load_owner_policy(session)
     viewer_adjacent: set[str] = set()
-    if owner_policy.viewer_subject_ids:
-        viewer_adjacent |= owner_policy.viewer_subject_ids & candidate_subject_ids
+    if inputs.viewer_subject_ids:
+        viewer_adjacent |= inputs.viewer_subject_ids & candidate_subject_ids
         for p in particles.values():
-            if not owner_policy.viewer_subject_ids.isdisjoint(p.subject_ids):
+            if not inputs.viewer_subject_ids.isdisjoint(p.subject_ids):
                 viewer_adjacent.update(p.subject_ids)
         viewer_adjacent &= candidate_subject_ids
 
@@ -374,9 +477,9 @@ async def build_graph_data(
     for sid in list(cargo_by_subject):
         pids = cargo_by_subject[sid]
         pids.sort(key=lambda pid: (0 if pid in hit_ids else 1, -eff.get(pid, 0.0), pid))
-        if len(pids) > cfg.max_particles_per_subject:
-            overflow = pids[cfg.max_particles_per_subject :]
-            cargo_by_subject[sid] = pids[: cfg.max_particles_per_subject]
+        if len(pids) > max_particles_per_subject:
+            overflow = pids[max_particles_per_subject:]
+            cargo_by_subject[sid] = pids[:max_particles_per_subject]
             cargo_truncated_by_subject[sid] = len(overflow)
             cargo_truncated_total += len(overflow)
             for pid in overflow:
@@ -426,10 +529,10 @@ async def build_graph_data(
             supersedes=p.supersedes,
             contested=badges.get(pid),
             utility_score=utility.get(pid, 0.0),
-            source_uri=source_uris.get(pid),
+            source_uri=inputs.source_uris.get(pid),
             retrieval_hit=pid in hit_ids,
             ghost=pid in ghosts,
-            as_of_note=as_of_notes.get(pid),
+            as_of_note=inputs.as_of_notes.get(pid),
         )
         for pid, p in sorted(rendered_particles.items())
     }
@@ -444,21 +547,21 @@ async def build_graph_data(
     if cargo_truncated_total:
         disclosures.append(
             f"{cargo_truncated_total} particle(s) beyond the per-subject panel cap "
-            f"omitted (graph.max_particles_per_subject = {cfg.max_particles_per_subject})"
+            f"omitted (graph.max_particles_per_subject = {max_particles_per_subject})"
         )
-    if dropped_below_threshold:
+    if inputs.dropped_below_threshold:
         disclosures.append(
-            f"{dropped_below_threshold} particle(s) below "
-            f"min_particle_confidence = {min_particle_confidence} dropped"
+            f"{inputs.dropped_below_threshold} particle(s) below "
+            f"min_particle_confidence = {inputs.min_particle_confidence} dropped"
         )
-    if excluded_undatable:
+    if inputs.excluded_undatable:
         disclosures.append(
-            f"{excluded_undatable} retired particle(s) excluded fail-closed: "
+            f"{inputs.excluded_undatable} retired particle(s) excluded fail-closed: "
             f"retirement instant not reconstructible"
         )
-    if missing_disputants:
+    if inputs.missing_disputants:
         disclosures.append(
-            f"{missing_disputants} disputant particle(s) referenced by this "
+            f"{inputs.missing_disputants} disputant particle(s) referenced by this "
             f"INCONSISTENCY no longer exist in the store — the evidence shown "
             f"is incomplete"
         )
@@ -468,30 +571,23 @@ async def build_graph_data(
             f"subject — they appear in the detail panel, not on the canvas"
         )
 
-    log.info(
-        "graph build: %s → %d nodes, %d edges, %d particles",
-        scope_desc,
-        len(nodes),
-        len(edges),
-        len(infos),
-    )
     return GraphData(
-        scope_type=scope_type,
-        scope_ref=scope_ref,
-        as_of=as_of,
-        history=history,
+        scope_type=inputs.scope_type,
+        scope_ref=inputs.scope_ref,
+        as_of=inputs.as_of,
+        history=inputs.history,
         nodes=nodes,
         edges=sorted(edges, key=lambda e: (e.source, e.target, e.particle_id)),
         supersessions=supersessions,
         particles=infos,
         census=GraphCensus(
-            scope=scope_desc,
+            scope=inputs.scope_desc,
             candidate_subjects=len(candidate_subject_ids),
             rendered_subjects=len(nodes),
             candidate_particles=candidate_particles,
             rendered_particles=len(infos),
-            dropped_below_threshold=dropped_below_threshold,
-            excluded_undatable=excluded_undatable,
+            dropped_below_threshold=inputs.dropped_below_threshold,
+            excluded_undatable=inputs.excluded_undatable,
         ),
         disclosures=disclosures,
     )

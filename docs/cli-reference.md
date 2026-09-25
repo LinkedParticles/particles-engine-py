@@ -149,7 +149,7 @@ $ particles query [OPTIONS] [QUESTION]
 * `--top-k INTEGER`: Number of particles to retrieve  [default: 40]
 * `--subject TEXT`: Filter to particles about this subject ID
 * `--tag TEXT`: Filter by taxonomy tag (subtree-expanded; repeatable)
-* `--include-ancestors`: Also match particles tagged with a broader ancestor of each --tag (up-expansion over taxonomy parent links)
+* `--include-ancestors`: Match particles tagged with a broader ancestor of each --tag as well (up-expansion over taxonomy parent links)
 * `--show-particles`: Print retrieved particles with scores before the answer
 * `--show-source`: After the answer, print the source passage behind each of the top hits, labelled exact (hash-verified chunk), located (best term overlap; not verified), or whole source. Display only: never affects ranking. `particles particle source <id>` does the same for one belief.
 * `--contestedness`: Show per-result contestedness: the max−min spread of effective confidence across your policy set (local + adopted lenses). Absent when fewer than two policies are configured.
@@ -406,7 +406,7 @@ $ particles audit [OPTIONS] [PATH]
 * `--yes`: Skip the cost-confirmation prompt.
 * `--judge`: LLM-judge duplicate pairs (verified duplicates) instead of REPORT-mode candidates.
 * `--scope TEXT`: Semantic-finding scope (contradiction probe + duplicate scan): 'harvested' (default with PATH; headline counts only pairs touching this harvest's beliefs; the store-wide duplicate total is still disclosed) or 'store' (the whole store; the re-audit default).
-* `--output PATH`: Also write the Markdown report to FILE.
+* `--output PATH`: Write the Markdown report to FILE as well.
 * `--format TEXT`: Terminal format: markdown (default) or json.  [default: markdown]
 * `--store TEXT`: Audit a named store (default: the default store).  [default: default]
 * `-v, --verbose`
@@ -498,20 +498,20 @@ $ particles benchmark [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `observer`: The two-project observer fixture — zero...
+* `observer`: The two-project observer fixture, with...
 * `memory`: The LongMemEval agent-memory benchmark...
 * `rot`: The memory-rot benchmark.
 * `relevance-floor`: The relevance-floor benchmark: how often...
 
 ### `particles benchmark observer`
 
-The two-project observer fixture — zero LLM calls.
+The two-project observer fixture, with zero LLM calls.
 
 Two repositories' memory files, sharing generic subjects, evolve over
 `--days` and are harvested into one scratch store through the real
 pipeline with scripted extraction and a scripted contradiction probe.
 Each day, every line a project currently states is checked through that
-project's observer: in view, or not — and if not, which mechanism retired
+project's observer: in view, or not, and if not, which mechanism retired
 it (cross-project supersession, the generation cascade, or a surviving
 particle attested only by the other project) and whether the winner is in
 view. Report-only; the only number the default flip is decided
@@ -615,14 +615,14 @@ $ particles benchmark rot [OPTIONS] COMMAND [ARGS]...
 
 **Options**:
 
-* `--arm [oracle|probe|live]`: Perception arm: oracle (scripted extraction + scripted §6.6 probe; zero LLM calls, deterministic), probe (scripted extraction, live contradiction probe), or live (the general extractor — the product).  [default: oracle]
+* `--arm [oracle|probe|live]`: Perception arm: oracle (scripted extraction + scripted §6.6 probe; zero LLM calls, deterministic), probe (scripted extraction, live contradiction probe), or live (the general extractor, i.e. the product).  [default: oracle]
 * `--seed INTEGER`: World seed; repeat for several worlds (default: benchmark_rot.seeds).
 * `--days INTEGER RANGE`: Simulated world length (default: benchmark_rot.days).  [x>=30]
 * `--top-k INTEGER RANGE`: Probe top-k (default: benchmark_rot.top_k).  [x>=1]
 * `--trust-policy / --no-trust-policy`: Write the domain rule demoting the untrusted source channel (the operator's policy). --no-trust-policy measures the neutral-when-silent default instead.  [default: trust-policy]
 * `--estimate`: Print the projected LLM calls and cost, then exit.
 * `-y, --yes`: Skip the confirmation above the call threshold.
-* `-o, --output PATH`: Also write the rendered report to this path.
+* `-o, --output PATH`: Write the rendered report to this path as well.
 * `--format [table|json]`: table (default) or json (the report of record).  [default: table]
 * `--store-dir PATH`: Keep each world's scratch store (and its blobs) here for inspection.
 * `--cache-dir PATH`: Persist the paid arms' extraction results here, so a re-run that changes only candidacy or the ladder pays probes alone. The key includes the extractor, the resolved model and the SDK version, so a prompt or model change is a miss, never a silent replay.
@@ -637,7 +637,7 @@ $ particles benchmark rot [OPTIONS] COMMAND [ARGS]...
 
 Re-classify a saved rot report under the current scorer.
 
-Free: retrieval is taken as recorded — no store, encoder, or LLM call. The
+Free: retrieval is taken as recorded, with no store, encoder, or LLM call. The
 output is a complete report of record with ``selection.scorer_version`` set
 to what ran and a first note naming the source and both versions.
 
@@ -673,10 +673,10 @@ $ particles benchmark relevance-floor [OPTIONS] COMMAND [ARGS]...
 * `--store TEXT`: Store handle to replay against (default: the default store).
 * `--top-k INTEGER RANGE`: Retrieval depth (default: benchmark_relevance_floor.top_k). The floor reads the maximum cosine over the rendered top-k, so this is on the run tuple.  [1<=x<=200]
 * `--limit INTEGER RANGE`: Replay a seeded sample of N questions, stratified by source.  [x>=1]
-* `--judge`: Also run the LLM-priced stage: answer every question with the gate disabled, then judge the answer grounded-and-useful. Estimate-gated.
+* `--judge`: Run the LLM-priced stage too: answer every question with the gate disabled, then judge the answer grounded-and-useful. Estimate-gated.
 * `--estimate`: With --judge: run the free replay, print the projection, and exit before any LLM call.
 * `-y, --yes`: Skip the confirmation above the call threshold.
-* `-o, --output PATH`: Also write the rendered report to this path.
+* `-o, --output PATH`: Write the rendered report to this path as well.
 * `--format [table|json]`: table (default; aggregate-only, no question text) or json (the report of record; carries question and answer text).  [default: table]
 * `--replay-from FILE`: Reuse the free replay recorded in a saved JSON report instead of re-running it (the replay is free but slow on a large store). Refused unless top_k and the encoder match and it covers every question asked for.
 * `--checkpoint PATH`: Judged-stage checkpoint file (default: beside the held-out set), so an interrupted run never re-pays a finished question.
@@ -705,7 +705,7 @@ $ particles benchmark relevance-floor harvest [OPTIONS]
 
 * `--transcripts PATH`: Directory of agent transcripts (*.jsonl), searched recursively (default: benchmark_relevance_floor.transcripts_dir).
 * `-o, --output PATH`: Held-out JSONL to write (default: benchmark_relevance_floor.heldout_path).
-* `--prompts / --no-prompts`: Also harvest question-shaped sentences the operator typed to the agent: a proxy source, reported apart. --no-prompts keeps explicit memory queries only.  [default: prompts]
+* `--prompts / --no-prompts`: Harvest question-shaped sentences the operator typed to the agent as well: a proxy source, reported apart. --no-prompts keeps explicit memory queries only.  [default: prompts]
 * `--allow-in-repo`: Permit an --output inside a git work tree.
 * `--help`: Show this message and exit.
 
@@ -908,7 +908,13 @@ $ particles corpus cat [OPTIONS] SELECTOR
 
 ### `particles corpus delete`
 
-Delete a corpus entry, its snapshots, and all particles sourced from it.
+Delete a corpus entry, its snapshots, and the particles only it supports.
+
+A particle that another entry also supports is kept, with this entry's
+source refs removed. When the removed ref was its earliest source, the
+next-earliest one becomes the age anchor. The delete is recorded as a
+CORPUS_ENTRY_DELETED event that holds the entry id and counts, not the
+deleted content.
 
 **Usage**:
 
@@ -1028,7 +1034,7 @@ $ particles corpus fsck [OPTIONS]
 
 **Options**:
 
-* `--search PATH`: Also look for strays under this blob root, the directory holding the two-character shards (repeatable). Nothing is inferred: the audit tells you what is missing so you can point --search at where you think it went.
+* `--search PATH`: Look for strays under this blob root too, the directory holding the two-character shards (repeatable). Nothing is inferred: the audit tells you what is missing so you can point --search at where you think it went.
 * `--re-home`: Copy digest-verified strays found under --search into the blob dir.
 * `--dry-run`: Report what --re-home would copy, without copying.
 * `--help`: Show this message and exit.
@@ -1515,7 +1521,7 @@ Measure event-anchored-validity quality.
 Reports the dangerous **wrong-expiry rate**: of the aligned claims whose
 gold is durable (no boundary), the fraction the extractor wrongly assigned a
 ``valid_until`` and thereby set up for silent retirement by the §9.3
-staleness lint (the headline, the over-eager-expiry risk). Also reports existence
+staleness lint (the headline, the over-eager-expiry risk). It also reports existence
 precision/recall of correct date-bounded extraction and date accuracy.
 Discovers every validity suite under --suites-dir the extractor is the
 production routing choice for (or runs only --suite). Report-only
@@ -2062,7 +2068,7 @@ $ particles init claude-code [OPTIONS]
 * `--dry-run`: Print the resulting files without writing anything.
 * `--command TEXT`: Override the hook command base (default: the absolute path of the running `particles` console script).
 * `--no-audit`: Skip the first-run memory-audit hand-off.
-* `--skills / --no-skills`: Also install the shipped agent-onboarding skill files into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on: an agent that has the tools but not the guidance is the gap these close.  [default: skills]
+* `--skills / --no-skills`: Install the shipped agent-onboarding skill files too, into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on: an agent that has the tools but not the guidance is the gap these close.  [default: skills]
 * `--json`: Emit a machine-readable result on stdout (what was created, what was merged, and what is left for the human) so an agent can run the installer and report the outcome instead of scraping human-formatted output. Implies --no-audit: the audit hand-off is interactive, and the result names it under next_steps.
 * `--help`: Show this message and exit.
 
@@ -2475,7 +2481,7 @@ Bring a store's project keys up to date, so a project observer can read it.
 A belief is *in view* for a project when one of its sources was harvested
 there, which is read from the `project:` tag on the source's corpus entry.
 Older versions stamped a per-worktree name, or nothing at all. This verb
-adds the project's real key beside whatever an entry already carries — it
+adds the project's real key beside whatever an entry already carries. It
 never removes a tag, and running it twice changes nothing.
 
 It reports the two things you need to see: harvested entries it could not
@@ -2510,7 +2516,7 @@ Put a belief in view for every project.
 judgement, so it is yours to record. The belief and its sources are not
 touched: the widening is a standing statement the read lens consults, and
 `--revoke` withdraws it. There is deliberately no agent-facing way to do
-this — an agent that could widen its own belief could put it in front of
+this: an agent that could widen its own belief could put it in front of
 every future session.
 
 **Usage**:
@@ -2589,7 +2595,7 @@ $ particles memory consolidate [OPTIONS]
 * `--if-due`: Exit 0 without running unless the last successful run is older than consolidation.min_interval_hours; makes over-scheduling harmless.
 * `--structural-only`: Skip all LLM passes (disclosed in the report and the run record).
 * `--scope TEXT`: Semantic-pass scope: 'delta' (default; particles changed since the previous run's watermark) or 'store' (the whole store, still capped).  [default: delta]
-* `--output PATH`: Also write the run report as Markdown to FILE.
+* `--output PATH`: Write the run report as Markdown to FILE as well.
 * `--format TEXT`: Terminal format: markdown (default) or json.  [default: markdown]
 * `-v, --verbose`
 * `--debug`

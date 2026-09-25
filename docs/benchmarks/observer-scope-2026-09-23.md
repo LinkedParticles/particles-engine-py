@@ -1,4 +1,4 @@
-# Two-project observer fixture — after observer-aware reconciliation (2026-09-23)
+# Two-project observer fixture after observer-aware reconciliation (2026-09-23)
 
 The run of record after observer-aware reconciliation: both arms, twenty seeds, fourteen days, `single` store mode, the real embedding model, zero LLM calls. The write-up and the comparison with the first run are in [`observer-scope.md`](observer-scope.md).
 
@@ -13,9 +13,9 @@ Seeds 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 · 1
 | Own lines retired by the other project's activity | 0.0% (0 / 4273) |
 | Winner in view after a cross-project supersession | n/a (0 eligible) |
 | Lines in view a project never stated (lens leak) | 0.0% (0 / 4273) |
-| In view — `fact` lines | 100.0% (2240 / 2240) |
-| In view — `rule` lines | 100.0% (1473 / 1473) |
-| In view — `own` lines | 100.0% (560 / 560) |
+| In view, `fact` lines | 100.0% (2240 / 2240) |
+| In view, `rule` lines | 100.0% (1473 / 1473) |
+| In view, `own` lines | 100.0% (560 / 560) |
 
 **Why an own line was not in view** (counts over own-line checkpoints):
 
@@ -69,9 +69,9 @@ Seeds 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 · 1
 | Own lines retired by the other project's activity | 0.0% (0 / 4273) |
 | Winner in view after a cross-project supersession | n/a (0 eligible) |
 | Lines in view a project never stated (lens leak) | 0.0% (0 / 4273) |
-| In view — `fact` lines | 100.0% (2240 / 2240) |
-| In view — `rule` lines | 100.0% (1473 / 1473) |
-| In view — `own` lines | 100.0% (560 / 560) |
+| In view, `fact` lines | 100.0% (2240 / 2240) |
+| In view, `rule` lines | 100.0% (1473 / 1473) |
+| In view, `own` lines | 100.0% (560 / 560) |
 
 **Why an own line was not in view** (counts over own-line checkpoints):
 

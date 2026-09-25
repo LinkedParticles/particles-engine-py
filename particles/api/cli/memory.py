@@ -229,7 +229,7 @@ def rescope_cmd(
     A belief is *in view* for a project when one of its sources was harvested
     there, which is read from the `project:` tag on the source's corpus entry.
     Older versions stamped a per-worktree name, or nothing at all. This verb
-    adds the project's real key beside whatever an entry already carries — it
+    adds the project's real key beside whatever an entry already carries. It
     never removes a tag, and running it twice changes nothing.
 
     It reports the two things you need to see: harvested entries it could not
@@ -350,7 +350,7 @@ def widen_cmd(
     judgement, so it is yours to record. The belief and its sources are not
     touched: the widening is a standing statement the read lens consults, and
     `--revoke` withdraws it. There is deliberately no agent-facing way to do
-    this — an agent that could widen its own belief could put it in front of
+    this: an agent that could widen its own belief could put it in front of
     every future session.
     """
     configure_output(verbose, debug, quiet, progress)
@@ -692,7 +692,7 @@ def consolidate_cmd(
         ),
     ),
     output: Path | None = typer.Option(
-        None, "--output", help="Also write the run report as Markdown to FILE."
+        None, "--output", help="Write the run report as Markdown to FILE as well."
     ),
     format_: str = typer.Option(
         "markdown", "--format", help="Terminal format: markdown (default) or json."

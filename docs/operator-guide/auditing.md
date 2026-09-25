@@ -6,8 +6,8 @@ an entity is identified, or how a source is trusted is recorded as an immutable
 event: *who, when, why, and which records it touched*.
 
 This is the durable answer to questions the per-record state can't give you on
-its own: *"why was this source retracted? what merged into this subject? what's
-the history of trust changes?"* A record's current fields tell you its state
+its own: why a source was retracted, what merged into a subject, and the
+history of trust changes. A record's current fields tell you its state
 now; the event log tells you the **decisions that produced it**.
 
 ## What gets logged
@@ -31,6 +31,7 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | `particle tag` | `PARTICLE_TAGGED` |
 | `particle untag` | `PARTICLE_UNTAGGED` |
 | `corpus retract` | `SOURCE_RETRACTED` |
+| `corpus delete` | `CORPUS_ENTRY_DELETED` (entry id and counts only, never the deleted content) |
 | `particle retract` | `PARTICLE_RETRACTED` (actor `cli:particle-retract`) |
 | `memory useful` | `BELIEF_MARKED_USEFUL` (actor `cli:memory-useful` / `http:/memory/useful`) |
 | *(system-emitted)* §6.6 trust resolution drops a candidate | `CONFLICT_CANDIDATE_DROPPED` |
@@ -109,8 +110,14 @@ cascade; the follow-up `particles lint` flags downstream particles
 `PROVENANCE_STALE`.
 
 Reach for `corpus delete` only when the source should be erased entirely (a
-privacy request or a mistaken deposit); that path destroys the audit trail by
-design.
+privacy request or a mistaken deposit); that path destroys the source's audit
+trail by design. It deletes only the particles whose sole source is the entry.
+A particle that another entry also states survives with this entry's refs
+removed, so deleting one of two identical files no longer deletes claims the
+other still makes. The `CORPUS_ENTRY_DELETED` event records that a delete
+happened (the entry id, the affected particle ids, and counts) but not the
+entry's URI or any claim text, because keeping either would defeat the
+delete's purpose.
 
 ## One belief went stale: retiring just that one
 

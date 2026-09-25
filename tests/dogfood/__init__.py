@@ -191,7 +191,7 @@ async def persist_corpus(session: Any, subjects: list[DogfoodSubject]) -> None:
     """
     from particles.store.particle_store import insert_particle
     from particles.store.subject_store import insert_subject
-    from particles.store.taxonomy_store import ParticleTagEdgeRow, insert_taxonomy
+    from particles.store.taxonomy_store import insert_taxonomy
 
     # Materialise top-level taxonomies before particles so tag membership
     # checks (in tests that exercise the CLI) see them at query time.
@@ -220,12 +220,9 @@ async def persist_corpus(session: Any, subjects: list[DogfoodSubject]) -> None:
             _dim = 384
             _emb = [0.0] * _dim
             _emb[0] = 1.0
+            # ``insert_particle`` writes ``p.tags`` to both ``tags_json`` and
+            # the ``particle_tag_edges`` join rows tag-aware queries read.
             await insert_particle(session, p, embedding=_emb)
-            # Wire the particle_tag_edges join rows so tag-aware queries
-            # find this particle. ``insert_particle`` already persisted
-            # ``p.tags`` into ``ParticleRow.tags_json``.
-            for tag in p.tags or []:
-                session.add(ParticleTagEdgeRow(particle_id=p.id, tag=tag))
     await session.commit()
 
 

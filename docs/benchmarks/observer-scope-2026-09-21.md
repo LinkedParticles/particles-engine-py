@@ -9,9 +9,9 @@ Seeds 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 · 1
 | Own lines retired by the other project's activity | 20.6% (880 / 4273) |
 | Winner in view after a cross-project supersession | 0.0% (0 / 810) |
 | Lines in view a project never stated (lens leak) | 0.0% (0 / 3393) |
-| In view — `fact` lines | 62.4% (1397 / 2240) |
-| In view — `rule` lines | 97.5% (1436 / 1473) |
-| In view — `own` lines | 100.0% (560 / 560) |
+| In view, `fact` lines | 62.4% (1397 / 2240) |
+| In view, `rule` lines | 97.5% (1436 / 1473) |
+| In view, `own` lines | 100.0% (560 / 560) |
 
 **Why an own line was not in view** (counts over own-line checkpoints):
 

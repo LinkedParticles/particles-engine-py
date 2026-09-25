@@ -248,7 +248,7 @@ to revoke.
 **What the SSRF guard means for you in practice.** The URL deposit rejects
 loopback, RFC 1918, link-local, and cloud-metadata addresses, and it validates
 the address it actually connects to across DNS re-resolution and
-redirects. So you cannot use the share sheet to deposit a page from
+redirects. You therefore cannot use the share sheet to deposit a page from
 your home network or from the engine host itself; that returns `400` with
 `Could not deposit the provided URL`. That is the guard working, not a bug;
 deposit local material from the engine host with `particles deposit <path>`.

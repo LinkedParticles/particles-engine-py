@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +40,12 @@ from particles.corpus.store import (
 from particles.observability import traced
 from particles.operations.extract import collapse_superseded_pending, extract_snapshot
 from particles.operations.lint import run_lint
+from particles.operations.reindex_scope import (
+    decide_reindex_scope,
+    is_prefix,
+    resolve_prefix,
+    union_selectors,
+)
 from particles.store.particle_store import (
     get_active_particles_for_entry,
     get_active_particles_with_extractor_id,
@@ -201,7 +208,8 @@ async def reindex(
     The particle-selecting scopes (``extractor_version``, ``extractor_id``,
     ``provider_model``) union with each other and **intersect** with
     ``entry_ids`` when both are supplied. See ``_identify_scope``
-    for why the combination narrows rather than erroring.
+    for why the combination narrows rather than erroring, and
+    ``decide_reindex_scope`` for the rules themselves.
 
     Args:
         entry_ids: explicit list of entries to reindex; if None, auto-discover scope.
@@ -248,6 +256,12 @@ async def reindex(
 
     await assert_store_schema_current(session)
 
+    # Apply step, ahead of the gather (D2): the collapse
+    # commits under the writer lock, so it runs to completion here and scope
+    # identification below only reads.
+    collapsed = await _collapse_for_auto_discovery(
+        session, entry_ids, include_failed, progress=progress, dry_run=dry_run
+    )
     scope = await _identify_scope(
         session,
         entry_ids,
@@ -256,7 +270,7 @@ async def reindex(
         include_failed,
         provider_model,
         progress=progress,
-        dry_run=dry_run,
+        collapsed=collapsed,
     )
     # The upfront work plan (2026-08-02 incident): report what the resolved
     # scope will cost — entries, snapshots, supersede-able particles, known
@@ -331,6 +345,38 @@ async def reindex(
     }
 
 
+async def _collapse_for_auto_discovery(
+    session: AsyncSession,
+    entry_ids: list[str] | None,
+    include_failed: bool,
+    *,
+    progress: Callable[[str], None] | None = None,
+    dry_run: bool = False,
+) -> frozenset[str]:
+    """Collapse superseded FAILED/PENDING generations; return the collapsed ids.
+
+    Runs only for the auto-discovery FAILED/PENDING union (no named entries,
+    ``include_failed``), the one scope that would otherwise retry them. A
+    FAILED or PENDING generation of a MUTABLE entry that a newer snapshot has
+    replaced is not worth a retry, and retrying it after the newer one is
+    COMPLETE would retire the current generation.
+
+    **Commits** on a live run (the collapse's writer-lock transaction), which
+    is why it is its own step before scope gathering rather than a call
+    inside it. ``--dry-run`` promises zero writes, so there it only plans the
+    collapse, and the returned ids drop the same snapshots from the reported
+    scope that a live run would have marked.
+    """
+    if entry_ids or not include_failed:
+        return frozenset()
+    collapse = await collapse_superseded_pending(session, dry_run=dry_run)
+    if progress is not None:
+        line = collapse.summary()
+        if line:
+            progress(line)
+    return frozenset(snapshot_id for _, snapshot_id, _ in collapse.collapsed)
+
+
 async def _lookup_entry_uri(session: AsyncSession, entry_id: str) -> str:
     """Return the corpus entry's uri_r for progress display, or ``""`` on failure."""
     from particles.corpus.store import CorpusEntryRow
@@ -361,26 +407,11 @@ async def _particle_selector_pairs(
     extractor_id: str | None,
     provider_model: str | None,
 ) -> set[tuple[str, str]] | None:
-    """Union of the snapshot pairs selected by the particle-matching flags.
+    """Gather the snapshot pairs each particle-matching flag selects, unioned.
 
-    Returns ``None`` — distinct from an empty set — when the caller passed no
-    particle-matching flag at all, so callers can tell "no filter requested"
-    from "filter requested, matched nothing".
+    Only the flags actually passed are queried; ``union_selectors`` decides
+    the ``None``-versus-empty distinction.
     """
-    if not (extractor_version or extractor_id or provider_model):
-        return None
-
-    pairs: set[tuple[str, str]] = set()
-    if extractor_version:
-        pairs.update(
-            _source_pairs(
-                await get_active_particles_with_extractor_version(session, extractor_version)
-            )
-        )
-    if extractor_id:
-        pairs.update(
-            _source_pairs(await get_active_particles_with_extractor_id(session, extractor_id))
-        )
     # Particles produced by a specific "<provider>:<model>" pairing.
     # Exact equality on the stamped column, never a substring match — pairings
     # nest, so a substring scope would sweep in the sibling model this exists
@@ -388,88 +419,45 @@ async def _particle_selector_pairs(
     # particles are model-mixed is re-extracted whole, which is the intended
     # behaviour for undoing a provider trial but is not a particle-level
     # surgical tool.
-    if provider_model:
-        pairs.update(
-            _source_pairs(await get_active_particles_with_provider_model(session, provider_model))
-        )
-    return pairs
+    return union_selectors(
+        _source_pairs(await get_active_particles_with_extractor_version(session, extractor_version))
+        if extractor_version
+        else None,
+        _source_pairs(await get_active_particles_with_extractor_id(session, extractor_id))
+        if extractor_id
+        else None,
+        _source_pairs(await get_active_particles_with_provider_model(session, provider_model))
+        if provider_model
+        else None,
+    )
 
 
-async def _explicit_entry_scope(
-    session: AsyncSession,
-    explicit_entry_ids: list[str],
-    extractor_version: str | None,
-    extractor_id: str | None,
-    provider_model: str | None,
-    progress: Callable[[str], None] | None,
+async def _gather_named(
+    session: AsyncSession, explicit_entry_ids: list[str]
 ) -> list[tuple[str, str]]:
-    """Scope for named entries, intersected with any particle-matching flags.
+    """Resolve each named id (prefix or full) to its latest COMPLETE snapshot.
 
-    Named entries resolve to their latest COMPLETE snapshot. When a
-    particle-matching flag is *also* supplied the two scopes are **intersected**:
-    before this, the explicit branch returned early and every other
-    flag was discarded silently, so an operator narrowing by both entry and
-    model got the whole entry — wider than asked for, and reindex supersedes.
-
-    Intersecting rather than raising is deliberate. The fix has to hold for the
-    HTTP route and the Python API too, not just the CLI, and AND-ing
-    independent filters is the least-surprising reading on every one of them;
-    it also errs strictly narrower, which is the safe direction here. Any
-    entry dropped by the intersection is reported — narrowing is safe, but it
-    should never be silent either.
-
-    The store-wide auto-discovery unions (FAILED/PENDING snapshots, stale
-    schema versions) stay bypassed on this path: an operator who names entries
-    must not be handed the rest of the store, and folding the stale-schema
-    union in *after* the intersection would re-open the same widening in a new
-    place.
+    An ambiguous or unknown prefix is logged and skipped (``resolve_prefix``
+    decides which); an entry with no COMPLETE snapshot contributes nothing.
     """
     named: list[tuple[str, str]] = []
     for raw_id in explicit_entry_ids:
-        entry_id = raw_id
-        if len(raw_id) < 36:
-            matches = await find_entry_ids_by_prefix(session, raw_id)
-            if len(matches) == 1:
-                entry_id = matches[0]
-            elif len(matches) > 1:
-                log.warning(
-                    "Ambiguous entry prefix %r matches %d entries; skipping",
-                    raw_id,
-                    len(matches),
-                )
-                continue
-            else:
-                log.warning("Entry prefix %r not found; skipping", raw_id)
-                continue
-        snap_id = await get_latest_completed_snapshot_id(session, entry_id)
-        if snap_id and (entry_id, snap_id) not in named:
-            named.append((entry_id, snap_id))
-
-    selected = await _particle_selector_pairs(
-        session, extractor_version, extractor_id, provider_model
-    )
-    if selected is None:
-        return named
-
-    scope = [pair for pair in named if pair in selected]
-    if len(scope) != len(named):
-        flags = ", ".join(
-            f"{name}={value!r}"
-            for name, value in (
-                ("extractor_version", extractor_version),
-                ("extractor_id", extractor_id),
-                ("provider_model", provider_model),
+        matches = await find_entry_ids_by_prefix(session, raw_id) if is_prefix(raw_id) else []
+        resolution = resolve_prefix(raw_id, matches)
+        if resolution.problem == "ambiguous":
+            log.warning(
+                "Ambiguous entry prefix %r matches %d entries; skipping",
+                raw_id,
+                len(matches),
             )
-            if value
-        )
-        message = (
-            f"Reindex scope narrowed: {len(scope)} of {len(named)} named "
-            f"entries matched {flags}; the rest are skipped."
-        )
-        log.warning(message)
-        if progress is not None:
-            progress(message)
-    return scope
+            continue
+        if resolution.entry_id is None:
+            log.warning("Entry prefix %r not found; skipping", raw_id)
+            continue
+        snap_id = await get_latest_completed_snapshot_id(session, resolution.entry_id)
+        if snap_id:
+            named.append((resolution.entry_id, snap_id))
+    return named
 
 
 async def _identify_scope(
@@ -480,55 +468,71 @@ async def _identify_scope(
     include_failed: bool,
     provider_model: str | None = None,
     progress: Callable[[str], None] | None = None,
-    dry_run: bool = False,
+    collapsed: AbstractSet[str] = frozenset(),
 ) -> list[tuple[str, str]]:
-    """Return list of (entry_id, snapshot_id) pairs to reindex."""
-    if explicit_entry_ids:
-        return await _explicit_entry_scope(
-            session,
-            explicit_entry_ids,
-            extractor_version,
-            extractor_id,
-            provider_model,
-            progress,
-        )
+    """Return list of (entry_id, snapshot_id) pairs to reindex.
 
-    scope: list[tuple[str, str]] = []
+    Gathers what the scope decision needs, then hands it to the pure
+    ``decide_reindex_scope`` (D2). Reads only: the collapse
+    is applied (or, under ``--dry-run``, planned) by ``reindex`` before this
+    runs, and arrives as ``collapsed``.
 
-    # Auto-discover: PENDING and FAILED snapshots. Collapse first:
-    # a FAILED or PENDING generation of a MUTABLE entry that a newer snapshot
-    # has replaced is not worth a retry, and retrying it after the newer one
-    # is COMPLETE would retire the current generation.
-    if include_failed:
-        # ``--dry-run`` promises zero writes, so it plans the collapse without
-        # marking and drops the same snapshots from the scope it reports.
-        collapse = await collapse_superseded_pending(session, dry_run=dry_run)
-        if progress is not None:
-            line = collapse.summary()
-            if line:
-                progress(line)
-        skipped = {snapshot_id for _, snapshot_id, _ in collapse.collapsed}
-        scope.extend(
-            pair
-            for pair in await list_entry_snapshot_pairs_with_extraction_status(
-                session, [ExtractionStatus.FAILED, ExtractionStatus.PENDING]
-            )
-            if pair[1] not in skipped
-        )
-
-    # Auto-discover: particles matching the extractor / provider-model flags
+    Named entries resolve to their latest COMPLETE snapshot and are
+    **intersected** with any particle-matching flags. Intersecting
+    rather than raising is deliberate: the fix has to hold for the HTTP route
+    and the Python API too, not just the CLI, and AND-ing independent filters
+    is the least-surprising reading on every one of them; it also errs
+    strictly narrower, which is the safe direction for a superseding verb.
+    Any entry dropped by the intersection is reported, since narrowing is
+    safe but should never be silent. The store-wide auto-discovery unions
+    (FAILED/PENDING, stale schema) are not gathered on that path: folding them
+    in would re-open the same widening in a new place.
+    """
     selected = await _particle_selector_pairs(
         session, extractor_version, extractor_id, provider_model
     )
-    if selected is not None:
-        scope.extend(selected)
+    if explicit_entry_ids:
+        decided = decide_reindex_scope(
+            named=await _gather_named(session, explicit_entry_ids),
+            selected=selected,
+            failed_or_pending=[],
+            collapsed=collapsed,
+            stale_schema=[],
+        )
+    else:
+        decided = decide_reindex_scope(
+            named=None,
+            selected=selected,
+            failed_or_pending=await list_entry_snapshot_pairs_with_extraction_status(
+                session, [ExtractionStatus.FAILED, ExtractionStatus.PENDING]
+            )
+            if include_failed
+            else [],
+            collapsed=collapsed,
+            stale_schema=_source_pairs(
+                await get_active_particles_with_stale_schema_version(session, SCHEMA_VERSION)
+            ),
+        )
 
-    # Auto-discover: particles whose schema_version is older than current
-    scope.extend(
-        _source_pairs(await get_active_particles_with_stale_schema_version(session, SCHEMA_VERSION))
-    )
-
-    return list(set(scope))
+    if decided.narrowed is not None:
+        kept, named_count = decided.narrowed
+        flags = ", ".join(
+            f"{name}={value!r}"
+            for name, value in (
+                ("extractor_version", extractor_version),
+                ("extractor_id", extractor_id),
+                ("provider_model", provider_model),
+            )
+            if value
+        )
+        message = (
+            f"Reindex scope narrowed: {kept} of {named_count} named "
+            f"entries matched {flags}; the rest are skipped."
+        )
+        log.warning(message)
+        if progress is not None:
+            progress(message)
+    return decided.pairs
 
 
 async def _reindex_snapshot(

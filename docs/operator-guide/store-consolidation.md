@@ -93,7 +93,7 @@ particle runs the §6.6 reconciliation ladder against the Mini's ACTIVE set.
 **Particle IDs: no collision.** Import mints a **fresh** UUID for every
 particle; the source UUID rides along as `sourceParticleId` (origin metadata
 only). The validation confirmed the imported particle's ID differs from the
-source. So there is no primary-key clash, but see idempotency below.
+source: there is no primary-key clash, but see idempotency below.
 
 **No exact-duplicate dedup → import is not idempotent.** Import identity is
 embedding-similarity + §6.6, **not** claim identity. Re-running the same import

@@ -42,12 +42,14 @@ import json
 import logging
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.duplicate_key import content_hash as norm_content_hash
+from particles.core.equivalence import co_evidential_components
 from particles.core.schema import (
     CandidateCluster,
     CoEvidentialCandidate,
@@ -69,6 +71,7 @@ from particles.core.stance import stance_holder
 from particles.core.status import Status, StatusReason
 from particles.extraction.polarity import is_non_asserted
 from particles.operations._scope import pair_scope_tier
+from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
 
 if TYPE_CHECKING:
     from particles.store.event_store import OperatorEvent
@@ -145,9 +148,8 @@ async def suggest_co_evidential(
             written in that case.
     """
     from particles.config import get_config
-    from particles.embeddings import cosine_similarity
     from particles.store.particle_store import get_active_particles_with_embeddings
-    from particles.store.relation_store import get_co_evidential_group
+    from particles.store.relation_store import get_all_relations
     from particles.store.subject_store import (
         get_subject,
         list_all_subjects,
@@ -168,13 +170,12 @@ async def suggest_co_evidential(
     else:
         subjects = await list_all_subjects(session)
 
-    # Cluster cache shared across subjects so a multi-subject particle BFSes once.
-    cluster_for: dict[str, set[str]] = {}
-
-    async def _cluster(pid: str) -> set[str]:
-        if pid not in cluster_for:
-            cluster_for[pid] = await get_co_evidential_group(session, pid)
-        return cluster_for[pid]
+    # Already-linked pairs (in any direction, transitively) are skipped: the
+    # co-evidential components are read once for every Subject rather than
+    # walked per particle.
+    linked = co_evidential_components(
+        await get_all_relations(session, RelationType.CO_EVIDENTIAL), 0.0
+    )
 
     # fetch the embedding set **once**, store-wide, and group it by
     # Subject in process. This loop used to issue one
@@ -198,9 +199,6 @@ async def suggest_co_evidential(
     # per-Subject query is issued once per Subject.
     by_subject: dict[str, list[tuple[Particle, Any]]] = {}
 
-    def _keep(p: Particle) -> bool:
-        return is_truth_apt(p) and not is_non_asserted(p.properties)
-
     if subject_id is not None:
         for subject in subjects:
             by_subject[subject.id] = [
@@ -208,11 +206,13 @@ async def suggest_co_evidential(
                 for p, e in await get_active_particles_with_embeddings(
                     session, subject_id=subject.id
                 )
-                if _keep(p)
+                if is_pair_eligible(p)
             ]
     else:
         eligible = {
-            p.id: (p, e) for p, e in await get_active_particles_with_embeddings(session) if _keep(p)
+            p.id: (p, e)
+            for p, e in await get_active_particles_with_embeddings(session)
+            if is_pair_eligible(p)
         }
         wanted = {s.id for s in subjects}
         for pid, sid in await list_particle_subject_pairs(session):
@@ -227,37 +227,27 @@ async def suggest_co_evidential(
         if len(particles_with_embs) < 2:
             continue
 
+        # The shared candidacy rules (similarity, already linked, same stance
+        # holder) decided over plain values. Enumeration is
+        # store-wide here, so there is no scope. The report lists a Subject's
+        # pairs in candidate order, so restore it from the probe order.
+        position = {p.id: k for k, (p, _) in enumerate(particles_with_embs)}
+        pairs = sorted(
+            enumerate_candidate_pairs(particles_with_embs, threshold=threshold, linked=linked),
+            key=lambda c: (position[c.a.id], position[c.b.id]),
+        )
         candidates: list[CoEvidentialCandidate] = []
-        for i, (p_a, emb_a) in enumerate(particles_with_embs):
-            for p_b, emb_b in particles_with_embs[i + 1 :]:
-                pair_key = frozenset({p_a.id, p_b.id})
-                if pair_key in seen_pairs:
-                    continue
-                seen_pairs.add(pair_key)
-
-                # Skip already-linked pairs (in any direction, transitively).
-                if p_b.id in await _cluster(p_a.id):
-                    continue
-
-                # M2: a stance is the same claim only as another stance
-                # by the SAME holder — never co-evidential with a non-stance (its
-                # target) or with a different holder's stance. Merging those would
-                # collapse distinct holders' positions, destroying the §4
-                # per-holder distribution. Cheap structural skip (holders differ
-                # ⇒ at least one is a stance the other is not equal to); two
-                # non-stances both read None and pass through unchanged.
-                if stance_holder(p_a) != stance_holder(p_b):
-                    continue
-
-                # normalized cosine clamped to [0, 1]; the candidate
-                # threshold lives on this scale.
-                sim = cosine_similarity(emb_a, emb_b)
-                if sim < threshold:
-                    continue
-
-                candidates.append(
-                    CoEvidentialCandidate(particle_a=p_a.id, particle_b=p_b.id, similarity=sim)
+        for pair in pairs:
+            # A pair shared by two Subjects is proposed once, under the first.
+            pair_key = frozenset({pair.a.id, pair.b.id})
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            candidates.append(
+                CoEvidentialCandidate(
+                    particle_a=pair.a.id, particle_b=pair.b.id, similarity=pair.similarity
                 )
+            )
 
         if candidates:
             clusters.append(
@@ -919,6 +909,64 @@ async def _select_merge_events(
     return events, window
 
 
+def plan_unmerge_group(event: OperatorEvent, by_id: Mapping[str, Particle]) -> UnmergeGroup | str:
+    """Decide how one ``DUPLICATES_MERGED`` event reverts, with no I/O.
+
+    The pure decision half of :func:`unmerge_exact_duplicates` (D2):
+    ``by_id`` holds the event's survivor and listed copies as they stand now,
+    and an id absent from it is a row that no longer exists.
+
+    Each listed copy is either planned for restore or skipped with its reason:
+    ``MISSING`` (no row), ``ALREADY_ACTIVE``, ``NOT_SUPERSEDED`` (some other
+    status), or ``NOT_MERGE_SUPERSEDED`` (superseded for a reason other than
+    the merge). Only a copy still ``SUPERSEDED`` with reason
+    ``DUPLICATE_MERGED`` is restorable (§8).
+
+    Returns:
+        The group, with ``restored_ids`` holding the restorable copies in
+        listed order and ``relations_deleted`` left at zero for the caller to
+        fill; or, when the payload has no readable survivor / superseded list,
+        the warning that skips the event.
+    """
+    payload = event.payload or {}
+    survivor_id = payload.get("survivor")
+    listed = payload.get("superseded") or []
+    if not isinstance(survivor_id, str) or not isinstance(listed, list):
+        return f"Event {event.event_id} has no readable survivor/superseded payload; skipped."
+
+    survivor = by_id.get(survivor_id)
+    group = UnmergeGroup(
+        merge_event_id=event.event_id,
+        survivor_id=survivor_id,
+        survivor_status=survivor.status.value if survivor else None,
+        content_hash=payload.get("content_hash"),
+    )
+    for loser_id in listed:
+        loser = by_id.get(loser_id)
+        if loser is None:
+            group.skipped.append(
+                UnmergeSkip(particle_id=loser_id, reason=UnmergeSkipReason.MISSING)
+            )
+            continue
+        found = UnmergeSkip(
+            particle_id=loser_id,
+            reason=UnmergeSkipReason.NOT_SUPERSEDED,
+            found_status=loser.status.value,
+            found_status_reason=(loser.status_reason.value if loser.status_reason else None),
+        )
+        if loser.status is Status.ACTIVE:
+            found.reason = UnmergeSkipReason.ALREADY_ACTIVE
+            group.skipped.append(found)
+        elif loser.status is not Status.SUPERSEDED:
+            group.skipped.append(found)
+        elif loser.status_reason is not StatusReason.DUPLICATE_MERGED:
+            found.reason = UnmergeSkipReason.NOT_MERGE_SUPERSEDED
+            group.skipped.append(found)
+        else:
+            group.restored_ids.append(loser_id)
+    return group
+
+
 async def unmerge_exact_duplicates(
     session: AsyncSession,
     *,
@@ -971,7 +1019,7 @@ async def unmerge_exact_duplicates(
             to a missing or non-merge event. Nothing is written.
     """
     from particles.store.event_store import EventRefKind, OperatorEventType, record_event
-    from particles.store.particle_store import get_particle, update_particle_status
+    from particles.store.particle_store import get_particles_by_ids, update_particle_status
     from particles.store.relation_store import delete_relation
 
     events, selector = await _select_merge_events(
@@ -983,54 +1031,30 @@ async def unmerge_exact_duplicates(
         return report
 
     for event in events:
+        # Gather: the survivor and every listed copy, in one read per event —
+        # per event, not per run, so a copy an earlier event in this run just
+        # restored is seen as it now stands.
         payload = event.payload or {}
-        survivor_id = payload.get("survivor")
-        listed = payload.get("superseded") or []
-        if not isinstance(survivor_id, str) or not isinstance(listed, list):
-            report.warnings.append(
-                f"Event {event.event_id} has no readable survivor/superseded payload; skipped."
-            )
+        listed = payload.get("superseded")
+        wanted = [payload.get("survivor"), *(listed if isinstance(listed, list) else [])]
+        by_id = await get_particles_by_ids(session, [i for i in wanted if isinstance(i, str)])
+
+        # Decide: pure (D2).
+        planned = plan_unmerge_group(event, by_id)
+        if isinstance(planned, str):
+            report.warnings.append(planned)
             continue
-
-        survivor = await get_particle(session, survivor_id)
-        group = UnmergeGroup(
-            merge_event_id=event.event_id,
-            survivor_id=survivor_id,
-            survivor_status=survivor.status.value if survivor else None,
-            content_hash=payload.get("content_hash"),
-        )
-
-        restorable: list[str] = []
-        for loser_id in listed:
-            loser = await get_particle(session, loser_id)
-            if loser is None:
-                group.skipped.append(
-                    UnmergeSkip(particle_id=loser_id, reason=UnmergeSkipReason.MISSING)
-                )
-                continue
-            found = UnmergeSkip(
-                particle_id=loser_id,
-                reason=UnmergeSkipReason.NOT_SUPERSEDED,
-                found_status=loser.status.value,
-                found_status_reason=(loser.status_reason.value if loser.status_reason else None),
-            )
-            if loser.status is Status.ACTIVE:
-                found.reason = UnmergeSkipReason.ALREADY_ACTIVE
-                group.skipped.append(found)
-            elif loser.status is not Status.SUPERSEDED:
-                group.skipped.append(found)
-            elif loser.status_reason is not StatusReason.DUPLICATE_MERGED:
-                found.reason = UnmergeSkipReason.NOT_MERGE_SUPERSEDED
-                group.skipped.append(found)
-            else:
-                restorable.append(loser_id)
+        group = planned
+        survivor_id = group.survivor_id
+        restorable = list(group.restored_ids)
 
         if dry_run:
-            group.restored_ids = restorable
             # The edge is only withdrawn alongside the copy it belongs to, so
             # the planned count tracks the restorable set, not the listed one.
             group.relations_deleted = len(restorable)
         else:
+            # ``restored_ids`` is rebuilt as the writes land.
+            group.restored_ids = []
             for loser_id in restorable:
                 await update_particle_status(session, loser_id, Status.ACTIVE, None)
                 if await delete_relation(
