@@ -191,7 +191,6 @@ body {
   gap: 8px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  text-transform: capitalize;
 }
 .card .kind .dot {
   width: 10px;
@@ -246,6 +245,49 @@ body {
   color: var(--text);
   font-size: 0.82rem;
   font-style: italic;
+}
+
+/* The kind's question: what the card asks, before the evidence. */
+.card .question {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+/* A contested card's two sides (claim A and claim B of its INCONSISTENCY). */
+.card .refs .side-label {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.card .refs .particle.flagged {
+  border-color: var(--accent);
+}
+.card .gesture-help {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.card .gesture-help summary {
+  cursor: pointer;
+}
+.card .gesture-help dl {
+  margin: 8px 0 0;
+}
+.card .gesture-help dt {
+  color: var(--text);
+  font-weight: 600;
+  margin-top: 6px;
+}
+.card .gesture-help dd {
+  margin: 2px 0 0;
+}
+.session-hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 4px 0 0;
 }
 
 /* --- Gestures ------------------------------------------------------------ */
@@ -387,7 +429,7 @@ body {
   border-color: transparent;
 }
 
-/* --- Compose sheet (supersede / comment / deposit / confirm) ------------- */
+/* --- Compose sheet (supersede / resolve / deposit / confirm) ------------- */
 .sheet-backdrop {
   position: fixed;
   inset: 0;
@@ -425,6 +467,46 @@ body {
 .sheet textarea {
   min-height: 96px;
   resize: vertical;
+}
+.sheet {
+  max-height: 92vh;
+  overflow-y: auto;
+}
+.sheet > .hint {
+  white-space: pre-wrap;
+}
+/* A choice field: one radio row per option, each saying what it does. */
+.sheet .choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sheet .choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 0.92rem;
+  margin: 0;
+  cursor: pointer;
+}
+.sheet .choice:has(input:checked) {
+  border-color: var(--accent);
+}
+.sheet .choice input {
+  width: auto;
+  margin-top: 3px;
+  flex: none;
+}
+.sheet .choice .choice-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 /* --- Query route -------------------------------------------- */

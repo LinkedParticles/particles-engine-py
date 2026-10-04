@@ -39,6 +39,15 @@ difference shows up exactly where file memory hurts:
   forever; here its effective confidence decays with age, `lint` flags it
   stale, and the fix *supersedes* it: the old claim retired with a pointer
   to what replaced it, not erased.
+- **What you said about your old home stops describing your new one.** Tell
+  a session "Sandeep's Curry House is a ten-minute walk from my flat", later
+  say "I moved to Mumbai", and the store retires the old address. The nightly
+  consolidation then rewrites the walking-distance claim as history: "was a
+  ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived,
+  as of 2026-09-04". The restaurant stays in memory with its place, and it is
+  no longer offered as around the corner. A claim the cycle cannot restate
+  safely is left as it is and shows up in `particles curate` for you to
+  decide.
 - **The store can audit what your files can't.** The first run reads the
   memory you already have and reports what's lurking in it (contradictions,
   likely duplicates, probably-stale facts, cited-but-never-captured
@@ -138,6 +147,13 @@ every project, and they all name one store:
 - **The harvest follows you.** Each session end deposits that session's
   transcript and that project's memory files into the same store, whichever
   project the session was in.
+- **Only that store touches the memory files.** A `~/.claude/projects/*/memory/`
+  directory is harvested and re-rendered only by the store the installed hooks
+  name. Any other store is refused, whether a `DATABASE_URL` pointed at a
+  scratch database, a test, or `particles memory consolidate --store <other>`:
+  it neither reads the memory files into itself nor writes its beliefs into
+  `MEMORY.md`, and the refusal is recorded with its reason. A project-scope
+  install (`--project`) binds its own repository's directory the same way.
 
 What a session is **shown** from that store is a separate choice, and you make
 it with one line of config.
@@ -297,6 +313,13 @@ injects it as `additionalContext`, so the agent's standing knowledge is *in
 the context window* before the first prompt, not behind an MCP tool it may
 forget to call. A `resume` session already replays its prior context, so the
 push is skipped there; `startup`, `clear`, and `compact` get a fresh render.
+A belief is flagged `contested (inconsistency) by <id>` when an open
+INCONSISTENCY names it. Besides the ones extraction files, the nightly cycle
+opens one when it confirms that two of your notes disagree, so a
+session learns of a contradiction the morning after the second note is
+harvested. Every claim of that disagreement carries the same id, and
+`particle_show <id>` names both sides, their notes and the reason. Correcting
+the wrong note clears the flag on the next run.
 Two budgets bound the injection: `mcp.recall.digest_max_beliefs` (default 200)
 and `claude_code.digest_max_bytes` (default 24 000, truncated on a line
 boundary with a disclosed footer).
@@ -321,10 +344,15 @@ material. This is *harvest, don't ask*; the agent took no action to be remembere
   shapes (`sk-…` keys, AWS access key IDs, `Bearer` headers, PEM blocks). The
   result lands as **one corpus entry per session**
   (`claude-code://session/<id>`, `CONVERSATION`, `APPEND_ONLY`); a grown
-  transcript appends a snapshot; an unchanged one is a content-hash no-op.
+  transcript appends a snapshot, and extraction reads only the turns it adds,
+  with the turns before them shown as context; an unchanged one is a
+  content-hash no-op.
 - **Changed memory files.** Each `*.md` under the project's auto-memory
   directory deposits as `LOCAL_MARKDOWN` / `MUTABLE`, so an edited `MEMORY.md`
-  is re-extracted with the right staleness semantics. Claude Code's own
+  is re-extracted with the right staleness semantics. The index lines of
+  `MEMORY.md` (`- [Title](topic.md) — what it covers`) are left out when the
+  linked file sits beside it: each only summarises a file that is harvested
+  in full, and read as a claim it can contradict that file. Claude Code's own
   auto-memory stays enabled; the integration harvests it rather than
   fighting it. **A git worktree shares its repository's memory.** Claude Code
   keeps transcripts per working directory but auto-memory per repository, so
@@ -480,7 +508,7 @@ Contradictions and duplicates it names are resolved with
 ```
 Audited 23 memory files → 212 beliefs about 58 subjects.
 
-  4 potential contradictions        (2 cross-file, 2 contested at extract time)
+  4 potential contradictions        (2 across files, 2 contested at extract time)
   11 likely-duplicate belief pairs  (unjudged similarity candidates; --judge to verify)
   7 probably-stale facts            (5 aged past their source's decay horizon, 2 expired)
 
@@ -499,6 +527,25 @@ candidates, and extractions from memory files carry self-reported (capped,
 not benchmark-calibrated) confidence. The report says all of this rather
 than overstate.
 
+Contradictions are found in two passes. A probe on `llm.semantic_lint` reads
+the most similar claim pairs, pairs from two different files first. Each pair
+it flags is then read a second time on `llm.verification` (the default model
+unless you route it elsewhere), this time with each claim's source passage,
+file name and file date. Only the pairs the second reading confirms are
+counted, and the report says how many were flagged and how many confirmed:
+
+```
+  contradiction check: the first pass flagged 18 of 200 probed pairs; a second reading (claude-sonnet-5) confirmed 4
+```
+
+The count is of disagreements, not claim pairs: when two notes disagree
+through several claim pairs, or one claim disagrees with claims in two other
+notes, the pairs that share a claim count once, and a line under the headline
+says how many pairs were grouped. The split beside the count says how many
+disagreements cross files and how many sit within one file. Set `audit.verify_contradictions: false` to count every flag,
+and `audit.max_contradiction_verifications` (default 25) to bound the second
+readings; a flag past that cap is named as unverified and not counted.
+
 What to know before running it:
 
 - **The deposits become your real store.** The audited corpus is the same
@@ -506,11 +553,43 @@ What to know before running it:
   running `init` after `audit`, in either order) re-processes nothing:
   corpus dedup skips unchanged content and extraction skips COMPLETE
   snapshots.
-- **The cost estimate always prints first.** Above
+- **The cost estimate always prints first.** It gives the extraction call
+  count, the token projection, a dollar range at the configured model's list
+  price, and the expected wall time, for example `Cost: ≈ $5.63–10.33
+  expected, $19 ceiling at claude-sonnet-5 list price ($2/$10 per MTok)` and
+  `Time: about 1.6 h, ~60 s per file`. The expected range takes a per-call
+  output figure for the extraction model
+  (`audit.estimate_output_tokens_per_extraction_call`, with a per-model
+  override) within `audit.estimate_output_spread`, adds the expected retries at
+  `extraction.retry_max_tokens`, and spans zero to every contradiction probe:
+  the `audit.max_contradiction_probes` cap plus the probes extraction makes
+  while it reconciles new beliefs, and to every second reading of a flagged
+  pair (`audit.max_contradiction_verifications`). The ceiling is every call
+  spending its full `extraction.max_tokens`, the expected retries at their
+  budget, and every probe and second reading. The defaults come from a measured run of 96 memory files that billed
+  $7.97 and took 96 minutes. The figure is priced from `llm.price_per_mtok`,
+  which ships with the Anthropic list prices; prompt-cache and batch discounts
+  are not applied, so it leans high.
+  A model with no price entry (an OpenAI-compatible endpoint, for example)
+  prints tokens only, with the config key to add a price under. Above
   `audit.confirm_call_threshold` estimated extraction calls (default 50) the
-  CLI asks before spending; `--yes` pre-confirms, `--estimate` prints and
-  exits without depositing anything, and a non-interactive run without
-  `--yes` aborts with the estimate shown.
+  CLI asks before spending, and the question repeats the dollar range and the
+  time;
+  `--yes` pre-confirms, `--estimate` prints and exits without depositing
+  anything (`--estimate --format json` prints the estimate as JSON), and a
+  non-interactive run without `--yes` aborts with the estimate shown.
+- **The report ends with what the run actually cost.** The last line totals
+  the tokens the providers reported for this run, per purpose and model, and
+  prices them at list price with the prompt-cache and batch multipliers
+  applied, for example `LLM usage: 96 extraction calls (claude-sonnet-5),
+  312k input, 640k output tokens; 200 semantic lint calls
+  (claude-haiku-4-5), 60k input, 4k output tokens; ≈ $9.20 at list price.`
+  No Admin API key is needed: the figure comes from each response's own
+  `usage` field. An unpriced model shows tokens only. `--format json`
+  carries the same totals under `llm_usage` and prints the line to stderr,
+  and the run's `CONSOLIDATION_RUN` event records them, so a cost history
+  can be read back from `particles events`. `particles memory consolidate`
+  ends its report the same way.
 - **Transcripts are opt-in.** `--transcripts <dir>` harvests session
   `*.jsonl` transcripts newest-first, capped at
   `audit.transcript_max_entries` (default 20; `--max-entries` overrides).
@@ -521,6 +600,15 @@ What to know before running it:
   substance); a re-audit of a populated store still runs the structural
   finders and duplicate candidates but says
   `contradiction check skipped: no API key` in the report.
+- **An incomplete audit says so, and exits 1.** When the contradiction check
+  is skipped (no key, or the LLM becomes unavailable mid-run, for example an
+  exhausted credit balance), the report's first line reads
+  `(INCOMPLETE: contradiction check skipped, …)`, the probe stops instead of
+  walking its remaining pairs, and the verb exits 1 with the command that
+  finishes the job. The structural findings in that report still stand. Exit
+  codes match `particles memory consolidate`: 0 complete, 1 report written
+  but incomplete, 2 the audit did not start. `--format json` carries
+  `"complete": false` beside `semantic_skip_reason`.
 - **The projection renders at the end.** When the MEMORY.md projection is
   enabled, a successful harvest+extract pass finishes by re-rendering the
   `memory-index` region, so the activation moment leaves your `MEMORY.md`
@@ -529,8 +617,10 @@ What to know before running it:
 `--output report.md` also writes the report to a file; `--format json` dumps
 the full model; `--store <handle>` audits a named store. Presentation knobs
 live under `audit:` in `config.yaml` (`exemplars_per_class`,
-`transcript_max_entries`, `confirm_call_threshold`); detection thresholds
-stay with their finders.
+`transcript_max_entries`, `confirm_call_threshold`, and the cost bounds
+`max_contradiction_probes`, `verify_contradictions` and
+`max_contradiction_verifications`); detection thresholds stay with their
+finders.
 
 ## Degradation and debugging
 
@@ -556,7 +646,12 @@ directory could not be identified and the hook fell back to the directory
 holding the transcript).
 
 `particles hook doctor --store <handle>` prints the memory directory a session
-started from the current directory writes to. It also lists **stray memory
+started from the current directory writes to, and whether that store is the
+one the installed hooks name for it (`memory binding:`). A store that is not is
+never harvested into from that directory and never renders into it; the
+`session-end` log line carries the reason as `memory_skipped`. Hooks installed
+before 1.70.2 pin no database and are refused the same way: re-run
+`particles init claude-code` to pin one. It also lists **stray memory
 directories**: before 1.147.1 a session in a linked worktree had the
 projection create a `memory/MEMORY.md` beside its transcripts, a file Claude
 Code never reads. They are harmless and are no longer created, harvested, or

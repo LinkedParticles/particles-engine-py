@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Collection
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from sqlalchemy import ColumnElement, DateTime, String, Text, select
@@ -28,6 +28,9 @@ from particles.store import subject_cache
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 
 log = logging.getLogger(__name__)
+
+_IN_CHUNK = 10_000
+"""Ids per ``IN (...)`` query, well under SQLite's 32766-variable ceiling."""
 
 
 class SubjectRow(Base):
@@ -144,7 +147,43 @@ async def get_subject(session: AsyncSession, subject_id: str) -> Subject | None:
     return None
 
 
-def persona_alias_guard(name: str, source_type: str | None) -> tuple[str, ...]:
+async def get_subject_classes(
+    session: AsyncSession, subject_ids: Collection[str]
+) -> dict[str, str | None]:
+    """``subject_class`` by subject id, one query per chunk; an unknown id is absent."""
+    ids = sorted({sid for sid in subject_ids if sid})
+    if not ids:
+        return {}
+    classes: dict[str, str | None] = {}
+    for start in range(0, len(ids), _IN_CHUNK):
+        result = await session.execute(
+            select(SubjectRow.id, SubjectRow.subject_class).where(
+                SubjectRow.id.in_(ids[start : start + _IN_CHUNK])
+            )
+        )
+        classes.update(result.all())
+    return classes
+
+
+def is_persona_source(source_type: str | None, source_tags: Collection[str] = ()) -> bool:
+    """Whether a corpus entry's first-person references are the store's speaker.
+
+    True for a ``subjects.persona_source_types`` source type (a transcript, a
+    journal) and, whatever the source type, for an entry carrying one of
+    ``subjects.persona_source_tags``: a Claude Code memory file is
+    deposited as ``LOCAL_MARKDOWN`` and tagged ``memory-file``, and its "I" is
+    the same person a transcript's is. The one predicate both the fold and
+    :func:`persona_alias_guard` read, so the two cannot disagree about scope.
+    """
+    cfg = get_config().subjects
+    if source_type is not None and source_type in cfg.persona_source_types:
+        return True
+    return not set(source_tags).isdisjoint(cfg.persona_source_tags)
+
+
+def persona_alias_guard(
+    name: str, source_type: str | None, source_tags: Collection[str] = ()
+) -> tuple[str, ...]:
     """Canonical names whose aliases must not answer ``name`` for this source.
 
     The persona fold records each surface form it folds ("user", "I", "the
@@ -155,7 +194,8 @@ def persona_alias_guard(name: str, source_type: str | None) -> tuple[str, ...]:
     page, or a Subject named "User" in an imported bundle, is not the person
     this store's transcripts call "I". Every such path passes this guard as
     ``find_by_name(..., skip_aliases_of=...)``, so outside a persona source
-    type it binds exactly as it did before the aliases existed.
+    (:func:`is_persona_source`) it binds exactly as it did before the aliases
+    existed.
 
     Scoped to persona *forms*: an alias an operator added to the persona
     Subject ("Jeff") answers everywhere. Keyed on the configured canonical
@@ -164,12 +204,12 @@ def persona_alias_guard(name: str, source_type: str | None) -> tuple[str, ...]:
     which it already needed, since the fold would otherwise split them.
 
     Returns:
-        The ``skip_aliases_of`` value: empty inside a persona source type (the
+        The ``skip_aliases_of`` value: empty inside a persona source (the
         resolver folds the name there, and never looks the raw form up) and
         for any name that is not a persona form.
     """
     cfg = get_config().subjects
-    if source_type is not None and source_type in cfg.persona_source_types:
+    if is_persona_source(source_type, source_tags):
         return ()
     if name.strip().casefold() not in {a.casefold() for a in cfg.persona_aliases}:
         return ()
@@ -242,7 +282,14 @@ async def find_by_external_ref(
     session: AsyncSession, namespace: str, external_id: str
 ) -> Subject | None:
     """Look up a subject by external ontology reference."""
-    result = await session.execute(select(SubjectRow))
+    query = select(SubjectRow)
+    if external_id.isascii() and '"' not in external_id and "\\" not in external_id:
+        # The stored JSON spells such an id verbatim, so a substring match is a
+        # sound prefilter; the exact check below still decides. Without it every
+        # lookup parsed every Subject, which a batch relink does thousands of
+        # times.
+        query = query.where(SubjectRow.external_ids_json.contains(external_id, autoescape=True))
+    result = await session.execute(query)
     for row in result.scalars():
         refs: list[dict[str, str]] = json.loads(row.external_ids_json)
         for ref in refs:
@@ -331,6 +378,50 @@ async def link_particle_to_subjects(
     for sid in dict.fromkeys(subject_ids):  # deduplicate, preserving order
         session.add(ParticleSubjectRow(particle_id=particle_id, subject_id=sid))
     await session.flush()
+
+
+async def attach_subjects_in_place(
+    session: AsyncSession, particle_id: str, subject_ids: list[str]
+) -> list[str]:
+    """Link an unlinked particle to Subjects without superseding it.
+
+    A subject link is an annotation, changed in place, as
+    :func:`split_subject` and :func:`merge_subjects` already change it. Writes
+    one ``particle_subjects`` row per Subject and the denormalised
+    ``subject_ids_json`` in lockstep, so the particle keeps its id, its utility
+    evidence, its observer scope and every card or relation naming it.
+
+    Refuses a particle that already has a subject link: correcting a wrong
+    subject is reassignment, not attachment. Records no event; the
+    operation that calls this records one per batch. Caller commits.
+
+    Returns:
+        The Subject ids linked, deduplicated in order.
+
+    Raises:
+        ValueError: The particle or a Subject is missing, the particle is
+            already linked, or ``subject_ids`` is empty.
+    """
+    from particles.store.particle_store import ParticleRow
+
+    ids = list(dict.fromkeys(subject_ids))
+    if not ids:
+        raise ValueError("attach_subjects_in_place needs at least one subject id")
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        raise ValueError(f"Particle {particle_id} not found")
+    existing = await session.execute(
+        select(ParticleSubjectRow.subject_id).where(ParticleSubjectRow.particle_id == particle_id)
+    )
+    if existing.first() is not None or json.loads(row.subject_ids_json):
+        raise ValueError(f"Particle {particle_id} already has a subject link")
+    for sid in ids:
+        if await session.get(SubjectRow, sid) is None:
+            raise ValueError(f"Subject {sid} not found")
+        session.add(ParticleSubjectRow(particle_id=particle_id, subject_id=sid))
+    row.subject_ids_json = json.dumps(ids)
+    await session.flush()
+    return ids
 
 
 async def add_aliases(
@@ -889,6 +980,41 @@ async def count_subjects(session: AsyncSession) -> int:
 
     result = await session.execute(select(func.count(SubjectRow.id)))
     return int(result.scalar_one())
+
+
+async def list_subject_classes_and_links(
+    session: AsyncSession, *, created_by: datetime | None = None
+) -> list[tuple[str | None, list[ExternalRef]]]:
+    """Every Subject's class and external links, one query.
+
+    The plain rows the vocabulary report's subject header folds; ids and names
+    are not read, since the header counts and never lists. ``created_by``
+    keeps the Subjects created at or before that instant, as they stand now:
+    a class or link changed since is read as current, and a Subject deleted
+    or merged away since is absent.
+    """
+    if created_by is not None and created_by.tzinfo is None:
+        created_by = created_by.replace(tzinfo=UTC)
+    result = await session.execute(
+        select(SubjectRow.subject_class, SubjectRow.external_ids_json, SubjectRow.created_at)
+    )
+    rows: list[tuple[str | None, list[ExternalRef]]] = []
+    for subject_class, ext_json, created_at in result.all():
+        if created_by is not None:
+            created = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+            if created > created_by:
+                continue
+        refs = [
+            ExternalRef(
+                namespace=r["namespace"],
+                id=r["id"],
+                uri=r.get("uri"),
+                confidence=float(r.get("confidence", 1.0)),
+            )
+            for r in json.loads(ext_json or "[]")
+        ]
+        rows.append((subject_class, refs))
+    return rows
 
 
 async def count_subjects_without_active_particles(session: AsyncSession) -> int:

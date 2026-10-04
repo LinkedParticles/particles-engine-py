@@ -111,12 +111,15 @@ class TestFlags:
     def test_summary_is_printed_as_indented_json(self, cli_db: Path, backfill: AsyncMock) -> None:
         result = runner.invoke(app, ["structure"], catch_exceptions=False)
         assert result.exit_code == 0
-        assert json.loads(result.output) == _SUMMARY
+        # The summary is stdout; the run's usage line rides stderr.
+        assert json.loads(result.stdout) == _SUMMARY
+        assert "LLM usage:" in result.stderr
 
     def test_dry_run_summary_passes_through_verbatim(
         self, cli_db: Path, backfill: AsyncMock
     ) -> None:
         backfill.return_value = {"backlog": 120, "batch_limit": 50, "runs_needed": 3}
         result = runner.invoke(app, ["structure", "--dry-run"], catch_exceptions=False)
+        assert "LLM usage:" not in result.stderr  # a dry run is not metered
         assert result.exit_code == 0
         assert json.loads(result.output)["runs_needed"] == 3

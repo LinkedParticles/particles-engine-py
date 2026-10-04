@@ -41,7 +41,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 
@@ -52,18 +52,22 @@ from particles.api.cli._claude_code import (
     distill_transcript,
     filter_memory_file_for_deposit,
     hook_log_path,
+    kept_prefix_length,
     observer_project_for,
     projection_enabled,
+    projection_refusal,
     read_hook_log_tail,
     redact_secrets,
     repository_root,
     resolve_session_project,
     stray_memory_dirs,
+    transcript_started_at,
     truncate_on_line_boundary,
 )
-from particles.api.cli._memory_projection import DigestDecision
+from particles.api.cli._memory_projection import DigestDecision, bullet_beliefs
 from particles.config import get_config
 from particles.corpus.rule_sources import refresh_policy_for
+from particles.store.session_exposure_store import SessionExposure, ShownBelief
 
 if TYPE_CHECKING:
     from particles.api.client.base import TextDepositOutcome
@@ -195,41 +199,67 @@ def session_start_cmd(
 
 
 async def _session_start(store: str, payload: dict[str, Any], record: dict[str, Any]) -> str | None:
+    started = time.monotonic()
     source = str(payload.get("source") or "startup")
     if source == "resume":
         # A resumed session replays its prior context, digest included;
         # re-injecting would duplicate it. startup / clear / compact (context
         # rebuilt) all get a fresh push. The source test lives here, not in a
         # settings matcher, so the policy upgrades with the SDK.
+        # Its context was recorded when first delivered, so no row.
         record["skipped"] = "resume"
         return None
 
+    try:
+        project_key = resolve_session_project(payload).key
+    except Exception:  # noqa: BLE001 — an unresolved project is never an observer
+        log.debug("session project resolution failed", exc_info=True)
+        project_key = ""
+    # under `claude_code.observer_scope: project` the session
+    # reads the store through its own project; otherwise the whole store.
+    observer = observer_project_for(project_key)
     decision = await _digest_decision(store, payload)
+    shown: list[ShownBelief] = list(decision.loaded)
     if decision.action == "skip":
         # The MEMORY.md projected region the harness just loaded IS the
         # current view (trailer fingerprint matched) — injecting the digest
         # would duplicate it.
         record["skipped"] = "projection-current"
+        await _record_exposure(
+            store, payload, record, "skip", shown, project_key, observer, started
+        )
         return None
 
+    max_bytes = get_config().claude_code.digest_max_bytes
     if decision.action == "diff" and decision.content is not None:
         # Mismatch: the store moved since the last render — top up with only
         # the difference (new / changed / newly-contested lines).
-        digest = decision.content
+        digest = truncate_on_line_boundary(decision.content, max_bytes)
         record["digest_mode"] = "projection-diff"
+        action: Literal["full", "diff"] = "diff"
+        # Diff lines carry their own `p-` ids; read them from what survived.
+        shown += bullet_beliefs(digest)
     else:
         from particles.api.client import get_backend
 
-        # under `claude_code.observer_scope: project` the session
-        # reads the store through its own project; otherwise the whole store.
-        observer = observer_project_for(resolve_session_project(payload).key)
         if observer is not None:
             record["observer_project"] = observer
-        digest = await get_backend().digest(store, observer)
+        rendered = await get_backend().digest_located(store, observer)
+        kept = kept_prefix_length(rendered.markdown, max_bytes)
+        digest = truncate_on_line_boundary(rendered.markdown, max_bytes)
+        action = "full"
+        shown += [
+            ShownBelief(
+                particle_id=line.particle_id,
+                shown_as="digest",
+                contested_bases=line.contested_bases,
+            )
+            for line in rendered.lines
+            if line.offset < kept
+        ]
 
-    max_bytes = get_config().claude_code.digest_max_bytes
-    digest = truncate_on_line_boundary(digest, max_bytes)
     record["digest_bytes"] = len(digest.encode("utf-8"))
+    await _record_exposure(store, payload, record, action, shown, project_key, observer, started)
     return json.dumps(
         {
             "hookSpecificOutput": {
@@ -238,6 +268,55 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
             }
         }
     )
+
+
+#: Time the exposure write leaves the hook before its deadline, so a slow write
+#: (a held writer lock) can never cost the session its context.
+_EXPOSURE_DEADLINE_MARGIN_SECONDS = 1.0
+
+
+async def _record_exposure(
+    store: str,
+    payload: dict[str, Any],
+    record: dict[str, Any],
+    action: Literal["full", "diff", "skip"],
+    shown: list[ShownBelief],
+    project_key: str,
+    observer: str | None,
+    started: float,
+) -> None:
+    """Record what the session was shown, through the client backend.
+
+    Fail-open, like every hook step: a failed or timed-out write
+    is logged and the session still receives its context. The write gets what
+    is left of the hook deadline, less a margin, so it can never trip the
+    deadline that would drop the context.
+    """
+    from particles.api.client import get_backend
+
+    exposure = SessionExposure(
+        session_id=str(payload.get("session_id") or ""),
+        recorded_at=datetime.now(UTC),
+        source=str(payload.get("source") or "startup"),
+        action=action,
+        project_key=project_key,
+        observer_scope_applied=observer is not None,
+        beliefs=shown,
+    )
+    remaining = (
+        get_config().claude_code.hook_deadline_seconds
+        - (time.monotonic() - started)
+        - _EXPOSURE_DEADLINE_MARGIN_SECONDS
+    )
+    try:
+        if remaining <= 0:
+            raise TimeoutError("no time left before the hook deadline")
+        await asyncio.wait_for(get_backend().record_session_exposure(store, exposure), remaining)
+    except Exception as exc:  # noqa: BLE001 — fail-open: exposure unknown, context delivered
+        log.debug("session exposure write failed", exc_info=True)
+        record["exposure_error"] = f"{type(exc).__name__}: {exc}"
+        return
+    record["exposure_beliefs"] = len(shown)
 
 
 async def _digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision:
@@ -307,9 +386,15 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
             else:
                 deposited.append((outcome.entry_id, outcome.snapshot_id))
 
-    # (b) Changed memory files in the project's memory directory (§3b).
+    # (b) Changed memory files in the project's memory directory (§3b) — only
+    # when this store is the one the installed hooks name for it. A hook run
+    # against any other store (a test, a stray DATABASE_URL) must neither
+    # ingest the user's memory files nor render into them.
     memory_dir = session_project.memory_dir
     memory_md_text: str | None = None
+    project_roots = _session_project_roots(payload)
+    if memory_dir is not None and _memory_dir_refused(store, memory_dir, project_roots, record):
+        memory_dir = None
     if memory_dir is not None and memory_dir.is_dir():
         harvested, skipped, memory_md_text = await _harvest_memory_files(store, memory_dir, project)
         deposited.extend(harvested)
@@ -363,7 +448,7 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
 
         if not get_backend().remote:
             with contextlib.suppress(Exception):
-                record["utility"] = await _mine_utility(store, transcript_path, session_id)
+                record["utility"] = await _mine_utility(store, transcript_path, session_id, project)
 
     # the render-splice tail of the cycle. Ordering is the
     # safety property: this point is reached only when every deposit above
@@ -375,28 +460,66 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
         from particles.api.client import get_backend
 
         if not get_backend().remote:
-            record["projection"] = await run_projection_cycle(store, memory_dir, memory_md_text)
+            record["projection"] = await run_projection_cycle(
+                store, memory_dir, memory_md_text, project_roots=project_roots
+            )
     return None
 
 
-async def _mine_utility(store: str, transcript_path: Path, session_id: str) -> dict[str, int]:
+def _session_project_roots(payload: dict[str, Any]) -> tuple[Path, ...]:
+    """The session's repository, whose project-scope install may bind its memory."""
+    cwd = str(payload.get("cwd") or "")
+    return (repository_root(Path(cwd)),) if cwd else ()
+
+
+def _memory_dir_refused(
+    store: str, memory_dir: Path, project_roots: tuple[Path, ...], record: dict[str, Any]
+) -> bool:
+    """Whether ``store`` must leave ``memory_dir`` alone; the reason goes to the hook log.
+
+    A remote engine is exempt: its store is not named by a local DSN, and the
+    projection never runs against one.
+    """
+    from particles.api.client import get_backend
+
+    if get_backend().remote:
+        return False
+    refusal = projection_refusal(store, memory_dir, project_roots)
+    if refusal is None:
+        return False
+    record["memory_skipped"] = refusal
+    return True
+
+
+async def _mine_utility(
+    store: str, transcript_path: Path, session_id: str, project: str
+) -> dict[str, int]:
     """Mine the current session's actions into utility evidence.
 
-    Re-distills the transcript (deterministic, cheap) and mines it against the
-    store's current ACTIVE beliefs. Returns disclosure counts for the hook log.
+    Re-distills the transcript (deterministic, cheap) and mines it against what
+    the session was shown, read as of the session's start: the
+    first timestamp in the raw transcript, which the distilled copy drops.
+    Returns disclosure counts for the hook log.
     """
     from particles.operations.utility_mining import mine_session_from_transcript
 
-    text = distill_transcript(
-        transcript_path.read_text(encoding="utf-8", errors="replace"), session_id
-    )
+    raw = transcript_path.read_text(encoding="utf-8", errors="replace")
+    text = distill_transcript(raw, session_id)
     if not text:
         return {}
-    result = await mine_session_from_transcript(store, text, session_id)
+    result = await mine_session_from_transcript(
+        store,
+        text,
+        session_id,
+        started_at=transcript_started_at(raw),
+        project_key=project or None,
+    )
     return {
         "literal": result.literal,
         "behavioural": result.behavioural,
         "candidates": result.candidates,
+        "nominated": result.literal_nominated,
+        "judge_calls": result.behavioural_calls,
     }
 
 
@@ -451,7 +574,7 @@ async def _harvest_memory_files(
         raw = md.read_text(encoding="utf-8", errors="replace")
         if md.parent == memory_dir and md.name == "MEMORY.md":
             memory_md_text = raw
-        text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir)
+        text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir, source_dir=md.parent)
         if not text.strip():
             continue
         mtime = datetime.fromtimestamp(md.stat().st_mtime, tz=UTC)
@@ -557,6 +680,7 @@ async def _extract_inline(store: str, deposited: list[tuple[str, str]]) -> int:
     """
     from particles.api.client import get_backend
     from particles.db import session_scope
+    from particles.ingest.pipeline import SnapshotOutcome
     from particles.operations.extract import extract_snapshot
 
     if get_backend().remote:
@@ -564,10 +688,16 @@ async def _extract_inline(store: str, deposited: list[tuple[str, str]]) -> int:
     max_entries = get_config().claude_code.harvest.max_extract_entries_per_session
     extracted = 0
     for entry_id, snapshot_id in deposited[:max_entries]:
+        outcome = SnapshotOutcome()
         async with session_scope(store) as session:
-            await extract_snapshot(session, entry_id, snapshot_id, agent_id="claude-code-hook")
+            await extract_snapshot(
+                session, entry_id, snapshot_id, agent_id="claude-code-hook", outcome_out=outcome
+            )
             await session.commit()
-        extracted += 1
+        # A snapshot handed back PENDING (every LLM call failed) or never
+        # claimed is not extracted; the consolidation catch-up owns it.
+        if outcome.skipped is None and not outcome.failed_calls:
+            extracted += 1
     return extracted
 
 
@@ -658,7 +788,7 @@ def _run_doctor(store: str) -> bool:
     for line in blob_lines:
         typer.echo(f"  {line}")
 
-    for line in _check_memory_dirs():
+    for line in _check_memory_dirs(store):
         typer.echo(f"  {line}")
 
     for line in _check_observer_scope(store):
@@ -698,8 +828,13 @@ def _check_observer_scope(store: str) -> list[str]:
     ]
 
 
-def _check_memory_dirs() -> list[str]:
-    """Report which memory directory a session here writes to, and any strays.
+def _check_memory_dirs(store: str) -> list[str]:
+    """Report which memory directory a session here writes to, whether ``store``
+    serves it, and any strays.
+
+    A directory is harvested and rendered only by the store the installed hooks
+    name (``_claude_code.projection_refusal``); a refusal is reported with its
+    reason, because the SessionEnd hook records it only in the hook log.
 
     A linked worktree's sessions key their memory on the main checkout, so the
     directory beside their transcripts is never read by Claude Code; older
@@ -715,6 +850,11 @@ def _check_memory_dirs() -> list[str]:
     lines = [f"memory dir:     {memory_dir} ({state})"]
     if claude_project_slug(cwd) != key:
         lines.append("                (a session here shares its repository's memory directory)")
+    refusal = projection_refusal(store, memory_dir, (repository_root(cwd),))
+    if refusal is None:
+        lines.append(f"memory binding: store '{store}' is the store the installed hooks name")
+    else:
+        lines.append(f"memory binding: NOT SERVED, {refusal}")
     strays = stray_memory_dirs(projects_root)
     if strays:
         lines.append(

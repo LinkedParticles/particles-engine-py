@@ -94,7 +94,7 @@ from particles.benchmark.memory.schema import (
     RetrievalStageMetrics,
     RunSelection,
 )
-from particles.config import ProviderSelection, TokenPrice, get_config
+from particles.config import ProviderSelection, TokenPrice, get_config, lookup_by_model
 from particles.core.schema import (
     Mutability,
     Particle,
@@ -500,7 +500,7 @@ class MemoryRunEstimate(BaseModel):
     #: a call has no price configured — a partial dollar figure reads as a
     #: total, so none is printed instead.
     estimated_cost_usd: float | None = None
-    #: Resolved model ids for which ``benchmark_memory.price_per_mtok`` holds
+    #: Resolved model ids for which ``llm.price_per_mtok`` holds
     #: no entry. Rendered as "no price configured for <model>".
     unpriced_models: list[str] = Field(default_factory=list)
 
@@ -537,22 +537,21 @@ _T = TypeVar("_T")
 def _by_model(mapping: Mapping[str, _T], provider: str, model: str) -> tuple[_T | None, str | None]:
     """``(entry, key)`` for a resolved selection: ``provider:model`` first, then the bare id.
 
-    The one key-resolution convention every ``benchmark_memory`` per-model
-    mapping shares — ``price_per_mtok``,
-    ``estimate_output_tokens_per_extraction_call_by_model``,
+    The one key-resolution convention every per-model mapping shares —
+    ``llm.price_per_mtok`` (``LLMConfig.price_for``) and the
+    ``benchmark_memory`` ``estimate_output_tokens_per_extraction_call_by_model``,
     ``chars_per_token_by_model`` — so a key that prices a model is the key
     that selects its token assumptions, and the lookups cannot diverge.
-    Membership, not truthiness: a legitimate ``0`` entry is an entry.
+    Membership, not truthiness: a legitimate ``0`` entry is an entry. The
+    resolution itself is :func:`particles.config.lookup_by_model`, shared with
+    the audit estimate.
     """
-    for key in (f"{provider}:{model}", model):
-        if key in mapping:
-            return mapping[key], key
-    return None, None
+    return lookup_by_model(mapping, provider, model)
 
 
 def _lookup_price(provider: str, model: str) -> TokenPrice | None:
     """``price_per_mtok`` entry for a resolved selection: ``provider:model`` first, then bare id."""
-    price, _ = _by_model(get_config().benchmark_memory.price_per_mtok, provider, model)
+    price, _ = _by_model(get_config().llm.price_per_mtok, provider, model)
     return price
 
 
@@ -614,7 +613,7 @@ def _cost_component(
     price = _lookup_price(selection.provider, selection.model)
     cost: float | None = None
     if price is not None:
-        multiplier = 1.0 - get_config().benchmark_memory.batch_discount if batched else 1.0
+        multiplier = 1.0 - get_config().llm.batch_discount if batched else 1.0
         cost = multiplier * (
             input_tokens * price.input / 1_000_000 + output_tokens * price.output / 1_000_000
         )
@@ -668,10 +667,10 @@ def estimate_run(
     used. ``pooled`` / ``batch_qa`` mark
     the write side / the QA side as batch-priced, which only holds while
     ``llm.batch.enabled`` (the runner degrades to sequential calls
-    otherwise). Dollars appear only for models with a
-    ``benchmark_memory.price_per_mtok`` entry — the mapping ships empty
-    because prices go stale — and a run with any unpriced component prints
-    no total rather than a misleading partial one.
+    otherwise). Dollars appear only for models with an
+    ``llm.price_per_mtok`` entry (the Anthropic list prices ship as its
+    defaults), and a run with any unpriced component prints no total rather
+    than a misleading partial one.
     """
     cfg = get_config().extraction
     unique_chars: dict[str, int] = {}
@@ -1017,8 +1016,8 @@ def render_cost_projection(estimate: MemoryRunEstimate) -> str:
     if estimate.unpriced_models:
         missing = ", ".join(f"no price configured for {m}" for m in estimate.unpriced_models)
         return (
-            f"Cost: not projected — {missing} (set benchmark_memory.price_per_mtok; "
-            f"prices go stale, so none is compiled in)."
+            f"Cost: not projected — {missing} (add an entry under llm.price_per_mtok "
+            f"in config.yaml)."
         )
     pieces = []
     for c in estimate.cost_components:

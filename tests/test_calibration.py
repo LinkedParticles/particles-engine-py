@@ -21,10 +21,12 @@ from particles.extraction.calibration import (
     T_MIN,
     TRANSFORM_LOGIT,
     FitDiagnostics,
+    HeldOutCheck,
     TemperatureScaler,
     calibration_error,
     expected_calibration_error,
     fitted_suite_ids,
+    heldout_check,
     is_saturated,
     is_suite_stale,
     scaler_for_record,
@@ -304,6 +306,87 @@ class TestNonImprovingFit:
         d = self._clean()
         d.with_ece(0.9, 0.1)
         assert d.ece_before is None
+
+
+class TestHeldOutCheck:
+    """a fit is scored on recorded pairs it never saw.
+
+    The in-sample guard above is one-sided. Measured 2026-10-01, the persisted
+    production calibration (T=2.1736, fitted on hedged prose) cleared it and
+    raised ECE on flatly stated prose; these tests pin the check that refuses
+    such a fit, as a pure function over recorded confidences and outcomes.
+    """
+
+    #: The shape of that measurement: flat prose stated at 0.93 and right
+    #: about 85 % of the time. T=2.1736 drags 0.93 to about 0.77, overshooting.
+    _FLAT_RAWS = [0.93] * 100
+    _FLAT_LABELS = [True] * 85 + [False] * 15
+
+    def _clean(self) -> FitDiagnostics:
+        raws, labels = _calibrated_pairs()
+        d = TemperatureScaler().fit(raws, labels).diagnostics
+        assert d is not None
+        return d
+
+    def test_the_production_temperature_worsens_flat_prose(self) -> None:
+        check = heldout_check(2.1736, self._FLAT_RAWS, self._FLAT_LABELS)
+        assert check.n == 100
+        assert check.ece_before == pytest.approx(0.08)
+        assert check.ece_after > check.ece_before
+
+    def test_a_temperature_that_matches_the_held_out_data_improves_it(self) -> None:
+        # logit(0.93) / logit(0.85) ≈ 1.49: the T that lands 0.93 on 0.85.
+        check = heldout_check(1.49, self._FLAT_RAWS, self._FLAT_LABELS)
+        assert check.ece_after < check.ece_before
+
+    def test_identity_temperature_leaves_held_out_ece_unchanged(self) -> None:
+        check = heldout_check(1.0, self._FLAT_RAWS, self._FLAT_LABELS)
+        assert check.ece_after == pytest.approx(check.ece_before)
+
+    def test_no_pairs_is_a_check_with_nothing_scored(self) -> None:
+        assert heldout_check(2.0, [], []) == HeldOutCheck(n=0, ece_before=0.0, ece_after=0.0)
+
+    def test_length_mismatch_raises(self) -> None:
+        with pytest.raises(ValueError):
+            heldout_check(2.0, [0.9], [True, False])
+
+    def test_saturated_values_are_scored_unchanged(self) -> None:
+        check = heldout_check(3.0, [1.0, 1.0], [True, False])
+        assert check.ece_before == pytest.approx(check.ece_after)
+
+    def test_worsening_held_out_check_refuses_the_fit(self) -> None:
+        d = self._clean().with_ece(0.1442, 0.0384)
+        assert d.is_trustworthy is True  # every in-sample guard clears
+        d = d.with_heldout(heldout_check(2.1736, self._FLAT_RAWS, self._FLAT_LABELS))
+        assert d.heldout_worsens is True
+        assert d.is_trustworthy is False
+        assert any("held-out regression" in r for r in d.reasons())
+
+    def test_improving_held_out_check_passes(self) -> None:
+        d = self._clean().with_ece(0.1, 0.05)
+        d = d.with_heldout(heldout_check(1.49, self._FLAT_RAWS, self._FLAT_LABELS))
+        assert d.heldout_worsens is False
+        assert d.is_trustworthy is True
+
+    def test_an_unchanged_held_out_ece_passes(self) -> None:
+        """The held-out rule is "must not rise"; the in-sample one is "must fall"."""
+        d = self._clean().with_heldout(HeldOutCheck(n=10, ece_before=0.05, ece_after=0.05))
+        assert d.heldout_worsens is False
+        assert d.is_trustworthy is True
+
+    def test_a_required_check_with_no_pairs_refuses_the_fit(self) -> None:
+        d = self._clean().with_heldout(heldout_check(2.0, [], []))
+        assert d.heldout_missing is True
+        assert d.heldout_worsens is False
+        assert d.is_trustworthy is False
+        assert any("no held-out check" in r for r in d.reasons())
+
+    def test_no_check_requested_does_not_trip_either_condition(self) -> None:
+        d = self._clean()
+        assert d.heldout_n is None
+        assert d.heldout_missing is False
+        assert d.heldout_worsens is False
+        assert d.is_trustworthy is True
 
 
 # ---------------------------------------------------------------------------

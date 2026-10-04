@@ -344,17 +344,36 @@ class TestOracle:
     async def test_probe_provider_parses_the_pipelines_own_prompt(self) -> None:
         # Bind the parser to the real prompt text, so a reworded probe prompt
         # fails here instead of silently turning every verdict into an error.
-        from particles.ingest.pipeline import _contradiction_prompt
+        from particles.ingest.pipeline import _contradiction_prompt, _contradiction_verdict
 
         provider = OracleProbeProvider(generate_world(42))
         prompt = _contradiction_prompt(
             "The user's home city is Boston.", "The user's home city is Denver."
         )
-        assert (await provider.complete(prompt, max_tokens=10)).startswith("YES")
+        assert _contradiction_verdict(await provider.complete(prompt, max_tokens=10)) is True
         same = _contradiction_prompt(
             "The user's home city is Boston.", "The user's home city is Boston."
         )
-        assert await provider.complete(same, max_tokens=10) == "NO"
+        assert _contradiction_verdict(await provider.complete(same, max_tokens=10)) is False
+
+    async def test_probe_provider_parses_the_update_prompt(self) -> None:
+        # rung 2.5 asks a second question before it retires anything.
+        # An oracle that could not parse it would silently switch the rung off
+        # on the acceptance instrument.
+        # the reply also names the slot's kind, and every persona slot
+        # changes over time, so a world update must read as one.
+        from particles.core.conflict_resolution import SlotVerdict
+        from particles.ingest.pipeline import _slot_verdict, _update_prompt
+
+        provider = OracleProbeProvider(generate_world(42))
+        prompt = _update_prompt(
+            "The user's home city is Boston.", "The user's home city is Denver."
+        )
+        reply = await provider.complete(prompt, max_tokens=10)
+        assert _slot_verdict(reply) is SlotVerdict.CHANGES
+        other = _update_prompt("The user's home city is Boston.", "The user's car is Volvo.")
+        reply = await provider.complete(other, max_tokens=10)
+        assert _slot_verdict(reply) is SlotVerdict.DIFFERENT
 
     async def test_extractor_unregistered_text_is_a_note_not_an_error(self) -> None:
         ex = OracleExtractor()
@@ -436,15 +455,16 @@ class TestEstimate:
         assert est.extraction_calls == 0 and est.probe_calls > 0
 
     def test_live_arm_extracts_every_session(self) -> None:
+        get_config().llm.price_per_mtok.clear()
         est = estimate_rot_run("live", seeds=[42, 43], days=90, checkpoints=[90])
         assert est.extraction_calls == est.sessions
-        assert est.cost_usd is None  # the price map ships empty
+        assert est.cost_usd is None  # an unpriced model is never priced at zero
 
     def test_priced_when_every_model_has_a_price(self) -> None:
         cfg = get_config()
         for purpose in ("extraction", "semantic_lint"):
             model = cfg.llm.for_purpose(purpose).model
-            cfg.benchmark_memory.price_per_mtok[model] = TokenPrice(input=2.0, output=10.0)
+            cfg.llm.price_per_mtok[model] = TokenPrice(input=2.0, output=10.0)
         est = estimate_rot_run("live", seeds=[42], days=90, checkpoints=[90])
         expected = (
             est.extraction_input_tokens * 2.0
@@ -823,3 +843,147 @@ class TestPublishedRotReports:
         assert (m.stale_over_current.numerator, m.stale_over_current.denominator) == (83, 123)
         tool = r.by_channel["tool_turn"].poison_leak_at_k
         assert (tool.numerator, tool.denominator) == (11, 20)
+
+
+# ---------------------------------------------------------------------------
+# Real pairs: operator demotion rulings
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysRetires:
+    """A scripted check that says YES to every probe, so the sweep would retire."""
+
+    provider_model = "test:always-retires"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, prompt: str, **kwargs: Any) -> str:
+        self.calls += 1
+        # Both checks say YES; the slot check names a slot that changes over
+        # time, the only kind the sweep retires.
+        return "REASON: one slot, two values\nSLOT: CHANGES\nVERDICT: YES"
+
+
+def _ruling(ruling: str, old: str = "The piano costs $299.", new: str = "It costs $699.") -> Any:
+    from datetime import UTC, datetime
+
+    from particles.core.duplicate_key import content_hash
+    from particles.operations.curation.rulings import DemotionRuling, RulingClaim
+
+    return DemotionRuling(
+        ruling=ruling,  # type: ignore[arg-type]
+        reason="SUPERSEDED_BY_UPDATE",
+        retired=RulingClaim(particle_id="r-" + old, content_hash=content_hash(old), content=old),
+        replacement=RulingClaim(
+            particle_id="n-" + new, content_hash=content_hash(new), content=new
+        ),
+        actor="curate",
+        store="default",
+        recorded_at=datetime(2026, 10, 1, tzinfo=UTC),
+        card_key="demotion:x|y",
+    )
+
+
+def _write_rulings(path: Path, *rulings: Any) -> Path:
+    path.write_text("".join(r.model_dump_json() + "\n" for r in rulings))
+    return path
+
+
+class TestRealPairs:
+    async def test_each_outcome_is_scored_against_the_ruling(self) -> None:
+        from particles.benchmark.rot import score_real_pairs
+        from particles.benchmark.rot.schema import RealPairOutcome
+
+        answers = {
+            "coexist kept": (False, None),
+            "coexist retired": (True, True),
+            "replacement retired": (True, True),
+            "replacement kept": (True, False),
+            "unanswered": (True, None),
+        }
+
+        async def checks(older: str, newer: str) -> tuple[bool | None, bool | None]:
+            return answers[older]
+
+        rulings = [
+            _ruling("coexist", "coexist kept"),
+            _ruling("coexist", "coexist retired"),
+            _ruling("replacement", "replacement retired"),
+            _ruling("replacement", "replacement kept"),
+            _ruling("coexist", "unanswered"),
+        ]
+        report = await score_real_pairs(rulings, source="f.jsonl", checks=checks)
+        assert [r.outcome for r in report.results] == [
+            RealPairOutcome.AGREE,
+            RealPairOutcome.FALSE_POSITIVE,
+            RealPairOutcome.AGREE,
+            RealPairOutcome.MISS,
+            RealPairOutcome.UNDECIDED,
+        ]
+        assert (report.false_positive.numerator, report.false_positive.denominator) == (1, 2)
+        assert (report.miss.numerator, report.miss.denominator) == (1, 2)
+        assert report.undecided == 1
+
+    async def test_the_runner_scores_a_coexist_pair_the_checks_retire_as_a_false_positive(
+        self, bow_encoder: None, tmp_path: Path
+    ) -> None:
+        from particles.benchmark.rot.schema import RealPairOutcome
+        from particles.llm import override_providers
+
+        rulings = _write_rulings(tmp_path / "rulings.jsonl", _ruling("coexist"))
+        check = _AlwaysRetires()
+        # The probe arm leaves semantic_lint to the configured provider; this
+        # outer override stands in for the live model.
+        with override_providers({"semantic_lint": check}):
+            report = await run_rot_benchmark(
+                arm="probe",
+                seeds=[42],
+                days=30,
+                checkpoints=[30],
+                work_dir=tmp_path / "work",
+                real_pairs=rulings,
+            )
+        rp = report.real_pairs
+        assert rp is not None and rp.pairs == 1
+        assert (rp.false_positive.numerator, rp.false_positive.denominator) == (1, 1)
+        assert rp.results[0].outcome is RealPairOutcome.FALSE_POSITIVE
+        assert rp.results[0].retired_text == "The piano costs $299."
+        # A section of its own: the world metrics never see the real pair.
+        assert report.metrics.recall_current_at_k.denominator == len(SLOTS)
+        assert "Real pairs: operator demotion rulings" in render_report(report)
+
+    async def test_the_oracle_arm_does_not_score_real_pairs(
+        self, bow_encoder: None, tmp_path: Path
+    ) -> None:
+        rulings = _write_rulings(tmp_path / "rulings.jsonl", _ruling("coexist"))
+        report = await run_rot_benchmark(
+            arm="oracle",
+            seeds=[42],
+            days=30,
+            checkpoints=[30],
+            work_dir=tmp_path / "work",
+            real_pairs=rulings,
+        )
+        assert report.real_pairs is None
+        assert any("Real pairs not scored" in n for n in report.quality_notes)
+
+    def test_the_estimate_counts_two_checks_per_pair(self, tmp_path: Path) -> None:
+        rulings = _write_rulings(
+            tmp_path / "rulings.jsonl", _ruling("coexist"), _ruling("replacement", "Other.")
+        )
+        kw: dict[str, Any] = {"seeds": [42], "days": 30, "checkpoints": [30]}
+        base = estimate_rot_run("probe", **kw)
+        with_pairs = estimate_rot_run("probe", real_pairs=rulings, **kw)
+        assert with_pairs.probe_calls == base.probe_calls + 4
+        assert estimate_rot_run("oracle", real_pairs=rulings, **kw).probe_calls == 0
+
+    def test_cli_names_a_missing_rulings_file(self, tmp_path: Path) -> None:
+        from particles.api.cli import app
+
+        result = cli.invoke(
+            app,
+            ["benchmark", "rot", "--rulings", str(tmp_path / "absent.jsonl"), "--estimate"],
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output

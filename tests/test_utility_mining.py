@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
 from particles.config import get_config
@@ -21,7 +19,11 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.operations.utility_mining import (
+    _MATCHER_MAX_TOKENS,
+    _credit_matched,
     extract_action_lines,
+    head_and_tail,
+    literal_evidence,
     literal_tokens,
     match_literal,
     mine_session,
@@ -138,9 +140,10 @@ async def test_behavioural_matcher_degrades_on_provider_error(db_session: object
 
 
 @pytest.mark.asyncio
-async def test_mine_session_records_literal_events(db_session: object) -> None:
-    # Behavioural tier off → deterministic literal-only, no LLM needed. The
-    # autouse fixture resets config before the next test (reset_config() mid-test
+async def test_with_the_judge_off_a_literal_match_records_nothing(db_session: object) -> None:
+    # a token match nominates and never credits, so with the judge
+    # off (the old cheap literal-only run) no event is recorded. The autouse
+    # fixture resets config before the next test (reset_config() mid-test
     # would dispose the db_session engine).
     get_config().utility.mining.behavioural_matching = False
     actives = [
@@ -148,20 +151,113 @@ async def test_mine_session_records_literal_events(db_session: object) -> None:
         _belief("p-none", "Unrelated trivia about `xyzzy-plugh`"),
     ]
     result = await mine_session(db_session, "sess-1", _TRANSCRIPT, actives)  # type: ignore[arg-type]
-    assert result.literal == 1
-    assert result.behavioural == 0
+    assert (result.literal, result.behavioural, result.behavioural_calls) == (0, 0, 0)
+    assert result.literal_nominated == 1
     assert result.candidates == 2
+    assert await _events(db_session, "sess-1") == set()
 
-    from particles.store.utility_store import get_reinforcement_scores
 
-    scores = await get_reinforcement_scores(
-        db_session,  # type: ignore[arg-type]
-        ["p-commit", "p-none"],
-        30.0,
-        now=datetime.now(UTC),
+async def _events(session: object, session_id: str) -> set[tuple[str, str | None]]:
+    from sqlalchemy import select
+
+    from particles.store.utility_store import UtilityEventRow
+
+    rows = await session.execute(  # type: ignore[attr-defined]
+        select(UtilityEventRow.particle_id, UtilityEventRow.match_basis).where(
+            UtilityEventRow.session_id == session_id
+        )
     )
-    assert "p-commit" in scores
-    assert "p-none" not in scores
+    return {(pid, basis) for pid, basis in rows.all()}
+
+
+class TestTheRuling:
+    """§2, unit tests 3 to 5: the judge decides, each candidate on its own evidence."""
+
+    @staticmethod
+    def _judge(monkeypatch: pytest.MonkeyPatch, reply: str) -> list[str]:
+        import particles.operations.utility_mining as um
+
+        prompts: list[str] = []
+
+        async def fake_complete(_purpose: str, prompt: str, **_k: object) -> str:
+            prompts.append(prompt)
+            return reply
+
+        monkeypatch.setattr(um, "complete", fake_complete)
+        get_config().utility.mining.behavioural_matching = True
+        get_config().utility.mining.behavioural_candidate_limit = 0
+        return prompts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("reply", "expected"), [("[]", set()), ("[1]", {("p-commit", "literal")})]
+    )
+    async def test_only_an_applied_ruling_credits_a_literal_nomination(
+        self,
+        db_session: object,
+        monkeypatch: pytest.MonkeyPatch,
+        reply: str,
+        expected: set[tuple[str, str]],
+    ) -> None:
+        """Unit test 3."""
+        prompts = self._judge(monkeypatch, reply)
+        actives = [_belief("p-commit", "Every commit needs `git commit -s`")]
+        result = await mine_session(db_session, "sess-r", _TRANSCRIPT, actives)  # type: ignore[arg-type]
+        assert len(prompts) == 1
+        assert "only touch the topic" in prompts[0]
+        assert result.literal_nominated == 1
+        assert await _events(db_session, "sess-r") == expected
+
+    @pytest.mark.asyncio
+    async def test_literal_evidence_reaches_past_the_old_window(
+        self, db_session: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unit test 4: the matching lines with one line of context, wherever they sit."""
+        prompts = self._judge(monkeypatch, "[1]")
+        filler = [f"[tool: Read — /repo/src/module_{i:04d}.py]" for i in range(200)]
+        lines = [*filler, "[tool: Bash — uv run pytest]", "[tool: Bash — git commit -s -m x]"]
+        lines.append("[tool: Bash — git push]")
+        transcript = "\n".join(lines) + "\n"
+        assert transcript.index("git commit -s") > 6000
+
+        actives = [_belief("p-commit", "Every commit needs `git commit -s`")]
+        await mine_session(db_session, "sess-late", transcript, actives)  # type: ignore[arg-type]
+
+        (prompt,) = prompts
+        assert "git commit -s -m x" in prompt
+        assert "uv run pytest" in prompt and "git push" in prompt  # one line either side
+        assert "module_0198" not in prompt  # two lines away: not context
+        assert "module_0000" not in prompt  # the session head is not this route's evidence
+
+    def test_literal_evidence_is_three_hits_spread_across_the_session(self) -> None:
+        lines = [f"[tool: Bash — step {i}]" for i in range(30)]
+        for i in (2, 9, 15, 22, 28):
+            lines[i] = f"[tool: Bash — git commit -s -m {i}]"
+        evidence = literal_evidence("git commit -s", lines)
+        hits = [line for line in evidence if "git commit -s" in line]
+        assert [h.rsplit(" ", 1)[1] for h in hits] == ["2]", "15]", "28]"]
+        assert "…" in evidence  # separate windows are marked as a gap
+
+    @pytest.mark.asyncio
+    async def test_behavioural_evidence_is_the_head_and_the_tail(
+        self, db_session: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unit test 5."""
+        prompts = self._judge(monkeypatch, "[]")
+        lines = [f"[tool: Read — /repo/src/module_{i:04d}.py]" for i in range(300)]
+        transcript = "\n".join(lines) + "\n"
+        actives = [_belief("p-soft", "Prefer general mechanisms over per-genre defaults")]
+        await mine_session(db_session, "sess-ht", transcript, actives)  # type: ignore[arg-type]
+
+        (prompt,) = prompts
+        assert "module_0000" in prompt  # the head
+        assert "module_0299" in prompt  # the tail
+        assert "module_0150" not in prompt  # the middle
+        assert "characters of actions omitted" in prompt
+
+    def test_a_short_session_is_shown_whole(self) -> None:
+        lines = ["[tool: Bash — a]", "[tool: Bash — b]"]
+        assert head_and_tail(lines) == "\n".join(lines)
 
 
 @pytest.mark.asyncio
@@ -228,11 +324,11 @@ async def test_budget_override_caps_calls_and_reports_truncation(db_session: obj
 
 
 @pytest.mark.asyncio
-async def test_zero_budget_makes_no_calls_but_literal_tier_still_mines(
+async def test_zero_budget_makes_no_calls_and_credits_nothing(
     db_session: object,
 ) -> None:
-    # Budget exhausted upstream → zero behavioural calls, truncation flagged,
-    # and the LLM-free literal tier keeps mining (correction v1.74.1).
+    # Budget exhausted upstream → zero judge calls and truncation flagged
+    # (correction v1.74.1); with no ruling, nothing is credited.
     import particles.operations.utility_mining as um
 
     async def boom(*a: object, **k: object) -> str:
@@ -255,7 +351,9 @@ async def test_zero_budget_makes_no_calls_but_literal_tier_still_mines(
         )
         assert result.behavioural_calls == 0
         assert result.behavioural_truncated is True  # judgement was wanted
-        assert result.literal == 1  # the LLM-free tier still ran
+        # the token still nominates, but with no ruling nothing is credited.
+        assert result.literal_nominated == 1
+        assert result.literal == 0
     finally:
         um.complete = orig  # type: ignore[assignment]
 
@@ -525,7 +623,7 @@ async def test_behavioural_matcher_batches_when_latency_tolerant(db_session: obj
 
     assert captured["groups"] == 3  # ceil(32 / 15)
     assert captured["latency_tolerant"] is True
-    assert captured["purpose"] == "semantic_lint"
+    assert captured["purpose"] == "use_judge"
     assert result.behavioural_calls == 3
     assert result.behavioural == 3  # guideline 1 of each of the three groups
 
@@ -557,3 +655,111 @@ async def test_behavioural_batch_dead_request_does_not_spend_budget(db_session: 
 
     assert result.behavioural_calls == 1  # only the answered group drew down the budget
     assert result.behavioural == 1
+
+
+@pytest.mark.asyncio
+async def test_behavioural_matcher_goes_sequential_under_a_spent_batch_wait_budget(
+    db_session: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """a spent budget costs full price, never the matcher's literal-only fallback.
+
+    The utility watermark means a session mined tonight is never mined again,
+    so literal-only here would lose its behavioural matches for good.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import anthropic
+
+    from particles import llm
+    from particles.llm.batch_budget import BatchWaitBudget, batch_wait_budget
+
+    client = MagicMock(spec=anthropic.Anthropic)
+    client.messages.create.side_effect = [
+        SimpleNamespace(content=[SimpleNamespace(text="[1]")], stop_reason="end_turn")
+        for _ in range(3)
+    ]
+    budget = BatchWaitBudget(budget_seconds=1000, min_remaining_seconds=300)
+    budget.charge(900, requests=1, cut_short=False)
+    llm.set_client(client)
+    try:
+        get_config().llm.batch.min_requests = 2  # three groups would otherwise batch
+        get_config().utility.mining.behavioural_matching = True
+        get_config().utility.mining.behavioural_candidate_limit = 0
+        actives = [
+            _belief(f"p-soft-{i}", f"Prefer general mechanism number {i}") for i in range(32)
+        ]
+        with batch_wait_budget(budget):
+            result = await mine_session(
+                db_session,  # type: ignore[arg-type]
+                "sess-budget-spent",
+                _TRANSCRIPT,
+                actives,
+                latency_tolerant=True,
+            )
+    finally:
+        llm.set_client(None)
+
+    client.messages.batches.create.assert_not_called()
+    assert client.messages.create.call_count == 3
+    assert result.behavioural == 3
+    assert result.behavioural_calls == 3
+    assert "literal-only" not in caplog.text
+    assert (budget.sequential_sets, budget.sequential_requests) == (1, 3)
+
+
+class TestMatcherReplyParsing:
+    """Only the reply's answer array credits a belief."""
+
+    def _batch(self) -> list[Particle]:
+        return [_belief(f"p-{i}", f"guideline {i}") for i in range(1, 16)]
+
+    def test_bare_array_credits_its_numbers(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "[1, 4]", matched)
+        assert matched == {"p-1", "p-4"}
+
+    def test_empty_array_credits_nothing(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "[]", matched)
+        assert matched == set()
+
+    def test_numbers_in_prose_are_not_credited(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        reply = (
+            "Guideline 3 does not apply: the session made 12 tool calls and none "
+            "touched the changelog. Guideline 7 was followed.\n\n[7]"
+        )
+        _credit_matched(batch, reply, matched)
+        assert matched == {"p-7"}
+
+    def test_last_array_is_the_answer(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "Considering [2, 5] first. Final answer: [5]", matched)
+        assert matched == {"p-5"}
+
+    def test_reply_cut_off_before_the_array_credits_nothing(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "Guideline 2 is plainly followed, and guideline 9", matched)
+        assert matched == set()
+
+    def test_reply_cut_off_inside_the_array_credits_nothing(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "[1, 4, 1", matched)
+        assert matched == set()
+
+    def test_out_of_range_numbers_are_ignored(self) -> None:
+        batch, matched = self._batch(), set[str]()
+        _credit_matched(batch, "[0, 3, 99]", matched)
+        assert matched == {"p-3"}
+
+    def test_matcher_budget_leaves_room_for_reasoning(self) -> None:
+        assert _MATCHER_MAX_TOKENS >= 400
+
+
+def test_the_use_judge_is_its_own_purpose_defaulting_to_sonnet() -> None:
+    """the gate measured a Haiku-class judge short of its bar."""
+    llm = get_config().llm
+    assert llm.for_purpose("use_judge").model == "claude-sonnet-5-5"
+    llm.semantic_lint = None
+    assert llm.for_purpose("use_judge") != llm.for_purpose("semantic_lint")

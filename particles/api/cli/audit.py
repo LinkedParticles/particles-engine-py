@@ -20,6 +20,7 @@ report live in ``particles.operations.audit``.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from collections.abc import Callable
@@ -29,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from particles.operations.audit import AuditProgress
+    from particles.operations.audit import AuditProgress, AuditReport
 
 import typer
 
@@ -37,19 +38,31 @@ from particles.api.cli import app, run
 from particles.api.cli._claude_code import (
     distill_transcript,
     filter_memory_file_for_deposit,
+    is_claude_code_memory_dir,
     projection_enabled,
     redact_secrets,
     stray_memory_dirs,
     transcript_project_key,
 )
 from particles.api.cli._logging import configure_logging
+from particles.api.cli._output import current_output
+from particles.api.cli._progress import heartbeat_paused, progress_line, set_heartbeat_status
 from particles.config import get_config
 from particles.core.observer_scope import project_tag
 from particles.db import session_scope
+from particles.llm.usage import render_usage_line
 from particles.secrets import get_anthropic_api_key_optional
 
 _FORMATS = ("markdown", "json")
 _SCOPES = ("harvested", "store")
+
+# Exit codes, aligned with ``particles memory consolidate``: the
+# report was written but the run did less than asked, or the run never started.
+EXIT_INCOMPLETE = 1
+EXIT_NOT_STARTED = 2
+
+#: Off a terminal, probe progress prints at most this many lines.
+_PROBE_LINES_OFF_TTY = 10
 
 
 @app.command("audit")
@@ -80,7 +93,12 @@ def audit_cmd(
     estimate: bool = typer.Option(
         False,
         "--estimate",
-        help="Print the extraction cost estimate and exit: no deposit, no LLM call.",
+        help=(
+            "Print the cost estimate (calls, tokens, a dollar range at the configured "
+            "model's list price, and the expected wall time) and exit: no deposit, no LLM "
+            "call. With --format json "
+            "the estimate is printed as JSON."
+        ),
     ),
     yes: bool = typer.Option(False, "--yes", help="Skip the cost-confirmation prompt."),
     judge: bool = typer.Option(
@@ -110,14 +128,28 @@ def audit_cmd(
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     debug: bool = typer.Option(False, "--debug"),
 ) -> None:
-    """Audit an agent-memory directory: harvest, extract, and report the rot census."""
+    """Audit an agent-memory directory: harvest, extract, and report the rot census.
+
+    The line under the header says how many files extracted in full, how
+    many were cut short at the output-token limit, and how many produced
+    nothing, naming the last.
+
+    Exit codes: 0 means the audit completed. 1 means the report was written
+    but the audit is incomplete: a harvested file produced no beliefs because
+    its extraction failed (it stays pending, and re-running the same command
+    retries it), or the contradiction check was skipped (no API key, or the
+    LLM became unavailable, for example an exhausted credit balance). The
+    findings in the report still stand. 2 means the audit did not start
+    (invalid options, no API key for a harvest, a missing path, nothing to
+    audit, or the cost confirmation was declined).
+    """
     configure_logging(verbose, debug)
     if format_ not in _FORMATS:
         typer.echo(f"Error: --format must be one of: {', '.join(_FORMATS)}.", err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_NOT_STARTED)
     if scope is not None and scope not in _SCOPES:
         typer.echo(f"Error: --scope must be one of: {', '.join(_SCOPES)}.", err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_NOT_STARTED)
     harvesting = path is not None or transcripts is not None
     if scope == "harvested" and not harvesting:
         typer.echo(
@@ -126,8 +158,8 @@ def audit_cmd(
             "store-wide re-audit probe.",
             err=True,
         )
-        raise typer.Exit(1)
-    run(
+        raise typer.Exit(EXIT_NOT_STARTED)
+    report = run(
         _audit_impl(
             paths=[path] if path is not None else [],
             transcripts_dir=transcripts,
@@ -141,17 +173,60 @@ def audit_cmd(
             store=store,
         )
     )
+    if report is not None and not report.complete:
+        typer.echo(_incomplete_notice(report, [path] if path is not None else None), err=True)
+        raise typer.Exit(EXIT_INCOMPLETE)
+
+
+def _incomplete_notice(report: AuditReport, paths: list[Path] | None = None) -> str:
+    """The line an incomplete audit ends with: what was skipped, how to finish it.
+
+    ``paths`` are the harvested inputs. A file that was not extracted is still
+    PENDING, so re-running the same harvest retries it; a re-audit without the
+    paths would not.
+    """
+    store_flag = "" if report.store == "default" else f" --store {report.store}"
+    notices: list[str] = []
+    if report.extraction_failures:
+        n = report.extraction_failures
+        noun = "file" if n == 1 else "files"
+        rerun = "particles audit" + "".join(f" {p}" for p in paths or []) + store_flag
+        notices.append(
+            f"audit incomplete: {n} {noun} not extracted, so the census does not "
+            f"cover them. Run `{rerun}` to retry them."
+        )
+    if report.semantic_skipped:
+        reason = report.semantic_skip_reason or "LLM unavailable"
+        when = (
+            "once ANTHROPIC_API_KEY is set"
+            if reason == "no API key"
+            else "once the LLM is available again"
+        )
+        finish = "particles audit" + store_flag
+        notices.append(
+            f"audit incomplete: contradiction check skipped, {reason}. "
+            f"Run `{finish}` {when} to finish it."
+        )
+    return "\n".join(notices)
 
 
 def _make_progress_renderer() -> Callable[[AuditProgress], None]:
-    """Progress lines for the long extraction phase.
+    """Progress for the long extraction phase and the contradiction probe.
 
     A real memory directory is 10–20 minutes of sequential LLM calls; without
     per-entry feedback the activation-moment audit is indistinguishable from a
     hang (owner-reported on the first dogfood run, 2026-07-11). The Engine
     emits ``AuditProgress`` events; this closure renders them.
+
+    Extraction keeps one line per entry: each names the file and what it
+    yielded, which is worth scrollback. The probe is up to
+    ``audit.max_contradiction_probes`` identical steps, so it renders in place
+    on the heartbeat line when one is running, and otherwise as at most
+    ``_PROBE_LINES_OFF_TTY`` milestone lines. Every line goes through
+    ``progress_line`` so none lands on the heartbeat's open line.
     """
     start = time.monotonic()
+    in_place = get_config().cli.heartbeat_seconds > 0 and current_output().show_progress()
 
     def _elapsed() -> str:
         minutes, seconds = divmod(int(time.monotonic() - start), 60)
@@ -159,17 +234,34 @@ def _make_progress_renderer() -> Callable[[AuditProgress], None]:
 
     def _render(event: AuditProgress) -> None:
         if event.phase == "census":
-            typer.echo(f"  Scanning findings — {event.label}… ({_elapsed()} elapsed)")
+            progress_line(f"  Scanning findings — {event.label}… ({_elapsed()} elapsed)")
         elif event.phase == "probe":
-            typer.echo(f"  [{event.done}/{event.total}] {event.label}… ({_elapsed()} elapsed)")
+            finished = event.done >= event.total
+            if in_place:
+                set_heartbeat_status(
+                    None if finished else f"{event.label} {event.done}/{event.total}"
+                )
+                return
+            step = max(1, math.ceil(event.total / _PROBE_LINES_OFF_TTY))
+            if finished or event.done % step == 0:
+                progress_line(
+                    f"  [{event.done}/{event.total}] {event.label}… ({_elapsed()} elapsed)"
+                )
         elif event.failed:
-            typer.echo(
+            progress_line(
                 f"  [{event.done}/{event.total}] {event.label} → extraction failed "
+                f"(disclosed in the report; {_elapsed()} elapsed)"
+            )
+        elif event.partial:
+            noun = "belief" if event.particles == 1 else "beliefs"
+            progress_line(
+                f"  [{event.done}/{event.total}] {event.label} → "
+                f"{event.particles} {noun}, reply cut short at the output-token limit "
                 f"(disclosed in the report; {_elapsed()} elapsed)"
             )
         else:
             noun = "belief" if event.particles == 1 else "beliefs"
-            typer.echo(
+            progress_line(
                 f"  [{event.done}/{event.total}] {event.label} → "
                 f"{event.particles} {noun} ({_elapsed()} elapsed)"
             )
@@ -185,7 +277,9 @@ def run_first_run_audit(store: str, only_memory_dir: Path | None = None) -> None
     ``only_memory_dir``, that project's own — with the same
     estimate/confirm gate as the standalone verb. Raises ``typer.Exit`` on
     refusal/abort — the caller (init) catches it so a declined audit never fails
-    the install.
+    the install. An *incomplete* audit does not raise: its report is already
+    printed and the install succeeded, so it ends with the notice naming what
+    was skipped and the command that finishes it.
     """
     root = Path.home() / ".claude" / "projects"
     # Linked worktrees' memory directories are this SDK's own stray output,
@@ -207,7 +301,7 @@ def run_first_run_audit(store: str, only_memory_dir: Path | None = None) -> None
         return
     noun = "directory" if len(dirs) == 1 else "directories"
     typer.echo(f"\nFirst-run memory audit over {len(dirs)} memory {noun}…")
-    run(
+    report = run(
         _audit_impl(
             paths=list(dirs),
             transcripts_dir=None,
@@ -221,6 +315,8 @@ def run_first_run_audit(store: str, only_memory_dir: Path | None = None) -> None
             store=store,
         )
     )
+    if report is not None and not report.complete:
+        typer.echo(_incomplete_notice(report, list(dirs)))
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +347,18 @@ class _HarvestPlan:
 
 
 def _project_tag(memory_dir: Path) -> list[str]:
-    """The ``project:<slug>`` tag the SessionEnd hook stamps, when derivable."""
-    if memory_dir.name == "memory" and memory_dir.parent.name:
-        return [f"project:{memory_dir.parent.name}"]
+    """The ``project:<key>`` tag the SessionEnd hook stamps, when derivable.
+
+    Only for a memory directory Claude Code itself reads, whose parent is the
+    ``~/.claude/projects/<key>`` directory the key names. Any other directory
+    named ``memory`` (a copy under ``/tmp/rung1``) would otherwise be tagged
+    with its parent's name, which two unrelated directories can share, and
+    that tag decides which project observes the beliefs. Such a
+    harvest is left unattributed, which the observer-scope read treats as
+    in view for no project rather than for every project.
+    """
+    if is_claude_code_memory_dir(memory_dir):
+        return [project_tag(memory_dir.resolve().parent.name)]
     return []
 
 
@@ -276,7 +381,7 @@ def _plan_memory_file(
     from particles.corpus.deposit import _resolve_content_published_at
 
     raw = md.read_text(encoding="utf-8", errors="replace")
-    text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir)
+    text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir, source_dir=md.parent)
     if not text.strip():
         return None
     return _PlannedDeposit(
@@ -382,7 +487,7 @@ def _refuse_without_key() -> None:
         "Fix: export ANTHROPIC_API_KEY=sk-... and re-run.",
         err=True,
     )
-    raise typer.Exit(1)
+    raise typer.Exit(EXIT_NOT_STARTED)
 
 
 async def _perform_deposits(store: str, plan: _HarvestPlan) -> tuple[list[str], int, int]:
@@ -421,16 +526,21 @@ async def _perform_deposits(store: str, plan: _HarvestPlan) -> tuple[list[str], 
 
 async def _run_projection_cycles(store: str, plan: _HarvestPlan) -> bool:
     """End the pass with the first render: the audited store projects
-    straight back into each harvested MEMORY.md (render-after-successful-harvest)."""
+    straight back into each harvested MEMORY.md (render-after-successful-harvest).
+
+    Only into a directory Claude Code itself reads, ``~/.claude/projects/<key>/memory``
+    (the set ``init claude-code`` audits). A verb named ``audit`` pointed at any
+    other directory, even one named ``memory``, leaves it untouched: the
+    projection writes MEMORY.md there and keeps per-project state keyed on the
+    parent directory's name, which two unrelated directories can share.
+    """
     if not projection_enabled():
         return False
     from particles.api.cli._memory_projection import run_projection_cycle
 
     rendered = False
     for memory_dir, raw_text in plan.memory_dirs:
-        if raw_text is None and memory_dir.name != "memory":
-            # No MEMORY.md was harvested and this is not a Claude-shaped memory
-            # dir — don't mint a MEMORY.md into an arbitrary notes directory.
+        if not is_claude_code_memory_dir(memory_dir):
             continue
         outcome = await run_projection_cycle(store, memory_dir, raw_text)
         if outcome.get("outcome") in ("rendered", "created"):
@@ -450,7 +560,8 @@ async def _audit_impl(
     output: Path | None,
     fmt: str,
     store: str,
-) -> None:
+) -> AuditReport | None:
+    """Run the flow and print the report; returns it, or None when nothing was audited."""
     from particles.api.client import get_backend
 
     if get_backend().remote:
@@ -460,16 +571,18 @@ async def _audit_impl(
             "on the machine that holds the store.",
             err=True,
         )
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_NOT_STARTED)
 
     # Deferred import: the operation pulls the curation/lint stack — and tests
     # patch ``particles.operations.audit.run_memory_audit`` at call time
     # (tests/AGENTS.md § Mocking strategy).
     from particles.operations.audit import (
+        cost_summary,
         estimate_extraction,
         render_audit_report,
         render_estimate,
         run_memory_audit,
+        time_summary,
     )
 
     on_progress = _make_progress_renderer()
@@ -485,19 +598,24 @@ async def _audit_impl(
         for path in [*paths, *([transcripts_dir] if transcripts_dir else [])]:
             if not path.exists():
                 typer.echo(f"Error: {path} does not exist.", err=True)
-                raise typer.Exit(1)
+                raise typer.Exit(EXIT_NOT_STARTED)
 
         plan = build_harvest_plan(paths, transcripts_dir, max_entries)
         if not plan.deposits:
             typer.echo("No auditable content found (no non-empty *.md or *.jsonl files).")
-            raise typer.Exit(1)
+            raise typer.Exit(EXIT_NOT_STARTED)
 
         # §4: estimate ALWAYS printed before extraction.
         cost = estimate_extraction([len(d.text) for d in plan.deposits])
+        if estimate_only and fmt == "json":
+            # stdout stays one parseable document; the note goes to stderr.
+            typer.echo(cost.model_dump_json(indent=2))
+            typer.echo("--estimate: nothing was deposited.", err=True)
+            return None
         typer.echo(render_estimate(cost))
         if estimate_only:
             typer.echo("--estimate: nothing was deposited.")
-            return
+            return None
         threshold = get_config().audit.confirm_call_threshold
         if cost.estimated_llm_calls > threshold and not yes:
             if not sys.stdin.isatty():
@@ -507,10 +625,16 @@ async def _audit_impl(
                     "given in a non-interactive run. Nothing was deposited.",
                     err=True,
                 )
-                raise typer.Exit(1)
-            if not typer.confirm(f"Proceed with ~{cost.estimated_llm_calls} extraction LLM calls?"):
+                raise typer.Exit(EXIT_NOT_STARTED)
+            dollars = cost_summary(cost) or "unpriced model"
+            duration = time_summary(cost)
+            if duration is not None:
+                dollars += f", {duration}"
+            if not typer.confirm(
+                f"Proceed with ~{cost.estimated_llm_calls} extraction LLM calls ({dollars})?"
+            ):
                 typer.echo("Aborted — nothing was deposited.")
-                raise typer.Exit(1)
+                raise typer.Exit(EXIT_NOT_STARTED)
 
         entry_ids, new, unchanged = await _perform_deposits(store, plan)
         typer.echo(
@@ -542,7 +666,7 @@ async def _audit_impl(
                 "--estimate applies to a harvest; a re-audit (no PATH) deposits and "
                 "extracts nothing."
             )
-            return
+            return None
         # §7 re-audit degradation: structural finders + REPORT-mode duplicates
         # run without an LLM; the contradiction probe is skipped WITH a line.
         async with session_scope(store) as session:
@@ -560,12 +684,20 @@ async def _audit_impl(
             await session.commit()
 
     rendered = render_audit_report(report)
-    if fmt == "json":
-        typer.echo(report.model_dump_json(indent=2))
-    else:
-        typer.echo(rendered)
+    # The heartbeat's in-place line is still open on the terminal; the report
+    # must start on a fresh line, not after "… contradiction probe 185/200".
+    with heartbeat_paused():
+        if fmt == "json":
+            typer.echo(report.model_dump_json(indent=2))
+            # stdout stays one parseable document (``llm_usage`` is in it); the
+            # human line the markdown report ends with goes to stderr.
+            if report.llm_usage is not None:
+                typer.echo(render_usage_line(report.llm_usage), err=True)
+        else:
+            typer.echo(rendered)
     if output is not None:
         from particles.render.markdown import atomic_write_text
 
         atomic_write_text(output, rendered)
         typer.echo(f"Report written to {output}.")
+    return report

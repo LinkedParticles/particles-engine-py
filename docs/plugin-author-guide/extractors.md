@@ -17,7 +17,7 @@ DEFAULT_TRUST_WEIGHT = 0.50
 
 APPLICABILITY = [
     ApplicabilityClause(
-        keyword="MUST",                                   # RFC 2119 keyword
+        keyword="MUST",  # RFC 2119 keyword
         domain_uri="http://www.wikidata.org/entity/Q…",
         domain_label="short human label",
         source_types=[SOURCE_TYPE],
@@ -26,8 +26,8 @@ APPLICABILITY = [
 
 
 class MyExtractor:
-    EXTRACTOR_ID = EXTRACTOR_ID                # unique slug
-    EXTRACTOR_VERSION = EXTRACTOR_VERSION      # SemVer; bump when behaviour changes
+    EXTRACTOR_ID = EXTRACTOR_ID  # unique slug
+    EXTRACTOR_VERSION = EXTRACTOR_VERSION  # SemVer; bump when behaviour changes
     DEFAULT_TRUST_WEIGHT = DEFAULT_TRUST_WEIGHT  # in [0.0, 1.0]; demotion-only
     APPLICABILITY = APPLICABILITY
 
@@ -106,10 +106,11 @@ No pipeline, schema, store, CLI or API change is needed.
 ```python
 def _make_extractors() -> list[ExtractorPlugin]:
     from particles.extraction.myextractor import MyExtractor
+
     ...
     return [
         ...,
-        MyExtractor(),      # before GeneralExtractor
+        MyExtractor(),  # before GeneralExtractor
         GeneralExtractor(),  # fallback: must stay last
     ]
 ```
@@ -166,6 +167,7 @@ ones are added over time. Today the pipeline passes:
 | `entry_uri_r` | The entry's URL, for extractors that parse identity out of it (GitHub repo paths, the docstring extractor's module path). |
 | `deposited_by` | Who deposited the entry. Only migration extractors use it; see below. |
 | `completion_pool` | A shared batch for LLM requests. Only pool-aware LLM extractors use it. |
+| `append_prefix` | The raw bytes of an `APPEND_ONLY` snapshot the store has already extracted, when the new snapshot extends them. Only the general extractor reads it, as a delta read of the text after the prefix; every other extractor ignores it and reads the whole snapshot. |
 | `supersede_ids` | Set during reindex. If you use the carry-forward helper, pass it through, or reindex treats the particles it is replacing as cache hits and never re-runs the model. |
 
 ## LLM-driven extractors: two shapes
@@ -184,12 +186,14 @@ def _normalise(self, content: bytes, snapshot: Snapshot) -> NormalizedDocument:
     """
     ...
 
+
 async def _extract_claims(self, doc: NormalizedDocument, **kwargs) -> ExtractionResult:
     """LLM claim extraction over the NormalizedDocument. Typically
     extract_with_carry_forward(doc.chunks, ...) plus any post-extraction
     stamping (e.g. injecting doc.injected_subjects on every candidate).
     """
     ...
+
 
 async def extract(self, snapshot: Snapshot, content: bytes, **kwargs) -> ExtractionResult:
     doc = self._normalise(content, snapshot)
@@ -208,13 +212,13 @@ returns the prose document *and* the parse context, and `extract()` prepends a
 synthesised metadata candidate:
 
 ```python
-def _normalise(self, content: bytes, snapshot: Snapshot) -> tuple[NormalizedDocument, Ctx]:
-    ...
+def _normalise(self, content: bytes, snapshot: Snapshot) -> tuple[NormalizedDocument, Ctx]: ...
+
 
 async def extract(self, snapshot, content, **kwargs):
     doc, ctx = self._normalise(content, snapshot)
     result = await self._extract_claims(doc, **kwargs)
-    meta = _build_<noun>_meta_candidate(ctx, doc.injected_subjects)
+    meta = _build_ < noun > _meta_candidate(ctx, doc.injected_subjects)
     if meta is not None:
         result.candidates.insert(0, meta)
     return result
@@ -326,7 +330,9 @@ identity; the operator-side picture is
 When a structured extractor mints code-like subject names (snake_case
 identifiers, dotted paths), exempt its source type from the non-entity subject
 gate via `subject_gate.exempt_source_types` so the names are not stripped; see
-the `PYTHON_SOURCE` precedent.
+the `PYTHON_SOURCE` precedent. A name the gate does strip is recorded on the
+particle under `properties["extraction:gated_subjects"]` with the token class
+that matched, so the extractor's output stays inspectable after the gate.
 
 ## Relation kinds
 

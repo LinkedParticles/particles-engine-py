@@ -926,7 +926,7 @@ class TestPruneObsoleteMarkdown:
         kept.write_text("kept body")
         original_mtime = kept.stat().st_mtime
 
-        removed = prune_obsolete_markdown(tmp_path, {kept}, recursive=False)
+        removed = prune_obsolete_markdown(tmp_path, {kept}, owned={kept}, recursive=False)
         assert removed == 0
         assert kept.exists()
         # Mtime unchanged — the file was not even rewritten. This is what
@@ -941,10 +941,29 @@ class TestPruneObsoleteMarkdown:
         obsolete = tmp_path / "obsolete.md"
         obsolete.write_text("subject was deleted in DB but file lingered")
 
-        removed = prune_obsolete_markdown(tmp_path, {kept}, recursive=False)
+        removed = prune_obsolete_markdown(tmp_path, {kept}, owned={kept, obsolete}, recursive=False)
         assert removed == 1
         assert kept.exists()
         assert not obsolete.exists()
+
+    def test_unowned_files_survive(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+        # a file the exporter never wrote is not a prune candidate,
+        # whatever its name. Before the fix this deleted a vault's own notes.
+        from particles.exporters.markdown import prune_obsolete_markdown
+
+        users = tmp_path / "Ideas.md"
+        users.write_text("my own note")
+        nested = tmp_path / "Journal" / "2026-10-01.md"
+        nested.parent.mkdir()
+        nested.write_text("today")
+        (tmp_path / "Empty").mkdir()
+
+        removed = prune_obsolete_markdown(tmp_path, set(), owned=set(), recursive=True)
+        assert removed == 0
+        assert users.exists()
+        assert nested.exists()
+        # A directory the prune did not empty is left alone, even if empty.
+        assert (tmp_path / "Empty").is_dir()
 
     def test_recursive_walks_subdirs(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         from particles.exporters.markdown import prune_obsolete_markdown
@@ -956,7 +975,9 @@ class TestPruneObsoleteMarkdown:
         nested_obs.parent.mkdir()
         nested_obs.write_text("subject suppressed")
 
-        removed = prune_obsolete_markdown(tmp_path, {nested_kept}, recursive=True)
+        removed = prune_obsolete_markdown(
+            tmp_path, {nested_kept}, owned={nested_kept, nested_obs}, recursive=True
+        )
         assert removed == 1
         assert nested_kept.exists()
         assert not nested_obs.exists()
@@ -973,7 +994,7 @@ class TestPruneObsoleteMarkdown:
         kept = tmp_path / "kept.md"
         kept.write_text("body")
         # Pass the unresolved Path that the caller would naturally hand in.
-        removed = prune_obsolete_markdown(tmp_path, {kept}, recursive=False)
+        removed = prune_obsolete_markdown(tmp_path, {kept}, owned={kept}, recursive=False)
         assert removed == 0
         assert kept.exists()
 
@@ -991,7 +1012,7 @@ class TestPruneObsoleteMarkdown:
         cfg = config_dir / "workspace.json"
         cfg.write_text("{}")
 
-        prune_obsolete_markdown(tmp_path, {kept}, recursive=True)
+        prune_obsolete_markdown(tmp_path, {kept}, owned={kept, canvas, cfg}, recursive=True)
         assert canvas.exists()
         assert cfg.exists()
 

@@ -15,11 +15,14 @@ the visibility predicate — *believed at T*:
    its retirement instant R — stored (§2a) or reconstructed (§2b) —
    satisfies ``R > T``.
 
-``INCONSISTENCY`` particles are never visible (they are never ACTIVE; the
-§6.6 ledger is a different surface). Born-retired rows (quarantine
-losers, ``status_reason = CONFLICT_PENDING``) were never believed — never
-visible and never counted. ``valid_until`` is evaluated against T, not now:
-a claim valid until 2007 was in force in 2000.
+Born-retired rows — ``INCONSISTENCY`` records (the §6.6 ledger is a
+different surface) and quarantine losers — were never believed:
+never visible and never counted. They are identified by the ``born_retired``
+storage column, not by their current status or reason: resolving a conflict
+moves the record off ``INCONSISTENCY`` and the loser off ``CONFLICT_PENDING``,
+and neither may then read as a retired belief.
+``valid_until`` is evaluated against T, not now: a claim valid until 2007 was
+in force in 2000.
 
 The retirement instant resolves through the §2b ladder, each rung exact:
 
@@ -53,7 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.schema import AsOfNote, AsOfSuccessor, Particle
 from particles.core.status import Status, StatusReason
 from particles.store.event_store import EventRefKind, OperatorEventRefRow, OperatorEventRow
-from particles.store.particle_store import ParticleRow
+from particles.store.particle_store import ParticleRow, load_born_retired_ids
 
 #: Operator event types whose refs date a particle's retirement exactly
 #: (rung 2). Automated pipeline/lint transitions do not emit
@@ -75,19 +78,37 @@ def ensure_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
 
 
-def is_once_believed_retirement(status: Status, status_reason: StatusReason | None) -> bool:
+def is_never_believed(
+    status: Status, status_reason: StatusReason | None, *, born_retired: bool
+) -> bool:
+    """True for a born-retired row, resolved or not.
+
+    ``born_retired`` is the durable signal: the row's storage column, stamped
+    at insert. An open INCONSISTENCY record and an unresolved quarantine loser
+    (``CONFLICT_PENDING``) are recognised from the model too, so a caller
+    without the column still hides them.
+    """
+    return (
+        born_retired
+        or status is Status.INCONSISTENCY
+        or status_reason is StatusReason.CONFLICT_PENDING
+    )
+
+
+def is_once_believed_retirement(
+    status: Status, status_reason: StatusReason | None, *, born_retired: bool
+) -> bool:
     """True when a non-ACTIVE row records a belief that was once held.
 
     The shared exclusion-set helper for the query disclosure count and the
-    ``UNDATED_RETIREMENT`` lint finding: born-retired rows
-    quarantine losers (``status_reason = CONFLICT_PENDING``) and INCONSISTENCY
-    records — were never believed, so their lack of a retirement instant is
-    correct, not a gap; counting them would overstate the store's undatable
-    history.
+    ``UNDATED_RETIREMENT`` lint finding: born-retired rows (INCONSISTENCY
+    records and quarantine losers, see :func:`is_never_believed`) were never
+    believed, so their lack of a retirement instant is correct, not
+    a gap; counting them would overstate the store's undatable history.
     """
-    if status in (Status.ACTIVE, Status.INCONSISTENCY):
+    if status is Status.ACTIVE:
         return False
-    return status_reason is not StatusReason.CONFLICT_PENDING
+    return not is_never_believed(status, status_reason, born_retired=born_retired)
 
 
 @dataclass(frozen=True)
@@ -126,11 +147,14 @@ class RetirementIndex:
 
     ``successor_by_predecessor`` maps each superseded particle id to its
     earliest ``supersedes``-pointer successor; ``event_retired_at`` maps a
-    particle id to the latest retirement-dating operator event instant.
+    particle id to the latest retirement-dating operator event instant;
+    ``never_believed`` holds the ids stored ``born_retired``,
+    which the ladder must never date.
     """
 
     successor_by_predecessor: dict[str, SuccessorRef]
     event_retired_at: dict[str, datetime]
+    never_believed: frozenset[str] = frozenset()
 
     def resolve(
         self,
@@ -188,11 +212,15 @@ class AsOfView:
         if ensure_utc(particle.asserted_at) > self.as_of:
             return not_visible
 
-        # INCONSISTENCY records are never visible; born-retired quarantine
-        # losers were never believed — neither is counted as undatable.
-        if particle.status is Status.INCONSISTENCY:
-            return not_visible
-        if particle.status_reason is StatusReason.CONFLICT_PENDING:
+        # Born-retired rows (INCONSISTENCY records, quarantine losers) were
+        # never believed and are not counted as undatable. Once resolved they
+        # no longer read INCONSISTENCY / CONFLICT_PENDING, and the ladder below
+        # would date a "retirement" from the review.
+        if is_never_believed(
+            particle.status,
+            particle.status_reason,
+            born_retired=particle.id in self.index.never_believed,
+        ):
             return not_visible
 
         # ``valid_until`` is evaluated against T, not now: a claim whose
@@ -226,13 +254,13 @@ class AsOfView:
 
 
 async def load_retirement_index(session: AsyncSession) -> RetirementIndex:
-    """Load one store's rung 1–2 maps: successor pointers + retirement events.
+    """Load one store's rung 1–2 maps plus its never-believed id set.
 
     One in-memory successor map (``SELECT id, content, supersedes, asserted_at
     WHERE supersedes IS NOT NULL`` — no new index; the store's stated scale is
     ≤10⁵ particles) and one batched lookup over the indexed
-    ``operator_event_refs`` table. Shared by the query lens and the
-    ``UNDATED_RETIREMENT`` lint finding.
+    ``operator_event_refs`` table, plus the ``born_retired`` ids.
+    Shared by the query lens and the graph view.
     """
     successor_by_predecessor: dict[str, SuccessorRef] = {}
     result = await session.execute(
@@ -274,6 +302,7 @@ async def load_retirement_index(session: AsyncSession) -> RetirementIndex:
     return RetirementIndex(
         successor_by_predecessor=successor_by_predecessor,
         event_retired_at=event_retired_at,
+        never_believed=await load_born_retired_ids(session),
     )
 
 

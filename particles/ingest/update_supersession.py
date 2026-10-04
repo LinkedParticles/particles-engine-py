@@ -35,6 +35,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from particles.core.generics import is_generic_claim
 from particles.core.schema import (
     CorpusEntry,
     Particle,
@@ -155,8 +156,15 @@ class SubjectIndex:
         floor: float,
         limit: int,
         skip_ids: Iterable[str] = (),
+        generic: bool | None = None,
     ) -> list[Particle]:
-        """Most similar particles sharing any of ``subject_ids``, best first."""
+        """Most similar particles sharing any of ``subject_ids``, best first.
+
+        ``generic`` is whether the claim being matched is a generic claim
+        (:func:`~particles.core.generics.is_generic_claim`), or ``None`` to skip
+        the check. A particle of the other kind never enters the pool: a
+        generic and an instance claim are not an adjudicable pair.
+        """
         skip = set(skip_ids) | self.retired
         seen: dict[str, float] = {}
         pool: dict[str, Particle] = {}
@@ -166,6 +174,9 @@ class SubjectIndex:
                     continue
                 score = cosine_similarity(embedding, emb)
                 if score >= floor:
+                    if generic is not None and is_generic_claim(particle.content) != generic:
+                        skip.add(particle.id)
+                        continue
                     seen[particle.id] = score
                     pool[particle.id] = particle
         best = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:limit]

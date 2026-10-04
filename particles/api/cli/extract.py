@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
 from typing import Any
 
 import typer
@@ -20,6 +22,8 @@ from particles.api.cli._output import (
 from particles.api.client import get_backend
 from particles.core.schema import Particle
 from particles.db import session_scope
+from particles.llm.usage import LLMUsage, render_usage_line
+from particles.operations.llm_spend import MeteredExtractRun
 
 
 def _echo_page_stats(
@@ -79,6 +83,14 @@ def extract_cmd(
     all_pending: bool = typer.Option(
         False, "--all-pending", help="Extract all PENDING snapshots in deposit order"
     ),
+    tag: str | None = typer.Option(
+        None,
+        "--tag",
+        help=(
+            "With --all-pending, extract only snapshots of corpus entries that carry this "
+            "tag (for example memory-file for Claude Code memory files)."
+        ),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show quality notes and INFO logs"),
     debug: bool = typer.Option(
         False, "--debug", help="Show raw LLM prompt/response and DEBUG logs"
@@ -89,6 +101,10 @@ def extract_cmd(
     """Extract particles from a corpus entry, or all PENDING entries at once."""
     configure_output(verbose, debug, quiet, progress)
 
+    if tag is not None and not all_pending:
+        typer.echo("--tag filters --all-pending; add --all-pending.", err=True)
+        raise typer.Exit(1)
+
     if all_pending:
         if get_backend().remote:
             typer.echo(
@@ -97,14 +113,14 @@ def extract_cmd(
                 err=True,
             )
             raise typer.Exit(1)
-        run(_extract_all_pending(agent_id))
+        run(_extract_all_pending(agent_id, tag=tag))
         return
 
     if not entry_id:
         typer.echo("Provide an entry ID or use --all-pending.", err=True)
         raise typer.Exit(1)
 
-    entry_id, particles, page_stats, carry_forward_ids, suppressed_ids = run(
+    entry_id, particles, page_stats, carry_forward_ids, suppressed_ids, llm_usage = run(
         _extract(entry_id, snapshot_id, agent_id)
     )
     summary = f"Extracted {len(particles)} particles"
@@ -132,9 +148,35 @@ def extract_cmd(
     )
     for p in particles:
         typer.echo(f"  [{p.status}] {p.id[:8]}… {p.content[:80]}")
+    _echo_usage(llm_usage)
 
 
-async def _extract_all_pending(agent_id: str) -> None:
+@contextlib.asynccontextmanager
+async def _metered_run(route: str) -> AsyncIterator[MeteredExtractRun]:
+    """Meter one extract run and print its usage line when it ends, however it ends.
+
+    The calls made before an account-level stop were still billed, so the line
+    and the ``EXTRACT_RUN`` record both survive an early exit.
+    """
+    meter = MeteredExtractRun(actor="cli:extract", route=route)
+    try:
+        async with meter:
+            yield meter
+    finally:
+        _echo_usage(meter.llm_usage)
+
+
+def _echo_usage(llm_usage: LLMUsage | None) -> None:
+    """The run's measured LLM usage, on stderr like ``audit``'s.
+
+    ``None`` is a remote run: the engine made and recorded the calls, so the
+    laptop has nothing to report.
+    """
+    if llm_usage is not None:
+        typer.echo(render_usage_line(llm_usage), err=True)
+
+
+async def _extract_all_pending(agent_id: str, *, tag: str | None = None) -> None:
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import select
@@ -148,6 +190,7 @@ async def _extract_all_pending(agent_id: str) -> None:
         count_snapshots_by_extraction_status,
         reset_stale_in_progress,
     )
+    from particles.ingest.pipeline import SnapshotOutcome
     from particles.llm import AccountLevelLLMError, get_client
     from particles.operations.extract import collapse_superseded_pending, extract_snapshot
     from particles.operations.version_guard import assert_store_schema_current
@@ -195,12 +238,16 @@ async def _extract_all_pending(agent_id: str) -> None:
 
     async with session_scope() as session:
         result = await session.execute(
-            select(SnapshotRow.entry_id, SnapshotRow.snapshot_id)
+            select(SnapshotRow.entry_id, SnapshotRow.snapshot_id, CorpusEntryRow.tags_json)
             .where(SnapshotRow.extraction_status == ExtractionStatus.PENDING.value)
             .join(CorpusEntryRow, SnapshotRow.entry_id == CorpusEntryRow.entry_id)
             .order_by(CorpusEntryRow.created_at)
         )
-        pending = result.all()
+        pending = [
+            (entry_id, snapshot_id)
+            for entry_id, snapshot_id, tags_json in result.all()
+            if tag is None or entry_has_tag(tags_json, tag)
+        ]
         # Counts for the no-pending message below. "No PENDING snapshots
         # found" alone is ambiguous after a failed run — an operator whose
         # previous extraction printed FAILED lines reads it as "my snapshots
@@ -212,101 +259,188 @@ async def _extract_all_pending(agent_id: str) -> None:
             f"{counts[s.value]} {s.value}" for s in ExtractionStatus if counts.get(s.value)
         )
         suffix = f" ({breakdown})" if breakdown else ""
-        typer.echo(f"No PENDING snapshots found{suffix}.")
+        scope = f" tagged {tag}" if tag is not None else ""
+        typer.echo(f"No PENDING snapshots{scope} found{suffix}.")
         return
 
     typer.echo(f"Extracting {len(pending)} pending snapshot(s)…")
     failures = 0
-    for index, (entry_id, snapshot_id) in enumerate(pending):
-        # ``id_prefix`` disambiguates multiple snapshots of the same
-        # corpus entry — a single ``--all-pending`` run after a scrap-
-        # and-re-extract commonly queues every historical
-        # snapshot of every entry, and bare ``entry_id[:8]`` lines
-        # printed three or four times with different particle counts
-        # are confusing.
-        id_prefix = f"{entry_id[:8]}…/{snapshot_id[:8]}…"
-        page_stats: list[Any] = []
-        carry_forward_ids: list[str] = []
-        suppressed_ids: list[str] = []
-        async with session_scope() as session:
-            try:
-                particles = await extract_snapshot(
-                    session,
-                    entry_id,
-                    snapshot_id,
-                    agent_id=agent_id,
-                    page_stats_out=page_stats,
-                    carry_forward_ids_out=carry_forward_ids,
-                    suppressed_ids_out=suppressed_ids,
-                    skip_if_superseded=True,
-                )
-                await session.commit()
-                # Merge ADR-0057 carry-forward count and the existing
-                # page-count suffix into one parenthesised group, so
-                # the line stays compact when both fire:
-                #   ``0 particles (31 already extracted, 3 pages)``.
-                # "already extracted" is plain-English for "matched the
-                # chunk_hash of an existing ACTIVE particle, no LLM call
-                # needed" — without it, the CLI shows "0 particles" for
-                # a snapshot whose entire content was actually reused
-                # from a sibling snapshot.
-                extras: list[str] = []
-                if carry_forward_ids:
-                    extras.append(f"{len(carry_forward_ids)} already extracted")
-                if suppressed_ids:
-                    # same reasoning as "already extracted": a
-                    # re-harvest whose claims the store already holds must not
-                    # read as "0 particles" with no explanation.
-                    extras.append(f"{len(suppressed_ids)} duplicate(s) suppressed")
-                if page_stats:
-                    extras.append(f"{len(page_stats)} pages")
-                summary = f"{len(particles)} particles"
-                if extras:
-                    summary += f" ({', '.join(extras)})"
-                typer.echo(f"  {id_prefix}  {summary}")
-                _echo_page_stats(page_stats, carry_forward_ids)
-            except AccountLevelLLMError as exc:
-                # Bad / missing key, no permission, or no credit: every
-                # remaining snapshot would fail the same way, so stop here
-                # instead of restating one billing error per snapshot (and per
-                # PDF page). The pipeline already reset this snapshot
-                # IN_PROGRESS → PENDING, and the rest were never claimed, so
-                # the whole queue survives for a retry.
-                remaining = len(pending) - index
-                typer.echo(
-                    f"\nLLM unavailable (account-level): {exc}",
-                    err=True,
-                )
-                typer.echo(
-                    f"Stopped after {index} of {len(pending)} snapshot(s); "
-                    f"{remaining} still PENDING. Fix the API key or credit balance, "
-                    "then re-run `particles extract --all-pending`.",
-                    err=True,
-                )
-                raise typer.Exit(1) from exc
-            except Exception as exc:
-                failures += 1
-                if isinstance(exc, OperationalError) and "database is locked" in str(exc).lower():
-                    # The per-snapshot handler swallows the exception before
-                    # it reaches run()'s lock translation, so give the same
-                    # operator-friendly message here instead of the raw
-                    # SQLAlchemy dump.
+    left_pending = 0
+    # one metered run around the whole pass, one EXTRACT_RUN record
+    # and one usage line.
+    async with _metered_run("all-pending") as meter:
+        for index, (entry_id, snapshot_id) in enumerate(pending):
+            meter.snapshots += 1
+            # ``id_prefix`` disambiguates multiple snapshots of the same
+            # corpus entry — a single ``--all-pending`` run after a scrap-
+            # and-re-extract commonly queues every historical
+            # snapshot of every entry, and bare ``entry_id[:8]`` lines
+            # printed three or four times with different particle counts
+            # are confusing.
+            id_prefix = f"{entry_id[:8]}…/{snapshot_id[:8]}…"
+            page_stats: list[Any] = []
+            carry_forward_ids: list[str] = []
+            suppressed_ids: list[str] = []
+            outcome = SnapshotOutcome()
+            async with session_scope() as session:
+                try:
+                    particles = await extract_snapshot(
+                        session,
+                        entry_id,
+                        snapshot_id,
+                        agent_id=agent_id,
+                        page_stats_out=page_stats,
+                        carry_forward_ids_out=carry_forward_ids,
+                        suppressed_ids_out=suppressed_ids,
+                        skip_if_superseded=True,
+                        outcome_out=outcome,
+                    )
+                    await session.commit()
+                    if outcome.skipped == "waiting":
+                        held = (outcome.waiting_on or "")[:8]
+                        remedy = (
+                            "it is FAILED: restore its blob, or run `particles reindex` "
+                            "on the entry"
+                            if outcome.waiting_on_failed
+                            else "it is read once that snapshot completes"
+                        )
+                        typer.echo(
+                            f"  {id_prefix}  skipped (waiting on {held}…, which holds a "
+                            f"partial whole read; {remedy})"
+                        )
+                        continue
+                    if outcome.skipped is not None:
+                        typer.echo(f"  {id_prefix}  skipped ({outcome.skipped})")
+                        continue
+                    if outcome.failed_calls and outcome.kept_calls:
+                        # A partly failed append-only read kept what it answered;
+                        # the snapshot stays PENDING for the rest.
+                        left_pending += 1
+                        resent = (
+                            f"; a retry sends {outcome.rebilled_calls} other answered call(s) again"
+                            if outcome.rebilled_calls
+                            else ""
+                        )
+                        typer.echo(
+                            f"  {id_prefix}  left PENDING: {outcome.failed_calls} LLM call(s) "
+                            f"produced nothing usable; kept {outcome.kept_calls} answered "
+                            f"call(s) ({len(particles)} particles), and a retry reads only "
+                            f"the rest{resent}",
+                            err=True,
+                        )
+                        continue
+                    if outcome.failed_calls:
+                        # The pipeline handed the snapshot back PENDING with nothing
+                        # written. Printing "0 particles" here read as a finished
+                        # extraction of an empty source.
+                        left_pending += 1
+                        resent = (
+                            f"; a retry sends its {outcome.rebilled_calls} answered call(s) again"
+                            if outcome.rebilled_calls
+                            else ""
+                        )
+                        typer.echo(
+                            f"  {id_prefix}  left PENDING: {outcome.failed_calls} LLM call(s) "
+                            f"produced nothing usable, so nothing was written{resent}",
+                            err=True,
+                        )
+                        continue
+                    # Merge ADR-0057 carry-forward count and the existing
+                    # page-count suffix into one parenthesised group, so
+                    # the line stays compact when both fire:
+                    #   ``0 particles (31 already extracted, 3 pages)``.
+                    # "already extracted" is plain-English for "matched the
+                    # chunk_hash of an existing ACTIVE particle, no LLM call
+                    # needed" — without it, the CLI shows "0 particles" for
+                    # a snapshot whose entire content was actually reused
+                    # from a sibling snapshot.
+                    extras: list[str] = []
+                    if carry_forward_ids:
+                        extras.append(f"{len(carry_forward_ids)} already extracted")
+                    if suppressed_ids:
+                        # same reasoning as "already extracted": a
+                        # re-harvest whose claims the store already holds must not
+                        # read as "0 particles" with no explanation.
+                        extras.append(f"{len(suppressed_ids)} duplicate(s) suppressed")
+                    if outcome.conflicts_cleared:
+                        # a contradiction the probe flagged and a second
+                        # reading did not confirm wrote no record.
+                        extras.append(
+                            f"{outcome.conflicts_cleared} contradiction flag(s) cleared on a "
+                            "second reading"
+                        )
+                    if outcome.conflict_unread:
+                        extras.append(f"{outcome.conflict_unread} contradiction flag(s) unread")
+                    if page_stats:
+                        extras.append(f"{len(page_stats)} pages")
+                    summary = f"{len(particles)} particles"
+                    if extras:
+                        summary += f" ({', '.join(extras)})"
+                    typer.echo(f"  {id_prefix}  {summary}")
+                    _echo_page_stats(page_stats, carry_forward_ids)
+                except AccountLevelLLMError as exc:
+                    # Bad / missing key, no permission, or no credit: every
+                    # remaining snapshot would fail the same way, so stop here
+                    # instead of restating one billing error per snapshot (and per
+                    # PDF page). The pipeline already reset this snapshot
+                    # IN_PROGRESS → PENDING, and the rest were never claimed, so
+                    # the whole queue survives for a retry.
+                    remaining = len(pending) - index
                     typer.echo(
-                        f"  {id_prefix}  FAILED: database is locked — another "
-                        "particles process is holding a writer transaction. "
-                        "Re-run `particles extract --all-pending` once it "
-                        "finishes to retry this snapshot.",
+                        f"\nLLM unavailable (account-level): {exc}",
                         err=True,
                     )
-                else:
-                    typer.echo(f"  {id_prefix}  FAILED: {exc}", err=True)
+                    typer.echo(
+                        f"Stopped after {index} of {len(pending)} snapshot(s); "
+                        f"{remaining} still PENDING. Fix the API key or credit balance, "
+                        "then re-run `particles extract --all-pending`.",
+                        err=True,
+                    )
+                    raise typer.Exit(1) from exc
+                except Exception as exc:
+                    failures += 1
+                    if (
+                        isinstance(exc, OperationalError)
+                        and "database is locked" in str(exc).lower()
+                    ):
+                        # The per-snapshot handler swallows the exception before
+                        # it reaches run()'s lock translation, so give the same
+                        # operator-friendly message here instead of the raw
+                        # SQLAlchemy dump.
+                        typer.echo(
+                            f"  {id_prefix}  FAILED: database is locked — another "
+                            "particles process is holding a writer transaction. "
+                            "Re-run `particles extract --all-pending` once it "
+                            "finishes to retry this snapshot.",
+                            err=True,
+                        )
+                    else:
+                        typer.echo(f"  {id_prefix}  FAILED: {exc}", err=True)
 
+    if left_pending:
+        typer.echo(
+            f"{left_pending} of {len(pending)} snapshot(s) left PENDING after failed LLM "
+            "calls. Re-run `particles extract --all-pending` to retry them.",
+            err=True,
+        )
     if failures:
         typer.echo(
             f"Extraction failed for {failures} of {len(pending)} snapshot(s).",
             err=True,
         )
+    if failures or left_pending:
         raise typer.Exit(1)
+
+
+def entry_has_tag(tags_json: str | None, tag: str) -> bool:
+    """Whether a corpus entry's stored tag list names ``tag`` exactly."""
+    import json
+
+    try:
+        tags = json.loads(tags_json or "[]")
+    except ValueError:
+        return False
+    return isinstance(tags, list) and tag in tags
 
 
 def _is_pdf_entry(entry_id: str) -> bool:
@@ -372,7 +506,7 @@ async def _resolve_local(entry_id: str, snapshot_id: str | None) -> tuple[str, s
 
 async def _extract(
     entry_id: str, snapshot_id: str | None, agent_id: str
-) -> tuple[str, list[Particle], list[Any], list[str], list[str]]:
+) -> tuple[str, list[Particle], list[Any], list[str], list[str], LLMUsage | None]:
     backend = get_backend()
     if backend.remote:
         # The engine takes full UUIDs and does not infer the latest snapshot;
@@ -395,4 +529,5 @@ async def _extract(
         outcome.page_stats,
         outcome.carry_forward_ids,
         outcome.suppressed_ids,
+        outcome.llm_usage,
     )

@@ -43,6 +43,8 @@ from particles.benchmark.metrics import (
     compute_calibration_error,
     compute_precision,
     compute_recall,
+    compute_semantic_calibration_error,
+    semantic_match_labels,
 )
 from particles.benchmark.schema import (
     BenchmarkCase,
@@ -316,6 +318,58 @@ class TestMetrics:
         ece = compute_calibration_error(set(), ps, bins=10)
         # All in last bin, none matched, conf=1.0 → |1.0 - 0.0| = 1.0
         assert ece == pytest.approx(1.0, abs=1e-9)
+
+
+class TestSemanticMatchLabel:
+    """The calibration label beside the full-match one."""
+
+    def test_every_outcome_but_spurious_is_correct(self) -> None:
+        outcomes = ["matched", "under_confidence", "spurious", "under_confidence", "spurious"]
+        assert semantic_match_labels(outcomes) == [True, True, False, True, False]
+
+    def test_empty_outcomes_label_nothing(self) -> None:
+        assert semantic_match_labels([]) == []
+
+    def test_reads_live_outcomes_and_run_file_strings_alike(self) -> None:
+        """A ``ClaimOutcome`` and its persisted string label identically."""
+        from particles.benchmark.runner import ClaimOutcome
+
+        live = semantic_match_labels(list(ClaimOutcome))
+        persisted = semantic_match_labels([o.value for o in ClaimOutcome])
+        assert live == persisted == [True, True, False]
+
+    def test_under_confidence_claims_are_scored_correct_not_wrong(self) -> None:
+        """The defect the semantic figure exists to remove.
+
+        Ten correct claims stated at 0.70, below a 0.80 gold floor: the
+        full-match label calls all ten wrong (ECE 0.70) though every one is
+        right (ECE 0.30 under the semantic label).
+        """
+        ps = [_make_emitted(f"c{i}", confidence=0.7) for i in range(10)]
+        full = compute_calibration_error(set(), ps, bins=10)
+        semantic = compute_semantic_calibration_error([(0.7, "under_confidence")] * 10)
+        assert full == pytest.approx(0.70, abs=1e-9)
+        assert semantic == pytest.approx(0.30, abs=1e-9)
+
+    def test_agrees_with_full_match_when_nothing_is_under_confident(self) -> None:
+        """Only the label differs: no partial match, no difference."""
+        ps = [_make_emitted(f"c{i}", confidence=0.6 + 0.04 * i) for i in range(10)]
+        matched = {ps[i].id for i in (0, 3, 4, 7, 9)}
+        scored = [(p.confidence.value, "matched" if p.id in matched else "spurious") for p in ps]
+        assert compute_semantic_calibration_error(scored) == pytest.approx(
+            compute_calibration_error(matched, ps)
+        )
+
+    def test_empty_population_is_zero(self) -> None:
+        assert compute_semantic_calibration_error([]) == 0.0
+
+    def test_bins_default_matches_the_full_match_figure(self) -> None:
+        """Two ECEs on different binning would not be comparable."""
+        import inspect
+
+        full = inspect.signature(compute_calibration_error).parameters["bins"].default
+        semantic = inspect.signature(compute_semantic_calibration_error).parameters["bins"].default
+        assert full == semantic == 10
 
 
 # ---------------------------------------------------------------------------

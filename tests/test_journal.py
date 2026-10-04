@@ -18,6 +18,7 @@ from particles.extraction.journal import (
     JournalExtractor,
     _parse_journal_response,
 )
+from tests._client_fixtures import stream_via_create
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -197,6 +198,19 @@ class TestSalvageResilience:
         assert any("JSON parse error" in n for n in notes)
 
 
+class TestJournalPrompt:
+    def test_prompt_carries_the_reference_rule(self) -> None:
+        # Shared with the general extractor (0.16.0): a claim written from
+        # "my flat" or "last month" must name what the entry says they are.
+        from particles.extraction.general import REFERENCE_RULE
+        from particles.extraction.journal import _build_journal_prompt
+
+        prompt = _build_journal_prompt()
+        assert REFERENCE_RULE in prompt
+        # No reference date is passed on this path, so no unfilled placeholder.
+        assert "{reference_date}" not in prompt
+
+
 class TestJournalExtractorAccepts:
     def test_accepts_only_journal(self) -> None:
         ex = JournalExtractor()
@@ -226,6 +240,7 @@ class TestJournalExtract:
         mock_client = MagicMock(spec=anthropic.Anthropic)
         mock_client.messages = MagicMock()
         mock_client.messages.create = MagicMock(return_value=mock_resp)
+        stream_via_create(mock_client)
 
         set_client(mock_client)
         try:
@@ -274,6 +289,7 @@ class TestJournalExtract:
         mock_client = MagicMock(spec=anthropic.Anthropic)
         mock_client.messages = MagicMock()
         mock_client.messages.create = MagicMock(return_value=mock_resp)
+        stream_via_create(mock_client)
 
         set_client(mock_client)
         try:
@@ -315,6 +331,7 @@ async def test_pipeline_writes_narrative_graph(db_session: AsyncSession) -> None
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(
@@ -384,6 +401,7 @@ async def test_no_narrative_when_extractor_emits_none(db_session: AsyncSession) 
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(

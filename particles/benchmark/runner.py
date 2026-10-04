@@ -61,7 +61,7 @@ from __future__ import annotations
 import logging
 import re
 import statistics
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -80,6 +80,13 @@ from particles.benchmark.metrics import (
     compute_calibration_error,
     compute_precision,
     compute_recall,
+    compute_semantic_calibration_error,
+)
+from particles.benchmark.resolution import (
+    GoldSubject,
+    SubjectResolution,
+    resolution_metrics,
+    run_resolution,
 )
 from particles.benchmark.schema import BenchmarkSuite
 from particles.config import get_config
@@ -194,6 +201,12 @@ class BenchmarkReport:
     judge: str
     equivalence_threshold: float
     quality_notes: list[str] = field(default_factory=list)
+    # One row per gold subject when the suite carries ``gold_subjects``:
+    # the resolver's answer and its judged outcome, behind the
+    # ``resolution_*`` fractions in ``metrics``. Per-run detail with a
+    # default, the ``graded`` precedent; empty when the suite has no gold
+    # subjects or the caller did not ask for resolution.
+    subject_resolution: list[SubjectResolution] = field(default_factory=list)
 
 
 def graded_pairs(report: BenchmarkReport) -> tuple[list[float], list[bool]]:
@@ -365,6 +378,7 @@ async def run_benchmark_repeated(
     judge: EquivalenceJudge = EquivalenceJudge.EMBEDDING,
     threshold: float = 0.80,
     on_report: Callable[[int, BenchmarkReport], None] | None = None,
+    gold_subjects: Sequence[GoldSubject] = (),
 ) -> AggregateBenchmarkReport:
     """Run one suite ``runs`` times and summarise each metric's spread.
 
@@ -385,6 +399,7 @@ async def run_benchmark_repeated(
             fixture_dir=fixture_dir,
             judge=judge,
             threshold=threshold,
+            gold_subjects=gold_subjects,
         )
         reports.append(report)
         if on_report is not None:
@@ -392,7 +407,7 @@ async def run_benchmark_repeated(
 
     # Union of metric names, in first-seen order; a metric absent from some
     # run contributes only the runs that reported it (the reference runner
-    # always emits the same three, but a fork's runner need not).
+    # emits the same keys on every run of one suite, but a fork's runner need not).
     names: list[str] = []
     for report in reports:
         for name in report.metrics:
@@ -478,6 +493,7 @@ async def run_benchmark(
     fixture_dir: Path,
     judge: EquivalenceJudge = EquivalenceJudge.EMBEDDING,
     threshold: float = 0.80,
+    gold_subjects: Sequence[GoldSubject] = (),
 ) -> BenchmarkReport:
     """Run one suite against one extractor and return the report.
 
@@ -490,6 +506,13 @@ async def run_benchmark(
     as a quality note and contributes zero matched + zero emitted
     particles to the rollup. This makes the report robust to one
     bad case mid-suite.
+
+    ``gold_subjects`` adds the subject-resolution fractions to
+    ``metrics`` and one :class:`SubjectResolution` row per gold subject. The
+    pass resolves each gold subject from its gold mention, not from the
+    extractor's output, so it calls Wikidata and never the LLM; a caller
+    that does not want those network calls (``extractor calibrate``) passes
+    nothing.
     """
     all_matched_ids: set[str] = set()
     all_emitted: list[Particle] = []
@@ -614,7 +637,25 @@ async def run_benchmark(
         "precision": compute_precision(len(all_matched_ids), len(all_emitted)),
         "recall": compute_recall(matched_required, total_required),
         "calibration_error": compute_calibration_error(all_matched_ids, all_emitted),
+        # the same ECE under the semantic-match label, which is the
+        # calibration label. An added key beside the three
+        # §13.3 metrics, never a change to ``calibration_error``: that figure
+        # keeps its full-match meaning so archived run files and survey pages
+        # still read. Computed from the outcome records rather than a second
+        # id set, so a saved run file recomputes it exactly.
+        "calibration_error_semantic": compute_semantic_calibration_error(
+            [
+                (claim.confidence, claim.outcome)
+                for case_result in per_case
+                for claim in case_result.emitted_claims
+            ]
+        ),
     }
+    resolved, resolution_notes = await run_resolution(
+        gold_subjects, source_type=suite.source_types[0] if suite.source_types else None
+    )
+    metrics.update(resolution_metrics(resolved))
+    quality_notes.extend(resolution_notes)
 
     return BenchmarkReport(
         suite_id=suite.suite_id,
@@ -631,4 +672,5 @@ async def run_benchmark(
         judge=judge.value,
         equivalence_threshold=threshold,
         quality_notes=quality_notes,
+        subject_resolution=resolved,
     )

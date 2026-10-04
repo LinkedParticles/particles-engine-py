@@ -537,10 +537,7 @@ async def _ensure_store_db(handle: str) -> None:
     from particles.db import create_tables, session_scope
     from particles.ingest.importers.registry import ensure_extractor_records
 
-    dsn = _store_dsn(handle)
-    if dsn and dsn.startswith("sqlite"):
-        # SQLite creates the file but not its parent directory.
-        _sqlite_file_path(dsn).parent.mkdir(parents=True, exist_ok=True)
+    # create_tables() creates a missing SQLite parent directory itself.
     await create_tables(handle)
     async with session_scope(handle) as session:
         await ensure_extractor_records(session)

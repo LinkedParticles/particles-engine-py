@@ -67,10 +67,19 @@
 # the crisp falsifiable facts, 0.70-0.80 on the inference, evaluative, and
 # forward-looking claims. A future revision that states them lower should
 # surface as under-confidence.
+#
+# v0.3.0 (2026-09-30) adds two cases and the gold_subjects block at the end of
+# the file: the subject-resolution column. web-article-003 names two
+# companies with ordinary English words and no Wikidata item, the recorded
+# POET failure in a form a fixture can hold. web-article-004 names
+# real software whose names are crowded by other senses. Their claim gold was
+# authored against extractor 0.16.0 output on the same model, over two runs,
+# under the same one-required-per-sentence convention. Recall, precision and
+# ECE from 0.2.0 and 0.3.0 are not comparable: the case set differs.
 
 suite_id: prose-article-seed-001
 name: Prose-article seed benchmark
-version: 0.2.0
+version: 0.3.0
 domain: general prose
 source_types: [WEB_PAGE]
 published_by: anthropic/particles-sdk
@@ -764,3 +773,394 @@ cases:
         confidence_min: 0.80
         uncertainty_nature: EPISTEMIC
         required: false
+
+  # v0.3.0: a trade-news brief whose two companies are named with ordinary English
+  # words and hold no Wikidata item. The claim gold is ordinary; the
+  # case exists for its gold_subjects below.
+  - case_id: web-article-003
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000003"
+      captured_at: "2026-04-14T00:00:00+00:00"
+      content_hash: "5a54e85beebfa5cfe0baa14ed0b9b124841be5dc5bf8d456e1e92433a8a4f0a9"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-04-14T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Harbor buys Lantern to put notes next to the numbers — Counting House Review</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/deals">Deals</a> · <a href="/subscribe">Subscribe</a></nav>
+        <article>
+          <h1>Harbor buys Lantern to put notes next to the numbers</h1>
+          <p class="byline">By Wendell Asquith · 14 April 2026</p>
+          <p>Harbor, a payroll software company with 60 employees based in Manchester,
+          has acquired Lantern, a note-taking app made by a twelve-person company in
+          Leeds. Neither company disclosed the price.</p>
+          <p>Lantern launched in 2022 and says it has about 45,000 monthly active users,
+          most of them bookkeepers at small accounting firms. Harbor sells payroll
+          software to roughly 3,100 businesses in the north of England.</p>
+          <p>Harbor plans to build Lantern's shared notebooks into its payroll dashboard
+          by the end of 2026, so that an accountant can attach a note to an individual
+          pay run. Lantern's standalone app will keep working until at least June 2027,
+          and its twelve staff are joining Harbor.</p>
+          <p>"Our customers kept their explanations in one tool and their numbers in
+          another," said Odile Fanshawe, Harbor's chief executive. "Every payroll
+          question we get starts with someone hunting for a note."</p>
+          <p>It is Harbor's second acquisition; it bought a timesheet startup in 2024.</p>
+        </article>
+        <footer>© 2026 Counting House Review. Filed under <a href="/tag/deals">Deals</a>.</footer>
+      </body>
+      </html>
+    expected:
+      - content: "Harbor has acquired Lantern."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Harbor is a payroll software company."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Harbor has 60 employees."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Harbor is based in Manchester."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Lantern is a note-taking app."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Lantern was made by a twelve-person company in Leeds."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Neither Harbor nor Lantern disclosed the price of the acquisition."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Lantern has about 45,000 monthly active users, most of them bookkeepers at small accounting firms."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Lantern launched in 2022."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Most of Lantern's monthly active users are bookkeepers at small accounting firms."
+        confidence_min: 0.70
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Harbor sells payroll software to roughly 3,100 businesses in the north of England."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Harbor plans to build Lantern's shared notebooks into its payroll dashboard by the end of 2026."
+        confidence_min: 0.60
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Building Lantern into Harbor's payroll dashboard will let an accountant attach a note to an individual pay run."
+        confidence_min: 0.60
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Lantern's standalone app will keep working until at least June 2027."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Lantern's twelve staff are joining Harbor."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Odile Fanshawe is Harbor's chief executive."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Odile Fanshawe said Harbor's customers kept their explanations in one tool and their numbers in another."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Odile Fanshawe said every payroll question Harbor receives starts with someone hunting for a note."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The acquisition of Lantern is Harbor's second acquisition."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Harbor bought a timesheet startup in 2024."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # DOCUMENT_META: byline, date, publication, section.
+      - content: "The article was written by Wendell Asquith."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The article was published on 14 April 2026."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The article was published by Counting House Review."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The article is filed under Deals."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # v0.3.0: an engineering post naming real software whose names are also ordinary
+  # words or other entities' names, so Wikidata's top hit is not always the
+  # product.
+  - case_id: web-article-004
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000004"
+      captured_at: "2025-09-02T00:00:00+00:00"
+      content_hash: "b1c5ed3ddc55aa2da73a64649940001463d7b3d5c8b663d59a7f93534b2d27b6"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2025-09-02T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Rewriting billing in Go — Ostrander Freight Engineering</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/engineering">Engineering</a> · <a href="/jobs">Jobs</a></nav>
+        <article>
+          <h1>Rewriting billing in Go</h1>
+          <p class="byline">By Ines Marchetti · 2 September 2025</p>
+          <p>Ostrander Freight is a 90-person company that builds dispatch and billing
+          software for regional trucking firms. This spring we rewrote our billing
+          service, which was originally written in Python, in Go.</p>
+          <p>The rewrite cut the service's p99 latency from 840 milliseconds to 95
+          milliseconds and reduced its memory use by about two thirds. It took four
+          engineers eleven weeks.</p>
+          <p>Billing records still live in Postgres; the rewrite changed the code, not
+          the database. What did change is how invoices are produced: invoice events
+          now flow through Kafka instead of a nightly batch job, so a customer sees a
+          new charge within a minute rather than the next morning.</p>
+          <p>We considered Rust and chose Go because four of the six engineers on the
+          billing team already knew it. During incidents the on-call engineers
+          coordinate in a Signal group chat, and the runbooks for the new service
+          live in Notion.</p>
+          <p>Next we plan to move the dispatch service off Python as well, starting in
+          the first quarter of 2026.</p>
+        </article>
+        <footer>© 2025 Ostrander Freight. Posted in <a href="/tag/infrastructure">Infrastructure</a>.</footer>
+      </body>
+      </html>
+    expected:
+      - content: "Ostrander Freight is a 90-person company that builds dispatch and billing software for regional trucking firms."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Ostrander Freight is a 90-person company."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Ostrander Freight builds dispatch and billing software for regional trucking firms."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Ostrander Freight's billing service was originally written in Python."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The rewrite of Ostrander Freight's billing service cut its p99 latency from 840 milliseconds to 95 milliseconds."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The rewrite of Ostrander Freight's billing service reduced its memory use by about two thirds."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The rewrite of Ostrander Freight's billing service took four engineers eleven weeks."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Ostrander Freight's billing records are stored in Postgres."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The billing service rewrite changed the code but not the database."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Ostrander Freight's invoice events now flow through Kafka instead of a nightly batch job."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Before the rewrite, Ostrander Freight produced invoices through a nightly batch job."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "After the rewrite, an Ostrander Freight customer sees a new charge within a minute rather than the next morning."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Ostrander Freight considered Rust and chose Go for the billing service rewrite because four of the six engineers on the billing team already knew Go."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Ostrander Freight considered Rust for the billing service rewrite."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The Ostrander Freight billing team has six engineers."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Four of the six engineers on Ostrander Freight's billing team already knew Go."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "During incidents, Ostrander Freight's on-call engineers coordinate in a Signal group chat."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "The runbooks for Ostrander Freight's new billing service live in Notion."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter of 2026."
+        confidence_min: 0.75
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+      - content: "Ostrander Freight's dispatch service is currently written in Python."
+        confidence_min: 0.80
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      # DOCUMENT_META: byline, date, section.
+      - content: "The blog post 'Rewriting billing in Go' was authored by Ines Marchetti."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The blog post 'Rewriting billing in Go' was published on 2 September 2025."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+      - content: "The blog post 'Rewriting billing in Go' is posted in the Infrastructure category."
+        confidence_min: 0.85
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+# --- Gold subjects ------------------------------------------------
+# A non-normative root-level extension: a §13.3 runner that predates it ignores
+# the key, and the reference runner adds the resolution_accuracy column (with
+# wrong-ref and bare-local counted apart) beside recall, precision and ECE.
+#
+# Rule for what is listed: every proper-named entity a gold claim names, whether
+# or not today's extractor emits it as a subject. The column scores the
+# resolver, and an extractor change can start emitting any of them; picking
+# only the names a resolver happens to get right or wrong would tune the gold
+# to an outcome. Each is resolved from its `mention` (default: the first gold
+# claim in its case that names it as a whole word), the claim text the extract
+# pipeline hands the resolver.
+#
+# `ref: null` means no authority holds the entity, so the right answer is a bare
+# local Subject. Every invented company, person, publication and vessel in these
+# fixtures is that case. Real places and real software carry their Wikidata QID
+# (checked by hand against wbsearchentities on 2026-09-30).
+gold_subjects:
+  # web-article-001
+  - {case_id: web-article-001, name: Fernwood Systems, ref: null}
+  - {case_id: web-article-001, name: SHA-256, ref: "wikidata:Q110651361"}
+  - {case_id: web-article-001, name: "Halifax, Nova Scotia", ref: "wikidata:Q2141"}
+  - {case_id: web-article-001, name: Dana Okonkwo, ref: null}
+  # web-article-002
+  - {case_id: web-article-002, name: Halcyon Grid Cooperative, ref: null}
+  - {case_id: web-article-002, name: "Duluth, Minnesota", ref: "wikidata:Q485708"}
+  - {case_id: web-article-002, name: Pike Lake array, ref: null}
+  - {case_id: web-article-002, name: Tomas Ilves, ref: null}
+  # web-essay-001
+  - {case_id: web-essay-001, name: Priya Raghunathan, ref: null}
+  - {case_id: web-essay-001, name: Bracken & Doyle, ref: null}
+  - {case_id: web-essay-001, name: Salt Marsh Notes, ref: null}
+  # web-interview-001
+  - {case_id: web-interview-001, name: Maren Kaldestad, ref: null}
+  - {case_id: web-interview-001, name: Kvitholm Institute, ref: null}
+  - {case_id: web-interview-001, name: Meridian Rose, ref: null}
+  - {case_id: web-interview-001, name: Stray Light Foundation, ref: null}
+  - {case_id: web-interview-001, name: Bergen, ref: "wikidata:Q26793"}
+  - {case_id: web-interview-001, name: Jonas Brekke, ref: null}
+  - {case_id: web-interview-001, name: Tidewrack Quarterly, ref: null}
+  # web-article-003: the failure. Both companies are ordinary English
+  # words with no Wikidata item, and wbsearchentities answers each with the
+  # common noun (lantern, the lighting device; harbor, the body of water).
+  - {case_id: web-article-003, name: Harbor, ref: null}
+  - {case_id: web-article-003, name: Lantern, ref: null}
+  - {case_id: web-article-003, name: Manchester, ref: "wikidata:Q18125"}
+  - {case_id: web-article-003, name: Leeds, ref: "wikidata:Q39121"}
+  - {case_id: web-article-003, name: Odile Fanshawe, ref: null}
+  - {case_id: web-article-003, name: Wendell Asquith, ref: null}
+  - {case_id: web-article-003, name: Counting House Review, ref: null}
+  # web-article-004: real software outranked or crowded by other senses of the
+  # name. "Go" is the sharpest: its top hit is Goiás, the Brazilian state.
+  - {case_id: web-article-004, name: Ostrander Freight, ref: null}
+  - {case_id: web-article-004, name: Python, ref: "wikidata:Q28865"}
+  - {case_id: web-article-004, name: Go, ref: "wikidata:Q37227"}
+  - {case_id: web-article-004, name: Postgres, ref: "wikidata:Q192490"}
+  - {case_id: web-article-004, name: Kafka, ref: "wikidata:Q16235208"}
+  - {case_id: web-article-004, name: Rust, ref: "wikidata:Q575650"}
+  - {case_id: web-article-004, name: Signal, ref: "wikidata:Q19718090"}
+  - {case_id: web-article-004, name: Notion, ref: "wikidata:Q60747998"}
+  - {case_id: web-article-004, name: Ines Marchetti, ref: null}
+  - {case_id: web-article-004, name: "Rewriting billing in Go", ref: null}

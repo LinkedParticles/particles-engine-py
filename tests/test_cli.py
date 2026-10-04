@@ -114,7 +114,9 @@ async def _add_corpus_entry(
     return entry.entry_id, snap.snapshot_id
 
 
-async def _add_corpus_entry_with_id(entry_id: str, snapshot_id: str) -> None:
+async def _add_corpus_entry_with_id(
+    entry_id: str, snapshot_id: str, tags: list[str] | None = None
+) -> None:
     """Insert a corpus entry + one snapshot with caller-chosen IDs.
 
     Used by the extract prefix-resolution tests, which need two entries that
@@ -128,6 +130,7 @@ async def _add_corpus_entry_with_id(entry_id: str, snapshot_id: str) -> None:
         source_type="WEB_PAGE",
         uri_r=f"https://example.com/{entry_id}",
         deposited_by="test",
+        tags=tags or [],
     )
     snap = Snapshot(
         snapshot_id=snapshot_id,
@@ -1014,6 +1017,18 @@ class TestSubjects:
         assert result.exit_code == 0
         assert "A. Einstein" in result.output
 
+    def test_relink_gated_rejects_an_unknown_tier(self, runner: CliRunner, cli_db: Path) -> None:
+        result = runner.invoke(app, ["subjects", "relink-gated", "--tier", "4"])
+        assert result.exit_code == 1
+        assert "--tier must be 1, 2 or 3" in result.output
+
+    def test_relink_gated_dry_run_writes_nothing(self, runner: CliRunner, cli_db: Path) -> None:
+        # dry-run by default; an empty store has nothing to relink.
+        result = runner.invoke(app, ["subjects", "relink-gated"])
+        assert result.exit_code == 0, result.output
+        assert "Recoverable with tiers 1, 2, 3: 0" in result.output
+        assert "Nothing written" in result.output
+
     def test_unknown_action_errors(self, runner: CliRunner, cli_db: Path) -> None:
         result = runner.invoke(app, ["subjects", "not-a-real-action"])
         assert result.exit_code != 0
@@ -1229,6 +1244,153 @@ class TestReviewCommand:
         assert result.exit_code != 0
         assert "--action required" in result.output
 
+    def test_review_resolves_a_short_id(self, runner: CliRunner, cli_db: Path) -> None:
+        # The listing, `curate` and `particle show` all print 8-char ids; review
+        # must take the same prefix `particle retract` does.
+        from particles.db import session_scope
+        from particles.store.particle_store import get_particle, insert_particle
+
+        def _claim(text: str, status: Status = Status.ACTIVE) -> Particle:
+            return Particle(
+                id=str(uuid.uuid4()),
+                content=text,
+                confidence=Confidence(
+                    value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                ),
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                asserted_by="t",
+                status=status,
+                provenance=[],
+            )
+
+        pa, pb = _claim("Claim A"), _claim("Claim B")
+        inc = _claim("INCONSISTENCY: conflict between two claims.", Status.INCONSISTENCY)
+        inc.provenance = [
+            ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=pa.id),
+            ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=pb.id),
+        ]
+
+        async def _seed() -> None:
+            async with session_scope() as session:
+                for p in (pa, pb, inc):
+                    await insert_particle(session, p)
+                await session.commit()
+
+        asyncio.run(_seed())
+        result = runner.invoke(app, ["review", inc.id[:8], "--action", "BOTH_VALID"])
+        assert result.exit_code == 0, result.output
+        assert "recorded: BOTH_VALID" in result.output
+
+        async def _status() -> Status | None:
+            async with session_scope() as session:
+                row = await get_particle(session, inc.id)
+                return row.status if row else None
+
+        assert asyncio.run(_status()) is Status.RETRACTED
+
+    def test_review_unknown_id_is_one_line_not_a_traceback(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        result = runner.invoke(app, ["review", "deadbeef", "--action", "PREFER_A"])
+        assert result.exit_code == 1
+        assert "No particle matches prefix 'deadbeef'" in result.output
+        full = str(uuid.uuid4())
+        result = runner.invoke(app, ["review", full, "--action", "PREFER_A"])
+        assert result.exit_code == 1
+        assert f"✗ Particle {full} not found" in result.output
+        assert "Traceback" not in result.output
+
+    @staticmethod
+    def _seed_conflict(a_text: str, b_text: str) -> tuple[str, str, str]:
+        """Seed two ACTIVE claims and their wrapper; return (a_id, b_id, inc_id)."""
+        from particles.db import session_scope
+        from particles.store.particle_store import insert_particle
+
+        def _claim(text: str, status: Status = Status.ACTIVE) -> Particle:
+            return Particle(
+                id=str(uuid.uuid4()),
+                content=text,
+                confidence=Confidence(
+                    value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                ),
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                asserted_by="t",
+                status=status,
+                provenance=[],
+            )
+
+        pa, pb = _claim(a_text), _claim(b_text)
+        inc = _claim(f"INCONSISTENCY\nParticle B (new): {b_text}", Status.INCONSISTENCY)
+        inc.provenance = [
+            ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=pa.id),
+            ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=pb.id),
+        ]
+
+        async def _seed() -> None:
+            async with session_scope() as session:
+                for p in (pa, pb, inc):
+                    await insert_particle(session, p)
+                await session.commit()
+
+        asyncio.run(_seed())
+        return pa.id, pb.id, inc.id
+
+    @staticmethod
+    def _statuses(*ids: str) -> list[Status | None]:
+        from particles.db import session_scope
+        from particles.store.particle_store import get_particle
+
+        async def _read() -> list[Status | None]:
+            async with session_scope() as session:
+                rows = [await get_particle(session, pid) for pid in ids]
+                return [r.status if r else None for r in rows]
+
+        return asyncio.run(_read())
+
+    def test_review_discard_retracts_both_sides(self, runner: CliRunner, cli_db: Path) -> None:
+        a, b, inc = self._seed_conflict("branch is clean", "branch has unstaged files")
+        result = runner.invoke(app, ["review", inc, "--action", "DISCARD", "--note", "stale"])
+        assert result.exit_code == 0, result.output
+        assert "recorded: DISCARD" in result.output
+        assert self._statuses(a, b, inc) == [Status.RETRACTED] * 3
+
+    def test_review_listing_offers_discard(self, runner: CliRunner, cli_db: Path) -> None:
+        self._seed_conflict("x is 1", "x is 2")
+        result = _invoke(runner, ["review"])
+        assert "|DEFER|DISCARD]" in result.output
+
+    def test_bulk_discard_dry_run_lists_both_sides(self, runner: CliRunner, cli_db: Path) -> None:
+        a, b, inc = self._seed_conflict("x is 1", "x is 2")
+        result = _invoke(runner, ["review", "--bulk", "DISCARD", "--dry-run"])
+        assert result.exit_code == 0
+        assert "A: x is 1" in result.output
+        assert "B: x is 2" in result.output
+        assert "would retract both sides of 1 conflicts" in result.output
+        assert self._statuses(a, b, inc) == [Status.ACTIVE, Status.ACTIVE, Status.INCONSISTENCY]
+
+    def test_bulk_discard_asks_and_a_no_writes_nothing(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        a, b, inc = self._seed_conflict("x is 1", "x is 2")
+        result = runner.invoke(app, ["review", "--bulk", "DISCARD"], input="n\n")
+        assert result.exit_code == 1
+        assert "A: x is 1" in result.output
+        assert "Aborted; nothing written." in result.output
+        assert self._statuses(a, b, inc) == [Status.ACTIVE, Status.ACTIVE, Status.INCONSISTENCY]
+
+    def test_bulk_discard_with_yes_applies(self, runner: CliRunner, cli_db: Path) -> None:
+        a, b, inc = self._seed_conflict("x is 1", "x is 2")
+        result = _invoke(runner, ["review", "--bulk", "DISCARD", "--yes"])
+        assert result.exit_code == 0
+        assert "Done: 1 resolved, 0 failed." in result.output
+        assert self._statuses(a, b, inc) == [Status.RETRACTED] * 3
+
+    def test_bulk_other_actions_do_not_prompt(self, runner: CliRunner, cli_db: Path) -> None:
+        self._seed_conflict("x is 1", "x is 2")
+        result = _invoke(runner, ["review", "--bulk", "DEFER"])
+        assert result.exit_code == 0
+        assert "Proceed?" not in result.output
+
     def test_review_surfaces_author_id_and_role(self, runner: CliRunner, cli_db: Path) -> None:
         """Spec §6 v0.2 Core checklist: surface author_id and author_role in
         the Review UI for UGC corpus entries."""
@@ -1372,8 +1534,10 @@ class TestReindexCommand:
     def test_reindex_empty_db_succeeds(self, runner: CliRunner, cli_db: Path) -> None:
         result = _invoke(runner, ["reindex", "--format", "json"])
         assert result.exit_code == 0
-        # The summary is JSON-formatted; verify it's valid JSON with expected keys
-        parsed = _json_payload(result.output)
+        # The summary is JSON-formatted; verify it's valid JSON with expected keys.
+        # The run's usage line rides stderr, after it.
+        parsed = _json_payload(result.stdout)
+        assert "LLM usage: no LLM calls." in result.stderr
         assert parsed["scope"] == 0
         assert parsed["succeeded"] == 0
         assert parsed["failed"] == 0
@@ -1425,7 +1589,8 @@ class TestReindexCommand:
         with patch("particles.operations.reindex.extract_snapshot", new=extract):
             result = _invoke(runner, ["reindex", "--format", "json", "--entry-ids", entry_id])
         assert result.exit_code == 0
-        assert _json_payload(result.output)["scope"] == 1
+        # stdout only: the run's usage line follows on stderr.
+        assert _json_payload(result.stdout)["scope"] == 1
         extract.assert_called_once()
 
     def test_plan_line_prints_before_a_live_run(self, runner: CliRunner, cli_db: Path) -> None:
@@ -1605,6 +1770,23 @@ class TestExportCommand:
         assert (tmp_path / "my-vault").exists()
         # Literal "~" directory should NOT have been created in cwd.
         assert not Path("~/my-vault").exists() or (tmp_path / "my-vault").exists()
+
+    def test_export_obsidian_refuses_a_populated_vault_without_force(
+        self, runner: CliRunner, cli_db: Path, tmp_path: Path
+    ) -> None:
+        """the first export into a directory holding notes it did not
+        write is refused with a clean usage error; --force exports beside them."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "Ideas.md").write_text("my ideas\n")
+        result = runner.invoke(app, ["export", "obsidian", str(vault)])
+        assert result.exit_code == 2
+        assert "Ideas.md" in result.output
+        assert "--force" in result.output
+        result = _invoke(runner, ["export", "obsidian", str(vault), "--force"])
+        assert result.exit_code == 0, result.output
+        assert (vault / "Ideas.md").read_text() == "my ideas\n"
+        assert (vault / "_index.md").exists()
 
     def test_export_wiki_still_requires_explicit_path(
         self, runner: CliRunner, cli_db: Path
@@ -2026,6 +2208,112 @@ class TestExtractCommand:
         assert extracted == [ok_entry]
         assert "Extraction failed for 1 of 2 snapshot(s)." in result.output
 
+    def test_extract_all_pending_discloses_a_snapshot_left_pending(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every LLM call failed, so the pipeline handed the snapshot back PENDING.
+
+        The loop printed "0 particles" for it, which reads as a finished
+        extraction of an empty source, and exited 0.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        _run_async(_add_corpus_entry_with_id(str(uuid.uuid4()), str(uuid.uuid4())))
+
+        async def _fake_extract(_session: Any, e_id: str, s_id: str, **kw: Any) -> list[Any]:
+            kw["outcome_out"].failed_calls = 2
+            kw["outcome_out"].rebilled_calls = 3
+            return []
+
+        monkeypatch.setattr("particles.operations.extract.extract_snapshot", _fake_extract)
+        result = _invoke(runner, ["extract", "--all-pending"])
+        assert result.exit_code == 1
+        assert "left PENDING: 2 LLM call(s) produced nothing usable" in result.output
+        # the answered calls a retry pays for again are named.
+        assert "a retry sends its 3 answered call(s) again" in result.output
+        assert "0 particles" not in result.output
+        assert "1 of 1 snapshot(s) left PENDING after failed LLM calls" in result.output
+
+    def test_extract_all_pending_discloses_a_kept_partial_read(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partly failed append-only read kept what it answered."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        _run_async(_add_corpus_entry_with_id(str(uuid.uuid4()), str(uuid.uuid4())))
+
+        async def _fake_extract(_session: Any, e_id: str, s_id: str, **kw: Any) -> list[Any]:
+            kw["outcome_out"].failed_calls = 1
+            kw["outcome_out"].kept_calls = 4
+            kw["outcome_out"].rebilled_calls = 1
+            return [object(), object()]
+
+        monkeypatch.setattr("particles.operations.extract.extract_snapshot", _fake_extract)
+        result = _invoke(runner, ["extract", "--all-pending"])
+        assert "kept 4 answered call(s) (2 particles), and a retry reads only the rest" in (
+            result.output
+        )
+        assert "a retry sends 1 other answered call(s) again" in result.output
+
+    def test_extract_all_pending_names_a_waiting_snapshot(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A snapshot held by a partial whole read says which one, and why."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        _run_async(_add_corpus_entry_with_id(str(uuid.uuid4()), str(uuid.uuid4())))
+
+        async def _fake_extract(_session: Any, e_id: str, s_id: str, **kw: Any) -> list[Any]:
+            kw["outcome_out"].skipped = "waiting"
+            kw["outcome_out"].waiting_on = "abcdef0123456789"
+            return []
+
+        monkeypatch.setattr("particles.operations.extract.extract_snapshot", _fake_extract)
+        result = _invoke(runner, ["extract", "--all-pending"])
+        assert "skipped (waiting on abcdef01…, which holds a partial whole read" in result.output
+
+    def test_extract_all_pending_tag_scopes_the_run(
+        self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        memory_entry = str(uuid.uuid4())
+        transcript_entry = str(uuid.uuid4())
+        _run_async(
+            _add_corpus_entry_with_id(
+                memory_entry, str(uuid.uuid4()), tags=["claude-code", "memory-file"]
+            )
+        )
+        _run_async(
+            _add_corpus_entry_with_id(
+                transcript_entry, str(uuid.uuid4()), tags=["claude-code", "transcript"]
+            )
+        )
+        extracted: list[str] = []
+
+        async def _fake_extract(_session: Any, e_id: str, s_id: str, **_kw: Any) -> list[Any]:
+            extracted.append(e_id)
+            return []
+
+        monkeypatch.setattr("particles.operations.extract.extract_snapshot", _fake_extract)
+        result = _invoke(runner, ["extract", "--all-pending", "--tag", "memory-file"])
+        assert result.exit_code == 0, result.output
+        assert extracted == [memory_entry]
+        assert "Extracting 1 pending snapshot(s)" in result.output
+
+        result = _invoke(runner, ["extract", "--all-pending", "--tag", "no-such-tag"])
+        assert result.exit_code == 0
+        assert "No PENDING snapshots tagged no-such-tag found" in result.output
+
+    def test_extract_tag_requires_all_pending(self, runner: CliRunner, cli_db: Path) -> None:
+        result = runner.invoke(app, ["extract", "some-entry", "--tag", "memory-file"])
+        assert result.exit_code == 1
+        assert "--tag filters --all-pending" in result.output
+
+    def test_entry_has_tag_is_exact(self) -> None:
+        from particles.api.cli.extract import entry_has_tag
+
+        assert entry_has_tag('["claude-code", "memory-file"]', "memory-file")
+        assert not entry_has_tag('["memory-file-archive"]', "memory-file")
+        assert not entry_has_tag(None, "memory-file")
+        assert not entry_has_tag("not json", "memory-file")
+
     def test_extract_all_pending_translates_database_locked(
         self, runner: CliRunner, cli_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2385,6 +2673,107 @@ class TestOutboundUnreachableUx:
 
         with pytest.raises(RuntimeError, match="unrelated failure"):
             run(_boom())
+
+
+# ---------------------------------------------------------------------------
+# `db init` against a SQLite path whose directory cannot be created
+# ---------------------------------------------------------------------------
+
+
+class TestDbInitUncreatableDirectory:
+    """SQLite does not create a database's parent directory. The store layer
+    creates it, and when it cannot, the CLI reports one line and exits
+    nonzero instead of an Alembic traceback."""
+
+    def test_uncreatable_directory_is_one_line_error(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import reset_config
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file where the store directory should be")
+        db_dir = blocker / "store"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir / 'particles.db'}")
+        reset_config()
+
+        result = runner.invoke(app, ["db", "init"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        err_lines = result.stderr.strip().splitlines()
+        assert len(err_lines) == 1, result.stderr
+        assert str(db_dir) in err_lines[0]
+        assert "Traceback" not in result.output
+
+
+_SERVE_VERBS = [
+    pytest.param(["mcp", "serve"], "particles.mcp.main", id="mcp-serve"),
+    pytest.param(["memory", "serve"], "particles.mcp.memory_compat.main", id="memory-serve"),
+]
+
+
+class TestServeStoreDirectory:
+    """The stdio MCP servers never pass through ``run()``, and once the transport
+    is up a store failure can only reach the client as a tool error. They check
+    the store directory before serving: missing is created, uncreatable exits
+    with one line and never starts the server."""
+
+    @pytest.mark.parametrize(("argv", "serve_target"), _SERVE_VERBS)
+    def test_uncreatable_directory_exits_before_serving(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        serve_target: str,
+    ) -> None:
+        from particles.config import reset_config
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file where the store directory should be")
+        db_dir = blocker / "store"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir / 'particles.db'}")
+        reset_config()
+
+        with patch(serve_target) as serve_main:
+            result = runner.invoke(app, argv)
+
+        assert result.exit_code == 1
+        serve_main.assert_not_called()
+        err_lines = result.stderr.strip().splitlines()
+        assert len(err_lines) == 1, result.stderr
+        assert str(db_dir) in err_lines[0]
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize(("argv", "serve_target"), _SERVE_VERBS)
+    def test_missing_directory_is_created_before_serving(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        argv: list[str],
+        serve_target: str,
+    ) -> None:
+        from particles.config import reset_config
+
+        db_dir = tmp_path / "missing" / "nested"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir / 'particles.db'}")
+        reset_config()
+
+        with patch(serve_target) as serve_main:
+            result = runner.invoke(app, argv)
+
+        assert result.exit_code == 0, result.output
+        assert db_dir.is_dir()
+        serve_main.assert_called_once()
+
+    def test_memory_serve_unknown_store_is_one_line_error(self, runner: CliRunner) -> None:
+        with patch("particles.mcp.memory_compat.main") as serve_main:
+            result = runner.invoke(app, ["memory", "serve", "--store", "no-such-store"])
+
+        assert result.exit_code == 1
+        serve_main.assert_not_called()
+        assert result.stderr.strip() == "Error: Unknown store 'no-such-store'"
 
 
 # ---------------------------------------------------------------------------

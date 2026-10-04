@@ -29,6 +29,7 @@ from particles.extraction.general import (
     _split_into_paragraph_chunks,
     candidate_to_particle,
 )
+from tests._client_fixtures import stream_via_create
 
 
 class TestConfidenceClampADR0263:
@@ -423,6 +424,49 @@ class TestCallLlmFencing:
         assert nonce_match.group(1) in full_system
 
 
+class TestReferenceResolutionRule:
+    """0.16.0: every claim-emitting prompt asks the model to resolve deictic and
+    relative references ("my flat", "last month") against the same source, and
+    always gives it a reference date to resolve relative time against."""
+
+    @pytest.mark.parametrize("flag_on", [False, True])
+    def test_rule_rides_every_prompt_shape(self, flag_on: bool) -> None:
+        from particles.extraction.general import REFERENCE_RULE
+
+        prompt = _build_extract_prompt(
+            scope_enabled=flag_on,
+            modality_enabled=flag_on,
+            polarity_enabled=flag_on,
+            stance_enabled=flag_on,
+            validity_enabled=flag_on,
+            structure_enabled=flag_on,
+        )
+        assert REFERENCE_RULE in prompt
+        # Exactly one date anchor: the validity rule's, or the standalone line.
+        assert prompt.count("{reference_date}") == 1
+
+    def test_reference_date_filled_with_validity_off(self) -> None:
+        from particles.config import get_config
+        from particles.extraction.general import _build_llm_request
+
+        cfg = get_config().extraction_validity
+        original = cfg.enabled
+        cfg.enabled = False
+        try:
+            a = _build_llm_request("A", reference_published_at=datetime(2026, 9, 20, tzinfo=UTC))
+            b = _build_llm_request("B", reference_published_at=datetime(2025, 1, 5, tzinfo=UTC))
+        finally:
+            cfg.enabled = original
+        assert "valid_until" not in a.request.system
+        assert "2026-09-20" in a.request.system
+        # The date stays out of the cached prefix, so the prefix still hits
+        # across sources, and the rule itself is cached.
+        assert a.request.cache_prefix is not None
+        assert "2026-09-20" not in a.request.cache_prefix
+        assert a.request.cache_prefix == b.request.cache_prefix
+        assert "Resolve references before you write a claim" in a.request.cache_prefix
+
+
 class TestCandidateToParticle:
     """candidate_to_particle carries particle_type through (default CLAIM)."""
 
@@ -476,6 +520,7 @@ class TestGeneralExtractor:
         mock_client = MagicMock(spec=anthropic.Anthropic)
         mock_client.messages = MagicMock()
         mock_client.messages.create = MagicMock(return_value=mock_resp)
+        stream_via_create(mock_client)
 
         set_client(mock_client)
         try:
@@ -720,12 +765,13 @@ class TestContradictionSignalGate:
         from particles.llm import set_client
 
         mock_content = MagicMock()
-        mock_content.text = "YES: A asserts X, B asserts not-X"
+        mock_content.text = "REASON: A asserts X, B asserts not-X\nVERDICT: YES"
         mock_resp = MagicMock()
         mock_resp.content = [mock_content]
         mock_client = MagicMock(spec=anthropic.Anthropic)
         mock_client.messages = MagicMock()
         mock_client.messages.create = MagicMock(return_value=mock_resp)
+        stream_via_create(mock_client)
 
         set_client(mock_client)
         try:
@@ -738,6 +784,47 @@ class TestContradictionSignalGate:
             )
         finally:
             set_client(None)
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("REASON: port 8080 against port 9000.\nVERDICT: YES", True),
+            ("REASON: both can hold.\nVERDICT: NO", False),
+            ("  REASON: x\n\n**VERDICT: yes**  ", True),
+            # Cut at the budget before the verdict line: no verdict, never a YES.
+            ("REASON: The first claim says the port is 8080 while the second", None),
+            # The old verdict-first shape, and a reply naming both verdicts.
+            ("YES: they disagree", None),
+            ("VERDICT: YES\nREASON: on reflection they agree\nVERDICT: NO", None),
+            ("", None),
+        ],
+    )
+    def test_contradiction_verdict_reads_only_a_final_verdict_line(
+        self, reply: str, expected: bool | None
+    ) -> None:
+        """The §6.6 probe's verdict comes last, so a cut reply has none (2026-09-25 audit)."""
+        from particles.ingest.pipeline import _contradiction_verdict
+
+        assert _contradiction_verdict(reply) is expected
+
+    @pytest.mark.asyncio
+    async def test_contradiction_probe_asks_for_the_verdict_last_with_room_to_finish(
+        self,
+    ) -> None:
+        """claude-haiku-4-5 cut a 120-token reply once; the budget now fits a reason line."""
+        from particles.ingest import pipeline
+
+        prompt = pipeline._contradiction_prompt("A.", "B.")
+        assert prompt.index("REASON:") < prompt.index("VERDICT: YES")
+        assert prompt.endswith("Claim A: A.\n\nClaim B: B.")
+        complete = AsyncMock(return_value="REASON: port differs.\nVERDICT: YES")
+        with patch("particles.llm.complete", complete):
+            assert await pipeline._llm_confirms_contradiction("A.", "B.") is True
+        assert complete.await_args.kwargs["max_tokens"] == pipeline._CONTRADICTION_PROBE_MAX_TOKENS
+        assert pipeline._CONTRADICTION_PROBE_MAX_TOKENS >= 250
+        complete.return_value = "REASON: The first claim says the port is 8080 while"
+        with patch("particles.llm.complete", complete):
+            assert await pipeline._llm_confirms_contradiction("A.", "B.") is None
 
 
 @pytest.mark.asyncio
@@ -767,6 +854,7 @@ async def test_full_deposit_and_extract(db_session: object, tmp_path: Path) -> N
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     # Mock embedding model (returns fixed 4-dim vector for speed)
     from particles import embeddings as ep
@@ -832,6 +920,7 @@ async def test_extract_without_an_encoder_discloses_both_consequences(
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
     set_client(mock_client)
 
     try:
@@ -1152,6 +1241,7 @@ async def test_api_failure_keeps_snapshot_pending(db_session: object, tmp_path: 
     mock_client.messages.create = MagicMock(
         side_effect=Exception("Error code: 400 - credit balance is too low")
     )
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
@@ -1260,6 +1350,8 @@ class TestPdfTransientErrorPropagation:
 
         assert len(result.candidates) == 1
         assert result.transient_error_count == 1
+        # The answered page is the call a retry of the snapshot sends again.
+        assert result.answered_calls == 1
 
 
 class TestPdfPageCap:
@@ -1384,6 +1476,7 @@ async def test_chunked_total_failure_keeps_snapshot_pending(
     mock_client.messages.create = MagicMock(
         side_effect=Exception("Error code: 429 - rate limit exceeded")
     )
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
@@ -1417,8 +1510,10 @@ async def test_chunked_partial_failure_keeps_snapshot_pending(
     """A *partial* chunked failure (one chunk succeeds, the rest fail) also
     resets to PENDING and discards the partial candidates.
 
-    Per the retry-whole-snapshot policy: carry-forward dedupes the already-
-    succeeded chunk cheaply on the next run, so discarding here loses nothing.
+    Per the retry-whole-snapshot policy nothing from the pass is written, so no
+    claim is silently lost. Carry-forward cannot skip the answered chunk on the
+    retry (no particle carries its hash), and the outcome says the retry sends
+    that call again.
     """
     import anthropic
 
@@ -1426,7 +1521,7 @@ async def test_chunked_partial_failure_keeps_snapshot_pending(
     from particles.core.schema import ExtractionStatus
     from particles.corpus.deposit import deposit_file
     from particles.corpus.store import SnapshotRow
-    from particles.ingest.pipeline import extract_snapshot
+    from particles.ingest.pipeline import SnapshotOutcome, extract_snapshot
     from particles.llm import set_client
     from particles.store.particle_store import get_particles_for_entry
 
@@ -1457,6 +1552,7 @@ async def test_chunked_partial_failure_keeps_snapshot_pending(
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(side_effect=create)
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[[0.1, 0.2, 0.3, 0.4]])
@@ -1469,11 +1565,20 @@ async def test_chunked_partial_failure_keeps_snapshot_pending(
         entry_id, snapshot_id = await deposit_file(session, doc, deposited_by="test")  # type: ignore[arg-type]
         await session.commit()  # type: ignore[union-attr]
 
-        particles = await extract_snapshot(session, entry_id, snapshot_id)  # type: ignore[arg-type]
+        outcome = SnapshotOutcome()
+        particles = await extract_snapshot(
+            session,  # type: ignore[arg-type]
+            entry_id,
+            snapshot_id,
+            outcome_out=outcome,
+        )
         await session.commit()  # type: ignore[union-attr]
 
         # At least two chunks, so the first succeeded and a later one failed.
         assert state["n"] >= 2
+        assert outcome.failed_calls >= 1
+        # The one answered call is discarded with the rest and re-sent on retry.
+        assert outcome.rebilled_calls == 1
         assert particles == []
         snap_row = await session.get(SnapshotRow, snapshot_id)  # type: ignore[union-attr]
         assert snap_row is not None
@@ -1762,6 +1867,7 @@ def _single_candidate_client(content: str) -> Any:
     client = MagicMock(spec=anthropic.Anthropic)
     client.messages = MagicMock()
     client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(client)
     return client
 
 
@@ -2182,6 +2288,7 @@ def _stance_pair_client() -> Any:
     client = MagicMock(spec=anthropic.Anthropic)
     client.messages = MagicMock()
     client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(client)
     return client
 
 
@@ -2658,3 +2765,532 @@ class TestPooledExtraction:
         assert len(result.candidates) == 1
         assert result.transient_error_count == 1
         assert any("Page 2: API error: batch result unavailable" in n for n in result.quality_notes)
+
+
+# ---------------------------------------------------------------------------
+# Output-budget failures: one retry at extraction.retry_max_tokens, and a
+# per-pass tally of replies cut short (the 2026-09-25 audit run: 17 of 96
+# memory files hit max_tokens=8192 on claude-sonnet-5)
+# ---------------------------------------------------------------------------
+
+_ONE_CLAIM = json.dumps([{"content": "The deploy key rotates monthly.", "confidence_value": 0.9}])
+# Two whole claims, then a third cut mid-string at the budget.
+_CUT_REPLY = (
+    '[{"content": "Claim one.", "confidence_value": 0.9}, '
+    '{"content": "Claim two.", "confidence_value": 0.9}, '
+    '{"content": "Claim thr'
+)
+
+
+def _anthropic_reply(text: str | None, stop_reason: str = "end_turn") -> MagicMock:
+    """A Messages API response: one text block, or only a thinking block when ``text`` is None."""
+    if text is None:
+        block = MagicMock(spec=["type", "thinking"])
+        block.type = "thinking"
+    else:
+        block = MagicMock(spec=["type", "text"])
+        block.type = "text"
+        block.text = text
+    resp = MagicMock(spec=["content", "stop_reason"])
+    resp.content = [block]
+    resp.stop_reason = stop_reason
+    return resp
+
+
+def _scripted_anthropic(*replies: MagicMock) -> MagicMock:
+    import anthropic
+
+    client = MagicMock(spec=anthropic.Anthropic)
+    client.messages = MagicMock()
+    client.messages.create = MagicMock(side_effect=list(replies))
+    stream_via_create(client)
+    return client
+
+
+class TestReplyBudgetRetry:
+    @pytest.mark.asyncio
+    async def test_empty_completion_then_successful_retry(self) -> None:
+        """The model spent the whole budget thinking (no text block): the call is
+        re-issued once at the larger budget and its claims are kept."""
+        from particles.extraction.general import _call_llm, tally_replies
+        from particles.llm import set_client
+
+        client = _scripted_anthropic(
+            _anthropic_reply(None, stop_reason="max_tokens"), _anthropic_reply(_ONE_CLAIM)
+        )
+        set_client(client)
+        try:
+            with tally_replies() as tally:
+                candidates, notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+
+        assert [c.content for c in candidates] == ["The deploy key rotates monthly."]
+        assert transient is False
+        budgets = [call.kwargs["max_tokens"] for call in client.messages.create.call_args_list]
+        assert budgets == [32000, 64000]
+        # Both budgets are above the SDK's non-streaming ceiling, so both calls stream.
+        assert client.messages.stream.call_count == 2
+        assert (tally.retried, tally.truncated) == (1, 0)
+        assert not any("still" in n for n in notes)
+
+    @pytest.mark.asyncio
+    async def test_empty_twice_is_a_transient_failure(self) -> None:
+        """Still empty after the retry: nothing usable, so the snapshot stays
+        PENDING for a later retry instead of reading as an empty source."""
+        from particles.extraction.general import _call_llm
+        from particles.llm import set_client
+
+        set_client(
+            _scripted_anthropic(
+                _anthropic_reply(None, stop_reason="max_tokens"),
+                _anthropic_reply(None, stop_reason="max_tokens"),
+            )
+        )
+        try:
+            candidates, notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        assert candidates == []
+        assert transient is True
+        assert any("API error" in n for n in notes)
+
+    @pytest.mark.asyncio
+    async def test_truncated_reply_is_retried_and_recorded_when_still_cut(self) -> None:
+        from particles.extraction.general import _call_llm, tally_replies
+        from particles.llm import set_client
+
+        set_client(
+            _scripted_anthropic(
+                _anthropic_reply(_CUT_REPLY, stop_reason="max_tokens"),
+                _anthropic_reply(_CUT_REPLY, stop_reason="max_tokens"),
+            )
+        )
+        try:
+            with tally_replies() as tally:
+                candidates, notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        # The two complete claims are salvaged; the cut is recorded, not hidden.
+        assert [c.content for c in candidates] == ["Claim one.", "Claim two."]
+        assert transient is False
+        assert (tally.retried, tally.truncated) == (1, 1)
+        assert any("claims after the cut were lost" in n for n in notes)
+        assert any("still truncated after one retry" in n for n in notes)
+
+    @pytest.mark.asyncio
+    async def test_truncated_then_whole_reply_is_not_recorded_as_cut(self) -> None:
+        from particles.extraction.general import _call_llm, tally_replies
+        from particles.llm import set_client
+
+        set_client(
+            _scripted_anthropic(
+                _anthropic_reply(_CUT_REPLY, stop_reason="max_tokens"),
+                _anthropic_reply(_ONE_CLAIM),
+            )
+        )
+        try:
+            with tally_replies() as tally:
+                candidates, _notes, _transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        # The first reply kept two claims and the retry one: the larger set wins,
+        # but it is the truncated one, so the cut is still recorded.
+        assert len(candidates) == 2
+        assert tally.truncated == 1
+
+    @pytest.mark.asyncio
+    async def test_unparseable_reply_is_transient_after_the_retry(self) -> None:
+        from particles.extraction.general import _call_llm
+        from particles.llm import set_client
+
+        set_client(
+            _scripted_anthropic(
+                _anthropic_reply("I could not find any claims, sorry."),
+                _anthropic_reply("Still no JSON here."),
+            )
+        )
+        try:
+            candidates, _notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        assert candidates == []
+        assert transient is True
+
+    @pytest.mark.asyncio
+    async def test_whole_reply_is_not_retried(self) -> None:
+        from particles.extraction.general import _call_llm
+        from particles.llm import set_client
+
+        client = _scripted_anthropic(_anthropic_reply(_ONE_CLAIM))
+        set_client(client)
+        try:
+            await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        assert client.messages.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_disabled_when_its_budget_is_not_larger(self) -> None:
+        from particles.config import get_config
+        from particles.extraction.general import _call_llm
+        from particles.llm import set_client
+
+        get_config().extraction.retry_max_tokens = 0
+        client = _scripted_anthropic(_anthropic_reply(None, stop_reason="max_tokens"))
+        set_client(client)
+        try:
+            candidates, _notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        assert client.messages.create.call_count == 1
+        assert (candidates, transient) == ([], True)
+
+    @pytest.mark.asyncio
+    async def test_a_non_budget_failure_is_never_retried(self) -> None:
+        """A network or server error is not a budget failure: retrying at a
+        larger budget would only bill twice."""
+        import anthropic
+
+        from particles.extraction.general import _call_llm
+        from particles.llm import set_client
+
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.create = MagicMock(side_effect=RuntimeError("connection reset"))
+        stream_via_create(client)
+        set_client(client)
+        try:
+            candidates, _notes, transient = await _call_llm("A memory file.")
+        finally:
+            set_client(None)
+        assert client.messages.create.call_count == 1
+        assert (candidates, transient) == ([], True)
+
+    def test_default_budgets_are_sent_the_way_the_sdk_accepts(self) -> None:
+        """The Anthropic SDK refuses a non-streaming request whose max_tokens
+        implies more than ten minutes of output. A default budget either fits
+        under that ceiling or is above the adapter's threshold, so it streams."""
+        import anthropic
+
+        from particles.config import get_config
+        from particles.llm.adapters.anthropic import _NONSTREAMING_MAX_TOKENS
+
+        client = anthropic.Anthropic(api_key="sk-test")
+        # The adapter's threshold is the SDK's own ceiling, to the token.
+        client._calculate_nonstreaming_timeout(_NONSTREAMING_MAX_TOKENS, None)
+        with pytest.raises(ValueError, match="Streaming is required"):
+            client._calculate_nonstreaming_timeout(_NONSTREAMING_MAX_TOKENS + 1, None)
+        cfg = get_config().extraction
+        for budget in (cfg.max_tokens, cfg.retry_max_tokens):
+            if budget <= _NONSTREAMING_MAX_TOKENS:
+                client._calculate_nonstreaming_timeout(budget, None)  # raises if too large
+
+
+# ---------------------------------------------------------------------------
+# on the chunked path: a long transcript's tool turns are
+# relabelled, so each chunk carrying one must also carry the rule that says
+# what the label means — on the sequential and the pooled path alike.
+# ---------------------------------------------------------------------------
+
+
+def _long_transcript() -> str:
+    """Three paragraphs, only the middle one carrying a tool turn."""
+    filler = "user: I have been thinking about the garden a great deal lately.\n" * 3
+    return (
+        filler
+        + "\n"
+        + "assistant: let me look that up\ntool: Profile snippet — diet: keto\n"
+        + "\n"
+        + filler
+    )
+
+
+class TestToolTurnRuleOnChunkedPath:
+    @pytest.fixture(autouse=True)
+    def _small_chunks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.config import get_config
+
+        # One paragraph per chunk, so the tool turn lands in exactly one.
+        monkeypatch.setattr(get_config().extraction, "html_chunk_size", 200)
+
+    @staticmethod
+    def _full(system: str | None, cache_prefix: str | None, prompt: str) -> str:
+        return (system or "") + (cache_prefix or "") + prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mark_tools", [True, False])
+    async def test_sequential_chunks_get_the_rule_only_where_a_tool_turn_is(
+        self, mark_tools: bool
+    ) -> None:
+        from particles.extraction.general import GeneralExtractor
+        from particles.extraction.tool_turns import TOOL_TURN_LABEL, TOOL_TURN_RULE
+
+        prompts: list[tuple[str, str]] = []
+
+        async def _fake_complete(purpose: str, prompt: str, **kwargs: Any) -> tuple[str, str]:
+            full = self._full(kwargs.get("system"), kwargs.get("cache_prefix"), prompt)
+            prompts.append((prompt, full))
+            return "[]", "anthropic:test-model"
+
+        with patch("particles.llm.complete_with_provider_model", _fake_complete):
+            result = await GeneralExtractor()._extract_single_pass(
+                _long_transcript().encode(), mark_tools=mark_tools
+            )
+
+        assert len(prompts) == 3  # the chunked path ran
+        with_rule = [TOOL_TURN_RULE in full for _, full in prompts]
+        if mark_tools:
+            assert [TOOL_TURN_LABEL in user for user, _ in prompts] == [False, True, False]
+            assert with_rule == [False, True, False]
+            assert any("turn(s) marked unverified" in n for n in result.quality_notes)
+        else:
+            # Unmarked source: no chunk's prompt changes.
+            assert with_rule == [False, False, False]
+
+    @pytest.mark.asyncio
+    async def test_pooled_chunks_get_the_rule_only_where_a_tool_turn_is(self) -> None:
+        from particles.extraction.general import GeneralExtractor
+        from particles.extraction.tool_turns import TOOL_TURN_RULE
+        from particles.llm import CompletionPool
+
+        pooled = AsyncMock(return_value=(["[]"] * 3, "anthropic:test-model"))
+        with patch("particles.extraction.general._pooled_group_complete", pooled):
+            await GeneralExtractor()._extract_single_pass(
+                _long_transcript().encode(),
+                mark_tools=True,
+                completion_pool=CompletionPool("extraction"),
+            )
+
+        planned = pooled.await_args.args[1]
+        assert [
+            TOOL_TURN_RULE in self._full(p.request.system, p.request.cache_prefix, p.request.prompt)
+            for p in planned
+        ] == [False, True, False]
+
+
+# ---------------------------------------------------------------------------
+# the pooled (batch) path retries a budget-failed reply as the
+# sequential path does, in a follow-up pooled batch at retry_max_tokens.
+# ---------------------------------------------------------------------------
+
+
+_THREE_CLAIMS = json.dumps(
+    [{"content": f"Claim {n}.", "confidence_value": 0.9} for n in ("one", "two", "three")]
+)
+
+
+class _ScriptedBatches:
+    """A Message Batches client whose replies are chosen by a marker in each prompt.
+
+    ``script[marker]`` is a list of replies, one per batch the marker's request
+    rides in: ``("text", body, stop_reason)``, ``("no_text", stop_reason)`` or
+    ``("errored",)``.
+    """
+
+    def __init__(self, script: dict[str, list[tuple[Any, ...]]]) -> None:
+        self.script = {k: list(v) for k, v in script.items()}
+        self.submitted: list[list[dict[str, Any]]] = []
+
+    def create(self, requests: list[dict[str, Any]]) -> Any:
+        self.submitted.append(requests)
+        return MagicMock(id=f"batch-{len(self.submitted)}")
+
+    def retrieve(self, batch_id: str) -> Any:
+        return MagicMock(processing_status="ended")
+
+    def results(self, batch_id: str) -> list[Any]:
+        entries = []
+        for request in self.submitted[int(batch_id.rsplit("-", 1)[1]) - 1]:
+            prompt = request["params"]["messages"][0]["content"]
+            marker = next(m for m in self.script if m in prompt)
+            reply = self.script[marker].pop(0)
+            entry = MagicMock(custom_id=request["custom_id"])
+            if reply[0] == "errored":
+                entry.result = MagicMock(type="errored")
+            else:
+                if reply[0] == "text":
+                    block = MagicMock(spec=["type", "text"], type="text", text=reply[1])
+                    stop_reason = reply[2]
+                else:
+                    block = MagicMock(spec=["type", "thinking"], type="thinking")
+                    stop_reason = reply[1]
+                message = MagicMock(spec=["content", "stop_reason", "usage"])
+                message.content, message.stop_reason, message.usage = [block], stop_reason, None
+                entry.result = MagicMock(type="succeeded", message=message)
+            entries.append(entry)
+        return entries
+
+
+class TestPooledReplyBudgetRetry:
+    @pytest.mark.asyncio
+    async def test_cut_and_empty_batch_replies_are_retried_in_one_follow_up_batch(self) -> None:
+        """Two snapshots' requests share the first batch. A reply cut at the budget,
+        one with an empty text block (the owner's ``char 0``) and one with no text
+        block at all are re-issued together in ONE follow-up batch at
+        ``extraction.retry_max_tokens``; an errored request is not re-issued."""
+        import asyncio
+
+        import anthropic
+
+        from particles.config import get_config
+        from particles.extraction.general import (
+            _build_llm_request,
+            _pooled_extract,
+            tally_replies,
+        )
+        from particles.llm import CompletionPool, set_client
+
+        batch_cfg = get_config().llm.batch
+        batch_cfg.min_requests = 1
+        batch_cfg.poll_interval_seconds = 0
+        scripted = _ScriptedBatches(
+            {
+                "SRC-CUT": [
+                    ("text", _CUT_REPLY, "max_tokens"),
+                    ("text", _THREE_CLAIMS, "end_turn"),
+                ],
+                "SRC-WHOLE": [("text", _ONE_CLAIM, "end_turn")],
+                "SRC-BLANK": [("text", "", "max_tokens"), ("text", _ONE_CLAIM, "end_turn")],
+                "SRC-THINK": [("no_text", "max_tokens"), ("text", _ONE_CLAIM, "end_turn")],
+                "SRC-GONE": [("errored",)],
+            }
+        )
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.batches = scripted
+        client.messages.create = MagicMock(side_effect=AssertionError("no sequential call"))
+
+        pool = CompletionPool("extraction", expected_participants=2)
+
+        async def snapshot(*markers: str) -> tuple[list[Any], Any]:
+            async with pool.participant():
+                with tally_replies() as tally:
+                    planned = [_build_llm_request(f"Source {m}.") for m in markers]
+                    return await _pooled_extract(pool, planned), tally
+
+        set_client(client)
+        try:
+            (a, a_tally), (b, b_tally) = await asyncio.gather(
+                snapshot("SRC-CUT", "SRC-WHOLE"),
+                snapshot("SRC-BLANK", "SRC-THINK", "SRC-GONE"),
+            )
+        finally:
+            set_client(None)
+
+        # One merged first batch, then ONE follow-up holding exactly the three
+        # budget failures, at the larger budget.
+        assert [len(s) for s in scripted.submitted] == [5, 3]
+        first_budgets = {r["params"]["max_tokens"] for r in scripted.submitted[0]}
+        retry_budgets = {r["params"]["max_tokens"] for r in scripted.submitted[1]}
+        assert first_budgets == {get_config().extraction.max_tokens}
+        assert retry_budgets == {get_config().extraction.retry_max_tokens}
+        retried = " ".join(r["params"]["messages"][0]["content"] for r in scripted.submitted[1])
+        assert all(m in retried for m in ("SRC-CUT", "SRC-BLANK", "SRC-THINK"))
+        assert "SRC-GONE" not in retried
+
+        # Snapshot A: the cut reply's retry came back whole, so nothing was lost.
+        assert [(len(c), t) for c, _, t in a] == [(3, False), (1, False)]
+        assert (a_tally.retried, a_tally.truncated) == (1, 0)
+        # Snapshot B: both budget failures recovered; the errored request stays a
+        # transient failure, which hands the snapshot back PENDING.
+        assert [(len(c), t) for c, _, t in b] == [(1, False), (1, False), (0, True)]
+        assert (b_tally.retried, b_tally.truncated) == (2, 0)
+        assert any("batch result unavailable" in n for n in b[2][1])
+
+    @pytest.mark.asyncio
+    async def test_a_reply_still_cut_after_the_retry_keeps_its_claims_and_says_so(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Parity with the sequential path: still cut after the retry, the complete
+        leading claims are kept (not a transient failure), the cut is recorded on
+        the tally and in the notes, and the warning that claims were lost is
+        logged once, for the final reply only."""
+        import anthropic
+
+        from particles.config import get_config
+        from particles.extraction.general import (
+            _build_llm_request,
+            _pooled_extract,
+            tally_replies,
+        )
+        from particles.llm import CompletionPool, set_client
+
+        batch_cfg = get_config().llm.batch
+        batch_cfg.min_requests = 1
+        batch_cfg.poll_interval_seconds = 0
+        scripted = _ScriptedBatches(
+            {"SRC-CUT": [("text", _CUT_REPLY, "max_tokens"), ("text", _CUT_REPLY, "max_tokens")]}
+        )
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.batches = scripted
+        pool = CompletionPool("extraction", expected_participants=1)
+
+        set_client(client)
+        try:
+            with caplog.at_level("INFO"), tally_replies() as tally:
+                async with pool.participant():
+                    [(candidates, notes, transient)] = await _pooled_extract(
+                        pool, [_build_llm_request("Source SRC-CUT.")]
+                    )
+        finally:
+            set_client(None)
+
+        assert len(scripted.submitted) == 2
+        assert [c.content for c in candidates] == ["Claim one.", "Claim two."]
+        assert transient is False
+        assert (tally.retried, tally.truncated) == (1, 1)
+        assert any("still truncated after one retry" in n for n in notes)
+        lost = [r for r in caplog.records if "claims after the cut were lost" in r.getMessage()]
+        assert len(lost) == 1 and lost[0].levelname == "WARNING"
+        assert "after one retry" in lost[0].getMessage()
+
+
+@pytest.mark.asyncio
+class TestGenericInstanceWritePath:
+    """A generic and an instance claim are not an adjudicable pair.
+
+    The probe is pinned to YES and the trust gap to a decisive one, so any pair
+    that reached the ladder would be retired or turned into an INCONSISTENCY.
+    """
+
+    async def test_generic_against_instance_keeps_both_active(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        from particles.core.status import Status
+        from particles.store.particle_store import get_particle, get_particles_by_status
+
+        written, seed_id, _ = await _drive_conflict(
+            db_session,
+            tmp_path,
+            has_signal=True,
+            score_new=0.9,
+            score_existing=0.1,
+            seed_content="Most mammals bear live young.",
+            candidate_content="The platypus lays eggs.",
+        )
+
+        assert len(written) == 1 and written[0].status == Status.ACTIVE
+        assert (await get_particle(db_session, seed_id)).status == Status.ACTIVE
+        assert len(await get_particles_by_status(db_session, Status.ACTIVE)) == 2
+        assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
+
+    async def test_two_generics_still_reach_the_ladder(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        from particles.core.status import Status
+        from particles.store.particle_store import get_particle
+
+        written, seed_id, _ = await _drive_conflict(
+            db_session,
+            tmp_path,
+            has_signal=True,
+            score_new=0.5,
+            score_existing=0.5,
+            seed_content="Most mammals bear live young.",
+            candidate_content="Most mammals do not bear live young.",
+        )
+
+        assert len(written) == 1 and written[0].status == Status.INCONSISTENCY
+        assert (await get_particle(db_session, seed_id)).status == Status.ACTIVE

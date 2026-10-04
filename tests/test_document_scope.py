@@ -38,6 +38,7 @@ from particles.extraction.scope import (
     SCOPE_KEY,
     is_excluded_document_meta,
 )
+from tests._client_fixtures import stream_via_create
 
 # --------------------------------------------------------------------------
 # The shared exclusion predicate
@@ -216,6 +217,7 @@ async def test_query_excludes_document_meta_by_default(db_session: object) -> No
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
@@ -259,6 +261,7 @@ async def test_lint_excludes_document_meta_from_contradictions(db_session: objec
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock()
+    stream_via_create(mock_client)
     set_client(mock_client)
     try:
         findings = await _check_contradictions(session, fix=False)  # type: ignore[arg-type]
@@ -307,6 +310,7 @@ async def test_pipeline_writes_document_meta_active_with_tag(
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[[0.1, 0.2, 0.3, 0.4]])

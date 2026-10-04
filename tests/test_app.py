@@ -376,6 +376,101 @@ class TestQualityDashboard:
         assert body["active_particles"] == 1
         assert body["total_entries"] == 1
 
+    def test_curation_precision_block(self, client: TestClient) -> None:
+        """the block is ``null`` with nothing to measure, then a report."""
+        assert client.get("/quality").json()["curation_precision"] is None
+
+        async def _affirm() -> None:
+            from particles.db import session_scope
+            from particles.store.event_store import OperatorEventType, record_event
+
+            async with session_scope() as session:
+                await record_event(
+                    session,
+                    actor="http:/curation/affirm",
+                    event_type=OperatorEventType.BELIEF_AFFIRMED,
+                    payload={"card_key": "duplicate_pair:a|b", "kind": "duplicate_pair"},
+                )
+                await session.commit()
+
+        _run_async(_affirm())
+        body = client.get("/quality").json()["curation_precision"]
+        assert body["acted"] == 1
+        assert body["precision"] == 1.0
+        assert body["kinds"][0]["kind"] == "duplicate_pair"
+        assert set(body["kinds"][0]) >= {
+            "offered",
+            "acted",
+            "dismissed",
+            "snoozed",
+            "open",
+            "expired",
+            "precision",
+            "acted_means",
+            "dismissed_means",
+        }
+
+
+class TestVocabularyReport:
+    """the read-time vocabulary report behind its own route."""
+
+    def test_empty_db(self, client: TestClient) -> None:
+        resp = client.get("/vocabulary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["subjects_total"] == 0
+        assert body["predicates"] == []
+        assert body["alignment_source"] is None
+        assert body["observer_scope"] is None
+        assert "DUPLICATES_MERGED" in body["modelling_decisions"]
+
+    def test_with_a_structured_claim(self, client: TestClient) -> None:
+        async def _seed() -> None:
+            from particles.core.schema import ClaimTerm, StructuredClaim, TermKind
+            from particles.db import session_scope
+            from particles.store.particle_store import insert_particle
+
+            claim = StructuredClaim(
+                subject=ClaimTerm(kind=TermKind.TOKEN, value="the report"),
+                predicate=ClaimTerm(kind=TermKind.TOKEN, value="covers"),
+                object=ClaimTerm(kind=TermKind.LITERAL, value="1987"),
+                structurizer_id="test",
+                structurizer_version="1.0.0",
+            )
+            particle = Particle(
+                content="The report covers 1987.",
+                confidence=Confidence(
+                    value=0.8, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                ),
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                asserted_by="test",
+                status=Status.ACTIVE,
+                provenance=[
+                    ProvenanceRef(
+                        type=ProvenanceRefType.SOURCE, corpus_entry_id="e", snapshot_id="s"
+                    )
+                ],
+                structured_claim=claim,
+            )
+            async with session_scope() as session:
+                await insert_particle(session, particle, [0.5, 0.5, 0.5, 0.5])
+                await session.commit()
+
+        _run_async(_seed())
+        body = client.get("/vocabulary").json()
+        assert body["claims_in_view"] == 1
+        row = body["predicates"][0]
+        assert (row["label"], row["claim_count"]) == ("covers", 1)
+        assert row["object_shapes"]["numeric"] == 1
+        assert row["subject_classes"] == [{"subject_class": "(unresolved)", "count": 1}]
+        assert row["alignments"] == []
+
+    def test_observer_project_is_passed_through(self, client: TestClient) -> None:
+        body = client.get("/vocabulary", params={"observer_project": "-proj-a"}).json()
+        # A store never rescoped cannot engage an observer, and says so.
+        assert body["observer_scope"]["project"] == "-proj-a"
+        assert body["observer_scope"]["engaged"] is False
+
 
 # ---------------------------------------------------------------------------
 # GET /particles/{id}/source — source-passage hydration
@@ -472,8 +567,13 @@ class TestCuration:
         assert body["built_at"]
         assert body["stale"] is False
         assert body["scope"] == "store"
-        # Every card kind is disclosed as store-wide on an explicit rebuild.
-        assert set(body["per_kind_scope"].values()) == {"store"}
+        # A structural rebuild is store-wide for every kind but the contradiction
+        # probe, which did not run, so that kind is carried forward.
+        scopes = body["per_kind_scope"]
+        assert scopes.pop("contradiction") == "carried"
+        assert set(scopes.values()) == {"store"}
+        assert "contradiction" not in body["kind_as_of"]
+        assert body["kind_as_of"]["stale"]
 
     def test_no_snapshot_param_bypasses_the_cache(self, client: TestClient) -> None:
         resp = client.get("/curation", params={"semantic": False, "no_snapshot": True})
@@ -489,39 +589,55 @@ class TestCuration:
         assert second["snapshot_id"] != first["snapshot_id"]
         assert second["scope"] == "store"
 
-    def test_contested_belief_surfaces_a_card(self, client: TestClient) -> None:
-        # An open INCONSISTENCY referencing two ACTIVE beliefs yields contested
-        # cards via get_inconsistency_backrefs (no LLM, no fix mutation).
-        _run_async(_add_inconsistency())
+    def test_open_conflict_surfaces_one_card(self, client: TestClient) -> None:
+        # an open INCONSISTENCY yields one card keyed by the record,
+        # not one CONTESTED card per claim (no LLM, no fix mutation).
+        inc_id = _run_async(_add_inconsistency())
         resp = client.get("/curation", params={"semantic": False})
         assert resp.status_code == 200
         body = resp.json()
         assert body["count"] == len(body["cards"])
-        assert body["count"] >= 1
-        kinds = {c["kind"] for c in body["cards"]}
-        assert "contested" in kinds
+        kinds = [c["kind"] for c in body["cards"]]
+        assert kinds.count("inconsistency") == 1
+        assert "contested" not in kinds
         # The card shape carries the fields the client renders.
-        contested = next(c for c in body["cards"] if c["kind"] == "contested")
-        assert contested["particle_ids"]
-        assert contested["suggested_gestures"]
-        assert "leverage" in contested
+        card = next(c for c in body["cards"] if c["kind"] == "inconsistency")
+        assert card["key"] == f"inconsistency:{inc_id}"
+        assert len(card["particle_ids"]) == 2
+        assert card["suggested_gestures"] == ["resolve", "snooze"]
+        assert card["resolve_actions"] == ["PREFER_A", "PREFER_B", "BOTH_VALID", "DISCARD"]
+        assert "leverage" in card
 
     def test_kind_filter_restricts_card_kinds(self, client: TestClient) -> None:
         _run_async(_add_inconsistency())
-        resp = client.get("/curation", params={"semantic": False, "kind": "contested"})
+        resp = client.get("/curation", params={"semantic": False, "kind": "inconsistency"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["count"] >= 1
-        assert all(c["kind"] == "contested" for c in body["cards"])
+        assert all(c["kind"] == "inconsistency" for c in body["cards"])
 
     def test_limit_caps_the_queue(self, client: TestClient) -> None:
-        # _add_inconsistency seeds two contested beliefs ⇒ two cards; limit=1 caps.
+        # Two open conflicts ⇒ two cards; limit=1 caps.
+        _run_async(_add_inconsistency())
         _run_async(_add_inconsistency())
         resp = client.get("/curation", params={"semantic": False, "limit": 1})
         assert resp.status_code == 200
         body = resp.json()
         assert body["count"] == 1
         assert len(body["cards"]) == 1
+        # The slice is not the backlog: open_count says what is behind it.
+        assert body["open_count"] >= 2
+
+    def test_conflict_card_names_both_sides_and_its_question(self, client: TestClient) -> None:
+        _run_async(_add_inconsistency())
+        body = client.get("/curation", params={"semantic": False, "kind": "inconsistency"}).json()
+        card = body["cards"][0]
+        assert card["title"] == "Open conflict"
+        assert card["question"]
+        assert card["conflict"]["inconsistency_id"] == card["inconsistency_id"]
+        sides = [card["conflict"]["a"]["particle_id"], card["conflict"]["b"]["particle_id"]]
+        assert card["particle_ids"] == sides
+        assert card["conflict"]["further_a"] == card["conflict"]["further_b"] == []
 
     def test_unknown_kind_returns_400(self, client: TestClient) -> None:
         resp = client.get("/curation", params={"semantic": False, "kind": "bogus"})
@@ -914,6 +1030,21 @@ class TestReview:
         events = client.get("/events", params={"type": "REVIEW_RESOLVED"}).json()
         assert len(events) == 1
         assert any(r["ref_id"] == inc_id for r in events[0]["refs"])
+
+    def test_review_discard_over_http(self, client: TestClient) -> None:
+        # DISCARD is accepted by POST /review/{id}, retracts both
+        # claims, and writes no trust statement.
+        inc_id = _run_async(_add_inconsistency())
+        resp = client.post(
+            f"/review/{inc_id}",
+            json={"action": "DISCARD", "reviewer_id": "tester", "note": "noise"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["resolution"] == "DISCARD"
+        assert body["trust_statement_id"] is None
+        retracted = client.get("/events", params={"type": "PARTICLE_RETRACTED"}).json()
+        assert len(retracted) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1587,6 +1718,29 @@ class TestOperatorCurationWrites:
         assert body["verdict"] == "ASSERTED"
         old = client.get(f"/particles/{target.id}").json()
         assert old["status"] == Status.SUPERSEDED.value
+        # the successor is the operator's, not the agent's.
+        new = client.get(f"/particles/{body['asserted_particle_id']}").json()
+        assert new["asserted_by"] == "operator:local"
+        assert new["confidence"]["calibration_source"] == "HUMAN_REVIEW"
+
+    def test_operator_supersede_rejects_an_out_of_range_confidence(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        target = _extracted_particle("X is five.")
+        _run_async(_insert(target))
+        resp = client.post(
+            f"/particles/{target.id}/supersede",
+            json={
+                "content": "X is six.",
+                "subject_names": ["X"],
+                "confidence": 1.5,
+                "source_excerpt": "e",
+                "reason": "r",
+            },
+        )
+        assert resp.status_code == 400
+        assert "between 0 and 1" in resp.json()["detail"]
+        assert client.get(f"/particles/{target.id}").json()["status"] == Status.ACTIVE.value
 
     def test_operator_supersede_reason_is_required(
         self, client: TestClient, belief_writes_enabled: None
@@ -1613,7 +1767,7 @@ class TestOperatorCurationWrites:
         )
         assert resp.status_code == 403
 
-    def test_assign_subject_by_id_carries_provenance(
+    def test_assign_subject_by_id_links_in_place(
         self, client: TestClient, belief_writes_enabled: None
     ) -> None:
         # Create a Subject the operator picks, plus a NO_SUBJECT orphan.
@@ -1623,16 +1777,34 @@ class TestOperatorCurationWrites:
         resp = client.post(f"/particles/{target.id}/subjects", json={"subject_id": subj["id"]})
         assert resp.status_code == 200
         body = resp.json()
-        assert body["verdict"] == "ASSERTED"
-        successor = client.get(f"/particles/{body['asserted_particle_id']}").json()
-        # Provenance carry-over: same content + confidence + extractor.
-        assert successor["content"] == "An orphaned claim."
-        assert successor["confidence"]["value"] == 0.7
-        assert successor["confidence"]["calibration_source"] == "EXTRACTOR_DIRECT"
-        assert successor["asserted_by"] == "general-extractor"
-        assert subj["id"] in successor["subject_ids"]
-        old = client.get(f"/particles/{target.id}").json()
-        assert old["status"] == Status.SUPERSEDED.value
+        # the same belief, linked in place; no successor.
+        assert body["verdict"] == "SUBJECT_ASSIGNED"
+        assert body["asserted_particle_id"] == target.id
+        same = client.get(f"/particles/{target.id}").json()
+        assert same["status"] == Status.ACTIVE.value
+        assert same["content"] == "An orphaned claim."
+        assert same["confidence"]["value"] == 0.7
+        assert same["asserted_by"] == "general-extractor"
+        assert same["subject_ids"] == [subj["id"]]
+
+    def test_relink_gated_dry_run_needs_no_write_gate(self, client: TestClient) -> None:
+        # planning is read-only, so it answers even with writes off.
+        resp = client.post("/subjects/relink-gated", json={})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["applied"] is False and body["recoverable"] == 0
+        assert body["tiers"] == [1, 2, 3]
+
+    def test_relink_gated_apply_disabled_403(self, client: TestClient) -> None:
+        resp = client.post("/subjects/relink-gated", json={"dry_run": False})
+        assert resp.status_code == 403
+
+    def test_relink_gated_apply_with_writes(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        resp = client.post("/subjects/relink-gated", json={"dry_run": False, "tiers": [3]})
+        assert resp.status_code == 200
+        assert resp.json()["applied"] is True and resp.json()["tiers"] == [3]
 
     def test_assign_subject_bad_request_400(
         self, client: TestClient, belief_writes_enabled: None
@@ -1724,6 +1896,50 @@ class TestOperatorCurationWrites:
     def test_snooze_disabled_403(self, client: TestClient) -> None:
         resp = client.post("/curation/snooze", json={"card_key": "k"})
         assert resp.status_code == 403
+
+    def test_dismissing_a_demotion_card_records_a_benchmark_fixture(
+        self, client: TestClient, belief_writes_enabled: None, tmp_path: Path
+    ) -> None:
+        # a permanent snooze of a demotion card is a "coexist" ruling;
+        # a timed snooze rules nothing.
+        from particles.config import get_config
+        from particles.core.status import Status, StatusReason
+
+        get_config().benchmark.runs_dir = str(tmp_path / "runs")
+        retired = _extracted_particle("The price is $299.")
+        replacement = _extracted_particle("The price is $699.").model_copy(
+            update={"supersedes": retired.id}
+        )
+        _run_async(_insert(retired))
+        _run_async(_insert(replacement))
+
+        async def _demote() -> None:
+            from particles.db import session_scope
+            from particles.store.particle_store import update_particle_status
+
+            async with session_scope() as session:
+                await update_particle_status(
+                    session,
+                    retired.id,
+                    Status.PROVENANCE_STALE,
+                    StatusReason.SUPERSEDED_BY_UPDATE,
+                )
+                await session.commit()
+
+        _run_async(_demote())
+        key = f"demotion:{'|'.join(sorted([retired.id, replacement.id]))}"
+        path = tmp_path / "runs" / "demotion-rulings.jsonl"
+
+        timed = client.post("/curation/snooze", json={"card_key": key, "snooze_days": 7})
+        assert timed.status_code == 200
+        assert timed.json()["benchmark_fixture"] is None
+        assert not path.exists()
+
+        resp = client.post("/curation/snooze", json={"card_key": key})
+        assert resp.status_code == 200
+        assert resp.json()["benchmark_fixture"] == "Recorded as a benchmark fixture."
+        [line] = path.read_text().splitlines()
+        assert '"ruling":"coexist"' in line
 
 
 # ---------------------------------------------------------------------------

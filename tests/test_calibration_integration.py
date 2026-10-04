@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -61,6 +61,90 @@ def runner() -> CliRunner:
 
 def _invoke(runner: CliRunner, args: list[str]) -> object:
     return runner.invoke(app, args, catch_exceptions=False)
+
+
+#: Sentinel for "the running extractor's version" in the seeding helper.
+_RUNNING = "<running>"
+
+
+def _running_version(extractor_id: str) -> str:
+    """The ``EXTRACTOR_VERSION`` of the registered extractor ``extractor_id``."""
+    from particles.extraction.registry import get_extractors
+
+    return next(e for e in get_extractors() if extractor_id == e.EXTRACTOR_ID).EXTRACTOR_VERSION
+
+
+def _write_heldout_run(
+    runs_dir: Path,
+    claims: list[tuple[float, str]],
+    *,
+    extractor_id: str = "numista-coin-extractor",
+    extractor_version: str | None = None,
+    provider_model: str | None = None,
+    suite_id: str = "numismatic-seed-001",
+    name: str = "20261001T000000Z",
+) -> Path:
+    """Write one recorded benchmark run in the envelope `extractor benchmark` persists.
+
+    ``claims`` are ``(raw confidence, outcome)`` pairs. Version and pairing
+    default to what `extractor calibrate` will look for under the test config,
+    so a run written with the defaults qualifies as held out.
+    """
+    import json
+
+    from particles.config import get_config
+    from particles.extraction.registry import get_extractors
+
+    if extractor_version is None:
+        extractor = next(e for e in get_extractors() if extractor_id == e.EXTRACTOR_ID)
+        extractor_version = extractor.EXTRACTOR_VERSION
+    if provider_model is None:
+        sel = get_config().llm.for_purpose("extraction")
+        provider_model = f"{sel.provider}:{sel.model}"
+    envelope = {
+        "format": 1,
+        "extraction_provider_model": provider_model,
+        "report": {
+            "suite_id": suite_id,
+            "extractor_id": extractor_id,
+            "extractor_version": extractor_version,
+            "per_case": [
+                {
+                    "case_id": "heldout-case",
+                    "emitted_claims": [
+                        {"confidence": conf, "outcome": outcome} for conf, outcome in claims
+                    ],
+                }
+            ],
+        },
+    }
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    path = runs_dir / f"{name}-benchmark-{extractor_id}-{suite_id}.json"
+    path.write_text(json.dumps(envelope))
+    return path
+
+
+#: A held-out population the numismatic calibration fit (T≈1.66, which pulls
+#: 0.95 down to about 0.86) improves: stated 0.95, right 80 % of the time.
+_PASSING_HELDOUT = [(0.95, "matched")] * 8 + [(0.95, "spurious")] * 2
+
+#: One the same fit worsens: stated 0.95 and right every time, so cutting the
+#: confidence only opens a gap that was not there.
+_WORSENING_HELDOUT = [(0.95, "matched")] * 10
+
+
+@pytest.fixture(autouse=True)
+def heldout_runs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Give every test its own runs dir holding one held-out run the numista fit passes.
+
+    `extractor calibrate` refuses to persist without a recorded held-out run,
+    and the shared test runs dir accumulates files across
+    sessions, so each test pins its own.
+    """
+    runs_dir = tmp_path / "heldout-runs"
+    monkeypatch.setenv("BENCHMARK_RUNS_DIR", str(runs_dir))
+    _write_heldout_run(runs_dir, _PASSING_HELDOUT)
+    return runs_dir
 
 
 # ---------------------------------------------------------------------------
@@ -270,33 +354,58 @@ class TestPerProviderCalibrationStore:
     async def test_registry_version_refresh_leaves_calibration(
         self, db_session: AsyncSession
     ) -> None:
-        """A version-only registry upsert must not disturb stored calibrations."""
+        """A version refresh keeps the record stored and stops applying it.
+
+        A registry version refresh leaves calibrations in place, and
+        it still does: the record is the audit trail of a fit and the operator's
+        to refit or retire. What changed (the 2026-10-02 amendment) is that it no
+        longer *applies* under the new version, because a prompt change was
+        measured to reverse what a temperature does.
+        """
         from particles.core.schema import ExtractorRecord
+        from particles.extraction.calibration import version_mismatch_reason
         from particles.store.extractor_store import (
             get_calibration,
+            get_extractor_record,
             upsert_calibration,
             upsert_extractor_record,
         )
 
+        await upsert_extractor_record(
+            db_session,
+            ExtractorRecord(extractor_id="my-extractor", name="my-extractor", version="0.1.0"),
+        )
         cal = ExtractorCalibration(
             temperature=1.4,
+            transform=TRANSFORM_LOGIT,
             fitted_at=datetime(2026, 5, 25, 0, 0, 0, tzinfo=UTC),
             benchmark_suite_id="s",
             sample_size=5,
             calibration_error_before=0.1,
             calibration_error_after=0.02,
             provider_model="anthropic:claude-sonnet-4-6",
+            extractor_version="0.1.0",
         )
         await upsert_calibration(db_session, "my-extractor", cal)
+        assert version_mismatch_reason(cal, "0.1.0") is None
         await upsert_extractor_record(
             db_session,
             ExtractorRecord(extractor_id="my-extractor", name="my-extractor", version="0.2.0"),
         )
         await db_session.commit()
 
+        # Still stored, unchanged: not deleted by the refresh.
         loaded = await get_calibration(db_session, "my-extractor", "anthropic:claude-sonnet-4-6")
         assert loaded is not None
         assert loaded.temperature == pytest.approx(1.4)
+        assert loaded.extractor_version == "0.1.0"
+        # …and not applied under the refreshed version.
+        refreshed = await get_extractor_record(db_session, "my-extractor")
+        assert refreshed is not None
+        assert refreshed.version == "0.2.0"
+        assert version_mismatch_reason(loaded, refreshed.version) == (
+            "fitted under 0.1.0, running 0.2.0"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1028,13 +1137,20 @@ def _seed_calibration_sync(
     pairing: str,
     suite_id: str,
     transform: str | None = TRANSFORM_LOGIT,
+    extractor_version: str | None = _RUNNING,
 ) -> None:
     """Persist one calibration directly, bypassing a fit.
 
     ``transform`` defaults to the applicable form so suite-set staleness can be
     exercised on its own; pass ``None`` for a pre-ADR-0238 record.
+    ``extractor_version`` defaults to the running extractor's, for the same
+    reason; pass another version, or ``None`` for a record persisted before
+    the key existed.
     """
     import asyncio
+
+    if extractor_version == _RUNNING:
+        extractor_version = _running_version(extractor_id)
 
     async def _seed() -> None:
         from particles.db import session_scope
@@ -1053,6 +1169,7 @@ def _seed_calibration_sync(
                     calibration_error_before=0.775,
                     calibration_error_after=0.088,
                     provider_model=pairing,
+                    extractor_version=extractor_version,
                 ),
             )
             await session.commit()
@@ -1176,6 +1293,293 @@ class TestSuiteStalenessReporting:
         assert result.exit_code == 0, combined
         assert "another stored calibration" in combined
         assert "local:qwen" in combined
+
+
+class TestHeldOutGuardCLI:
+    """`extractor calibrate` never persists a fit that fails out of sample.
+
+    The numismatic calibration fit clears every in-sample guard,
+    so each refusal here is the held-out check's alone.
+    """
+
+    def _calibrate(self, runner: CliRunner, *extra: str) -> object:
+        return _invoke(
+            runner,
+            [
+                "extractor",
+                "calibrate",
+                "numista-coin-extractor",
+                "--suites-dir",
+                str(_CALIBRATION_SUITES),
+                "--fixtures",
+                str(_FIXTURES),
+                *extra,
+            ],
+        )
+
+    def _stored(self) -> ExtractorCalibration | None:
+        import asyncio
+
+        from particles.config import get_config
+
+        sel = get_config().llm.for_purpose("extraction")
+
+        async def _read() -> ExtractorCalibration | None:
+            from particles.db import session_scope
+            from particles.store.extractor_store import get_calibration
+
+            async with session_scope() as session:
+                return await get_calibration(
+                    session, "numista-coin-extractor", f"{sel.provider}:{sel.model}"
+                )
+
+        return asyncio.run(_read())
+
+    def test_persisted_record_carries_the_held_out_figures(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        result = self._calibrate(runner)
+        assert result.exit_code == 0, result.output
+        assert "held-out: ECE" in result.output
+        record = self._stored()
+        assert record is not None
+        assert record.heldout_suite_id == "numismatic-seed-001"
+        assert record.heldout_sample_size == len(_PASSING_HELDOUT)
+        assert record.heldout_error_before is not None
+        assert record.heldout_error_after is not None
+        assert record.heldout_error_after <= record.heldout_error_before
+
+    def test_a_fit_that_worsens_held_out_ece_is_refused(
+        self, runner: CliRunner, cli_db: Path, heldout_runs_dir: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        for f in heldout_runs_dir.glob("*.json"):
+            f.unlink()
+        _write_heldout_run(heldout_runs_dir, _WORSENING_HELDOUT)
+        result = self._calibrate(runner)
+        assert result.exit_code == 1
+        assert "held-out regression" in result.output
+        assert "Refusing to persist" in result.output
+        assert self._stored() is None
+
+    def test_no_held_out_run_refuses_the_fit(
+        self, runner: CliRunner, cli_db: Path, heldout_runs_dir: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        for f in heldout_runs_dir.glob("*.json"):
+            f.unlink()
+        result = self._calibrate(runner)
+        assert result.exit_code == 1
+        assert "no held-out check" in result.output
+        assert self._stored() is None
+
+    def test_dry_run_reports_the_refusal_too(
+        self, runner: CliRunner, cli_db: Path, heldout_runs_dir: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        for f in heldout_runs_dir.glob("*.json"):
+            f.unlink()
+        _write_heldout_run(heldout_runs_dir, _WORSENING_HELDOUT)
+        result = self._calibrate(runner, "--dry-run")
+        assert result.exit_code == 1
+        assert "held-out regression" in result.output
+
+    @pytest.mark.parametrize(
+        "mismatch",
+        [
+            {"extractor_version": "0.0.0-other"},
+            {"provider_model": "other:model"},
+            {"suite_id": "numismatic-calibration-001"},  # the suite the fit consumed
+            {"extractor_id": "rdf-extractor"},
+        ],
+    )
+    def test_runs_that_are_not_held_out_for_this_fit_are_ignored(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        heldout_runs_dir: Path,
+        mismatch: dict[str, str],
+    ) -> None:
+        """Another version, pairing, extractor, or the fitted suite is not held-out evidence.
+
+        Each mismatching run would have *passed* the check, so the only way the
+        fit is refused is that the run was ignored and nothing was left.
+        """
+        _init_extractor_records_sync(cli_db)
+        for f in heldout_runs_dir.glob("*.json"):
+            f.unlink()
+        _write_heldout_run(heldout_runs_dir, _PASSING_HELDOUT, **mismatch)  # type: ignore[arg-type]
+        result = self._calibrate(runner)
+        assert result.exit_code == 1
+        assert "no held-out check" in result.output
+
+    def test_an_unreadable_run_file_is_skipped(
+        self, runner: CliRunner, cli_db: Path, heldout_runs_dir: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        (heldout_runs_dir / "20261002T000000Z-benchmark-numista-coin-extractor-x.json").write_text(
+            "{not json"
+        )
+        result = self._calibrate(runner)
+        assert result.exit_code == 0, result.output
+        assert "skipping unreadable benchmark run" in result.output
+
+    def test_listing_flags_a_record_never_checked_out_of_sample(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        _seed_calibration_sync(
+            "numista-coin-extractor", "anthropic:claude-sonnet-4-6", "numismatic-calibration-001"
+        )
+        result = _invoke(runner, ["extractor", "calibrations", "numista-coin-extractor"])
+        assert result.exit_code == 0, result.output
+        assert "NOT CHECKED OUT OF SAMPLE" in result.output
+
+    def test_listing_shows_the_held_out_figures_of_a_checked_record(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        assert self._calibrate(runner).exit_code == 0
+        result = _invoke(runner, ["extractor", "calibrations", "numista-coin-extractor"])
+        assert "held-out ECE" in result.output
+        assert "NOT CHECKED OUT OF SAMPLE" not in result.output
+
+
+class TestExtractorVersionKey:
+    """a record applies only under the extractor version it was fitted under."""
+
+    def _calibrate(self, runner: CliRunner, *extra: str) -> Any:
+        return _invoke(
+            runner,
+            [
+                "extractor",
+                "calibrate",
+                "numista-coin-extractor",
+                "--suites-dir",
+                str(_CALIBRATION_SUITES),
+                "--fixtures",
+                str(_FIXTURES),
+                *extra,
+            ],
+        )
+
+    def _listing(self, runner: CliRunner) -> Any:
+        return _invoke(
+            runner,
+            [
+                "extractor",
+                "calibrations",
+                "numista-coin-extractor",
+                "--suites-dir",
+                str(_SEED_SUITE.parent),
+            ],
+        )
+
+    def _pairing(self) -> str:
+        from particles.config import get_config
+
+        sel = get_config().llm.for_purpose("extraction")
+        return f"{sel.provider}:{sel.model}"
+
+    def _stored(self) -> ExtractorCalibration | None:
+        import asyncio
+
+        async def _read() -> ExtractorCalibration | None:
+            from particles.db import session_scope
+            from particles.store.extractor_store import get_calibration
+
+            async with session_scope() as session:
+                return await get_calibration(session, "numista-coin-extractor", self._pairing())
+
+        return asyncio.run(_read())
+
+    def test_calibrate_stamps_the_version_the_held_out_guard_checked(
+        self, runner: CliRunner, cli_db: Path, heldout_runs_dir: Path
+    ) -> None:
+        """The stamp and the guard read one value, so they cannot disagree."""
+        import json
+
+        from particles.extraction.calibration import version_mismatch_reason
+
+        _init_extractor_records_sync(cli_db)
+        result = self._calibrate(runner)
+        assert result.exit_code == 0, result.output
+        running = _running_version("numista-coin-extractor")
+        assert f"Calibration persisted for 'numista-coin-extractor' {running}" in result.output
+
+        record = self._stored()
+        assert record is not None
+        assert record.extractor_version == running
+        # The only held-out run the guard could score was recorded at that version.
+        (run_file,) = heldout_runs_dir.glob("*.json")
+        assert json.loads(run_file.read_text())["report"]["extractor_version"] == running
+        assert version_mismatch_reason(record, running) is None
+
+        listing = self._listing(runner)
+        assert f"under {running}" in listing.output
+        assert "NOT APPLIED" not in listing.output
+
+    def test_listing_flags_a_record_fitted_under_another_version(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        running = _running_version("numista-coin-extractor")
+        _seed_calibration_sync(
+            "numista-coin-extractor",
+            "local:qwen",
+            "numismatic-seed-001",
+            extractor_version="0.0.0-old",
+        )
+        result = self._listing(runner)
+        assert result.exit_code == 0, result.output
+        assert f"NOT APPLIED (fitted under 0.0.0-old, running {running})" in result.output
+        assert "EXTRACTOR_DIRECT" in result.output
+        # The record is listed, not hidden, with both ways out.
+        assert "under 0.0.0-old" in result.output
+        assert "--regenerate" in result.output
+        assert "calibration-forget numista-coin-extractor local:qwen" in result.output
+
+    def test_listing_flags_a_record_with_no_version_as_not_applied(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        """Every record persisted before the key existed reads this way."""
+        _init_extractor_records_sync(cli_db)
+        running = _running_version("numista-coin-extractor")
+        _seed_calibration_sync(
+            "numista-coin-extractor", "local:qwen", "numismatic-seed-001", extractor_version=None
+        )
+        result = self._listing(runner)
+        assert result.exit_code == 0, result.output
+        assert (
+            f"NOT APPLIED (fitted under an unknown extractor version, running {running})"
+            in result.output
+        )
+        assert "under unknown version" in result.output
+        assert "calibration-forget numista-coin-extractor local:qwen" in result.output
+
+    def test_calibrate_guard_names_an_inert_record_and_regenerate_replaces_it(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        _init_extractor_records_sync(cli_db)
+        running = _running_version("numista-coin-extractor")
+        _seed_calibration_sync(
+            "numista-coin-extractor",
+            self._pairing(),
+            "numismatic-calibration-001",
+            extractor_version="0.0.0-old",
+        )
+        refused = self._calibrate(runner)
+        combined = refused.output + (refused.stderr or "")
+        assert refused.exit_code == 1, combined
+        assert f"NOT APPLIED (fitted under 0.0.0-old, running {running})" in combined
+        assert "--regenerate" in combined
+
+        replaced = self._calibrate(runner, "--regenerate")
+        assert replaced.exit_code == 0, replaced.output
+        record = self._stored()
+        assert record is not None
+        assert record.extractor_version == running
 
 
 class TestCalibrationForgetCLI:

@@ -1,0 +1,138 @@
+# Ordinary-prose subject-resolution gold set.
+#
+# A resolution-only gold set: names, the sentence each appears in, and the
+# external ref the resolver should give it. It has no claim gold, so it is not
+# an extractor benchmark suite and lives outside tests/benchmark/suites/, where
+# suite discovery would pick it up and score claims it has no gold for.
+#
+# Why it exists. prose-article-seed-001's gold subjects were written around
+# known resolver failures (invented companies named with ordinary words, real
+# software crowded by other senses). That is the right fixture for showing a
+# failure, and the wrong one for estimating how a resolver change does on
+# prose nobody wrote for it. This set is the second column the default
+# decision asked for: short passages in ordinary genres, read for the entities
+# a writer would name in passing.
+#
+# How it was written, in this order, so the gold does not lean on any resolver:
+#   1. Eight passages in eight genres. Facts about real entities are true and
+#      well known; the people and the one internal event are invented.
+#   2. Every proper-named entity in a passage is a gold subject (the
+#      prose-article-seed-001 rule), and each mention is the passage sentence
+#      naming it, verbatim.
+#   3. Each gold ref was chosen from live Wikidata (2026-10-01) by reading the
+#      candidates' descriptions, and fixed before either selection value was
+#      run. A name with no item for the entity meant is null.
+#
+# Labelling conventions:
+#   * A city takes its main item, the municipality that the English Wikipedia
+#     article is attached to (Porto Q36433, not the "city seat" Q33707919).
+#   * A product named as a tool takes the software item (Figma Q96186334, not
+#     Figma Inc).
+#   * Vitest is real but has no Wikidata item (a full-text search finds only a
+#     podcast episode about it), so its gold is null.
+#   * Priya and Jordan are colleagues known by first name, the private
+#     referents ordinary notes are full of; null.
+#   * Ottolenghi is the chef (Q8056413), although a search for the bare
+#     surname does not return him among its first seven hits.
+
+gold_set_id: ordinary-prose-001
+version: 0.1.0
+source_type: WEB_PAGE
+
+passages:
+  local-news-001: >-
+    Cambridge City Council approved a new foot and cycle bridge over the River
+    Cam near Chesterton on Tuesday. Councillor Mark Ellison said the bridge
+    would take pressure off the existing crossings. Network Rail will close the
+    nearby level crossing for six weeks during construction.
+  tech-blog-001: >-
+    We moved our frontend build from Webpack to Vite last quarter. Build times
+    on GitHub Actions dropped from nine minutes to under three. We also
+    replaced Jest with Vitest, because Vitest reads the same config as Vite.
+    Lena Marsh, our designer, still prototypes everything in Figma first.
+  travel-001: >-
+    We flew from Lisbon to Porto, then took the train along the Douro River to
+    Pinhão. Our guide, Rui Matos, recommended the port lodges in Vila Nova de
+    Gaia. On the last day we drove north to Braga to climb the steps of Bom
+    Jesus do Monte.
+  business-001: >-
+    Shell moved its headquarters from The Hague to London in 2022. BP has its
+    head office in London as well. Both companies list their shares on the
+    London Stock Exchange.
+  science-001: >-
+    The James Webb Space Telescope observes in infrared from an orbit around
+    the second Lagrange point. It was launched on an Ariane 5 rocket from
+    Kourou in French Guiana in December 2021. NASA built the telescope with the
+    European Space Agency and the Canadian Space Agency.
+  sports-001: >-
+    Arsenal play their home matches at the Emirates Stadium in Holloway.
+    Chelsea's ground is Stamford Bridge, in Fulham. Both clubs compete in the
+    Premier League.
+  home-blog-001: >-
+    I bought a cast-iron skillet from Lodge, and it works well on the induction
+    hob we got from IKEA. My neighbour Priya swears by Le Creuset, but their
+    pans cost four times as much. The recipe I keep coming back to is from
+    Ottolenghi.
+  team-notes-001: >-
+    The quarterly offsite is in Denver this year. Flights are booked on Delta,
+    and the team is staying at the Brown Palace. Jordan, who joined from
+    Salesforce last year, will present on the second morning.
+
+gold_subjects:
+  # local-news-001
+  - {case_id: local-news-001, name: Cambridge City Council, ref: "wikidata:Q5025388", mention: "Cambridge City Council approved a new foot and cycle bridge over the River Cam near Chesterton on Tuesday."}
+  - {case_id: local-news-001, name: River Cam, ref: "wikidata:Q944772", mention: "Cambridge City Council approved a new foot and cycle bridge over the River Cam near Chesterton on Tuesday."}
+  - {case_id: local-news-001, name: Chesterton, ref: "wikidata:Q1848958", mention: "Cambridge City Council approved a new foot and cycle bridge over the River Cam near Chesterton on Tuesday."}
+  - {case_id: local-news-001, name: Mark Ellison, ref: null, mention: "Councillor Mark Ellison said the bridge would take pressure off the existing crossings."}
+  - {case_id: local-news-001, name: Network Rail, ref: "wikidata:Q1501071", mention: "Network Rail will close the nearby level crossing for six weeks during construction."}
+  # tech-blog-001
+  - {case_id: tech-blog-001, name: Webpack, ref: "wikidata:Q22909730", mention: "We moved our frontend build from Webpack to Vite last quarter."}
+  - {case_id: tech-blog-001, name: Vite, ref: "wikidata:Q111590996", mention: "We moved our frontend build from Webpack to Vite last quarter."}
+  - {case_id: tech-blog-001, name: GitHub Actions, ref: "wikidata:Q97185096", mention: "Build times on GitHub Actions dropped from nine minutes to under three."}
+  - {case_id: tech-blog-001, name: Jest, ref: "wikidata:Q65121527", mention: "We also replaced Jest with Vitest, because Vitest reads the same config as Vite."}
+  - {case_id: tech-blog-001, name: Vitest, ref: null, mention: "We also replaced Jest with Vitest, because Vitest reads the same config as Vite."}
+  - {case_id: tech-blog-001, name: Lena Marsh, ref: null, mention: "Lena Marsh, our designer, still prototypes everything in Figma first."}
+  - {case_id: tech-blog-001, name: Figma, ref: "wikidata:Q96186334", mention: "Lena Marsh, our designer, still prototypes everything in Figma first."}
+  # travel-001
+  - {case_id: travel-001, name: Lisbon, ref: "wikidata:Q597", mention: "We flew from Lisbon to Porto, then took the train along the Douro River to Pinhão."}
+  - {case_id: travel-001, name: Porto, ref: "wikidata:Q36433", mention: "We flew from Lisbon to Porto, then took the train along the Douro River to Pinhão."}
+  - {case_id: travel-001, name: Douro River, ref: "wikidata:Q14299", mention: "We flew from Lisbon to Porto, then took the train along the Douro River to Pinhão."}
+  - {case_id: travel-001, name: Pinhão, ref: "wikidata:Q1019773", mention: "We flew from Lisbon to Porto, then took the train along the Douro River to Pinhão."}
+  - {case_id: travel-001, name: Rui Matos, ref: null, mention: "Our guide, Rui Matos, recommended the port lodges in Vila Nova de Gaia."}
+  - {case_id: travel-001, name: Vila Nova de Gaia, ref: "wikidata:Q191135", mention: "Our guide, Rui Matos, recommended the port lodges in Vila Nova de Gaia."}
+  - {case_id: travel-001, name: Braga, ref: "wikidata:Q83247", mention: "On the last day we drove north to Braga to climb the steps of Bom Jesus do Monte."}
+  - {case_id: travel-001, name: Bom Jesus do Monte, ref: "wikidata:Q2707216", mention: "On the last day we drove north to Braga to climb the steps of Bom Jesus do Monte."}
+  # business-001
+  - {case_id: business-001, name: Shell, ref: "wikidata:Q154950", mention: "Shell moved its headquarters from The Hague to London in 2022."}
+  - {case_id: business-001, name: The Hague, ref: "wikidata:Q36600", mention: "Shell moved its headquarters from The Hague to London in 2022."}
+  - {case_id: business-001, name: London, ref: "wikidata:Q84", mention: "Shell moved its headquarters from The Hague to London in 2022."}
+  - {case_id: business-001, name: BP, ref: "wikidata:Q152057", mention: "BP has its head office in London as well."}
+  - {case_id: business-001, name: London Stock Exchange, ref: "wikidata:Q171240", mention: "Both companies list their shares on the London Stock Exchange."}
+  # science-001
+  - {case_id: science-001, name: James Webb Space Telescope, ref: "wikidata:Q186447", mention: "The James Webb Space Telescope observes in infrared from an orbit around the second Lagrange point."}
+  - {case_id: science-001, name: Ariane 5, ref: "wikidata:Q18532", mention: "It was launched on an Ariane 5 rocket from Kourou in French Guiana in December 2021."}
+  - {case_id: science-001, name: Kourou, ref: "wikidata:Q273312", mention: "It was launched on an Ariane 5 rocket from Kourou in French Guiana in December 2021."}
+  - {case_id: science-001, name: French Guiana, ref: "wikidata:Q3769", mention: "It was launched on an Ariane 5 rocket from Kourou in French Guiana in December 2021."}
+  - {case_id: science-001, name: NASA, ref: "wikidata:Q23548", mention: "NASA built the telescope with the European Space Agency and the Canadian Space Agency."}
+  - {case_id: science-001, name: European Space Agency, ref: "wikidata:Q42262", mention: "NASA built the telescope with the European Space Agency and the Canadian Space Agency."}
+  - {case_id: science-001, name: Canadian Space Agency, ref: "wikidata:Q212227", mention: "NASA built the telescope with the European Space Agency and the Canadian Space Agency."}
+  # sports-001
+  - {case_id: sports-001, name: Arsenal, ref: "wikidata:Q9617", mention: "Arsenal play their home matches at the Emirates Stadium in Holloway."}
+  - {case_id: sports-001, name: Emirates Stadium, ref: "wikidata:Q163995", mention: "Arsenal play their home matches at the Emirates Stadium in Holloway."}
+  - {case_id: sports-001, name: Holloway, ref: "wikidata:Q124308", mention: "Arsenal play their home matches at the Emirates Stadium in Holloway."}
+  - {case_id: sports-001, name: Chelsea, ref: "wikidata:Q9616", mention: "Chelsea's ground is Stamford Bridge, in Fulham."}
+  - {case_id: sports-001, name: Stamford Bridge, ref: "wikidata:Q171458", mention: "Chelsea's ground is Stamford Bridge, in Fulham."}
+  - {case_id: sports-001, name: Fulham, ref: "wikidata:Q3367868", mention: "Chelsea's ground is Stamford Bridge, in Fulham."}
+  - {case_id: sports-001, name: Premier League, ref: "wikidata:Q9448", mention: "Both clubs compete in the Premier League."}
+  # home-blog-001
+  - {case_id: home-blog-001, name: Lodge, ref: "wikidata:Q17034962", mention: "I bought a cast-iron skillet from Lodge, and it works well on the induction hob we got from IKEA."}
+  - {case_id: home-blog-001, name: IKEA, ref: "wikidata:Q54078", mention: "I bought a cast-iron skillet from Lodge, and it works well on the induction hob we got from IKEA."}
+  - {case_id: home-blog-001, name: Priya, ref: null, mention: "My neighbour Priya swears by Le Creuset, but their pans cost four times as much."}
+  - {case_id: home-blog-001, name: Le Creuset, ref: "wikidata:Q555861", mention: "My neighbour Priya swears by Le Creuset, but their pans cost four times as much."}
+  - {case_id: home-blog-001, name: Ottolenghi, ref: "wikidata:Q8056413", mention: "The recipe I keep coming back to is from Ottolenghi."}
+  # team-notes-001
+  - {case_id: team-notes-001, name: Denver, ref: "wikidata:Q16554", mention: "The quarterly offsite is in Denver this year."}
+  - {case_id: team-notes-001, name: Delta, ref: "wikidata:Q188920", mention: "Flights are booked on Delta, and the team is staying at the Brown Palace."}
+  - {case_id: team-notes-001, name: Brown Palace, ref: "wikidata:Q991069", mention: "Flights are booked on Delta, and the team is staying at the Brown Palace."}
+  - {case_id: team-notes-001, name: Jordan, ref: null, mention: "Jordan, who joined from Salesforce last year, will present on the second morning."}
+  - {case_id: team-notes-001, name: Salesforce, ref: "wikidata:Q941127", mention: "Jordan, who joined from Salesforce last year, will present on the second morning."}

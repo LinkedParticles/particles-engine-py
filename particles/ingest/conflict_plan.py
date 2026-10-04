@@ -38,6 +38,7 @@ from particles.core.conflict_resolution import (
     LadderOutcome,
     build_inconsistency_particle,
 )
+from particles.core.contradiction_disclosure import READING_KEY
 from particles.core.schema import Particle, ProvenanceRefType
 from particles.core.status import Status, StatusReason
 from particles.store.event_store import EventRefKind, OperatorEventType
@@ -97,6 +98,7 @@ def plan_quarantine(
     snapshot_id: str,
     trigger_ref_type: ProvenanceRefType,
     retired_twin: bool = False,
+    reading: str | None = None,
 ) -> tuple[Particle, Particle]:
     """The quarantined candidate and the INCONSISTENCY record that names it.
 
@@ -105,7 +107,9 @@ def plan_quarantine(
     was once a dangling id). ``PROVENANCE_STALE`` keeps it off query and lint;
     ``CONFLICT_PENDING`` carries the semantics and is what the insert seam
     requires for this birth. ``retired_twin`` marks ``existing`` as a claim
-    retired by judgment rather than a live one.
+    retired by judgment rather than a live one. ``reading`` is the
+    instruction a second reading confirmed the pair under, stamped on the
+    record as ``conflict:reading``; ``None`` leaves it unstamped.
     """
     quarantined = new.model_copy(
         update={
@@ -122,6 +126,10 @@ def plan_quarantine(
         trigger_ref_type=trigger_ref_type,
         retired_twin=retired_twin,
     )
+    if reading is not None:
+        wrapper = wrapper.model_copy(
+            update={"properties": {**(wrapper.properties or {}), READING_KEY: reading}}
+        )
     return quarantined, wrapper
 
 
@@ -180,12 +188,14 @@ def plan_conflict_writes(
     trigger_ref_type: ProvenanceRefType,
     scores: tuple[float | None, float | None],
     domain: str | None,
+    reading: str | None = None,
 ) -> ConflictWritePlan:
     """Map one ladder outcome to its writes.
 
     ``scores`` is ``(trust_score_new, trust_score_existing)``, recorded in the
     dropped-candidate event and the trust-resolution log lines. ``domain`` is
-    the INCONSISTENCY record's ``domain_hint``.
+    the INCONSISTENCY record's ``domain_hint``. ``reading`` is the instruction a
+    second reading confirmed the pair under, stamped on a rung-3 record.
     """
     score_new, score_existing = scores
     new_short, existing_short = new.id[:8], existing.id[:8]
@@ -323,6 +333,7 @@ def plan_conflict_writes(
                 corpus_entry_id=corpus_entry_id,
                 snapshot_id=snapshot_id,
                 trigger_ref_type=trigger_ref_type,
+                reading=reading,
             )
             return ConflictWritePlan(
                 insert=quarantined,

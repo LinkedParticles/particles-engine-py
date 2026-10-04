@@ -36,6 +36,7 @@ from particles.config import get_config
 from particles.core.claims import ClaimMatch, match_claim
 from particles.core.schema import (
     SCHEMA_VERSION,
+    AnswerAttribution,
     AnswerFailureCause,
     AsOfNote,
     ClaimCoverage,
@@ -75,6 +76,7 @@ from particles.store.particle_store import (
 from .as_of import load_as_of_view
 from .decay_policy import DecayPolicy, load_decay_policy
 from .gaps import _find_coverage_gaps, _find_subject_coverage_gaps
+from .grounding import composed_particles, parse_grounded, particle_handles
 from .observer_scope import filter_visible, merged_scope_note
 from .rank import RANKING_DEGRADED_NO_ENCODER, _collapse_co_evidential_top_k, _embed
 from .respond import (
@@ -557,6 +559,17 @@ async def _build_response(
     answer_generation_error: str | None = None
     answer_generation_error_cause: AnswerFailureCause | None = None
     answer_refused = False
+    answer_attribution: AnswerAttribution | None = None
+    # a grounded answer cites the handles of what the composer was
+    # shown. The request decides; unset, the configured default does.
+    grounded = (
+        request.grounded if request.grounded is not None else get_config().query.grounded_answers
+    )
+    handles = (
+        particle_handles(composed_particles(top_particles, narrative_constituents))
+        if grounded and top_particles
+        else None
+    )
     if relevance is not None and relevance.below_floor:
         answer = _below_floor_answer(request, relevance, len(top_particles))
         answer_refused = True
@@ -571,11 +584,18 @@ async def _build_response(
                 coverage_note,
                 narrative_constituents=narrative_constituents,
                 as_of=request.as_of,
+                handles=handles,
             )
             # the responder leads a non-bearing refusal with the
             # NO_RELEVANT_KNOWLEDGE marker — strip it, keep the prose, record
             # the machine-readable flag.
             answer, answer_refused = strip_refusal_marker(answer)
+            if handles is not None and not answer_refused:
+                # every cited handle checked against what the
+                # composer was shown; the uncited units keep the composer's
+                # own label. Nothing is dropped.
+                parsed = parse_grounded(answer, handles)
+                answer, answer_attribution = parsed.answer, parsed.attribution
         except Exception as exc:
             # Disclosed degradation, never a quiet one (the honesty
             # posture): a billing/network/provider failure used to be silently
@@ -617,6 +637,7 @@ async def _build_response(
         answer_generation_error_cause=answer_generation_error_cause,
         ranking_degraded=ranking_degraded,
         answer_refused=answer_refused,
+        answer_attribution=answer_attribution,
         particles=top_particles,
         effective_confidences=top_eff_confs,
         content_published_ats=top_pub_ats,

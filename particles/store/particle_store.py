@@ -12,17 +12,33 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
-from sqlalchemy import DateTime, Float, Index, String, Text, delete, or_, select
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    Index,
+    String,
+    Text,
+    and_,
+    delete,
+    false,
+    func,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, aliased, mapped_column
 
+from particles.core.contradiction_disclosure import ORIGIN_KEY, is_census_record
 from particles.core.duplicate_key import content_hash
 from particles.core.fingerprint import context_fingerprint
+from particles.core.modality import OPERATOR_CLASSIFIER
 from particles.core.schema import (
     AssertionModality,
     CanonicalForm,
@@ -102,6 +118,21 @@ class ParticleRow(Base):
     # Storage metadata beside the embedding, NOT a core Particle field — it is
     # never serialized to the schema artifacts or interchange.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True for a row born retired: an INCONSISTENCY record, or the losing
+    # candidate of a §6.6 INCONSISTENT verdict inserted PROVENANCE_STALE /
+    # CONFLICT_PENDING. Neither was ever believed, and no transition
+    # can make one believed (neither birth status has an edge to ACTIVE, and
+    # every exit from them is terminal), so the flag is a permanent fact about
+    # the row. It exists because the status and reason do not last: PREFER_A
+    # and the trust cascade flip a loser to CONFLICT_RESOLVED, promotion
+    # supersedes it, DISCARD retracts it, and resolving an INCONSISTENCY record
+    # retracts or demotes the record itself. The row then looks like a retired
+    # belief to the as-of lens. Stamped once by ``insert_particle``;
+    # storage metadata like ``retired_at``, never a core Particle field.
+    # Migration 042 backfills it.
+    born_retired: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     # SHA-256 of the normalized ``content`` (
     # particles.core.duplicate_key.content_hash). The index key for extract-time
     # exact-duplicate suppression: without it the rung would scan every ACTIVE
@@ -174,6 +205,19 @@ class ParticleRow(Base):
     canonical_form: Mapped[str] = mapped_column(
         String, nullable=False, default="PROSE", server_default="PROSE"
     )
+    # the stamp of the ``assertion_modality`` record. Set only by the
+    # two writers after insert, the regeneration pass and the operator verdict
+    # (``set_modality_record``); NULL on every extracted row, whose stamp is
+    # read through the minting snapshot's component record instead
+    # of being duplicated here (``core.modality.resolve_stamp``). Storage
+    # metadata beside the value, on the embedding precedent: never a Particle
+    # field, never serialized. A copy minted from another row carries the
+    # stamp with the value (``copy_modality_stamp``).
+    modality_classifier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modality_classifier_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modality_classified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_particles_status_confidence", "status", "confidence_value"),
@@ -187,6 +231,8 @@ class ParticleRow(Base):
         # reindex --provider-model scope: "which ACTIVE particles did
         # this pairing produce?". Status leads, mirroring the indexes above.
         Index("ix_particles_status_provider_model", "status", "extraction_provider_model"),
+        # the regeneration scope and the census read the stamp.
+        Index("ix_particles_status_modality_classifier", "status", "modality_classifier"),
     )
 
     def to_model(self) -> Particle:
@@ -429,6 +475,10 @@ async def insert_particle(
             f" status_reason = {particle.status_reason!r}"
         )
     row = ParticleRow.from_model(particle, embedding)
+    # The never-believed marker the as-of lens reads once the status or reason
+    # has moved on: the two non-ACTIVE births in the §6.6 table, an
+    # INCONSISTENCY record and the CONFLICT_PENDING quarantine (the gate above).
+    row.born_retired = particle.status in (Status.INCONSISTENCY, Status.PROVENANCE_STALE)
     if domain_hint is not None:
         row.domain_hint = domain_hint
     session.add(row)
@@ -902,11 +952,13 @@ async def get_particle_ids_changed_since(session: AsyncSession, since: datetime)
     """Particle ids created or modified at/after ``since`` (delta scope).
 
     "Created" = ``asserted_at``; "modified" = ``retired_at`` (the write-once
-    departure-from-ACTIVE stamp — the only mutation the delta scope
-    cares about, since content is immutable and edits are supersessions, which
-    mint a new ``asserted_at``). Feeds ``scope_particle_ids`` on the
-    seams so a scheduled census probes only what moved since the
-    previous run's watermark.
+    departure-from-ACTIVE stamp, since content is immutable and
+    edits are supersessions, which mint a new ``asserted_at``). A rewritten
+    adjudicability default joins the scope through its event instead, in the
+    consolidation pass's composition, so a restamp that changed nothing does
+    not. Feeds ``scope_particle_ids`` on the seams
+    so a scheduled census probes only what moved since the previous run's
+    watermark.
     """
     result = await session.execute(
         select(ParticleRow.id).where(
@@ -914,6 +966,39 @@ async def get_particle_ids_changed_since(session: AsyncSession, since: datetime)
         )
     )
     return {str(pid) for pid in result.scalars()}
+
+
+async def list_retirements_in_range(
+    session: AsyncSession, *, since: datetime | None, until: datetime
+) -> list[tuple[str, str | None]]:
+    """``(id, status_reason)`` for every belief that left ACTIVE in ``[since, until)``.
+
+    Keyed on the write-once ``retired_at`` stamp, so a belief that
+    hopped ACTIVE → PROVENANCE_STALE → SUPERSEDED retires once, at its first
+    hop, with its current reason. ``since=None`` opens the window at the start
+    of the store. Born-retired rows carry no stamp and never appear. The closure
+    measure's retirement feed (``operations.closure_measure``).
+    """
+    stmt = select(ParticleRow.id, ParticleRow.status_reason).where(
+        ParticleRow.retired_at.is_not(None), ParticleRow.retired_at < until
+    )
+    if since is not None:
+        stmt = stmt.where(ParticleRow.retired_at >= since)
+    result = await session.execute(stmt)
+    return [(str(pid), reason) for pid, reason in result.all()]
+
+
+async def list_ids_asserted_by_in_range(
+    session: AsyncSession, asserted_by: str, *, since: datetime | None, until: datetime
+) -> list[str]:
+    """Ids of particles ``asserted_by`` one identity with ``asserted_at`` in ``[since, until)``."""
+    stmt = select(ParticleRow.id).where(
+        ParticleRow.asserted_by == asserted_by, ParticleRow.asserted_at < until
+    )
+    if since is not None:
+        stmt = stmt.where(ParticleRow.asserted_at >= since)
+    result = await session.execute(stmt)
+    return [str(pid) for pid in result.scalars()]
 
 
 async def get_particles_for_entry(session: AsyncSession, corpus_entry_id: str) -> list[Particle]:
@@ -966,6 +1051,24 @@ async def stamp_scope_exemption_for_entry(session: AsyncSession, corpus_entry_id
             row.properties_json = json.dumps(stamped)
             changed += 1
     return changed
+
+
+async def set_particle_property(
+    session: AsyncSession, particle_id: str, key: str, value: Any
+) -> bool:
+    """Set one ``properties`` key on a stored particle; ``False`` if there is no such particle.
+
+    An annotation curated in place: nothing else about the row is
+    touched. Used to stamp an INCONSISTENCY record with the second reading
+    that confirmed it (``conflict:reading``).
+    """
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        return False
+    properties = json.loads(row.properties_json) if row.properties_json else {}
+    properties[key] = value
+    row.properties_json = json.dumps(properties)
+    return True
 
 
 async def get_particles_by_status(session: AsyncSession, status: Status) -> list[Particle]:
@@ -1070,6 +1173,30 @@ async def get_inconsistency_particles(session: AsyncSession) -> list[Particle]:
     return await get_particles_by_status(session, Status.INCONSISTENCY)
 
 
+async def get_census_records(session: AsyncSession) -> list[Particle]:
+    """Every census INCONSISTENCY record the nightly disclosure opened, open or closed.
+
+    A record keeps its ``conflict:origin`` marker for life, so the closed ones
+    (``RETRACTED`` by review, lapse or regroup; ``PROVENANCE_STALE`` by the
+    trust cascade) are found the same way as the open ones. The ``LIKE`` is a
+    cheap pre-filter over the three statuses a record can hold; the marker is
+    confirmed on the parsed properties.
+    """
+    result = await session.execute(
+        select(ParticleRow).where(
+            ParticleRow.status.in_(
+                [
+                    Status.INCONSISTENCY.value,
+                    Status.RETRACTED.value,
+                    Status.PROVENANCE_STALE.value,
+                ]
+            ),
+            ParticleRow.properties_json.like(f'%"{ORIGIN_KEY}"%'),
+        )
+    )
+    return [p for p in (row.to_model() for row in result.scalars().all()) if is_census_record(p)]
+
+
 async def get_inconsistency_backrefs(session: AsyncSession) -> dict[str, str]:
     """Map each particle id referenced by an open INCONSISTENCY -> that INCONSISTENCY id.
 
@@ -1082,8 +1209,19 @@ async def get_inconsistency_backrefs(session: AsyncSession) -> dict[str, str]:
     Cost is one INCONSISTENCY-status scan — acceptable at memory-store scale
     (is the general scaling lever).
     """
+    return inconsistency_backrefs(await get_inconsistency_particles(session))
+
+
+def inconsistency_backrefs(records: Sequence[Particle]) -> dict[str, str]:
+    """The :func:`get_inconsistency_backrefs` map, built from records already loaded.
+
+    A caller that has run the INCONSISTENCY status scan for another reason
+    (the lint pass that also reports each open record) builds
+    the map from that scan instead of running it twice. A belief named by
+    several records maps to the first; the badge needs only one.
+    """
     backrefs: dict[str, str] = {}
-    for inc in await get_inconsistency_particles(session):
+    for inc in records:
         for ref in inc.provenance:
             if ref.type == ProvenanceRefType.PARTICLE:
                 backrefs.setdefault(ref.corpus_entry_id, inc.id)
@@ -1310,6 +1448,31 @@ async def get_retired_at(session: AsyncSession, particle_id: str) -> datetime | 
     if row is None:
         raise ValueError(f"Particle {particle_id} not found")
     return row.retired_at
+
+
+async def is_born_retired(session: AsyncSession, particle_id: str) -> bool:
+    """Read one particle's ``born_retired`` storage column.
+
+    True for an INCONSISTENCY record or a quarantined conflict loser,
+    neither of which was ever believed, whatever its status and
+    reason read today. Raises for a missing
+    particle, as :func:`get_retired_at` does.
+    """
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        raise ValueError(f"Particle {particle_id} not found")
+    return row.born_retired
+
+
+async def load_born_retired_ids(session: AsyncSession) -> frozenset[str]:
+    """Every id stored with ``born_retired`` set.
+
+    The as-of lens loads this once per query beside its rung 1 and 2 maps. The
+    set holds only INCONSISTENCY records and quarantine losers, a small share
+    of any store.
+    """
+    result = await session.execute(select(ParticleRow.id).where(ParticleRow.born_retired.is_(True)))
+    return frozenset(result.scalars().all())
 
 
 async def get_active_particles_with_stale_embedding_model(
@@ -1626,6 +1789,103 @@ async def get_active_derived_particles(session: AsyncSession) -> list[Particle]:
     return [row.to_model() for row in result.scalars()]
 
 
+async def get_update_retirements_after(
+    session: AsyncSession,
+    after: tuple[datetime, str] | None,
+    *,
+    limit: int | None = None,
+) -> list[tuple[Particle, datetime]]:
+    """Claims retired as ``SUPERSEDED_BY_UPDATE``, oldest retirement first.
+
+    ``after`` is the ``(retired_at, id)`` cursor of the last one a previous run
+    examined; ``None`` starts from the first. A born-retired older candidate is
+    inserted and demoted in one step, so its ``retired_at`` is its insertion
+    time. Ties on ``retired_at`` are broken by id, so the cursor is strict.
+    """
+    query = select(ParticleRow).where(
+        ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
+        ParticleRow.retired_at.is_not(None),
+    )
+    if after is not None:
+        at, pid = after
+        query = query.where(
+            or_(
+                ParticleRow.retired_at > at,
+                and_(ParticleRow.retired_at == at, ParticleRow.id > pid),
+            )
+        )
+    query = query.order_by(ParticleRow.retired_at, ParticleRow.id)
+    if limit is not None:
+        query = query.limit(limit)
+    out: list[tuple[Particle, datetime]] = []
+    for row in (await session.execute(query)).scalars():
+        assert row.retired_at is not None  # filtered above
+        out.append((row.to_model(), row.retired_at))
+    return out
+
+
+async def count_update_retirements_after(
+    session: AsyncSession, after: tuple[datetime, str] | None
+) -> int:
+    """How many update retirements lie past ``after`` (the pass's waiting count)."""
+    query = select(func.count(ParticleRow.id)).where(
+        ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
+        ParticleRow.retired_at.is_not(None),
+    )
+    if after is not None:
+        at, pid = after
+        query = query.where(
+            or_(
+                ParticleRow.retired_at > at,
+                and_(ParticleRow.retired_at == at, ParticleRow.id > pid),
+            )
+        )
+    return int((await session.execute(query)).scalar_one())
+
+
+#: The demotions that name a replacing claim: a later claim retired this one as
+#: its replacement. ``RETRACTED_DEPENDENCY`` and the merge / review
+#: reasons are not replacements, and ``SUPERSEDED_BY_REINDEX`` is the same
+#: source read again, so neither is a pair an operator can rule on.
+REPLACEMENT_DEMOTIONS: frozenset[StatusReason] = frozenset(
+    {
+        StatusReason.SUPERSEDED_BY_UPDATE,
+        StatusReason.DOCUMENT_SUPERSEDED,
+        StatusReason.SUPERSEDED_BY_REANCHOR,
+    }
+)
+
+
+async def get_recorded_demotions(session: AsyncSession) -> list[tuple[Particle, Particle]]:
+    """Each retired claim whose replacing claim is on record, newest retirement first.
+
+    Returns ``(retired, replacement)`` pairs: ``retired`` carries one of
+    :data:`REPLACEMENT_DEMOTIONS` and is no longer ACTIVE, and ``replacement``
+    is the ACTIVE claim whose ``supersedes`` names it. A demotion that left no
+    such link (an out-of-order older claim stored already retired, a document
+    sweep demotion) has no pair to show and is not returned.
+    """
+    replacement = aliased(ParticleRow)
+    query = (
+        select(ParticleRow, replacement)
+        .join(replacement, replacement.supersedes == ParticleRow.id)
+        .where(
+            ParticleRow.status_reason.in_([r.value for r in REPLACEMENT_DEMOTIONS]),
+            ParticleRow.status != Status.ACTIVE.value,
+            replacement.status == Status.ACTIVE.value,
+        )
+        .order_by(ParticleRow.retired_at.desc(), ParticleRow.id)
+    )
+    seen: set[str] = set()
+    out: list[tuple[Particle, Particle]] = []
+    for retired_row, replacement_row in (await session.execute(query)).all():
+        if retired_row.id in seen:
+            continue
+        seen.add(retired_row.id)
+        out.append((retired_row.to_model(), replacement_row.to_model()))
+    return out
+
+
 async def get_particles_by_ids(
     session: AsyncSession, particle_ids: Sequence[str]
 ) -> dict[str, Particle]:
@@ -1685,6 +1945,32 @@ async def get_active_epistemic_particles_with_variance(
         )
     )
     return [row.to_model() for row in result.scalars()]
+
+
+async def predicate_census(session: AsyncSession) -> list[tuple[str | None, str]]:
+    """``(about-subject id, predicate)`` for every ACTIVE particle's structured claim.
+
+    The census the vocabulary proposal step reads:
+    one row per claim, the subject being the resolved Subject the triple is
+    about (``None`` when it resolved to none). Reads only the payload column,
+    never a whole row, so a store of tens of thousands of claims is one cheap
+    scan. Observer-blind, like every maintenance pass.
+    """
+    result = await session.execute(
+        select(ParticleRow.structured_claim_json).where(
+            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.structured_claim_json.isnot(None),
+        )
+    )
+    out: list[tuple[str | None, str]] = []
+    for (payload_json,) in result.all():
+        if payload_json is None:
+            continue
+        payload = json.loads(payload_json)
+        predicate = payload.get("predicate", {}).get("value")
+        if predicate:
+            out.append((payload.get("subject_id"), predicate))
+    return out
 
 
 async def get_particles_needing_structured_claim(
@@ -1889,3 +2175,157 @@ async def count_active_particles_by_schema_version(session: AsyncSession) -> dic
         .group_by(ParticleRow.schema_version)
     )
     return {row[0]: row[1] for row in result}
+
+
+# ---------------------------------------------------------------------------
+# the assertion_modality record
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModalityRecordRow:
+    """One particle's modality record as stored, plus what resolving its stamp needs."""
+
+    particle_id: str
+    status: str
+    assertion_modality: AssertionModality
+    classifier: str | None
+    classifier_model: str | None
+    classified_at: datetime | None
+    extractor_name: str | None
+    provider_model: str | None
+    minting_snapshot_id: str | None
+
+
+def _minting_snapshot_id(provenance_json: str) -> str | None:
+    """The snapshot of a particle's first SOURCE ref: the extraction that minted it."""
+    try:
+        refs = json.loads(provenance_json)
+    except ValueError:
+        return None
+    for ref in refs if isinstance(refs, list) else []:
+        if ref.get("type") == ProvenanceRefType.SOURCE.value and ref.get("snapshot_id"):
+            return str(ref["snapshot_id"])
+    return None
+
+
+def _extractor_name(extractor_ref_json: str | None) -> str | None:
+    if not extractor_ref_json:
+        return None
+    try:
+        name = json.loads(extractor_ref_json).get("name")
+    except (ValueError, AttributeError):
+        return None
+    return str(name) if name else None
+
+
+async def get_modality_records(
+    session: AsyncSession,
+    *,
+    particle_ids: Collection[str] | None = None,
+    statuses: Collection[Status] | None = (Status.ACTIVE,),
+) -> list[ModalityRecordRow]:
+    """Load the modality record of the selected particles.
+
+    ``particle_ids=None`` selects every particle in ``statuses``;
+    ``statuses=None`` selects every status. Reads columns only, never the
+    embedding, so a store-wide census stays a light scan.
+    """
+    stmt = select(
+        ParticleRow.id,
+        ParticleRow.status,
+        ParticleRow.assertion_modality,
+        ParticleRow.modality_classifier,
+        ParticleRow.modality_classifier_model,
+        ParticleRow.modality_classified_at,
+        ParticleRow.extractor_ref_json,
+        ParticleRow.extraction_provider_model,
+        ParticleRow.provenance_json,
+    ).order_by(ParticleRow.asserted_at, ParticleRow.id)
+    if statuses is not None:
+        stmt = stmt.where(ParticleRow.status.in_([s.value for s in statuses]))
+    if particle_ids is None:
+        rows = list((await session.execute(stmt)).all())
+    else:
+        ids = list(dict.fromkeys(particle_ids))
+        rows = []
+        for i in range(0, len(ids), 500):
+            chunk = stmt.where(ParticleRow.id.in_(ids[i : i + 500]))
+            rows.extend((await session.execute(chunk)).all())
+    return [
+        ModalityRecordRow(
+            particle_id=str(r.id),
+            status=str(r.status),
+            assertion_modality=AssertionModality(r.assertion_modality),
+            classifier=r.modality_classifier,
+            classifier_model=r.modality_classifier_model,
+            classified_at=r.modality_classified_at,
+            extractor_name=_extractor_name(r.extractor_ref_json),
+            provider_model=r.extraction_provider_model,
+            minting_snapshot_id=_minting_snapshot_id(r.provenance_json),
+        )
+        for r in rows
+    ]
+
+
+async def set_modality_record(
+    session: AsyncSession,
+    particle_id: str,
+    *,
+    modality: AssertionModality,
+    classifier: str,
+    classifier_model: str | None,
+    classified_at: datetime,
+    preserve_operator: bool = False,
+) -> AssertionModality | None:
+    """Write a particle's modality record and return the value it replaced. Flushes.
+
+    The one writer the regeneration pass and the operator verdict share.
+    Touches the value and its three stamp columns and nothing
+    else: never ``content``, ``confidence``, provenance, or ``status``.
+    The value is derived from ``content``, so it may be rewritten.
+
+    ``preserve_operator`` is the regeneration pass's guard: the row is re-read
+    here, at write time, and an operator verdict on it is left untouched and
+    ``None`` returned. A verdict recorded after a run computed its scope is
+    therefore never overwritten.
+
+    Raises:
+        ValueError: If the particle is missing.
+    """
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        raise ValueError(f"set_modality_record: particle {particle_id} not found")
+    await session.refresh(row, ["modality_classifier"])
+    if preserve_operator and row.modality_classifier == OPERATOR_CLASSIFIER:
+        return None
+    prior = AssertionModality(row.assertion_modality)
+    row.assertion_modality = modality.value
+    row.modality_classifier = classifier
+    row.modality_classifier_model = classifier_model
+    row.modality_classified_at = classified_at
+    await session.flush()
+    return prior
+
+
+async def copy_modality_stamp(session: AsyncSession, source_id: str, target_id: str) -> None:
+    """Copy the modality stamp between rows. Flushes.
+
+    For a particle minted from another that carries the source's
+    ``assertion_modality`` verbatim (quarantine promotion; a
+    re-anchor restatement). The value travels on the model; the stamp
+    is storage metadata and would otherwise be lost, so an operator verdict
+    would silently become a regenerable default on the copy. A NULL source
+    stamp leaves the target NULL, which resolves through the same provenance.
+
+    Raises:
+        ValueError: If either particle is missing.
+    """
+    source = await session.get(ParticleRow, source_id)
+    target = await session.get(ParticleRow, target_id)
+    if source is None or target is None:
+        raise ValueError(f"copy_modality_stamp: particle not found ({source_id} → {target_id})")
+    target.modality_classifier = source.modality_classifier
+    target.modality_classifier_model = source.modality_classifier_model
+    target.modality_classified_at = source.modality_classified_at
+    await session.flush()

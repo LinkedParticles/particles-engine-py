@@ -62,3 +62,74 @@ def test_quiet_silences_it(monkeypatch: pytest.MonkeyPatch) -> None:
     progress_line("should not appear")
 
     assert buf.getvalue() == ""
+
+
+def test_log_records_clear_the_heartbeat_line_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warning logged mid-heartbeat landed on the heartbeat's open line:
+
+        … audit: working (20s elapsed)LLM unavailable (account-level: …)
+
+    While the heartbeat runs, a stderr log handler prefixes each record with the
+    erase sequence; afterwards its own formatter is back.
+    """
+    import logging
+
+    from particles.api.cli import _progress
+    from particles.config import get_config
+
+    buf = _capture(monkeypatch, OutputSettings(progress=True))
+    monkeypatch.setattr(get_config().cli, "heartbeat_seconds", 3600)
+    handler = logging.StreamHandler(buf)  # buf is sys.stderr for this test
+    original = logging.Formatter("%(message)s")
+    handler.setFormatter(original)
+    monkeypatch.setattr(logging.root, "handlers", [handler])
+    logger = logging.getLogger("particles.test_heartbeat")
+
+    with _progress.heartbeat("audit"):
+        logger.error("LLM unavailable")
+    logger.error("after")
+
+    assert f"{_CLEAR_LINE}LLM unavailable\n" in buf.getvalue()
+    assert buf.getvalue().endswith("after\n")
+    assert handler.formatter is original
+
+
+def test_heartbeat_paused_erases_the_line_and_holds_the_ticker_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verb's final output must not start on the heartbeat's open line."""
+    import time
+
+    from particles.api.cli import _progress
+    from particles.config import get_config
+
+    buf = _capture(monkeypatch, OutputSettings(progress=True))
+    monkeypatch.setattr(get_config().cli, "heartbeat_seconds", 0.01)
+
+    with _progress.heartbeat("audit"):
+        _progress.set_heartbeat_status("contradiction probe 185/200")
+        time.sleep(0.1)
+        with _progress.heartbeat_paused():
+            painted = buf.getvalue()
+            time.sleep(0.1)
+            assert buf.getvalue() == painted  # no tick while paused
+            buf.write("Audited 96 memory files\n")
+        assert _progress._status is None  # the stale probe status is gone
+
+    assert "contradiction probe 185/200 (" in painted
+    assert painted.endswith(_CLEAR_LINE)
+
+
+def test_heartbeat_paused_writes_nothing_without_a_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from particles.api.cli import _progress
+
+    buf = _capture(monkeypatch, OutputSettings(progress=False))
+
+    with _progress.heartbeat_paused():
+        buf.write("report\n")
+
+    assert buf.getvalue() == "report\n"

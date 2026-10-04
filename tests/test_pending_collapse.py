@@ -416,15 +416,21 @@ class TestPipelineGuard:
         await db_session.commit()
         await collapse_superseded_pending(db_session)
 
+        from particles.ingest.pipeline import SnapshotOutcome
+
+        outcome = SnapshotOutcome()
         written = await extract_snapshot(
             db_session,
             entry.entry_id,
             old.snapshot_id,
             extractor=_ExplodingExtractor(),  # type: ignore[arg-type]
             skip_if_superseded=True,
+            outcome_out=outcome,
         )
 
         assert written == []
+        # The caller can tell this skip from a completion with nothing in it.
+        assert outcome.skipped == "superseded"
         # No claim was taken: still collapsed, still COMPLETE.
         status, superseded_by = await _state(db_session, old)
         assert status == C.value and superseded_by is not None

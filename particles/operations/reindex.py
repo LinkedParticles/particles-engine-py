@@ -18,10 +18,12 @@ import asyncio
 import logging
 from collections.abc import Callable
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.config import get_config
 from particles.core.schema import (
     SCHEMA_VERSION,
     ExtractionStatus,
@@ -29,21 +31,38 @@ from particles.core.schema import (
     ProvenanceRefType,
 )
 from particles.core.status import Status, StatusReason
-from particles.corpus.deposit import blob_exists
+from particles.corpus.deposit import blob_size
 from particles.corpus.store import (
+    clear_partial_reads,
     find_entry_ids_by_prefix,
+    get_entry,
     get_entry_uri_map,
+    get_extraction_component_records,
     get_latest_completed_snapshot_id,
+    get_partial_snapshot_id,
     list_entry_snapshot_pairs_with_extraction_status,
+    list_extraction_bases,
     list_snapshots_for_entry,
 )
+from particles.extraction.components import ComponentTable
+from particles.extraction.general import EXTRACTOR_ID as GENERAL_EXTRACTOR_ID
+from particles.extraction.general import general_component_table
+from particles.extraction.journal import EXTRACTOR_ID as JOURNAL_EXTRACTOR_ID
+from particles.extraction.journal import journal_component_table
+from particles.extraction.registry import select_extractor
+from particles.extraction.subject_gate import GATE_COMPONENT, gate_digest
+from particles.ingest.append_base import in_scope
+from particles.ingest.pipeline import SnapshotOutcome
 from particles.observability import traced
 from particles.operations.extract import collapse_superseded_pending, extract_snapshot
 from particles.operations.lint import run_lint
 from particles.operations.reindex_scope import (
+    ONLY_CHANGED_COMPONENTS_ENABLED,
+    ONLY_CHANGED_COMPONENTS_REFUSAL,
     decide_reindex_scope,
     is_prefix,
     resolve_prefix,
+    select_changed_components,
     union_selectors,
 )
 from particles.store.particle_store import (
@@ -52,6 +71,7 @@ from particles.store.particle_store import (
     get_active_particles_with_extractor_version,
     get_active_particles_with_provider_model,
     get_active_particles_with_stale_schema_version,
+    get_particles_by_ids,
     update_particle_status,
 )
 
@@ -72,6 +92,11 @@ class SnapshotPlan(BaseModel):
     #: The snapshot's blob is absent from the blob store, so extraction is
     #: known to fail with ``FileNotFoundError`` before any LLM call is made.
     blob_missing: bool = False
+    #: Size of the snapshot's raw content in bytes (0 when the blob is
+    #: missing): what an estimate prices the re-extraction from.
+    source_bytes: int = 0
+    #: Whether the entry is replayed whole as append-only.
+    replayed: bool = False
 
 
 #: How many per-snapshot "blob missing" lines the human rendering shows before
@@ -149,8 +174,15 @@ async def _build_plan(
     session: AsyncSession,
     scope: list[tuple[str, str]],
     scope_description: str,
+    replay_entries: AbstractSet[str] = frozenset(),
 ) -> ReindexPlan:
-    """Per-snapshot counts + blob presence for a resolved scope (pure reads)."""
+    """Per-snapshot counts + blob presence for a resolved scope (pure reads).
+
+    An entry in ``replay_entries`` is replayed whole, so its
+    particle count is the entry's retirement set, counted once, on its first
+    snapshot, rather than per snapshot, where one claim would count as many
+    times as it has refs.
+    """
     by_entry: dict[str, list[str]] = {}
     for entry_id, snapshot_id in sorted(scope):
         by_entry.setdefault(entry_id, []).append(snapshot_id)
@@ -163,18 +195,25 @@ async def _build_plan(
         content_hashes = {
             s.snapshot_id: s.content_hash for s in await list_snapshots_for_entry(session, entry_id)
         }
-        for snapshot_id in snapshot_ids:
-            count = sum(
-                1 for p in active if any(ref.snapshot_id == snapshot_id for ref in p.provenance)
-            )
+        replayed = entry_id in replay_entries
+        for position, snapshot_id in enumerate(snapshot_ids):
+            if replayed:
+                count = len(_entry_claims(active, entry_id)) if position == 0 else 0
+            else:
+                count = sum(
+                    1 for p in active if any(ref.snapshot_id == snapshot_id for ref in p.provenance)
+                )
             content_hash = content_hashes.get(snapshot_id)
+            size = blob_size(content_hash) if content_hash is not None else None
             snapshot_plans.append(
                 SnapshotPlan(
                     entry_id=entry_id,
                     snapshot_id=snapshot_id,
                     uri=uri_map.get(entry_id) or "",
                     particles=count,
-                    blob_missing=content_hash is None or not blob_exists(content_hash),
+                    blob_missing=size is None,
+                    source_bytes=size or 0,
+                    replayed=replayed,
                 )
             )
 
@@ -202,6 +241,7 @@ async def reindex(
     dry_run: bool = False,
     on_plan: Callable[[str], None] | None = None,
     on_status: Callable[[str], None] | None = None,
+    only_changed_components: bool = False,
 ) -> dict[str, object]:
     """Reindex corpus entries.
 
@@ -246,40 +286,30 @@ async def reindex(
             ``progress`` (opt-in, one full line per item, appended): the
             status is a single replaceable line the CLI feeds to the
             heartbeat.
+        only_changed_components: narrow an ``extractor_version`` scope to the
+            snapshots whose recorded extraction components changed since they
+            were extracted (``select_changed_components``). Refused
+            with ``ValueError`` while ``ONLY_CHANGED_COMPONENTS_ENABLED`` is
+            off. A skipped snapshot keeps its old version stamp, so the next
+            scope over that version selects it again.
 
     Returns a summary dict with counts and any errors.
     """
-    # refuse to reindex into a store with mismatched-schema
-    # particles. Reindex writes new ACTIVE particles and supersedes old
-    # ones — both operations assume the surrounding store is current.
-    from particles.operations.version_guard import assert_store_schema_current
-
-    await assert_store_schema_current(session)
-
-    # Apply step, ahead of the gather (D2): the collapse
-    # commits under the writer lock, so it runs to completion here and scope
-    # identification below only reads.
-    collapsed = await _collapse_for_auto_discovery(
-        session, entry_ids, include_failed, progress=progress, dry_run=dry_run
-    )
-    scope = await _identify_scope(
+    if only_changed_components and not ONLY_CHANGED_COMPONENTS_ENABLED:
+        raise ValueError(ONLY_CHANGED_COMPONENTS_REFUSAL)
+    resolved = await resolve_reindex_work(
         session,
-        entry_ids,
-        extractor_version,
-        extractor_id,
-        include_failed,
-        provider_model,
+        entry_ids=entry_ids,
+        extractor_version=extractor_version,
+        extractor_id=extractor_id,
+        include_failed=include_failed,
+        provider_model=provider_model,
+        only_changed_components=only_changed_components,
         progress=progress,
-        collapsed=collapsed,
+        dry_run=dry_run,
     )
-    # The upfront work plan (2026-08-02 incident): report what the resolved
-    # scope will cost — entries, snapshots, supersede-able particles, known
-    # missing blobs — BEFORE the first LLM call is spent.
-    plan = await _build_plan(
-        session,
-        scope,
-        _describe_scope(entry_ids, extractor_version, extractor_id, include_failed, provider_model),
-    )
+    work, replays, plan = resolved.work, resolved.replays, resolved.plan
+    scope = [(entry_id, sid) for entry_id, snaps in work for sid in snaps]
     plan_line = plan.format_line()
     log.info("%s", plan_line)
     emit = on_plan or progress
@@ -304,20 +334,34 @@ async def reindex(
     failed: list[str] = []
     total = len(scope)
 
-    for i, (entry_id, snapshot_id) in enumerate(scope, start=1):
+    done = 0
+    for entry_id, snapshot_ids in work:
+        i = done + 1
+        done += len(snapshot_ids)
         if progress is not None:
             uri = await _lookup_entry_uri(session, entry_id)
-            progress(f"[{i}/{total}] reindexing {entry_id[:8]}… snap {snapshot_id[:8]}… {uri}")
+            if entry_id in replays:
+                progress(
+                    f"[{i}-{done}/{total}] replaying {entry_id[:8]}… "
+                    f"({len(snapshot_ids)} snapshot(s), append-only) {uri}"
+                )
+            else:
+                progress(
+                    f"[{i}/{total}] reindexing {entry_id[:8]}… snap {snapshot_ids[0][:8]}… {uri}"
+                )
         try:
-            await _reindex_snapshot(session, entry_id, snapshot_id, extractor_version)
-            succeeded.append(entry_id)
+            if entry_id in replays:
+                await _reindex_append_entry(session, entry_id, snapshot_ids)
+            else:
+                await _reindex_snapshot(session, entry_id, snapshot_ids[0], extractor_version)
+            succeeded.extend([entry_id] * len(snapshot_ids))
         except Exception as exc:
-            log.error("Reindex failed for entry %s snapshot %s: %s", entry_id, snapshot_id, exc)
+            log.error("Reindex failed for entry %s snapshot(s) %s: %s", entry_id, snapshot_ids, exc)
             if progress is not None:
                 progress(f"[{i}/{total}] FAILED: {exc}")
-            failed.append(entry_id)
+            failed.extend([entry_id] * len(snapshot_ids))
         if on_status is not None:
-            status = f"snapshot {i}/{total} (entry {entry_id[:8]}…)"
+            status = f"snapshot {done}/{total} (entry {entry_id[:8]}…)"
             if failed:
                 status += f" — {len(failed)} failed"
             on_status(status)
@@ -343,6 +387,136 @@ async def reindex(
         # existed because the CLI dumped this envelope raw on every run.)
         "plan": plan.model_dump(),
     }
+
+
+@dataclass(frozen=True)
+class ResolvedWork:
+    """A reindex scope resolved into work, with its upfront plan."""
+
+    #: ``(entry_id, snapshot_ids)`` in run order: whole-entry replays first.
+    work: list[tuple[str, list[str]]]
+    #: Append-only entries replayed whole, to their snapshots.
+    replays: dict[str, list[str]]
+    plan: ReindexPlan
+    #: Pairs ``only_changed_components`` dropped from the scope.
+    component_skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
+async def resolve_reindex_work(
+    session: AsyncSession,
+    *,
+    entry_ids: list[str] | None = None,
+    extractor_version: str | None = None,
+    extractor_id: str | None = None,
+    include_failed: bool = True,
+    provider_model: str | None = None,
+    only_changed_components: bool = False,
+    progress: Callable[[str], None] | None = None,
+    dry_run: bool = False,
+) -> ResolvedWork:
+    """Resolve the requested scope into the work a reindex would do, and plan it.
+
+    Shared by :func:`reindex` and the ``--estimate`` sample
+    (``operations.reindex_estimate``), so the estimate samples exactly the
+    scope a live run would sweep. Writes only on a live run, and only the
+    collapse (see :func:`_collapse_for_auto_discovery`); with
+    ``dry_run`` it reads.
+    """
+    # refuse to reindex into a store with mismatched-schema
+    # particles. Reindex writes new ACTIVE particles and supersedes old
+    # ones — both operations assume the surrounding store is current.
+    from particles.operations.version_guard import assert_store_schema_current
+
+    await assert_store_schema_current(session)
+
+    # Apply step, ahead of the gather (D2): the collapse
+    # commits under the writer lock, so it runs to completion here and scope
+    # identification below only reads.
+    collapsed = await _collapse_for_auto_discovery(
+        session, entry_ids, include_failed, progress=progress, dry_run=dry_run
+    )
+    scope = await _identify_scope(
+        session,
+        entry_ids,
+        extractor_version,
+        extractor_id,
+        include_failed,
+        provider_model,
+        progress=progress,
+        collapsed=collapsed,
+    )
+    component_skipped: list[tuple[str, str]] = []
+    if only_changed_components:
+        scope, component_skipped = await _narrow_to_changed_components(
+            session, scope, extractor_version
+        )
+    # an APPEND_ONLY entry the scope reaches through a COMPLETE
+    # snapshot is replayed whole, grouped by entry so the order is its capture
+    # order however the scope enumerated its snapshots.
+    replays, scope = await _group_append_only(session, scope)
+    work: list[tuple[str, list[str]]] = [(e, snaps) for e, snaps in replays.items()]
+    work += [(entry_id, [snapshot_id]) for entry_id, snapshot_id in scope]
+    # The upfront work plan (2026-08-02 incident): report what the resolved
+    # scope will cost — entries, snapshots, supersede-able particles, known
+    # missing blobs — BEFORE the first LLM call is spent.
+    description = _describe_scope(
+        entry_ids, extractor_version, extractor_id, include_failed, provider_model
+    )
+    if component_skipped:
+        description += (
+            f"; {len(component_skipped)} snapshot(s) skipped, components unchanged "
+            "(their version stamp is kept)"
+        )
+    plan = await _build_plan(
+        session,
+        [(entry_id, sid) for entry_id, snaps in work for sid in snaps],
+        description,
+        replay_entries=frozenset(replays),
+    )
+    return ResolvedWork(work=work, replays=replays, plan=plan, component_skipped=component_skipped)
+
+
+def current_component_tables() -> dict[str, ComponentTable]:
+    """Each component-recording extractor's current table, the subject gate merged in.
+
+    What :func:`select_changed_components` compares a snapshot's record
+    against. The gate is source-dependent (exempt source types), so
+    it joins the table but never its ``always`` set.
+    """
+    gate_cfg = get_config().subject_gate
+    gate = ComponentTable(
+        digests={
+            GATE_COMPONENT: gate_digest(
+                cli_binaries=gate_cfg.cli_binaries,
+                allowlist=gate_cfg.allowlist,
+                dispositions=gate_cfg.dispositions,
+            )
+        }
+        if gate_cfg.enabled
+        else {}
+    )
+    return {
+        GENERAL_EXTRACTOR_ID: general_component_table().merged(gate),
+        JOURNAL_EXTRACTOR_ID: journal_component_table().merged(gate),
+    }
+
+
+async def _narrow_to_changed_components(
+    session: AsyncSession,
+    scope: list[tuple[str, str]],
+    extractor_version: str | None,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Keep the pairs whose recorded components changed; return ``(kept, skipped)``.
+
+    Only meaningful over an ``extractor_version`` scope, the one a bump
+    creates, and refused without one. Skipping writes nothing (see
+    :func:`select_changed_components`).
+    """
+    if not extractor_version:
+        raise ValueError("--only-changed-components narrows an --extractor-version scope only")
+    records = await get_extraction_component_records(session, {sid for _, sid in scope})
+    selection = select_changed_components(scope, records, current_component_tables())
+    return list(selection.kept), selection.skipped
 
 
 async def _collapse_for_auto_discovery(
@@ -438,7 +612,9 @@ async def _gather_named(
     """Resolve each named id (prefix or full) to its latest COMPLETE snapshot.
 
     An ambiguous or unknown prefix is logged and skipped (``resolve_prefix``
-    decides which); an entry with no COMPLETE snapshot contributes nothing.
+    decides which). An entry with no COMPLETE snapshot contributes nothing,
+    unless it is an in-scope APPEND_ONLY entry whose snapshot holds a partial
+    read: that snapshot carries ACTIVE claims, so it is named.
     """
     named: list[tuple[str, str]] = []
     for raw_id in explicit_entry_ids:
@@ -455,6 +631,8 @@ async def _gather_named(
             log.warning("Entry prefix %r not found; skipping", raw_id)
             continue
         snap_id = await get_latest_completed_snapshot_id(session, resolution.entry_id)
+        if snap_id is None and await _replay_snapshots(session, resolution.entry_id) is not None:
+            snap_id = await get_partial_snapshot_id(session, resolution.entry_id)
         if snap_id:
             named.append((resolution.entry_id, snap_id))
     return named
@@ -535,6 +713,152 @@ async def _identify_scope(
     return decided.pairs
 
 
+async def _group_append_only(
+    session: AsyncSession, scope: list[tuple[str, str]]
+) -> tuple[dict[str, list[str]], list[tuple[str, str]]]:
+    """Split the scope into whole-entry replays and ordinary snapshot pairs.
+
+    An entry is replayed when it is APPEND_ONLY, read by the general extractor
+    with ``extraction.append_only_delta`` on (the delta's scope, §6), and the
+    scope names one of its COMPLETE snapshots: re-extracting that snapshot
+    alone would either replace the entry's claims with its tail's or duplicate
+    them. The replay covers every COMPLETE snapshot of the entry, in capture
+    order. A PENDING or FAILED snapshot the scope names stays an ordinary pair,
+    extracted after the replay as the delta it is.
+    """
+    if not get_config().extraction.append_only_delta:
+        return {}, scope
+    replays: dict[str, list[str]] = {}
+    ordinary: list[tuple[str, str]] = []
+    checked: dict[str, list[str] | None] = {}
+    for entry_id, snapshot_id in scope:
+        if entry_id not in checked:
+            checked[entry_id] = await _replay_snapshots(session, entry_id)
+        replay = checked[entry_id]
+        if replay is not None and snapshot_id in replay:
+            replays.setdefault(entry_id, replay)
+        else:
+            ordinary.append((entry_id, snapshot_id))
+    return replays, ordinary
+
+
+async def _replay_snapshots(session: AsyncSession, entry_id: str) -> list[str] | None:
+    """An in-scope append-only entry's COMPLETE snapshots in capture order, else ``None``."""
+    entry = await get_entry(session, entry_id)
+    if entry is None or not in_scope(entry, select_extractor(entry.source_type)):
+        return None
+    return [
+        row.snapshot_id
+        for row in await list_extraction_bases(session, entry_id)
+        if row.extraction_status is ExtractionStatus.COMPLETE
+    ]
+
+
+def _entry_claims(particles: list[Particle], entry_id: str) -> list[Particle]:
+    """The extractor claims among ``particles`` with a SOURCE ref to ``entry_id``."""
+    return [
+        p
+        for p in particles
+        if p.extractor_ref is not None
+        and any(
+            ref.type is ProvenanceRefType.SOURCE and ref.corpus_entry_id == entry_id
+            for ref in p.provenance
+        )
+    ]
+
+
+async def _reindex_append_entry(
+    session: AsyncSession, entry_id: str, snapshot_ids: list[str]
+) -> None:
+    """Retire an append-only entry's claims and replay its snapshots in order.
+
+    **Retire** is every ACTIVE extractor claim with a source ref to the entry,
+    less the re-anchored restatements the per-snapshot path already exempts,
+    and it happens last, as there: the claims are threaded as
+    ``supersede_ids`` through every step, so no step pairs against them or
+    carries them forward, and they are retired only once every step succeeded.
+
+    **Replay** extracts the snapshots in capture order: the first whole, with
+    no base, and each later one as a delta from the one before, each stamping
+    its ``extracted_through``. Each claim so cites the snapshot, and the time,
+    that first contained its passage.
+
+    A step that fails stops the replay and retires nothing. The steps already
+    done have written their claims beside the old ones; running the reindex
+    again retires both and replays from the start.
+    """
+    existing = await get_active_particles_for_entry(session, entry_id)
+    to_retire = _entry_claims(existing, entry_id)
+    reanchored = await _reanchored_ids(session, to_retire)
+    to_retire = [p for p in to_retire if p.id not in reanchored]
+    supersede_ids = frozenset(p.id for p in to_retire)
+
+    carry_forward_ids: list[str] = []
+    suppressed_ids: list[str] = []
+    previous: str | None = None
+    for snapshot_id in snapshot_ids:
+        outcome = SnapshotOutcome()
+        await extract_snapshot(
+            session,
+            entry_id,
+            snapshot_id,
+            supersede_ids=supersede_ids,
+            carry_forward_ids_out=carry_forward_ids,
+            suppressed_ids_out=suppressed_ids,
+            skip_if_superseded=True,
+            append_base=previous,
+            outcome_out=outcome,
+            ignore_partial=True,
+        )
+        if outcome.failed_calls or outcome.skipped is not None:
+            raise RuntimeError(
+                f"replay stopped at snapshot {snapshot_id[:8]}… "
+                f"({outcome.skipped or f'{outcome.failed_calls} failed call(s)'}); "
+                "nothing was retired, and a rerun replays the entry from the start"
+            )
+        previous = snapshot_id
+
+    kept = set(carry_forward_ids) | set(suppressed_ids)
+    for p in to_retire:
+        if p.id in kept:
+            continue
+        await update_particle_status(
+            session, p.id, Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_REINDEX
+        )
+    # a snapshot that is not COMPLETE no longer vouches for text
+    # whose claims were just retired. Its offset, marker and component record
+    # go in the same transaction, so it is read next as the delta it is from
+    # the replayed base.
+    cleared = await clear_partial_reads(session, entry_id)
+    await session.commit()
+    if cleared:
+        log.info(
+            "Append-only entry %s: cleared the partial read of %d unfinished snapshot(s)",
+            entry_id,
+            len(cleared),
+        )
+    log.info(
+        "Replayed append-only entry %s over %d snapshot(s); %d claim(s) retired",
+        entry_id,
+        len(snapshot_ids),
+        len([p for p in to_retire if p.id not in kept]),
+    )
+
+
+async def _reanchored_ids(session: AsyncSession, particles: list[Particle]) -> set[str]:
+    """The ids among ``particles`` that are re-anchor restatements."""
+    predecessors = {p.supersedes for p in particles if p.supersedes is not None}
+    if not predecessors:
+        return set()
+    loaded = await get_particles_by_ids(session, sorted(predecessors))
+    replaced = {
+        pid
+        for pid, prior in loaded.items()
+        if prior.status_reason is StatusReason.SUPERSEDED_BY_REANCHOR
+    }
+    return {p.id for p in particles if p.supersedes in replaced}
+
+
 async def _reindex_snapshot(
     session: AsyncSession,
     entry_id: str,
@@ -550,12 +874,20 @@ async def _reindex_snapshot(
     to_supersede = [
         p for p in existing if any(ref.snapshot_id == snapshot_id for ref in p.provenance)
     ]
+    # a restatement the re-anchor pass wrote keeps its original's
+    # SOURCE refs, but it is the product of a judgement over the passage, not of
+    # the extractor being upgraded. Retiring it would bring back the present-tense
+    # claim it replaced; a re-emitted copy of that claim is matched to it by the
+    # pass instead.
+    reanchored = await _reanchored_ids(session, to_supersede)
+    to_supersede = [p for p in to_supersede if p.id not in reanchored]
 
     # Pass the to-be-superseded IDs so conflict detection ignores them;
     # without this, within-entry re-extraction would spuriously create
     # INCONSISTENCY particles against the old versions of the same claims.
     carry_forward_ids: list[str] = []
     suppressed_ids: list[str] = []
+    outcome = SnapshotOutcome()
     await extract_snapshot(
         session,
         entry_id,
@@ -568,7 +900,19 @@ async def _reindex_snapshot(
         # scopes name snapshots that have particles), so this only ever skips
         # one collapsed by another runner after the scope was built.
         skip_if_superseded=True,
+        outcome_out=outcome,
+        # the claims a partial read of this snapshot wrote are among
+        # those being replaced, so the read starts as if they were not there.
+        ignore_partial=True,
     )
+    # A call that failed left the snapshot PENDING with nothing written.
+    # Retiring the old claims now would leave its text with no claims at all,
+    # so the snapshot fails here and keeps them, as a replay step does.
+    if outcome.failed_calls:
+        raise RuntimeError(
+            f"re-extraction of snapshot {snapshot_id[:8]}… left it PENDING "
+            f"({outcome.failed_calls} failed call(s)); nothing was retired"
+        )
 
     # Carry-forward particles stay ACTIVE under the new snapshot
     # because their chunk's text hashed identically. Exclude them from

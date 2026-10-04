@@ -63,6 +63,7 @@ from particles.store.particle_store import (
     get_particle,
     insert_particle,
 )
+from tests._client_fixtures import stream_via_create
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -359,6 +360,7 @@ def _mock_llm(contents: list[str]) -> MagicMock:
     client = MagicMock(spec=anthropic.Anthropic)
     client.messages = MagicMock()
     client.messages.create = MagicMock(return_value=resp)
+    stream_via_create(client)
     return client
 
 

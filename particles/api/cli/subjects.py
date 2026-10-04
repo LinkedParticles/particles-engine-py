@@ -6,17 +6,23 @@
 
 This is a single Typer command with manual action dispatch via a positional
 argument (list, search, show, alias, merge, confirm, unlink, split, delete,
-gc, set-class, fix-labels, find-duplicates) — Typer sub-Typer style would be
-more idiomatic but the current shape is preserved for backwards compatibility.
+gc, set-class, fix-labels, find-duplicates, relink-gated) — Typer sub-Typer
+style would be more idiomatic but the current shape is preserved for
+backwards compatibility.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import typer
 
 from particles.api.cli import app, run
 from particles.core.schema import Subject
 from particles.db import session_scope
+
+if TYPE_CHECKING:
+    from particles.operations.subject_relink import RelinkReport
 
 # (b): subjects actions with no engine endpoint. They refuse in
 # remote mode (per-action, inside ``subjects_cmd``) rather than silently
@@ -32,6 +38,7 @@ _SUBJECTS_LOCAL_ONLY = frozenset(
         "unlink",
         "fix-labels",
         "find-duplicates",
+        "relink-gated",
     }
 )
 
@@ -42,7 +49,7 @@ def subjects_cmd(
         "list",
         help=(
             "Action: list, search, show, alias, confirm, unlink, merge, split, "
-            "delete, gc, set-class, fix-labels, find-duplicates"
+            "delete, gc, set-class, fix-labels, find-duplicates, relink-gated"
         ),
     ),
     rest: list[str] | None = typer.Argument(None, help="Arguments for the chosen action"),
@@ -83,6 +90,28 @@ def subjects_cmd(
             "e.g. wikidata:Q30297735. Skips resolver search; pulls metadata directly."
         ),
     ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="relink-gated only: write the links. Without it the run only reports.",
+    ),
+    tier: list[int] | None = typer.Option(
+        None,
+        "--tier",
+        help=(
+            "relink-gated only: a recovery tier to use (1 record, 2 structured claim, "
+            "3 backticks). Repeat for several. Default: subject_gate.relink_tiers."
+        ),
+    ),
+    sample: int = typer.Option(
+        0,
+        "--sample",
+        min=0,
+        help="relink-gated only: print this many planned relinks, for a precision check.",
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="relink-gated only: the seed that picks the --sample relinks."
+    ),
 ) -> None:
     """Manage subjects (canonical real-world entities).
 
@@ -100,6 +129,7 @@ def subjects_cmd(
         particles subjects split SOURCE_ID --particle PID [--particle PID ...] \\
             (--new-name "Applied Optoelectronics" | --new-external-id wikidata:Q30297735) \\
             [--dry-run]
+        particles subjects relink-gated [--tier N ...] [--sample N --seed S] [--apply]
     """
     args = rest or []
 
@@ -190,6 +220,13 @@ def subjects_cmd(
     elif action == "fix-labels":
         fixed, skipped = run(_fix_subject_labels())
         typer.echo(f"Fixed: {fixed}  Skipped (no label found): {skipped}")
+
+    elif action == "relink-gated":
+        if tier is not None and any(t not in (1, 2, 3) for t in tier):
+            typer.echo("--tier must be 1, 2 or 3.", err=True)
+            raise typer.Exit(1)
+        report = run(_relink_gated(apply=apply, tiers=tier, sample=sample, seed=seed))
+        _print_relink_report(report)
 
     elif action == "find-duplicates":
         pairs = run(_find_duplicate_subjects())
@@ -450,6 +487,49 @@ def subjects_cmd(
             err=True,
         )
         raise typer.Exit(1)
+
+
+async def _relink_gated(
+    *, apply: bool, tiers: list[int] | None, sample: int, seed: int
+) -> RelinkReport:
+    from particles.operations.subject_relink import (
+        apply_gated_relink,
+        build_report,
+        plan_gated_relink,
+    )
+
+    async with session_scope() as session:
+        plan = await plan_gated_relink(session, tiers=tiers)
+        if not apply:
+            return build_report(plan, sample=sample, seed=seed)
+        result = await apply_gated_relink(session, plan, actor="cli:subjects-relink-gated")
+        await session.commit()
+        return build_report(plan, sample=sample, seed=seed, result=result)
+
+
+def _print_relink_report(report: RelinkReport) -> None:
+    tiers = ", ".join(str(t) for t in report.tiers)
+    typer.echo(f"Subjectless beliefs that owe a subject: {report.orphans}")
+    typer.echo(f"Recoverable with tiers {tiers}: {report.recoverable}")
+    for t, n in report.by_tier.items():
+        typer.echo(f"  tier {t}: {n}")
+    for cls, n in report.by_class.items():
+        typer.echo(f"  {cls}: {n} name(s)")
+    typer.echo(
+        f"Withheld, no project key: {report.fail_closed_no_key}; "
+        f"several projects: {report.fail_closed_several}; "
+        f"nothing recoverable: {report.unrecovered}"
+    )
+    for item in report.sample:
+        names = ", ".join(f"{n.name} [{n.token_class}, tier {n.tier}]" for n in item.names)
+        typer.echo(f"\n  {item.particle_id[:8]}…  {names}\n    {item.content}")
+    if report.applied:
+        typer.echo(
+            f"\nRelinked {report.relinked} belief(s) to {report.subjects} subject(s); "
+            f"skipped {report.skipped}."
+        )
+    else:
+        typer.echo("\nNothing written. Re-run with --apply to link them.")
 
 
 async def _find_duplicate_subjects() -> list[tuple[Subject, Subject, float]] | None:

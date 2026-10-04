@@ -4,7 +4,7 @@
 
 """§9.6 Review operation (Extension B: cascade enabled).
 
-Presents INCONSISTENCY particles for human review; supports four resolution actions:
+Presents INCONSISTENCY particles for human review; supports five resolution actions:
   PREFER_A  → loser (B) demoted — a quarantined B flips its reason to
               CONFLICT_RESOLVED in place; write SourceTrustStatement + REVIEW
               particle; wrapper RETRACTED (CONFLICT_RESOLVED); trigger trust
@@ -16,6 +16,10 @@ Presents INCONSISTENCY particles for human review; supports four resolution acti
               promoted with ALEATORY); INCONSISTENCY particle retracted
   DEFER      → no status change; add reviewer note; re-queue — the only action
               that leaves the wrapper open
+  DISCARD    → neither claim is kept: every ACTIVE or PROVENANCE_STALE side
+              (a quarantined B included) → RETRACTED / CONFLICT_RESOLVED, a
+              pairing outside the hold set; no trust statement, no
+              cascade; wrapper RETRACTED
 
 Every non-DEFER resolution terminates its wrapper, so resolved conflicts leave
 the ``list_inconsistencies`` queue (review P4-3). Cascade runs in the same
@@ -29,12 +33,20 @@ wrapper's 120-char excerpt remains the only record of claim B.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.conflict_review import TrustJudgment, conflict_pair_ids, decide_resolution
+from particles.core.conflict_review import (
+    FurtherMembers,
+    TrustJudgment,
+    conflict_pair_ids,
+    decide_resolution,
+    further_member_ids,
+)
+from particles.core.contradiction_disclosure import census_replaces
 from particles.core.schema import (
     SCHEMA_VERSION,
     Confidence,
@@ -53,10 +65,11 @@ from particles.core.status import Status, StatusReason
 from particles.observability import traced
 from particles.operations._quarantine import apply_demotion, promote_quarantined
 from particles.operations.cascade import run_trust_cascade
-from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+from particles.store.event_store import EventRefKind, OperatorEventType, list_events, record_event
 from particles.store.particle_store import (
     get_inconsistency_particles,
     get_particle,
+    get_particles_by_ids,
     insert_particle,
     update_particle_status,
     update_uncertainty_nature,
@@ -69,6 +82,52 @@ log = logging.getLogger(__name__)
 async def list_inconsistencies(session: AsyncSession) -> list[Particle]:
     """Return all INCONSISTENCY particles pending review."""
     return await get_inconsistency_particles(session)
+
+
+@dataclass(frozen=True)
+class PriorReview:
+    """A review recorded against a census record that a later one replaced."""
+
+    record_id: str
+    action: str
+    note: str | None
+    reviewed_at: datetime
+
+
+async def prior_reviews(session: AsyncSession, inconsistency: Particle) -> list[PriorReview]:
+    """Every review recorded against the records this one replaced, oldest first.
+
+    A census record is closed and replaced when its group changes, and the
+    replacement's id is new. ``conflict:replaces`` names the predecessor; this
+    follows that chain so review can show a DEFER note (or any other) left on
+    an earlier record. Empty for a record that replaced nothing.
+    """
+    out: list[PriorReview] = []
+    seen: set[str] = set()
+    current = census_replaces(inconsistency)
+    while current is not None and current not in seen:
+        seen.add(current)
+        events = await list_events(
+            session,
+            ref_kind=EventRefKind.PARTICLE,
+            ref_id=current,
+            event_type=OperatorEventType.REVIEW_RESOLVED,
+            limit=100,
+        )
+        # The ref filter already names the record; a REVIEW_RESOLVED event
+        # refs its record and that record's claims, never another record.
+        out.extend(
+            PriorReview(
+                record_id=current,
+                action=str((event.payload or {}).get("action", "")),
+                note=event.reason,
+                reviewed_at=event.occurred_at,
+            )
+            for event in events
+        )
+        previous = await get_particle(session, current)
+        current = census_replaces(previous) if previous is not None else None
+    return sorted(out, key=lambda r: r.reviewed_at)
 
 
 @traced("review")
@@ -108,13 +167,25 @@ async def resolve(
     particle_a_id, particle_b_id = conflict_pair_ids(inc)
     particle_a = await get_particle(session, particle_a_id) if particle_a_id else None
     particle_b = await get_particle(session, particle_b_id) if particle_b_id else None
+    # A census record may name more claims than A and B, by side;
+    # the resolution then applies to every member of a side.
+    extra_a_ids, extra_b_ids = further_member_ids(inc)
+    further: FurtherMembers | None = None
+    if extra_a_ids or extra_b_ids:
+        loaded = await get_particles_by_ids(session, extra_a_ids + extra_b_ids)
+        further = FurtherMembers(
+            a=tuple(loaded[pid] for pid in extra_a_ids if pid in loaded),
+            b=tuple(loaded[pid] for pid in extra_b_ids if pid in loaded),
+        )
 
     # Decide (D2): every write below is chosen here, store-free.
-    plan = decide_resolution(action, inc, particle_a, particle_b)
+    plan = decide_resolution(action, inc, particle_a, particle_b, further)
 
     # Apply, in the order the plan documents.
     if plan.demote is not None:
         loser, demotion = plan.demote
+        await apply_demotion(session, loser.id, demotion)
+    for loser, demotion in plan.also_demote:
         await apply_demotion(session, loser.id, demotion)
     promoted_ids: list[str] = []
     minted: Particle | None = None
@@ -135,6 +206,23 @@ async def resolve(
             promoted_ids.append(aleatory.id)
         else:
             await update_uncertainty_nature(session, mark.particle.id, UncertaintyNature.ALEATORY)
+
+    retracted_ids: list[str] = []
+    for retirement in plan.retire:
+        rid = retirement.particle.id
+        await update_particle_status(session, rid, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED)
+        retracted_ids.append(rid)
+        # A quarantined loser was never believed, so nothing was retracted
+        # from belief; the REVIEW_RESOLVED event below still refs it.
+        if retirement.was_believed:
+            await record_event(
+                session,
+                actor=actor,
+                event_type=OperatorEventType.PARTICLE_RETRACTED,
+                reason=note,
+                refs=[(EventRefKind.PARTICLE, rid)],
+                payload={"via": "review", "inconsistency_particle_id": inconsistency_particle_id},
+            )
 
     trust_stmt: SourceTrustStatement | None = None
     if plan.trust is not None:
@@ -173,7 +261,7 @@ async def resolve(
     await _persist_review_particle(session, review)
 
     refs: list[tuple[EventRefKind, str]] = [(EventRefKind.PARTICLE, inconsistency_particle_id)]
-    for ref_pid in (particle_a_id, particle_b_id, *promoted_ids):
+    for ref_pid in (particle_a_id, particle_b_id, *extra_a_ids, *extra_b_ids, *promoted_ids):
         if ref_pid:
             refs.append((EventRefKind.PARTICLE, ref_pid))
     if trust_statement_id:
@@ -190,6 +278,7 @@ async def resolve(
             "cascade_resolved": cascade_count,
             "trust_statement_id": trust_statement_id,
             "promoted_particle_ids": promoted_ids,
+            "retracted_particle_ids": retracted_ids,
         },
     )
     await session.commit()

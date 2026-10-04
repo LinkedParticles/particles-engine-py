@@ -35,6 +35,23 @@ Beyond these, lint reports coverage and quality diagnostics
 `WIKIDATA_LINK_MISMATCH`, `BARE_PROPERTIES_KEY`, …), all surfaced for manual decision; use
 `--verbose --category <type>` to inspect one category in full.
 
+Two `INFO` findings concern the **adjudicability default**, the
+`assertion_modality` that decides whether the write path may arbitrate a claim:
+
+- `MODALITY_CLASSIFIER_STALE`: one finding per classifier rule other than
+  today's, with how many ACTIVE claims it set. A claim extracted before the
+  stamp existed reads `legacy-extraction`. Run `particles modality --dry-run`
+  to size the backlog and `particles modality` to reclassify it. Claims from
+  the journal extractor are left to re-extraction.
+- `MODALITY_GRANT_PENDING`: one finding per ACTIVE claim that `particles
+  modality` would have made adjudicable. Regeneration never makes that change
+  unattended; the finding names the `particles particle reclassify` command
+  that would.
+- `MODALITY_LENS_DIVERGENCE`: one finding per ACTIVE claim that an adopted
+  lens's `modality_rules` read differently from its stored default. A lens
+  never changes what the store arbitrates; the finding names the
+  `particles particle reclassify` command that would.
+
 ```bash
 uv run particles lint                # read-only: structural report, mutates nothing
 uv run particles lint --semantic     # adds LLM contradiction check (costs tokens)
@@ -56,7 +73,7 @@ uv run particles review <particle-id> --action PREFER_A
 uv run particles review --bulk BOTH_VALID --dry-run  # preview a bulk action
 ```
 
-Four resolution actions:
+Five resolution actions:
 
 | Action | Effect |
 |---|---|
@@ -64,6 +81,7 @@ Four resolution actions:
 | `PREFER_B` | The challenger wins. The existing claim is demoted to `PROVENANCE_STALE`; a quarantined challenger is promoted to a **new ACTIVE particle** (fresh ID, provenance preserved); the trust statement is written. |
 | `BOTH_VALID` | The contradiction is apparent, not real. Both claims stay queryable with `uncertainty_nature = ALEATORY`; a quarantined challenger is recovered as a new ACTIVE particle. |
 | `DEFER` | Record a reviewer note and re-queue; the only action that leaves the conflict open. |
+| `DISCARD` | Neither claim is worth keeping, for example two transient session-state claims from one conversation. Both claims are retracted (`RETRACTED` / `CONFLICT_RESOLVED`, a quarantined challenger included) and no trust statement is written. The retirement is not a verdict on the value, so a later restatement is not held for review; to keep a value out for good, use `particles particle retract` instead. |
 
 **Retired-value records.** Some INCONSISTENCY records are not a
 conflict between two live claims but a re-assertion of a claim you (or a
@@ -72,7 +90,14 @@ superseded by judgment, and the pipeline held the new copy for you instead of
 re-minting it. Their headline reads *"a candidate re-asserts a claim retired by
 judgment"* and Particle A is the retired original. Read the actions as:
 `PREFER_A`: the retirement stands; `PREFER_B`: lift it (a fresh ACTIVE
-particle is minted from the held copy; the original stays retired). Neither
+particle is minted from the held copy; the original stays retired);
+`DISCARD`: let this copy go without ruling again (the original keeps its
+retirement, so the value is still held if restated).
+
+`particles review --bulk DISCARD` retracts both sides of every open conflict,
+with no undo. It lists each conflict with both claims and asks before it
+writes anything; `--dry-run` prints the list only, and `--yes` skips the
+prompt for scripted use. Neither
 writes a trust statement or triggers a cascade, because the question was
 about a value, not a source. Set `extraction.retired_value_quarantine.enabled:
 false` to restore the pre-0264 behaviour (re-assertions re-enter ACTIVE).
@@ -94,6 +119,56 @@ candidate at extraction time. The drop is audited: a
 verdict, and the winning particle ID
 (see [Auditing](auditing.md)).
 
+## Rulings on replaced claims
+
+An update can retire a claim in favour of a later one: a new price, a new
+employer. The re-anchor pass can too, when it restates a claim whose basis
+changed. The curation queue shows each such
+retirement whose replacing claim is on record as a `demotion` card, with
+both claims quoted:
+
+```bash
+uv run particles curate --kind demotion
+uv run particles curate apply affirm <key>    # the replacement was right
+uv run particles curate apply dismiss <key>   # both claims hold
+```
+
+Neither gesture changes a status. A retirement records a judgment, so it is
+not reversible: dismissing the card leaves the retired claim retired. If the
+retired claim is still true, assert it again.
+
+What the gesture adds is a **labelled pair**. Each affirm or dismiss appends
+one line to `demotion-rulings.jsonl` in `benchmark.runs_dir` (default
+`~/.particles/benchmark/runs/`), and the gesture's output says so ("Recorded
+as a benchmark fixture."). A line holds both claims' texts and content
+hashes, the subject, the demotion reason, the probe answers that produced
+the retirement when they were recorded, your ruling (`coexist` for a
+dismiss, `replacement` for an affirm), who made it and when. Snooze records
+nothing. A later ruling on the same pair is appended, and readers take the
+newest. The HTTP gestures do the same: `POST /curation/affirm` and a
+permanent `POST /curation/snooze` (no `snooze_days`) return the disclosure in
+`benchmark_fixture`.
+
+`particles benchmark rot --arm probe` reads that file and re-asks the update
+checks about every pair you ruled on, in a section of its own (see
+[Memory rot: real pairs](../benchmarks/rot.md#real-pairs-your-own-demotion-rulings)).
+
+**Privacy.** The file holds claim text from your own store, in plain JSON,
+under your home directory. Nothing sends it anywhere: the benchmark reads it
+locally, and its probe arm sends each pair's two claims to your configured
+`semantic_lint` model, as the update sweep itself does. Recording is on by
+default because the file stays local. To stop writing it:
+
+```yaml
+benchmark:
+  record_demotion_rulings: false
+```
+
+A retirement whose replacing claim was never recorded has no card. Document
+supersession never records one, so a claim a document's newer version
+retired is not shown. Neither is an older claim that arrived after its
+successor and was stored already retired.
+
 ## Reindex
 
 When `PROVENANCE_STALE` particles accumulate, or when an extractor
@@ -107,6 +182,64 @@ uv run particles reindex --extractor-id <id>      # re-extract particles from on
 Reindex is rate-limited (default 100 extractions per minute). It
 respects the chunk-hash carry-forward; particles whose
 source chunks didn't change skip the LLM call.
+
+### Measure a version bump before sweeping it
+
+An `--extractor-version` scope re-extracts every snapshot stamped with the old
+version, at full price, though most bumps change one prompt section. Measure
+first:
+
+```bash
+uv run particles reindex --estimate --extractor-version 0.15.0
+```
+
+The estimate prints the free work plan and the sample it would take, then asks
+before spending. It re-extracts a seeded sample of the snapshots the sweep
+would re-run (`reindex.estimate_sample_size`, default 12), writes nothing, and
+compares each sample's new claims with its stored ones using the same judge the
+curation queue uses for duplicate pairs. It reports the share of sampled
+snapshots whose claims changed, with a 95% interval, the projected number of
+changed snapshots across the scope, and the cost of the full sweep projected
+from what the sample measured. Re-extracting unchanged text also varies from
+run to run, so read the share as an upper bound. In a script, pass `--yes`;
+without it a non-interactive run exits 2 and spends nothing.
+
+From there, run the sweep, narrow it with `--entry-ids`, or skip it. Every
+extraction now records which prompt sections, chunking path, vision channel and
+subject gate it reached, with a hash of each one's text, so a later release can
+re-run only the snapshots a bump could change. That selection,
+`--only-changed-components`, is refused until a version bump has run over a
+store whose snapshots carry the record.
+
+### Append-only sources
+
+A session transcript or an append-only archive is deposited again at every
+harvest, each snapshot a longer copy of the last, and extraction reads each
+snapshot as a delta: only the text after the point the previous extracted
+snapshot was read to. An extractor upgrade therefore does not reach
+a transcript's earlier text by itself. Reindex is how it does.
+
+Reindex works on an append-only entry as a whole, never on one of its
+snapshots. When the scope reaches such an entry, by `particles reindex
+--entry-ids <entry>` or through `--extractor-version`, `--extractor-id` or
+`--provider-model`, it:
+
+1. **retires** every ACTIVE extractor claim with a source reference to the
+   entry (`SUPERSEDED_BY_REINDEX`), except the restatements the re-anchor pass
+   wrote, and only once every step below has succeeded;
+2. **replays** the entry's extracted snapshots in the order they were
+   captured: the first read whole, each later one as a delta from the one
+   before it.
+
+Each claim then cites the snapshot, and the time, that first contained its
+passage. The replay costs one call per snapshot plus the new text of each, so
+an entry with many snapshots costs more to reindex than a single read of its
+latest one. The plan line counts the replayed snapshots. A replay that fails
+partway retires nothing; run the same reindex again and it starts the entry
+from the beginning.
+
+A pending or failed snapshot the auto-discovery scope finds is extracted as
+the delta it is, not replayed.
 
 The `EXTRACTOR_VERSION` this keys on is set by the extractor's author; see
 [Plugin-author guide → extractors](../plugin-author-guide/extractors.md) for

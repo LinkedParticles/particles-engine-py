@@ -175,3 +175,29 @@ class TestQualityReportSubjects:
         report = await get_quality_report(db_session)  # type: ignore[arg-type]
         assert report.total_subjects == 1
         assert report.subjects_without_particles == 0
+
+
+class TestQualityReportCurationPrecision:
+    """The ``curation_precision`` block rides the dashboard."""
+
+    @pytest.mark.asyncio
+    async def test_absent_until_there_is_something_to_measure(self, db_session: object) -> None:
+        report = await get_quality_report(db_session)  # type: ignore[arg-type]
+        assert report.curation_precision is None
+
+    @pytest.mark.asyncio
+    async def test_present_after_a_gesture(self, db_session: object) -> None:
+        from particles.store.event_store import OperatorEventType, record_event
+
+        await record_event(
+            db_session,  # type: ignore[arg-type]
+            actor="curate",
+            event_type=OperatorEventType.BELIEF_AFFIRMED,
+            payload={"card_key": "stale:p1", "kind": "stale"},
+        )
+        report = await get_quality_report(db_session)  # type: ignore[arg-type]
+        block = report.curation_precision
+        assert block is not None
+        assert block.acted == 1 and block.precision == 1.0
+        assert [k.kind for k in block.kinds] == ["stale"]
+        assert "curation_precision" in report.model_dump(mode="json")

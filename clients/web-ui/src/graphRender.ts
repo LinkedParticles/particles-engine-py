@@ -13,6 +13,7 @@
  */
 import { GraphData, GraphParams, GraphParticleInfo } from "./api";
 import { navigate } from "./router";
+import { reasonNote, statusText } from "./status";
 import { tokenPercent, tokenValue } from "./theme";
 
 // ---------------------------------------------------------------------------
@@ -186,7 +187,7 @@ export function renderGraph(
   const panel = el("aside", "gpanel");
   wrap.append(cyEl, panel);
   view.appendChild(wrap);
-  view.appendChild(legend());
+  view.appendChild(legend(data.scope_type));
 
   // --- elements, straight from the server payload (no epistemic math) -----
   const succOf: Record<string, string> = {};
@@ -242,6 +243,69 @@ export function renderGraph(
     });
   });
 
+  // The evidence scope draws the conflict itself: the INCONSISTENCY record
+  // and each disputant as belief nodes, joined by "disputes" edges, and each
+  // disputant tied to whichever of its subjects this render carries. Without
+  // this a conflict between subject-less beliefs (common for records that
+  // predate subject binding) left an empty canvas. Structure only: the node
+  // shade is the server's effective confidence, as everywhere else.
+  if (data.scope_type === "inconsistency") {
+    const anchorId = data.scope_ref;
+    const subjectIds = new Set(data.nodes.map((n) => n.subject_id));
+    const foreground = Object.keys(P).filter((pid) => P[pid].retrieval_hit);
+    for (const pid of foreground) {
+      const info = P[pid];
+      const isAnchor = pid === anchorId;
+      elements.push({
+        group: "nodes",
+        classes: isAnchor ? "belief anchor" : "belief",
+        data: {
+          id: `belief:${pid}`,
+          particleId: pid,
+          label: isAnchor
+            ? "INCONSISTENCY"
+            : (info.contested ? "⚠ " : "") + clip(info.content, 90),
+          hop: 0,
+          size: isAnchor ? 26 : 34,
+          shade: nodeShade(info.effective_confidence),
+          border: 2,
+        },
+      });
+    }
+    for (const pid of foreground) {
+      if (pid === anchorId || !P[anchorId]) continue;
+      elements.push({
+        group: "edges",
+        classes: "dispute",
+        data: {
+          id: `dispute:${pid}`,
+          source: `belief:${anchorId}`,
+          target: `belief:${pid}`,
+          particleId: pid,
+          opacity: 1,
+          lstyle: edgeStyleFor(P[pid]),
+          label: "disputes",
+        },
+      });
+      for (const sid of P[pid].subject_ids ?? []) {
+        if (!subjectIds.has(sid)) continue;
+        elements.push({
+          group: "edges",
+          classes: "about",
+          data: {
+            id: `about:${pid}:${sid}`,
+            source: `belief:${pid}`,
+            target: sid,
+            particleId: pid,
+            opacity: 0.6,
+            lstyle: "dotted",
+            label: "",
+          },
+        });
+      }
+    }
+  }
+
   // Colours come from the design tokens (design/tokens.css) resolved for the
   // active theme; Cytoscape needs concrete strings, so read them at render.
   const C = {
@@ -251,6 +315,7 @@ export function renderGraph(
     edgeGhost: tokenValue("--p-graph-edge-ghost"),
     edgeLabel: tokenValue("--p-badge-contested"),
     hit: tokenValue("--p-badge-hit"),
+    bg: tokenValue("--p-surface") || tokenValue("--p-bg"),
   };
   const cy = cytoscape({
     container: cyEl,
@@ -291,6 +356,43 @@ export function renderGraph(
         },
       },
       { selector: "edge.hit", style: { "line-color": C.hit, width: 3.5 } },
+      {
+        selector: "node.belief",
+        style: {
+          shape: "round-rectangle",
+          width: 150,
+          height: "label",
+          padding: "8px",
+          "text-valign": "center",
+          "text-margin-y": 0,
+          "text-max-width": 140,
+          "font-size": 10,
+        },
+      },
+      {
+        selector: "node.anchor",
+        style: {
+          shape: "diamond",
+          width: 30,
+          height: 30,
+          padding: "0px",
+          "text-valign": "bottom",
+          "text-margin-y": 4,
+          "background-color": C.edgeLabel,
+        },
+      },
+      {
+        selector: "edge.dispute",
+        style: {
+          "line-color": C.edgeLabel,
+          width: 2.5,
+          color: C.edgeLabel,
+          "font-size": 10,
+          "text-background-color": C.bg,
+          "text-background-opacity": 1,
+        },
+      },
+      { selector: "edge.about", style: { width: 1 } },
       { selector: "edge.ghost", style: { "line-color": C.edgeGhost } },
       { selector: ".hidden", style: { display: "none" } },
     ],
@@ -410,7 +512,10 @@ export function renderGraph(
       "prow" + (info.ghost ? " ghost" : "") + (info.retrieval_hit ? " hit" : ""),
     );
     const head_ = el("div");
-    head_.appendChild(el("span", `chip ${info.status}`, info.status));
+    const chip = el("span", `chip ${info.status}`, statusText(info.status, info.status_reason));
+    const note = reasonNote(info.status_reason);
+    if (note) chip.title = note;
+    head_.appendChild(chip);
     if (info.contested) {
       const bases = (info.contested.bases ?? []).join("+");
       const c = el("span", "chip contested", `contested: ${bases}`);
@@ -599,7 +704,12 @@ export function renderGraph(
     }
   };
 
-  cy.on("tap", "node", (ev) => showSubject((ev.target as CyEle).id()));
+  cy.on("tap", "node", (ev) => {
+    const target = ev.target as CyEle;
+    const pid = target.data("particleId");
+    if (pid) showParticle(pid);
+    else showSubject(target.id());
+  });
   cy.on("tap", "edge", (ev) => showParticle((ev.target as CyEle).data("particleId")));
   cy.on("tap", (ev) => {
     if (ev.target === (cy as unknown)) {
@@ -869,9 +979,14 @@ const LEGEND: ReadonlyArray<[string, string]> = [
   ["bold blue", "retrieval hit (query scope)"],
 ];
 
-function legend(): HTMLElement {
+const CONFLICT_LEGEND: ReadonlyArray<[string, string]> = [
+  ["◆ disputes", "the INCONSISTENCY record and the beliefs it names (boxes)"],
+];
+
+function legend(scopeType?: string): HTMLElement {
   const wrap = el("div", "graph-legend");
-  for (const [mark, meaning] of LEGEND) {
+  const entries = scopeType === "inconsistency" ? [...CONFLICT_LEGEND, ...LEGEND] : LEGEND;
+  for (const [mark, meaning] of entries) {
     const span = el("span");
     span.appendChild(el("b", "", mark));
     span.appendChild(document.createTextNode(` ${meaning}`));
@@ -883,6 +998,10 @@ function legend(): HTMLElement {
 // ---------------------------------------------------------------------------
 // Small DOM helpers
 // ---------------------------------------------------------------------------
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
 
 function el(tag: string, cls?: string, text?: string): HTMLElement {
   const e = document.createElement(tag);

@@ -17,7 +17,10 @@ not. Pinned here:
 * **the pipeline** — a cross-entry update supersedes; an out-of-order older
   claim is stored demoted; ``multi`` stores do it too; a revert re-mints
   (outside the judgment set); a different lineage falls through; the
-  switch really switches it off.
+  switch really switches it off;
+* **the slot rule** — a contradiction retires a claim only when the
+  update probe says both claims fill one slot and the later one gives it a new
+  value, on every route rung 2.5 runs on.
 """
 
 from __future__ import annotations
@@ -27,13 +30,14 @@ import re
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
 
-from particles.core.conflict_resolution import ConflictVerdict, resolve_conflict
+from particles.core.conflict_resolution import ConflictVerdict, SlotVerdict, resolve_conflict
 from particles.core.schema import (
     ClaimTerm,
     Confidence,
@@ -53,6 +57,7 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.extraction.general import CandidateParticle, ExtractionResult
 from particles.ingest.duplicate_suppression import JUDGMENT_RETIREMENTS
+from particles.ingest.pipeline import _has_update_signal as _real_update_signal
 from particles.ingest.update_supersession import (
     SubjectIndex,
     candidate_subject_names,
@@ -363,25 +368,69 @@ class _OneClaim:
         )
 
 
+FAVOURITE = "Sandeep's Curry House is the user's favourite place to eat."
+NOT_YET = "The user has not yet found a regular place to eat."
+DELHI = "The user lives in Lajpat Nagar, Delhi."
+MUMBAI = "The user is living in Bandra, Mumbai."
+
+#: A fixed fact stated twice with different values: the sweep retired the
+#: earlier figure for the later one on the kept stores.
+KAWAI_EARLIER = "The Kawai ES110 digital piano costs $699 to $799."
+KAWAI_LATER = "The Kawai ES110 digital piano costs $299."
+
+#: Contradicting pairs outside the city rule, each with the update probe's
+#: scripted verdict: whether the two claims fill one slot, and of
+#: what kind. The first is the 2026-09-27 Delhi scenario: the
+#: contradiction probe confirmed it, and rung 2.5 retired the favourite on its
+#: date alone.
+_SCRIPTED: dict[frozenset[str], SlotVerdict] = {
+    frozenset((FAVOURITE, NOT_YET)): SlotVerdict.DIFFERENT,
+    frozenset(
+        (
+            "The user's favourite restaurant is Sandeep's Curry House.",
+            "The user's favourite restaurant is now Bombay Canteen.",
+        )
+    ): SlotVerdict.CHANGES,
+    frozenset(("The user is vegetarian.", "The user eats fish now.")): SlotVerdict.CHANGES,
+    frozenset((DELHI, MUMBAI)): SlotVerdict.CHANGES,
+    frozenset((KAWAI_EARLIER, KAWAI_LATER)): SlotVerdict.FIXED,
+}
+
+
 async def _contradicts(a: str, b: str) -> bool:
     """Scripted probe: two claims contradict iff they name different cities."""
+    if frozenset((a, b)) in _SCRIPTED:
+        return True
     ca = {c for c in _CITIES if c in a}
     cb = {c for c in _CITIES if c in b}
     return bool(ca and cb and ca != cb)
 
 
+async def _updates(earlier: str, later: str) -> SlotVerdict:
+    """Scripted update probe: a home city is one slot that changes; the scripted pairs as listed."""
+    scripted = _SCRIPTED.get(frozenset((earlier, later)))
+    if scripted is not None:
+        return scripted
+    return SlotVerdict.CHANGES if await _contradicts(earlier, later) else SlotVerdict.DIFFERENT
+
+
 @pytest.fixture
-def bow() -> Generator[None, None, None]:
+def bow() -> Generator[AsyncMock, None, None]:
+    """A bag-of-words encoder, and both probes scripted; yields the update probe."""
     from particles import embeddings as ep
 
     original = ep._embedding_model
     ep.set_embedding_model(_BagOfWords())  # type: ignore[arg-type]
+    update_probe = AsyncMock(side_effect=_updates)
     try:
-        with patch(
-            "particles.ingest.pipeline._has_contradiction_signal",
-            AsyncMock(side_effect=_contradicts),
+        with (
+            patch(
+                "particles.ingest.pipeline._has_contradiction_signal",
+                AsyncMock(side_effect=_contradicts),
+            ),
+            patch("particles.ingest.pipeline._has_update_signal", update_probe),
         ):
-            yield
+            yield update_probe
     finally:
         ep.set_embedding_model(original)
 
@@ -556,6 +605,325 @@ class TestPipeline:
 
 
 # ---------------------------------------------------------------------------
+# an update retires a claim only when both claims fill one slot
+# ---------------------------------------------------------------------------
+
+#: The synthetic updates the slot rule must keep: each later claim gives a new
+#: value for the earlier claim's slot.
+SAME_SLOT_UPDATES = [
+    (BOSTON, DENVER),
+    (
+        "The user's favourite restaurant is Sandeep's Curry House.",
+        "The user's favourite restaurant is now Bombay Canteen.",
+    ),
+    ("The user is vegetarian.", "The user eats fish now."),
+]
+
+
+@pytest.mark.asyncio
+class TestSlotRule:
+    """The update probe gates rung 2.5 on every route it runs on.
+
+    The contradiction probe stays scripted as before; what these tests pin is
+    that its YES is no longer enough to retire a claim on a date.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bag-of-words encoder scores these short pairs lower than the
+        # production encoder does (the Delhi pair met the 0.45 floor there).
+        # The floor finds candidates and decides nothing, so lowering it only
+        # makes sure every pair here reaches the probes.
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "subject_floor", 0.3)
+
+    async def test_a_situational_claim_never_retires_a_lasting_preference(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        from particles.store.particle_store import get_particles_by_status
+
+        ex = _OneClaim()
+        await _say(db_session, ex, FAVOURITE, day=4)
+        [new] = await _say(db_session, ex, NOT_YET, day=20)
+        [favourite] = await _by_content(db_session, FAVOURITE)
+        assert favourite.status is Status.ACTIVE and favourite.status_reason is None
+        assert new.status is Status.ACTIVE and new.supersedes is None
+        # The pair was asked, earlier claim first, and nothing went to review:
+        # a cross-entry pair in different slots leaves the store as it was.
+        bow.assert_awaited_once_with(FAVOURITE, NOT_YET)
+        assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
+
+    @pytest.mark.parametrize(("old", "new"), SAME_SLOT_UPDATES)
+    async def test_a_new_value_for_the_same_slot_still_supersedes(
+        self, db_session: Any, bow: AsyncMock, old: str, new: str
+    ) -> None:
+        ex = _OneClaim()
+        await _say(db_session, ex, old, day=4)
+        [written] = await _say(db_session, ex, new, day=20)
+        [stale] = await _by_content(db_session, old)
+        assert stale.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        assert written.status is Status.ACTIVE and written.supersedes == stale.id
+        bow.assert_awaited_once_with(old, new)
+
+    async def test_an_out_of_order_claim_is_asked_in_date_order(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        ex = _OneClaim()
+        await _say(db_session, ex, DENVER, day=9)
+        [late_arrival] = await _say(db_session, ex, BOSTON, day=1)
+        assert late_arrival.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        bow.assert_awaited_once_with(BOSTON, DENVER)
+
+    async def test_an_incomplete_update_probe_retires_nothing(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        bow.side_effect = _real_update_signal
+        ex = _OneClaim()
+        await _say(db_session, ex, BOSTON, day=1)
+        with patch("particles.ingest.pipeline._llm_slot_verdict", AsyncMock(return_value=None)):
+            await _say(db_session, ex, DENVER, day=9)
+        [old] = await _by_content(db_session, BOSTON)
+        assert old.status is Status.ACTIVE
+
+    async def test_a_pair_the_rung_cannot_order_is_never_asked(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        # A different lineage: rung 2.5 cannot fire, so the question would be spend.
+        ex = _OneClaim()
+        await _say(db_session, ex, BOSTON, day=1)
+        await _say(
+            db_session,
+            ex,
+            DENVER,
+            day=9,
+            uri="https://people.example/profile",
+            source_type=SourceType.WEB_PAGE,
+        )
+        bow.assert_not_awaited()
+
+    async def test_the_sweep_leaves_a_different_slot_pair_alone(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.operations import reconcile as reconcile_mod
+
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, FAVOURITE, day=4)
+        await _say(db_session, ex, NOT_YET, day=20)
+        await _say(db_session, ex, BOSTON, day=4)
+        await _say(db_session, ex, DENVER, day=20)
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", True)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(side_effect=_contradicts)
+        )
+        update_probe = AsyncMock(side_effect=_updates)
+        monkeypatch.setattr(reconcile_mod, "_has_update_signal", update_probe)
+
+        summary = await reconcile_mod.reconcile_updates(db_session)
+        assert summary["demoted"] == 1
+        assert summary["different_slot"] == 1
+        assert summary["update_probed"] == 2
+        [favourite] = await _by_content(db_session, FAVOURITE)
+        assert favourite.status is Status.ACTIVE
+        [boston] = await _by_content(db_session, BOSTON)
+        assert boston.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        update_probe.assert_any_await(FAVOURITE, NOT_YET)
+
+    async def test_an_agent_keeps_its_own_belief_in_another_slot(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        agent = TestAgentAssertionPath()
+        await agent._assert(db_session, FAVOURITE, at=T0)
+        written = await agent._assert(db_session, NOT_YET, at=T0 + timedelta(hours=1))
+        [favourite] = await _by_content(db_session, FAVOURITE)
+        assert favourite.status is Status.ACTIVE
+        # The assertion path fails closed: the pair goes to review.
+        assert written.status is Status.INCONSISTENCY
+        bow.assert_awaited_once_with(FAVOURITE, NOT_YET)
+
+
+@pytest.mark.asyncio
+class TestFixedSlotRule:
+    """A fixed slot given two values goes to review, not to rung 2.5.
+
+    The update probe confirms the pair fills one slot, as's
+    residuals, and names the slot fixed: a later price for the same product as
+    stated once is not a newer price. Every route must keep the earlier claim.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "subject_floor", 0.3)
+
+    async def test_extraction_sends_the_pair_to_rung_3(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.store.particle_store import get_particles_by_status
+
+        # The second reading is a separate gate with its own tests;
+        # off here so the pair reaches the ladder on the scripted probes alone.
+        monkeypatch.setattr(get_config().extraction, "verify_conflicts", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, KAWAI_EARLIER, day=4)
+        await _say(db_session, ex, KAWAI_LATER, day=20)
+        [earlier] = await _by_content(db_session, KAWAI_EARLIER)
+        assert earlier.status is Status.ACTIVE and earlier.status_reason is None
+        [later] = await _by_content(db_session, KAWAI_LATER)
+        # Rung 3 at a write: the record opens, and the newcomer waits behind it
+        # for review. Nothing is retired by date.
+        assert later.status_reason is StatusReason.CONFLICT_PENDING
+        assert later.supersedes is None
+        [record] = await get_particles_by_status(db_session, Status.INCONSISTENCY)
+        named = [
+            r.corpus_entry_id for r in record.provenance if r.type is ProvenanceRefType.PARTICLE
+        ]
+        assert named[:2] == [earlier.id, later.id]
+        bow.assert_awaited_once_with(KAWAI_EARLIER, KAWAI_LATER)
+
+    async def test_the_agent_path_never_retires_its_own_fixed_fact(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        agent = TestAgentAssertionPath()
+        await agent._assert(db_session, KAWAI_EARLIER, at=T0)
+        written = await agent._assert(db_session, KAWAI_LATER, at=T0 + timedelta(hours=1))
+        [earlier] = await _by_content(db_session, KAWAI_EARLIER)
+        assert earlier.status is Status.ACTIVE
+        assert written.status is Status.INCONSISTENCY
+        bow.assert_awaited_once_with(KAWAI_EARLIER, KAWAI_LATER)
+
+    async def _backlog(self, session: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+        from particles.config import get_config
+        from particles.operations import reconcile as reconcile_mod
+
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", False)
+        ex = _OneClaim()
+        await _say(session, ex, KAWAI_EARLIER, day=4)
+        await _say(session, ex, KAWAI_LATER, day=20)
+        await _say(session, ex, BOSTON, day=4)
+        await _say(session, ex, DENVER, day=20)
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", True)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(side_effect=_contradicts)
+        )
+        monkeypatch.setattr(reconcile_mod, "_has_update_signal", AsyncMock(side_effect=_updates))
+        return reconcile_mod
+
+    async def test_the_sweep_opens_a_review_and_keeps_both_active(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.core.contradiction_disclosure import ORIGIN_KEY
+        from particles.store.particle_store import get_particles_by_status
+
+        reconcile_mod = await self._backlog(db_session, monkeypatch)
+        summary = await reconcile_mod.reconcile_updates(db_session)
+        # The home city still updates; the price does not.
+        assert summary["demoted"] == 1
+        assert summary["fixed_slot"] == 1
+        [earlier] = await _by_content(db_session, KAWAI_EARLIER)
+        [later] = await _by_content(db_session, KAWAI_LATER)
+        assert earlier.status is Status.ACTIVE and later.status is Status.ACTIVE
+        assert later.supersedes is None
+        [record] = await get_particles_by_status(db_session, Status.INCONSISTENCY)
+        named = [
+            r.corpus_entry_id for r in record.provenance if r.type is ProvenanceRefType.PARTICLE
+        ]
+        assert named[:2] == [earlier.id, later.id]
+        assert record.asserted_by == reconcile_mod.UPDATE_SWEEP_ACTOR
+        assert (record.properties or {})[ORIGIN_KEY] == reconcile_mod.FIXED_SLOT_ORIGIN
+        [review] = summary["reviews"]
+        assert review["record_id"] == record.id
+
+        # Idempotent: the ledger remembers the pair may not retire, so a re-run
+        # asks nothing and opens nothing.
+        again = await reconcile_mod.reconcile_updates(db_session)
+        assert again["fixed_slot"] == 0 and again["previously_cleared"] >= 1
+        assert len(await get_particles_by_status(db_session, Status.INCONSISTENCY)) == 1
+
+    async def test_a_pair_already_under_review_is_not_opened_twice(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.store.particle_store import get_particles_by_status
+
+        reconcile_mod = await self._backlog(db_session, monkeypatch)
+        await reconcile_mod.reconcile_updates(db_session)
+        # A reworded prompt invalidates the ledger, so the pair is asked again.
+        monkeypatch.setattr(reconcile_mod, "update_prompt_hash", lambda: "reworded")
+        again = await reconcile_mod.reconcile_updates(db_session)
+        [review] = again["reviews"]
+        assert review.get("already_open") is True and "record_id" not in review
+        assert len(await get_particles_by_status(db_session, Status.INCONSISTENCY)) == 1
+
+    async def test_a_dry_run_opens_nothing(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.store.particle_store import get_particles_by_status
+
+        reconcile_mod = await self._backlog(db_session, monkeypatch)
+        dry = await reconcile_mod.reconcile_updates(db_session, dry_run=True)
+        assert dry["fixed_slot"] == 1 and "record_id" not in dry["reviews"][0]
+        assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slot", "expected"),
+    [
+        (SlotVerdict.CHANGES, (True, True)),
+        (SlotVerdict.FIXED, (True, False)),
+        (SlotVerdict.DIFFERENT, (True, False)),
+        (None, (True, None)),
+    ],
+)
+async def test_update_checks_reports_whether_the_sweep_would_retire(
+    monkeypatch: pytest.MonkeyPatch, slot: SlotVerdict | None, expected: tuple[bool, bool | None]
+) -> None:
+    """The real-pairs benchmark reads the sweep's decision; a fixed slot keeps both."""
+    from particles.operations import reconcile as reconcile_mod
+
+    monkeypatch.setattr(reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True))
+    monkeypatch.setattr(reconcile_mod, "_has_update_signal", AsyncMock(return_value=slot))
+    assert await reconcile_mod.update_checks(KAWAI_EARLIER, KAWAI_LATER) == expected
+
+
+class TestSlotVerdictParser:
+    """The update probe's reply carries the slot's kind before its verdict."""
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("REASON: home city.\nSLOT: CHANGES\nVERDICT: YES", SlotVerdict.CHANGES),
+            ("REASON: the author.\nSLOT: FIXED\nVERDICT: YES", SlotVerdict.FIXED),
+            ("REASON: two attributes.\nSLOT: NONE\nVERDICT: NO", SlotVerdict.DIFFERENT),
+            # A NO needs no slot line: it is not an update whatever the kind.
+            ("REASON: two attributes.\nVERDICT: NO", SlotVerdict.DIFFERENT),
+            ("REASON: x.\n**SLOT:** fixed\n**VERDICT:** yes", SlotVerdict.FIXED),
+            # A YES without a usable kind is off protocol: no verdict, keep both.
+            ("REASON: home city.\nVERDICT: YES", None),
+            ("REASON: x.\nSLOT: NONE\nVERDICT: YES", None),
+            ("REASON: x.\nSLOT: CHANGES\nSLOT: FIXED\nVERDICT: YES", None),
+            # Cut before the verdict.
+            ("REASON: the author.\nSLOT: FIXED", None),
+        ],
+    )
+    def test_reply(self, reply: str, expected: SlotVerdict | None) -> None:
+        from particles.ingest.pipeline import _slot_verdict
+
+        assert _slot_verdict(reply) is expected
+
+    def test_prompt_asks_for_the_kind_before_the_verdict(self) -> None:
+        from particles.ingest.pipeline import _update_prompt
+
+        prompt = _update_prompt("A.", "B.")
+        assert prompt.index("SLOT: CHANGES") < prompt.index("VERDICT: YES")
+        assert prompt.endswith("Claim A: A.\n\nClaim B: B.")
+
+
+# ---------------------------------------------------------------------------
 # the backlog sweep, tool turns, persona folding, restated claims
 # ---------------------------------------------------------------------------
 
@@ -620,6 +988,29 @@ class TestPersonaFolding:
         assert _persona_canonical("Hiroshi", "CONVERSATION") == "Hiroshi"
         assert _persona_canonical("user", "WEB_PAGE") == "user"
 
+    def test_a_memory_file_folds_whatever_its_source_type(self) -> None:
+        """a Claude Code memory file is LOCAL_MARKDOWN on disk."""
+        from particles.ingest.subject_resolver import _persona_canonical
+        from particles.store.subject_store import persona_alias_guard
+
+        memory_file = ["claude-code", "memory-file"]
+        assert _persona_canonical("user", "LOCAL_MARKDOWN", memory_file) == "the user"
+        assert _persona_canonical("Mumbai", "LOCAL_MARKDOWN", memory_file) == "Mumbai"
+        # The same file untagged is any other Markdown file: its "I" is not the speaker.
+        assert _persona_canonical("user", "LOCAL_MARKDOWN", ["claude-code"]) == "user"
+        assert persona_alias_guard("I", "LOCAL_MARKDOWN", memory_file) == ()
+        assert persona_alias_guard("I", "LOCAL_MARKDOWN") == ("the user",)
+
+    def test_an_empty_tag_list_keys_the_fold_on_source_type_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.ingest.subject_resolver import _persona_canonical
+
+        monkeypatch.setattr(get_config().subjects, "persona_source_tags", [])
+        assert _persona_canonical("user", "LOCAL_MARKDOWN", ["memory-file"]) == "user"
+        assert _persona_canonical("user", "CONVERSATION") == "the user"
+
     @pytest.mark.asyncio
     async def test_the_readonly_lookup_folds_the_same_way_the_write_path_does(
         self, db_session: Any
@@ -650,6 +1041,211 @@ class TestPersonaFolding:
             await _candidate_subject_ids_readonly(db_session, candidate, {}, source_type="WEB_PAGE")
             == []
         )
+        # A memory file folds by its tag, as the write path does.
+        assert await _candidate_subject_ids_readonly(
+            db_session,
+            candidate,
+            {},
+            source_type="LOCAL_MARKDOWN",
+            source_tags=["claude-code", "memory-file"],
+        ) == [subject.id]
+        assert (
+            await _candidate_subject_ids_readonly(
+                db_session, candidate, {}, source_type="LOCAL_MARKDOWN"
+            )
+            == []
+        )
+
+
+#: The moved-city fixture the integration tier harvests (tests/fixtures/moved_city).
+MOVED_CITY = Path(__file__).parent / "fixtures" / "moved_city"
+
+#: Each session's residence claim as the live extractor emitted it on
+#: 2026-09-27: the same speaker named "user" in one file and "the user" in the
+#: next. The triple names the speaker, so the speaker is the about-subject.
+_SPLIT_SPEAKER: dict[str, tuple[str, list[str], datetime]] = {
+    "session-04.md": (DELHI, ["user", "Lajpat Nagar", "Delhi"], datetime(2026, 9, 4, tzinfo=UTC)),
+    "session-07.md": (
+        MUMBAI,
+        ["the user", "Bandra", "Mumbai"],
+        datetime(2026, 9, 20, tzinfo=UTC),
+    ),
+}
+
+
+class _WikidataLike:
+    """A live authority answering "user" the way Wikidata did: "user account".
+
+    Q3604202 at link confidence 0.22 clears the 0.15 abstain floor, so the
+    speaker's "user" became a Subject of its own. It answers nothing else, and
+    records every name it was asked.
+    """
+
+    NAMESPACE = "wikidata"
+    PRIORITY = 0
+    LIVE = True
+    DEFAULT_LINK_CONFIDENCE = 0.95
+    APPLICABILITY: list[Any] = []
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def uri_for(self, external_id: str) -> str | None:
+        return None
+
+    def recognize(self, name: str) -> Any:
+        return None
+
+    async def resolve(self, session: Any, name: str, **kwargs: Any) -> Any:
+        from particles.core.schema import ExternalRef
+        from particles.ingest.authorities import AuthorityResolution
+
+        self.asked.append(name)
+        if name.casefold() != "user":
+            return None
+        return AuthorityResolution(
+            external_ref=ExternalRef(
+                namespace="wikidata", id="Q3604202", uri=None, confidence=0.22375816106796265
+            ),
+            canonical_name="user account",
+            aliases=["account", "user", "online account", "User"],
+        )
+
+    async def canonical_name_for(self, session: Any, external_id: str) -> str | None:
+        return None
+
+
+class _MemoryFiles:
+    """An extractor emitting each moved-city session's scripted residence claim."""
+
+    EXTRACTOR_ID = "test-extractor"
+    EXTRACTOR_VERSION = "1"
+
+    def __init__(self) -> None:
+        self.by_content: dict[bytes, tuple[str, list[str]]] = {}
+
+    def accepts(self, source_type: str) -> bool:
+        return True
+
+    async def extract(self, snapshot: Any, content: bytes, **kwargs: object) -> ExtractionResult:
+        claim, subjects = self.by_content[content]
+        speaker = subjects[0]
+        return ExtractionResult(
+            candidates=[
+                CandidateParticle(
+                    content=claim,
+                    confidence_value=0.9,
+                    uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                    subjects=subjects,
+                    structured_claim=StructuredClaim(
+                        subject=ClaimTerm(kind=TermKind.TOKEN, value=speaker),
+                        predicate=ClaimTerm(kind=TermKind.TOKEN, value="lives in"),
+                        object=ClaimTerm(kind=TermKind.TOKEN, value=subjects[-1]),
+                        structurizer_id="t",
+                        structurizer_version="1",
+                    ),
+                )
+            ]
+        )
+
+
+@pytest.mark.asyncio
+class TestMemoryFileSpeaker:
+    """one speaker across memory files, so the move supersedes.
+
+    The 2026-09-27 replay on 1.159.0: ``particles audit`` harvested two
+    session notes as ``LOCAL_MARKDOWN`` memory files. The persona fold keyed on
+    source type alone, so it never ran; "user" went to Wikidata and came back
+    as "user account", "the user" became a bare Subject, and "the user lives in
+    Delhi" stayed ACTIVE beside "the user is living in Bandra" because the two
+    claims shared no subject for rung 2.5 to pair them on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # As in TestSlotRule: the bag-of-words encoder scores this pair below
+        # the production floor. The floor finds candidates and decides nothing.
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "subject_floor", 0.3)
+
+    async def _harvest(
+        self, session: Any, ex: _MemoryFiles, wikidata: _WikidataLike, name: str
+    ) -> list[Particle]:
+        from particles.corpus.deposit import deposit_text_versioned
+        from particles.ingest.pipeline import extract_snapshot
+
+        claim, subjects, dated = _SPLIT_SPEAKER[name]
+        text = (MOVED_CITY / name).read_text()
+        ex.by_content[text.encode()] = (claim, subjects)
+        entry_id, snapshot_id, _ = await deposit_text_versioned(
+            session,
+            text=text,
+            uri_r=f"file:///notes/{name}",
+            source_type=SourceType.LOCAL_MARKDOWN,
+            mutability=Mutability.MUTABLE,
+            content_published_at=dated,
+            # What `particles audit` and the SessionEnd harvest stamp.
+            tags=["claude-code", "memory-file"],
+        )
+        await session.commit()
+        with patch("particles.ingest.subject_resolver.get_authorities", return_value=[wikidata]):
+            written = await extract_snapshot(session, entry_id, snapshot_id, extractor=ex)
+        await session.commit()
+        return written
+
+    async def _speaker(self, session: Any, particle: Particle) -> str:
+        from particles.store.subject_store import get_subject
+
+        names = [
+            s.canonical_name
+            for s in [await get_subject(session, sid) for sid in particle.subject_ids]
+            if s is not None
+        ]
+        return next(n for n in names if "user" in n.casefold())
+
+    async def test_the_move_supersedes_across_two_memory_files(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        ex, wikidata = _MemoryFiles(), _WikidataLike()
+        await self._harvest(db_session, ex, wikidata, "session-04.md")
+        [mumbai] = await self._harvest(db_session, ex, wikidata, "session-07.md")
+
+        [delhi] = await _by_content(db_session, DELHI)
+        assert await self._speaker(db_session, delhi) == "the user"
+        assert await self._speaker(db_session, mumbai) == "the user"
+        assert delhi.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        assert mumbai.status is Status.ACTIVE and mumbai.supersedes == delhi.id
+        bow.assert_awaited_once_with(DELHI, MUMBAI)
+
+    async def test_the_speaker_never_reaches_a_live_authority(
+        self, db_session: Any, bow: AsyncMock
+    ) -> None:
+        ex, wikidata = _MemoryFiles(), _WikidataLike()
+        await self._harvest(db_session, ex, wikidata, "session-04.md")
+        await self._harvest(db_session, ex, wikidata, "session-07.md")
+        persona_forms = {"user", "the user"}
+        assert not persona_forms & {n.casefold() for n in wikidata.asked}
+        # The places in the same claims are still looked up.
+        assert {"Delhi", "Mumbai"} <= set(wikidata.asked)
+
+    async def test_without_the_tag_the_speaker_splits_as_it_did(
+        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The control: this fixture reproduces the 1.159.0 split when the fold is off."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().subjects, "persona_source_tags", [])
+        ex, wikidata = _MemoryFiles(), _WikidataLike()
+        await self._harvest(db_session, ex, wikidata, "session-04.md")
+        [mumbai] = await self._harvest(db_session, ex, wikidata, "session-07.md")
+
+        [delhi] = await _by_content(db_session, DELHI)
+        assert await self._speaker(db_session, delhi) == "user account"
+        assert await self._speaker(db_session, mumbai) == "the user"
+        assert delhi.status is Status.ACTIVE and delhi.status_reason is None
+        assert mumbai.supersedes is None
+        bow.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -668,6 +1264,7 @@ class TestSweep:
         monkeypatch.setattr(
             reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True)
         )
+        monkeypatch.setattr(reconcile_mod, "_has_update_signal", AsyncMock(side_effect=_updates))
 
     async def test_sweep_clears_a_backlog_and_is_idempotent(
         self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
@@ -741,6 +1338,38 @@ class TestSweep:
         await reconcile_updates(db_session)
         [boston] = await _by_content(db_session, BOSTON)
         assert boston.status is Status.ACTIVE, "the restated value must survive the sweep"
+
+    async def test_a_generic_and_an_instance_claim_are_never_paired(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """an exception does not falsify "most", so no probe, no retirement.
+
+        Both probes would say "a newer value for one slot that changes", which
+        retires the earlier claim for any pair that reached them.
+        """
+        from particles.config import get_config
+        from particles.operations import reconcile as reconcile_mod
+
+        generic = "Users generally keep the editor in dark mode."
+        instance = "The user keeps the editor in light mode."
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, generic, day=1)
+        await _say(db_session, ex, instance, day=9)
+        monkeypatch.setattr(get_config().reconciliation.update_supersession, "enabled", True)
+        contradiction = AsyncMock(return_value=True)
+        monkeypatch.setattr(reconcile_mod, "_has_contradiction_signal", contradiction)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_update_signal", AsyncMock(return_value=SlotVerdict.CHANGES)
+        )
+
+        assert await reconcile_mod.count_update_candidates(db_session, None) == 0
+        summary = await reconcile_mod.reconcile_updates(db_session)
+        assert summary["demoted"] == 0
+        contradiction.assert_not_awaited()
+        for claim in (generic, instance):
+            [p] = await _by_content(db_session, claim)
+            assert p.status is Status.ACTIVE
 
 
 @pytest.mark.asyncio

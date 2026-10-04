@@ -39,6 +39,7 @@ from particles.corpus.rule_sources import (
     resolve_rule_sources,
     sync_rule_sources,
 )
+from tests._client_fixtures import stream_via_create
 
 # --------------------------------------------------------------------------
 # Resolution — pure path work
@@ -459,6 +460,7 @@ class _Extractor:
         self.by_marker = by_marker
         self.messages = MagicMock()
         self.messages.create = MagicMock(side_effect=self._create)
+        stream_via_create(self)
 
     @staticmethod
     def _prompt(kwargs: dict[str, Any]) -> str:

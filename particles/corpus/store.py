@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String, Text, func, or_, select, update
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
 from sqlalchemy.orm.attributes import flag_modified
@@ -22,10 +23,15 @@ from particles.core.schema import (
     ExtractionStatus,
     FetchPolicy,
     Mutability,
+    Particle,
+    ProvenanceRefType,
     Snapshot,
     WarcRecordType,
 )
 from particles.db import Base
+from particles.extraction.components import ComponentRecord
+
+log = logging.getLogger(__name__)
 
 
 class CorpusEntryRow(Base):
@@ -124,6 +130,43 @@ class SnapshotRow(Base):
     # alone cannot tell a skipped generation from an extracted one. SDK-internal
     # by design: not a Snapshot-model field and not serialised.
     superseded_by_snapshot_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # How many times extraction has claimed this snapshot. Incremented by the
+    # claim and never reset, so a snapshot the pipeline handed back to PENDING
+    # (every LLM call failed) carries the count of its failed tries. The
+    # consolidation catch-up orders on it, least-tried first, so a snapshot
+    # that fails the same way every night cannot hold the head of the queue.
+    # SDK-internal like the column above: not a Snapshot-model field.
+    extraction_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # How far extraction read the snapshot, in bytes of the raw content: the
+    # content's length when the read reached the end, else the largest
+    # paragraph boundary whose decoded prefix was read in full (a read cut at
+    # ``extraction.max_llm_calls_per_source``). Written in the transaction that
+    # marks the snapshot COMPLETE after an extraction, and in the
+    # one that writes a partial read's claims with the snapshot PENDING, where
+    # it means "the claims of the text before this offset are written" and is
+    # where the snapshot's next read starts. Read only as the
+    # offset an APPEND_ONLY snapshot is read from. NULL on every snapshot
+    # extracted before. SDK-internal like the two columns above.
+    extracted_through: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The components the snapshot's latest extraction exercised: prompt
+    # sections, the chunking path, the vision channel, the subject gate, each
+    # with the content hash of its text, stored as a ``ComponentRecord`` in
+    # JSON. Written beside ``extracted_through`` in the COMPLETE
+    # transaction, and read by a version-scoped reindex to tell a snapshot that
+    # reached a changed component from one that did not. NULL on every
+    # snapshot extracted before the record, which reads as "every component
+    # exercised". SDK-internal like the columns above.
+    extraction_components_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # True while the snapshot holds the claims of a whole read that failed
+    # partway: its next read is the same whole read, so carry-forward skips the
+    # chunks already written, and the entry's later snapshots wait until it is
+    # COMPLETE. Cleared by COMPLETE and by the reindex that
+    # retires its claims. SDK-internal like the columns above.
+    resume_whole: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
 
     __table_args__ = (Index("ix_snapshots_entry_extraction", "entry_id", "extraction_status"),)
 
@@ -203,17 +246,72 @@ async def list_snapshots_for_entry(session: AsyncSession, entry_id: str) -> list
 
 
 async def update_extraction_status(
-    session: AsyncSession, snapshot_id: str, status: ExtractionStatus
+    session: AsyncSession,
+    snapshot_id: str,
+    status: ExtractionStatus,
+    *,
+    extracted_through: int | None = None,
+    components: ComponentRecord | None = None,
+    resume_whole: bool = False,
 ) -> None:
+    """Set a snapshot's extraction status, and the record of a read that ended.
+
+    ``extracted_through`` and ``components`` ride a
+    transition that ends a read and writes its claims: ``COMPLETE``, or
+    ``PENDING`` after a partial read (§10). Each is written only
+    when given; every other transition (the plain transient reset, the
+    stale-claim reset) passes neither and leaves both columns as they are.
+
+    ``resume_whole`` sets the partial whole read's marker with a ``PENDING``
+    write. ``COMPLETE`` always clears it; any other transition
+    leaves it as it is.
+    """
     row = await session.get(SnapshotRow, snapshot_id)
     if row is not None:
         row.extraction_status = status.value
+        ends_read = status in (ExtractionStatus.COMPLETE, ExtractionStatus.PENDING)
+        if ends_read and extracted_through is not None:
+            row.extracted_through = extracted_through
+        if ends_read and components is not None:
+            row.extraction_components_json = components.model_dump_json()
+        if status is ExtractionStatus.COMPLETE:
+            row.resume_whole = False
+        elif status is ExtractionStatus.PENDING and resume_whole:
+            row.resume_whole = True
         # Clear the claim timestamp on any transition away from IN_PROGRESS
         # so a later stale-detector can't see a stale value paired with a
         # non-IN_PROGRESS status.
         if status is not ExtractionStatus.IN_PROGRESS:
             row.extraction_started_at = None
         await session.flush()
+
+
+async def get_extraction_component_records(
+    session: AsyncSession, snapshot_ids: Collection[str]
+) -> dict[str, ComponentRecord | None]:
+    """Each snapshot's stored component record, ``None`` where it has none.
+
+    A snapshot missing from the store is missing from the result. A record
+    that does not parse reads as no record, which the selection rule treats
+    as "every component exercised": the safe direction for a scope.
+    """
+    if not snapshot_ids:
+        return {}
+    rows = await session.execute(
+        select(SnapshotRow.snapshot_id, SnapshotRow.extraction_components_json).where(
+            SnapshotRow.snapshot_id.in_(list(snapshot_ids))
+        )
+    )
+    records: dict[str, ComponentRecord | None] = {}
+    for snapshot_id, raw in rows.all():
+        record: ComponentRecord | None = None
+        if raw:
+            try:
+                record = ComponentRecord.model_validate_json(raw)
+            except ValueError:
+                log.warning("Snapshot %s: unreadable component record; ignored", snapshot_id)
+        records[snapshot_id] = record
+    return records
 
 
 async def claim_snapshot_for_extraction(
@@ -229,6 +327,7 @@ async def claim_snapshot_for_extraction(
     if row is not None:
         row.extraction_status = ExtractionStatus.IN_PROGRESS.value
         row.extraction_started_at = started_at
+        row.extraction_attempts = (row.extraction_attempts or 0) + 1
         # A claim un-collapses. The bulk paths never claim a
         # collapsed snapshot (``skip_if_superseded``), so reaching here with the
         # mark set means an operator named this generation explicitly; from now
@@ -240,6 +339,26 @@ async def claim_snapshot_for_extraction(
         # that the assignment above would not register as a change.
         flag_modified(row, "superseded_by_snapshot_id")
         await session.flush()
+
+
+async def release_extraction_claim(session: AsyncSession, snapshot_id: str) -> bool:
+    """Hand an IN_PROGRESS claim back as PENDING; a no-op on any other status.
+
+    The failure path of an extraction. Conditional, unlike
+    :func:`update_extraction_status`, because the failure can come after the
+    snapshot already left IN_PROGRESS (FAILED on a missing blob, PENDING on a
+    transient reset, COMPLETE at the write commit), and none of those may be
+    overwritten. Returns whether a claim was released. Caller commits.
+    """
+    result = await session.execute(
+        update(SnapshotRow)
+        .where(
+            SnapshotRow.snapshot_id == snapshot_id,
+            SnapshotRow.extraction_status == ExtractionStatus.IN_PROGRESS.value,
+        )
+        .values(extraction_status=ExtractionStatus.PENDING.value, extraction_started_at=None)
+    )
+    return bool(getattr(result, "rowcount", 0))
 
 
 async def reset_stale_in_progress(session: AsyncSession, *, older_than: datetime) -> list[str]:
@@ -482,6 +601,45 @@ async def get_entry_uri_map(
     return {entry_id: uri for entry_id, uri in rows}
 
 
+async def get_entry_source_facts(
+    session: AsyncSession, entry_ids: set[str]
+) -> dict[str, tuple[str, str | None]]:
+    """Batch-load ``(source_type, uri_r)`` keyed by entry_id.
+
+    What a lens's ``source_type`` and ``url_pattern`` modality rules match on.
+    One ``SELECT``; ``{}`` for the empty set.
+    """
+    if not entry_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(CorpusEntryRow.entry_id, CorpusEntryRow.source_type, CorpusEntryRow.uri_r).where(
+                CorpusEntryRow.entry_id.in_(entry_ids)
+            )
+        )
+    ).all()
+    return {entry_id: (source_type, uri) for entry_id, source_type, uri in rows}
+
+
+async def get_particle_source_uris(
+    session: AsyncSession, particles: Sequence[Particle]
+) -> dict[str, str]:
+    """Map particle id → source URI via each particle's first SOURCE provenance ref.
+
+    One ``SELECT`` over the cited entries. A particle with no SOURCE ref, or
+    whose entry has no ``uri_r``, is absent from the result.
+    """
+    entry_by_pid: dict[str, str] = {}
+    for p in particles:
+        src = next((r for r in p.provenance if r.type == ProvenanceRefType.SOURCE), None)
+        if src is not None and src.corpus_entry_id:
+            entry_by_pid[p.id] = src.corpus_entry_id
+    if not entry_by_pid:
+        return {}
+    uri_map = await get_entry_uri_map(session, set(entry_by_pid.values()))
+    return {pid: uri for pid, eid in entry_by_pid.items() if (uri := uri_map.get(eid)) is not None}
+
+
 async def get_document_supersession_map(
     session: AsyncSession, entry_ids: set[str]
 ) -> dict[str, str | None]:
@@ -717,21 +875,72 @@ async def list_entry_snapshot_pairs_with_extraction_status(
     return [(str(row[0]), str(row[1])) for row in result.all()]
 
 
-async def list_pending_snapshots_oldest_first(
-    session: AsyncSession,
-) -> list[tuple[str, str]]:
-    """(entry_id, snapshot_id) pairs of PENDING snapshots, oldest capture first.
+@dataclass(frozen=True)
+class PendingSnapshot:
+    """One PENDING snapshot as the consolidation catch-up reads it."""
 
-    The extract catch-up order: a capped pass drains the backlog
-    front-to-back, so the oldest deposits are never starved by newer ones.
+    entry_id: str
+    snapshot_id: str
+    captured_at: datetime
+    attempts: int
+    """Times extraction has claimed it before (``extraction_attempts``)."""
+
+
+async def get_snapshot_content_hashes(
+    session: AsyncSession, snapshot_ids: Sequence[str]
+) -> dict[str, str]:
+    """``snapshot_id → content_hash`` for the given snapshots; unknown ids are absent.
+
+    Lets a caller size the blobs a run would read without loading them: the
+    consolidation budget's extraction estimate.
+    """
+    if not snapshot_ids:
+        return {}
+    result = await session.execute(
+        select(SnapshotRow.snapshot_id, SnapshotRow.content_hash).where(
+            SnapshotRow.snapshot_id.in_(list(snapshot_ids))
+        )
+    )
+    return {str(snapshot_id): str(content_hash) for snapshot_id, content_hash in result}
+
+
+async def list_pending_snapshots_for_catchup(
+    session: AsyncSession,
+) -> list[PendingSnapshot]:
+    """PENDING snapshots in the consolidation catch-up order: least-tried, then oldest.
+
+    The extract catch-up drains the backlog oldest first, so the
+    oldest deposits are never starved by newer ones. Ordering on
+    ``extraction_attempts`` first keeps that promise from being turned inside
+    out: a snapshot whose extraction fails the same way every night (a reply
+    cut at the output budget, a batch that never finishes) is handed back
+    PENDING, and on capture time alone it would be first in line again the
+    next night, and every night after, ahead of everything deposited since.
     ``snapshot_id`` breaks capture-time ties deterministically.
     """
     result = await session.execute(
-        select(SnapshotRow.entry_id, SnapshotRow.snapshot_id)
+        select(
+            SnapshotRow.entry_id,
+            SnapshotRow.snapshot_id,
+            SnapshotRow.captured_at,
+            SnapshotRow.extraction_attempts,
+        )
         .where(SnapshotRow.extraction_status == ExtractionStatus.PENDING.value)
-        .order_by(SnapshotRow.captured_at, SnapshotRow.snapshot_id)
+        .order_by(
+            SnapshotRow.extraction_attempts,
+            SnapshotRow.captured_at,
+            SnapshotRow.snapshot_id,
+        )
     )
-    return [(str(row[0]), str(row[1])) for row in result.all()]
+    return [
+        PendingSnapshot(
+            entry_id=str(entry_id),
+            snapshot_id=str(snapshot_id),
+            captured_at=captured_at,
+            attempts=int(attempts or 0),
+        )
+        for entry_id, snapshot_id, captured_at, attempts in result.all()
+    ]
 
 
 async def list_entry_ids_created_since(session: AsyncSession, since: datetime) -> list[str]:
@@ -789,6 +998,128 @@ async def get_latest_completed_snapshot_id(session: AsyncSession, entry_id: str)
 
 
 @dataclass(frozen=True)
+class ExtractionBaseRow:
+    """One RESPONSE snapshot of an entry, as the base selection reads it."""
+
+    snapshot_id: str
+    captured_at: datetime
+    content_hash: str
+    extraction_status: ExtractionStatus
+    extracted_through: int | None
+    resume_whole: bool = False
+    """The snapshot holds a partial whole read."""
+    extraction_attempts: int = 0
+
+
+async def list_extraction_bases(session: AsyncSession, entry_id: str) -> list[ExtractionBaseRow]:
+    """Every archived RESPONSE snapshot of one entry, oldest first.
+
+    The candidates for an APPEND_ONLY snapshot's base. REVISIT snapshots are
+    excluded (they carry no content of their own), as is any snapshot with no
+    archive. Order is ``(captured_at, snapshot_id)``, the tie-break
+    :func:`list_pending_snapshots_for_catchup` uses.
+    """
+    result = await session.execute(
+        select(SnapshotRow)
+        .where(
+            SnapshotRow.entry_id == entry_id,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.archive_path.is_not(None),
+        )
+        .order_by(SnapshotRow.captured_at, SnapshotRow.snapshot_id)
+        .execution_options(populate_existing=True)
+    )
+    return [
+        ExtractionBaseRow(
+            snapshot_id=row.snapshot_id,
+            captured_at=row.captured_at,
+            content_hash=row.content_hash,
+            extraction_status=ExtractionStatus(row.extraction_status),
+            extracted_through=row.extracted_through,
+            resume_whole=bool(row.resume_whole),
+            extraction_attempts=row.extraction_attempts or 0,
+        )
+        for row in result.scalars()
+    ]
+
+
+@dataclass(frozen=True)
+class PartialReadState:
+    """What a snapshot holds of a read that failed partway."""
+
+    status: ExtractionStatus
+    extracted_through: int | None
+    resume_whole: bool
+
+    @property
+    def holds_partial(self) -> bool:
+        """A pending read left claims behind: an offset not yet COMPLETE, or the marker."""
+        if self.status is ExtractionStatus.COMPLETE:
+            return False
+        return self.resume_whole or self.extracted_through is not None
+
+
+async def get_partial_read_state(
+    session: AsyncSession, snapshot_id: str
+) -> PartialReadState | None:
+    """The snapshot's partial-read state, read before extraction claims it."""
+    row = await session.get(SnapshotRow, snapshot_id, populate_existing=True)
+    if row is None:
+        return None
+    return PartialReadState(
+        status=ExtractionStatus(row.extraction_status),
+        extracted_through=row.extracted_through,
+        resume_whole=bool(row.resume_whole),
+    )
+
+
+async def clear_partial_reads(session: AsyncSession, entry_id: str) -> list[str]:
+    """Clear the offset, marker and component record of the entry's unfinished snapshots.
+
+    The reindex replay retires every claim of an append-only entry, a partial
+    read's included; a snapshot that is not COMPLETE must then stop vouching
+    for text whose claims are gone. Returns the snapshot ids it
+    cleared. Caller commits.
+    """
+    result = await session.execute(
+        select(SnapshotRow).where(
+            SnapshotRow.entry_id == entry_id,
+            SnapshotRow.extraction_status != ExtractionStatus.COMPLETE.value,
+            or_(
+                SnapshotRow.extracted_through.is_not(None),
+                SnapshotRow.resume_whole.is_(True),
+            ),
+        )
+    )
+    cleared: list[str] = []
+    for row in result.scalars():
+        row.extracted_through = None
+        row.resume_whole = False
+        row.extraction_components_json = None
+        cleared.append(row.snapshot_id)
+    await session.flush()
+    return cleared
+
+
+async def get_partial_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:
+    """The entry's latest unfinished snapshot that holds a partial read, if any."""
+    result = await session.execute(
+        select(SnapshotRow.snapshot_id)
+        .where(
+            SnapshotRow.entry_id == entry_id,
+            SnapshotRow.extraction_status != ExtractionStatus.COMPLETE.value,
+            or_(
+                SnapshotRow.extracted_through.is_not(None),
+                SnapshotRow.resume_whole.is_(True),
+            ),
+        )
+        .order_by(SnapshotRow.captured_at.desc(), SnapshotRow.snapshot_id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+@dataclass(frozen=True)
 class GenerationRow:
     """One RESPONSE snapshot of a MUTABLE entry, as the collapse reads it."""
 
@@ -809,7 +1140,8 @@ async def list_generations_with_unextracted_snapshots(
     RESPONSE snapshot that is ``PENDING`` or ``FAILED`` and not already
     collapsed; for each such entry **all** of its RESPONSE snapshots are
     returned, oldest first on ``(captured_at, snapshot_id)`` — the same
-    tie-break :func:`list_pending_snapshots_oldest_first` uses — because
+    tie-break :func:`list_pending_snapshots_for_catchup` uses among
+    equally-tried snapshots — because
     whether a snapshot is superseded depends on its newer siblings, whatever
     their status. REVISIT snapshots are excluded: a REVISIT records that the
     content did *not* change, so it is never a generation.

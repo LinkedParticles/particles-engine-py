@@ -43,6 +43,7 @@ the pre-0215 approximation this module used to document.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,15 +61,20 @@ from particles.core.stance import stance_holder
 from particles.core.status import Status
 from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
-from particles.operations.query.contested import compose_badge
+from particles.operations.query.contested import compose_badge, compute_contested_badges
 from particles.operations.query.contestedness import (
     MemberPolicy,
+    compute_contestedness,
     load_member_policies,
     spread_for_group,
 )
 from particles.operations.query.rank import _first_source_key
 from particles.operations.query.source_info import load_source_rows
-from particles.store.particle_store import get_active_particles, get_inconsistency_backrefs
+from particles.store.particle_store import (
+    get_active_particles,
+    get_inconsistency_particles,
+    inconsistency_backrefs,
+)
 from particles.store.relation_store import get_all_relations
 
 #: Spread histogram edges — half-open buckets [lo, hi); the last is closed at 1.0.
@@ -118,15 +124,22 @@ class ContestedCensus:
     policy_names: list[str] = field(default_factory=list)
     #: Spreads of every claim the histogram evaluated (empty when absent).
     spreads: list[float] = field(default_factory=list)
+    #: ACTIVE beliefs the badges were composed over: the contested fraction's
+    #: denominator, so a reader of ``badges`` never re-reads the store for it.
+    active_count: int = 0
 
 
-async def compute_store_contested(session: AsyncSession) -> ContestedCensus:
+async def compute_store_contested(
+    session: AsyncSession, records: Sequence[Particle] | None = None
+) -> ContestedCensus:
     """Compose the badge for every ACTIVE belief in the store.
 
     Each basis is inverted so the pass costs a fixed handful of queries rather
     than a walk per belief:
 
-    - ``inconsistency`` — one INCONSISTENCY status scan (``get_inconsistency_backrefs``).
+    - ``inconsistency`` — one INCONSISTENCY status scan. ``records`` is that scan
+      when the caller already ran it (the lint pass shares it with the
+      ``OPEN_INCONSISTENCY`` check); ``None`` runs it here.
     - ``stance`` — one ``DISPUTES`` edge query, then only those edges' targets are
       expanded across their co-evidential component. Cost is O(#DISPUTES).
     - ``divergence`` — absent (and free) below two policies; otherwise one
@@ -144,7 +157,9 @@ async def compute_store_contested(session: AsyncSession) -> ContestedCensus:
 
     actives = await get_active_particles(session)
     by_id: dict[str, Particle] = {p.id: p for p in actives}
-    backrefs = await get_inconsistency_backrefs(session)
+    if records is None:
+        records = await get_inconsistency_particles(session)
+    backrefs = inconsistency_backrefs(records)
 
     # --- divergence: absent below two policies (§3), and then free ---
     members: list[MemberPolicy] = await load_member_policies(session)
@@ -212,6 +227,7 @@ async def compute_store_contested(session: AsyncSession) -> ContestedCensus:
         readings=readings,
         policy_names=policy_names,
         spreads=[r.spread for r in readings.values()],
+        active_count=len(by_id),
     )
 
 
@@ -236,7 +252,9 @@ def _describe(badge: ContestedBadge, reading: ContestednessReading | None) -> st
     return detail
 
 
-async def _check_contested(session: AsyncSession) -> list[LintFinding]:
+async def _check_contested(
+    session: AsyncSession, records: Sequence[Particle] | None = None
+) -> list[LintFinding]:
     """Emit the per-claim CONTESTED findings and the store-level distribution.
 
     Both renderings come off one :func:`compute_store_contested` pass, so the
@@ -245,7 +263,7 @@ async def _check_contested(session: AsyncSession) -> list[LintFinding]:
     spread in lint vs merge-then-spread in query, sharing one threshold) cannot
     recur by construction.
     """
-    census = await compute_store_contested(session)
+    census = await compute_store_contested(session, records)
     findings: list[LintFinding] = [
         LintFinding(
             particle_id=pid,
@@ -260,6 +278,44 @@ async def _check_contested(session: AsyncSession) -> list[LintFinding]:
         for pid, badge in sorted(census.badges.items())
     ]
     findings += _report_distribution(census)
+    return findings
+
+
+async def contested_findings_for(
+    session: AsyncSession, particles: list[Particle]
+) -> list[LintFinding]:
+    """The per-claim CONTESTED findings for a few named beliefs, read fresh.
+
+    The same finding :func:`_check_contested` emits, for exactly the given
+    beliefs rather than the store. The nightly disclosure pass
+    calls it after opening or closing records, so the curation cards of the
+    claims it touched reflect the records as they now stand. Non-``ACTIVE``
+    beliefs and beliefs with no fired basis yield nothing.
+    """
+    targets = [p for p in particles if p.status is Status.ACTIVE]
+    if not targets:
+        return []
+    members = await load_member_policies(session)
+    readings = await compute_contestedness(session, targets, members)
+    badges = await compute_contested_badges(session, targets, readings=readings)
+    findings: list[LintFinding] = []
+    for index, (target, badge) in enumerate(zip(targets, badges, strict=True)):
+        if badge is None:
+            continue
+        # Readings align with targets, or are empty below two policies.
+        reading = readings[index] if readings else None
+        findings.append(
+            LintFinding(
+                particle_id=target.id,
+                finding_type="CONTESTED",
+                severity="INFO",
+                detail=_describe(badge, reading),
+                recommended_action="Contested is disclosure, not a quality defect; "
+                + "; ".join(_BASIS_VERB[b] for b in badge.bases),
+                contested_bases=list(badge.bases),
+                inconsistency_id=badge.inconsistency_id,
+            )
+        )
     return findings
 
 

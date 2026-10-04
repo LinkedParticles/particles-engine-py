@@ -366,11 +366,34 @@ class TestMirrorTools:
 
     @pytest.mark.asyncio
     async def test_link_add_and_remove(self, db_session: Any, stub_subjects: None) -> None:
+        from unittest.mock import MagicMock
+
+        import anthropic
+
+        from particles.llm import set_client
         from particles.mcp.tools.write import link_add, link_remove, particle_assert
 
         _enable_writes()
-        a = (await particle_assert("A.", ["X"], 0.8, source_excerpt="a"))["asserted_particle_id"]
-        b = (await particle_assert("B.", ["X"], 0.8, source_excerpt="b"))["asserted_particle_id"]
+        # The second assert runs the §6.6 contradiction probe against the first
+        # (same subject). Answer it the way a live model does for two unrelated
+        # claims; unmocked, the probe reached the live API when a key was set,
+        # and failed closed (quarantining "B.") when one was not.
+        reply = MagicMock()
+        reply.content = [MagicMock(text="REASON: The claims are unrelated.\nVERDICT: NO")]
+        reply.stop_reason = "end_turn"
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.create = MagicMock(return_value=reply)
+        set_client(client)
+        try:
+            a = (await particle_assert("A.", ["X"], 0.8, source_excerpt="a"))[
+                "asserted_particle_id"
+            ]
+            b = (await particle_assert("B.", ["X"], 0.8, source_excerpt="b"))[
+                "asserted_particle_id"
+            ]
+        finally:
+            set_client(None)
         assert (await link_add(a, b))["verdict"] == "LINKED"
         assert (await link_remove(a, b))["removed"] is True
 
@@ -439,7 +462,11 @@ class TestConsensusAndFailClosed:
         from particles.store.particle_store import get_particle
 
         _enable_writes()  # default store is write-enabled -> resolves to multi
-        monkeypatch.setattr(llm, "complete", AsyncMock(return_value="YES: they disagree"))
+        monkeypatch.setattr(
+            llm,
+            "complete",
+            AsyncMock(return_value="REASON: they disagree\nSLOT: CHANGES\nVERDICT: YES"),
+        )
 
         a = await particle_assert(
             "Deploy key rotates monthly.", ["deploy key"], 0.8, source_excerpt="rotates monthly"

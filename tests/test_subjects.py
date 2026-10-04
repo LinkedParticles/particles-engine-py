@@ -323,9 +323,9 @@ class TestSubjectResolver:
         session = db_session  # type: ignore[assignment]
         # Patch Wikidata to return nothing
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         ):
             resolved = await resolve_subject(session, "Obscure Local Entity XYZ123")  # type: ignore[arg-type]
         assert resolved.canonical_name == "Obscure Local Entity XYZ123"
@@ -338,9 +338,9 @@ class TestSubjectResolver:
         session = db_session  # type: ignore[assignment]
         with (
             patch(
-                "particles.ingest.authorities.wikidata._wikidata_search",
+                "particles.ingest.authorities.wikidata._wikidata_candidates",
                 new_callable=AsyncMock,
-                return_value={"id": "Q339", "description": "dwarf planet"},
+                return_value=[{"id": "Q339", "description": "dwarf planet"}],
             ),
             patch(
                 "particles.ingest.authorities.wikidata._wikidata_aliases",
@@ -383,9 +383,9 @@ class TestSubjectResolver:
         # external-ref dedup misses) but the same rewritten canonical name.
         with (
             patch(
-                "particles.ingest.authorities.wikidata._wikidata_search",
+                "particles.ingest.authorities.wikidata._wikidata_candidates",
                 new_callable=AsyncMock,
-                return_value={"id": "Q139929495", "description": ""},
+                return_value=[{"id": "Q139929495", "description": ""}],
             ),
             patch(
                 "particles.ingest.authorities.wikidata._wikidata_aliases",
@@ -410,9 +410,9 @@ class TestSubjectResolver:
         session = db_session  # type: ignore[assignment]
         with (
             patch(
-                "particles.ingest.authorities.wikidata._wikidata_search",
+                "particles.ingest.authorities.wikidata._wikidata_candidates",
                 new_callable=AsyncMock,
-                return_value={"id": "Q123456", "description": "2015 studio album by Dreamtime"},
+                return_value=[{"id": "Q123456", "description": "2015 studio album by Dreamtime"}],
             ),
             patch(
                 "particles.ingest.authorities.wikidata._wikidata_aliases",
@@ -444,9 +444,9 @@ class TestSubjectResolver:
         floor = get_config().subjects.external_link_abstain_threshold
         with (
             patch(
-                "particles.ingest.authorities.wikidata._wikidata_search",
+                "particles.ingest.authorities.wikidata._wikidata_candidates",
                 new_callable=AsyncMock,
-                return_value={"id": "Q339", "description": "dwarf planet"},
+                return_value=[{"id": "Q339", "description": "dwarf planet"}],
             ),
             patch(
                 "particles.ingest.authorities.wikidata._wikidata_aliases",
@@ -481,9 +481,9 @@ class TestLiveLookupSkipAndNegativeCache:
 
         session = db_session  # type: ignore[assignment]
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         ) as mock_search:
             resolved = await resolve_subject(
                 session,  # type: ignore[arg-type]
@@ -504,9 +504,9 @@ class TestLiveLookupSkipAndNegativeCache:
 
         session = db_session  # type: ignore[assignment]
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         ):
             await resolve_subject(
                 session,  # type: ignore[arg-type]
@@ -523,9 +523,9 @@ class TestLiveLookupSkipAndNegativeCache:
 
         session = db_session  # type: ignore[assignment]
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         ) as mock_search:
             await resolve_subject(
                 session,  # type: ignore[arg-type]
@@ -542,9 +542,9 @@ class TestLiveLookupSkipAndNegativeCache:
         session = db_session  # type: ignore[assignment]
         assert subject_cache.negative_get("Nonexistent Widget QQQ") is False
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         ):
             await resolve_subject(session, "Nonexistent Widget QQQ")  # type: ignore[arg-type]
         assert subject_cache.negative_get("Nonexistent Widget QQQ") is True
@@ -559,9 +559,9 @@ class TestLiveLookupSkipAndNegativeCache:
         session = db_session  # type: ignore[assignment]
         subject_cache.negative_set("Ghost Referent ZZZ")
         with patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value={"id": "Q1", "description": "should never be consulted"},
+            return_value=[{"id": "Q1", "description": "should never be consulted"}],
         ) as mock_search:
             resolved = await resolve_subject(session, "Ghost Referent ZZZ")  # type: ignore[arg-type]
         mock_search.assert_not_called()
@@ -682,6 +682,28 @@ class TestPrefixExpansionCheck:
 
         assert not _is_prefix_expansion("FOO", "FOO_v1")
 
+    def test_word_continuation_kept_when_aliases_name_the_query(self) -> None:
+        # "PostgreSQL" lists "Postgres" among its names, so it is
+        # the same entity under its fuller name, not a different word.
+        from particles.ingest.authorities.wikidata import _is_prefix_expansion
+
+        assert _is_prefix_expansion("Postgres", "PostgreSQL")
+        assert not _is_prefix_expansion("Postgres", "PostgreSQL", {"Postgres"})
+
+    def test_alias_rescue_is_exact_and_case_sensitive(self) -> None:
+        # Goiás lists "GO"; that does not vouch for "Go".
+        from particles.ingest.authorities.wikidata import _is_prefix_expansion
+
+        assert _is_prefix_expansion("Go", "Goiás", {"GO", "Goias state"})
+        assert _is_prefix_expansion("Postgres", "PostgreSQL", {"Postgres SQL"})
+
+    def test_alias_rescue_does_not_apply_to_paper_titles(self) -> None:
+        from particles.ingest.authorities.wikidata import _is_prefix_expansion
+
+        assert _is_prefix_expansion(
+            "FlashAttention", "FlashAttention: Fast and Memory-Efficient", {"FlashAttention"}
+        )
+
     def test_word_continuation_rejected(self) -> None:
         # 'micrograd' (Karpathy's autograd library) → 'Microgradients…' is a
         # word expansion into a different word, not a separator-bounded title.
@@ -700,7 +722,7 @@ class TestPrefixExpansionCheck:
 
     @pytest.mark.asyncio
     async def test_wikidata_search_skips_prefix_expansion(self) -> None:
-        """Multi-hit search returns the first non-paper-title candidate."""
+        """Multi-hit search returns every candidate but the paper title."""
         from unittest.mock import AsyncMock as _AM
         from unittest.mock import MagicMock as _MM
 
@@ -733,9 +755,8 @@ class TestPrefixExpansionCheck:
             "particles.ingest.authorities.wikidata.particles_client",
             return_value=mock_client,
         ):
-            result = await sr._wikidata_search("FlashAttention")
-        assert result is not None
-        assert result["id"] == "Q2"
+            result = await sr._wikidata_candidates("FlashAttention")
+        assert [hit["id"] for hit in result] == ["Q2"]
 
 
 class TestCacheInvalidationOnMutation:
@@ -993,9 +1014,9 @@ class TestPersonaAliasRecording:
     @staticmethod
     def _no_wikidata() -> object:
         return patch(
-            "particles.ingest.authorities.wikidata._wikidata_search",
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=[],
         )
 
     @pytest.mark.asyncio

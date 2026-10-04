@@ -13,20 +13,26 @@ lint finding emits per-particle, so it becomes a single batch card.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import SuggestMode
+from particles.config import get_config
+from particles.core.schema import LintFinding, SuggestMode
 from particles.operations.abstraction import pending_candidate_events
+from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.deposit_suggest import suggest_deposits
 from particles.operations.links_suggest import suggest_co_evidential
 from particles.operations.lint import ContradictionProbeControl, run_lint
 from particles.operations.quality import get_quality_report
+from particles.operations.reanchor import pending_unrestated_events
+from particles.operations.subject_relink import plan_gated_relink
+from particles.store.particle_store import get_recorded_demotions
 
 from .cards import (
     CardKind,
     CurationCard,
     DuplicateVerdict,
-    contested_gestures,
     gestures_for,
 )
 
@@ -51,7 +57,104 @@ _LINT_KIND: dict[str, CardKind] = {
     # means. This replaces a bespoke get_inconsistency_backrefs branch — one
     # fewer hand-rolled finder, and the one-kind ↔ one-finder rule holds.
     "CONTESTED": CardKind.CONTESTED,
+    # one card per open INCONSISTENCY record, keyed by the record.
+    "OPEN_INCONSISTENCY": CardKind.INCONSISTENCY,
 }
+
+
+def cards_from_findings(findings: Sequence[LintFinding]) -> list[CurationCard]:
+    """Normalize per-record lint findings into curation cards.
+
+    Findings with no card kind, or with no particle, are not curation tasks
+    and are dropped. Shared with the nightly disclosure pass, which rebuilds
+    the cards of the records and claims it touched (as amended).
+    """
+    cards: list[CurationCard] = []
+    for f in findings:
+        kind = _LINT_KIND.get(f.finding_type)
+        if kind is None or f.particle_id is None:
+            continue
+        if kind is CardKind.INCONSISTENCY:
+            cards.append(_conflict_card(f))
+            continue
+        bases = f.contested_bases if kind is CardKind.CONTESTED else None
+        diagnostic = f.detail
+        if bases is not None:
+            # a belief contested only because it sits in an open
+            # INCONSISTENCY gets no CONTESTED card; each of its conflicts has
+            # its own card, which is where that work is.
+            if not [b for b in bases if b != "inconsistency"]:
+                continue
+            if "inconsistency" in bases and f.inconsistency_id:
+                diagnostic += f". Settle the conflict on card inconsistency:{f.inconsistency_id}"
+        cards.append(
+            CurationCard(
+                kind=kind,
+                particle_ids=[f.particle_id],
+                diagnostic=diagnostic,
+                suggested_gestures=gestures_for(kind),
+                contested_bases=list(bases) if bases is not None else None,
+                inconsistency_id=(f.inconsistency_id if kind is CardKind.CONTESTED else None),
+            )
+        )
+    return cards
+
+
+def _conflict_card(f: LintFinding) -> CurationCard:
+    """The ``INCONSISTENCY`` card for one ``OPEN_INCONSISTENCY`` finding.
+
+    ``particle_ids`` lists the members A, B, then any further census members by
+    side, so ``particle_ids[0]`` / ``[1]`` are the claims ``review`` calls A
+    and B. The card's identity is the record, never its members.
+    """
+    sides = f.conflict_sides or []
+    a_side = sides[0] if len(sides) > 0 else []
+    b_side = sides[1] if len(sides) > 1 else []
+    members = a_side[:1] + b_side[:1] + a_side[1:] + b_side[1:]
+    return CurationCard(
+        kind=CardKind.INCONSISTENCY,
+        particle_ids=list(dict.fromkeys(members)),
+        diagnostic=f.detail,
+        suggested_gestures=gestures_for(CardKind.INCONSISTENCY),
+        inconsistency_id=f.particle_id,
+    )
+
+
+async def _fold_recoverable_orphans(
+    session: AsyncSession, cards: list[CurationCard]
+) -> list[CurationCard]:
+    """Replace the NO_SUBJECT cards a relink can resolve with one batch card.
+
+    An orphan whose gated subject names the accepted relink tiers recover (and
+    whose project is known) is not a per-belief question: the relink answers
+    it. Those orphans become one ``gated_subjects`` card that names them all,
+    so its leverage is scored over its beliefs. Every other orphan keeps its
+    own ``no_subject`` card.
+    """
+    orphan_ids = {c.particle_ids[0] for c in cards if c.kind is CardKind.NO_SUBJECT}
+    if not orphan_ids:
+        return cards
+    plan = await plan_gated_relink(session)
+    recoverable = [item.particle_id for item in plan.items if item.particle_id in orphan_ids]
+    if not recoverable:
+        return cards
+    covered = set(recoverable)
+    kept = [
+        c for c in cards if c.kind is not CardKind.NO_SUBJECT or c.particle_ids[0] not in covered
+    ]
+    tiers = ", ".join(str(t) for t in plan.tiers)
+    kept.append(
+        CurationCard(
+            kind=CardKind.GATED_SUBJECTS,
+            particle_ids=sorted(covered),
+            diagnostic=(
+                f"{len(covered)} belief(s) with no subject name a file, record, identifier "
+                f"or command the extraction gate withheld; relink tiers {tiers} recover them"
+            ),
+            suggested_gestures=gestures_for(CardKind.GATED_SUBJECTS),
+        )
+    )
+    return kept
 
 
 async def collect_cards(
@@ -77,6 +180,11 @@ async def collect_cards(
     ``contradiction_probe`` is passed through to the
     probe: the audit uses it to cap / scope the probe's LLM cost and
     to read back the candidate-pair census for the "probed X of Y" disclosure.
+    Without one, a semantic collection (``particles curate --semantic``,
+    ``GET /curation``, a rebuild) still reads every flag a second time when
+    ``audit.verify_contradictions`` is on, uncapped like the probe itself, so a
+    card surface counts the same confirmed contradictions the audit and the
+    nightly census do.
 
     ``duplicate_scope_ids`` is passed through to the co-evidential
     finder as its ``scope_particle_ids``: enumeration stays store-wide, but the
@@ -85,6 +193,15 @@ async def collect_cards(
     bound) for ``particles curate`` and re-audits.
     """
     cards: list[CurationCard] = []
+
+    if semantic and contradiction_probe is None:
+        contradiction_probe = ContradictionProbeControl(
+            verify=get_config().audit.verify_contradictions
+        )
+    if semantic and contradiction_probe is not None and contradiction_probe.exclude_pairs is None:
+        # a disagreement a census record already discloses is
+        # reported through the record, not probed and paid for again.
+        contradiction_probe.exclude_pairs = await covered_pair_set(session)
 
     # --- lint (read-only): per-record structural + optional semantic findings ---
     # granularity_probe=False: GRANULARITY_VIOLATION has no CardKind, so the
@@ -97,26 +214,7 @@ async def collect_cards(
         contradiction_probe=contradiction_probe,
         granularity_probe=False,
     )
-    for f in report.findings:
-        kind = _LINT_KIND.get(f.finding_type)
-        if kind is None or f.particle_id is None:
-            continue
-        # a contested card offers `comment` only where an
-        # INCONSISTENCY exists for `review` to resolve, so its gestures follow
-        # the fired bases rather than the kind alone.
-        bases = f.contested_bases if kind is CardKind.CONTESTED else None
-        cards.append(
-            CurationCard(
-                kind=kind,
-                particle_ids=[f.particle_id],
-                diagnostic=f.detail,
-                suggested_gestures=(
-                    contested_gestures(bases) if bases is not None else gestures_for(kind)
-                ),
-                contested_bases=list(bases) if bases is not None else None,
-                inconsistency_id=(f.inconsistency_id if kind is CardKind.CONTESTED else None),
-            )
-        )
+    cards.extend(await _fold_recoverable_orphans(session, cards_from_findings(report.findings)))
 
     # --- duplicate pairs: co-evidential candidates within a Subject ---
     # with semantic finders on, run the duplicate finder in LLM_JUDGE
@@ -190,6 +288,48 @@ async def collect_cards(
                 ),
                 suggested_gestures=gestures_for(CardKind.PROPOSED_ABSTRACTION),
                 candidate_event_id=event.event_id,
+            )
+        )
+
+    # --- stale basis: dependents the re-anchor pass kept for review ---
+    # The unrestated event is the card's persistence; the card is open while
+    # the belief is ACTIVE, and affirm / snooze act on its key as for any card.
+    for event in await pending_unrestated_events(session):
+        payload = event.payload or {}
+        pid = str(payload.get("particle_id") or "")
+        if not pid:
+            continue
+        retired = str(payload.get("retired_content") or payload.get("retired_id") or "")
+        why = str(payload.get("why") or "")
+        restatement = str(payload.get("restatement") or "")
+        cards.append(
+            CurationCard(
+                kind=CardKind.STALE_BASIS,
+                particle_ids=[pid],
+                diagnostic=(
+                    f"Relied on “{retired}”, which a later update replaced; {why}"
+                    + (f". Proposed restatement: “{restatement}”" if restatement else "")
+                ),
+                suggested_gestures=gestures_for(CardKind.STALE_BASIS),
+            )
+        )
+
+    # --- demotions: claims a later claim retired as its replacement ---
+    # A listing of what the ladder and the sweeps already decided, not a new
+    # detection. particle_ids is (retired, replacement); the gestures record a
+    # ruling and never change either status.
+    for demoted, replacement in await get_recorded_demotions(session):
+        reason = demoted.status_reason.value if demoted.status_reason else "demoted"
+        cards.append(
+            CurationCard(
+                kind=CardKind.DEMOTION,
+                particle_ids=[demoted.id, replacement.id],
+                subject_ids=list(demoted.subject_ids),
+                diagnostic=(
+                    f"“{demoted.content}” was retired ({reason}) in favour of "
+                    f"“{replacement.content}”"
+                ),
+                suggested_gestures=gestures_for(CardKind.DEMOTION),
             )
         )
 

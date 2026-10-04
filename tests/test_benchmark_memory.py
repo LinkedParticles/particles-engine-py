@@ -1145,10 +1145,10 @@ class TestEstimate:
     def test_no_price_configured_prints_the_model_not_a_number(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The price map ships empty: prices go stale, so no dollar figure is compiled in."""
+        """An unpriced model is named, never priced at zero or given a partial total."""
         from particles.config import get_config
 
-        monkeypatch.setattr(get_config().benchmark_memory, "price_per_mtok", {})
+        monkeypatch.setattr(get_config().llm, "price_per_mtok", {})
         est = estimate_run([_question()])
         model = get_config().llm.for_purpose("extraction").model
         assert est.estimated_cost_usd is None
@@ -1167,10 +1167,12 @@ class TestEstimate:
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 1000)
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_answer_call", 100)
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_judge_call", 10)
-        monkeypatch.setattr(cfg, "batch_discount", 0.5)
+        monkeypatch.setattr(get_config().llm, "batch_discount", 0.5)
         # Every purpose resolves to llm.default under stock config; price it.
         model = get_config().llm.default.model
-        monkeypatch.setattr(cfg, "price_per_mtok", {model: TokenPrice(input=2.0, output=10.0)})
+        monkeypatch.setattr(
+            get_config().llm, "price_per_mtok", {model: TokenPrice(input=2.0, output=10.0)}
+        )
         monkeypatch.setattr(get_config().llm.batch, "enabled", True)
 
         full = estimate_run([_question()])
@@ -1212,10 +1214,9 @@ class TestEstimate:
     ) -> None:
         from particles.config import TokenPrice, get_config
 
-        cfg = get_config().benchmark_memory
         sel = get_config().llm.for_purpose("extraction")
         monkeypatch.setattr(
-            cfg,
+            get_config().llm,
             "price_per_mtok",
             {
                 sel.model: TokenPrice(input=100.0, output=100.0),

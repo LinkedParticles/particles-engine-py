@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.exporters.summaries import BaseExporterSummary
 
+
 class MyExporter:
-    FORMAT = "myformat"                    # unique lowercase slug
+    FORMAT = "myformat"  # unique lowercase slug
 
     async def export(
         self,

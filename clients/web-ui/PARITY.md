@@ -43,20 +43,40 @@ surface, this file changes **in the same commit**.
 
 ### 1. Curate (`/app#/curate`) — bus-stop curation
 
-The swipeable, leverage-ranked "today's N" card feed.
+The swipeable, leverage-ranked card feed, served in short batches
+(`curation.session_size`, default 7). The header names both the batch and the
+backlog it was cut from (`Top N of M cards open, by leverage`, from the
+response's `open_count`); a spent batch says how many remain and offers a
+refresh. Each card leads with the engine's `title` and `question`, then the
+briefs: claim, subjects, effective confidence, status, asserted date and
+source URI. Status is shown as the raw `status / status_reason` pair,
+verbatim, followed by a one-line plain reading of the reason; the Browse
+detail panel shows the same pair. The reading is a label table in the client,
+not an epistemic computation. The resolve sheet words "Keep B" and "Both
+valid" from each claim's state (ACTIVE stays, a quarantined
+`PROVENANCE_STALE / CONFLICT_PENDING` claim becomes ACTIVE, any other
+inactive claim stays inactive) and names the recorded status of a claim whose
+"Keep" is withheld. An open conflict is its own card (kind `inconsistency`, key
+`inconsistency:<record id>`): it shows both sides from
+`conflict.a` / `conflict.b` (plus a census record's `further_a` /
+`further_b`), labelled Claim A / Claim B in `review`'s order, and offers
+`resolve` and `snooze`. A contested card that also sits in a conflict shows
+the same sides with the card's own belief marked. A "What do these do?"
+disclosure lists one line per offered gesture.
 
 | Interaction | API call |
 |---|---|
 | Load / refresh queue (kind filter, limit, semantic toggle) | `GET /curation?limit&kind&semantic` |
 | affirm ("still true") | `POST /curation/affirm` |
 | snooze / dismiss (belief card) | `POST /curation/snooze` |
-| comment / resolve inconsistency | `POST /review/{particle_id}` |
+| resolve ("Resolve…", on a conflict card: exactly the card's `resolve_actions`, e.g. keep A / keep B / both valid / discard both; decide later is snooze) | `POST /review/{inconsistency_id}`: the card's `inconsistency_id`, never a member belief's id (the route 404s a non-INCONSISTENCY). An engine before 1.162 names this gesture `comment` and sends no `resolve_actions`; the client then offers every action |
 | merge duplicate pair | `POST /links` (CO_EVIDENTIAL) or `POST /subjects/{source_id}/merge` |
 | deposit cited URL | `POST /corpus/deposit/url`; manual-paste fallback `POST /corpus/deposit/text` |
 | dismiss uncited URL | `POST /corpus/links/dismiss` |
 | edit (operator supersede) | `POST /particles/{id}/supersede` |
 | retract single belief | `POST /particles/{id}/retract` |
 | assign subject to orphan | `POST /particles/{id}/subjects` |
+| link a batch of orphans' gated subjects (preview, then confirm) | `POST /subjects/relink-gated` (`dry_run: true`, then `false`) |
 | whole-source retract (dry-run first, then confirm) | `POST /corpus/{entry_id}/retract` |
 | reindex failed snapshots | `POST /reindex` |
 
@@ -107,9 +127,12 @@ clients must not try to assemble one).
 INCONSISTENCY record as the anchor plus its disputants with their **true
 statuses** (the quarantined loser included), all `retrieval_hit`-flagged.
 The client auto-opens the detail panel with the foreground listing
-("Conflict evidence", anchor first) — on pre-subject-binding conflicts
-there may be zero nodes (engine-disclosed), and the panel is the whole
-render. Entry points a client must offer: the CONTESTED curation card's
+("Conflict evidence", anchor first), and draws the conflict itself on the
+canvas: the anchor as a diamond, each disputant as a belief box joined to
+it by a "disputes" edge, and each disputant tied by a dotted edge to any of
+its subjects the render carries. A pre-subject-binding conflict has zero
+subject nodes (engine-disclosed), so these belief nodes are the whole
+canvas. Entry points a client must offer: the CONTESTED curation card's
 `inconsistency_id` and the contested drill-down text on any particle row
 both link `scope=inconsistency&inconsistency_id=…`. Projection scope
 renders a manifest section's deterministic selection the same

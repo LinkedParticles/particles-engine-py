@@ -15,6 +15,11 @@ The stored embedding (``particles.embedding_json`` plus the
 ``embedding_model_id`` that keys it) is the one sanctioned derived column on a
 record row D1's boundary cases, and is allowlisted below. Any
 other ``embedding*`` column fails, so a second one needs its own ruling.
+
+``session_exposures.observer_scope_applied`` matches by name but is not a
+derived view: it records whether one past session read the store through its
+project observer. It is a fact about that session, which the
+config at a later read cannot reproduce, and it stamps nothing on a belief.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ DERIVED_NAME_PATTERN = re.compile(
 SANCTIONED = {
     ("particles", "embedding_json"),
     ("particles", "embedding_model_id"),
+    # Not a derived view: what one past session was shown under.
+    ("session_exposures", "observer_scope_applied"),
 }
 
 

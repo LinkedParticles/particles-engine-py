@@ -28,6 +28,15 @@
 # workflow_dispatch path is a manual (re-)run against a version already on
 # the index.
 #
+# It builds only after a *successful* Publish, so a red post-publish smoke
+# there holds this image back even though the PyPI upload already happened.
+# That is deliberate: the image is the release installed from PyPI, and a
+# release that fails to install or import from the index would bake into an
+# image that does not start. The smoke waits out index lag before it judges
+# the release (see publish.yml), so a red run means the release itself needs
+# a look. Once it is understood, a plain `gh workflow run publish-image.yml`
+# on `main` builds the held-back version (this tree's).
+#
 # Tags are immutable by policy, PyPI-style: a version tag that already exists
 # on GHCR refuses to be re-pushed (recovery is the next patch release).
 # `latest` follows the newest published version.

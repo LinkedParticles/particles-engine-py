@@ -18,7 +18,18 @@ A pair is a candidate when:
 * at least one side is in scope, when a scope is given;
 * it is not already linked CO_EVIDENTIAL, transitively (§6.10);
 * it is not in the caller's ``exclude`` set;
-* both sides have the same stance holder.
+* both sides have the same stance holder;
+* it is not a generic paired with an instance claim: "most mammals
+  bear live young" and "the platypus lays eggs" are not an adjudicable pair,
+  since an exception does not falsify "most", so the lint never probes them
+  and ``links suggest`` never offers them as co-evidential. The rule is
+  :func:`~particles.core.conflict_resolution.is_generic_instance_pair`, the
+  §6.6 guard, applied here once for every caller. The audit and census
+  contradiction probes reach it through the lint.
+
+A caller may also ask for cross-source pairs first: within each
+scope tier, pairs whose two sides share no SOURCE corpus entry precede pairs
+from one entry. Order only; no pair is dropped.
 
 Per-particle eligibility (truth-apt, asserted) is
 :func:`is_pair_eligible`, which each caller applies while gathering, because
@@ -36,7 +47,8 @@ from typing import Any
 
 import numpy as np
 
-from particles.core.schema import Particle, is_truth_apt
+from particles.core.conflict_resolution import is_generic_instance_pair
+from particles.core.schema import Particle, ProvenanceRefType, is_truth_apt
 from particles.core.stance import stance_holder
 from particles.extraction.polarity import is_non_asserted
 from particles.operations._scope import pair_scope_tier
@@ -55,6 +67,18 @@ class CandidatePair:
     similarity: float
     a: Particle
     b: Particle
+    #: Both sides cite at least one SOURCE corpus entry in common: the two
+    #: claims came out of one note, not two.
+    same_source: bool = False
+
+
+def source_entry_ids(p: Particle) -> frozenset[str]:
+    """The corpus entries ``p`` was extracted from (its SOURCE provenance refs)."""
+    return frozenset(
+        r.corpus_entry_id
+        for r in p.provenance
+        if r.type == ProvenanceRefType.SOURCE and r.corpus_entry_id
+    )
 
 
 def is_pair_eligible(p: Particle) -> bool:
@@ -74,6 +98,7 @@ def enumerate_candidate_pairs(
     linked: Mapping[str, AbstractSet[str]],
     exclude: AbstractSet[frozenset[str]] = frozenset(),
     scope: frozenset[str] | None = None,
+    cross_source_first: bool = False,
 ) -> list[CandidatePair]:
     """Every candidate pair among ``candidates``, in probe order.
 
@@ -88,11 +113,14 @@ def enumerate_candidate_pairs(
             recorded.
         scope: Harvest scope. When set, a pair needs at least one
             side in it, and the tier records how many.
+        cross_source_first: Within each scope tier, order the pairs from two
+            different corpus entries before the pairs from one.
 
     Returns:
-        The pairs ordered by tier, then similarity (highest first), then the two
-        ids as a deterministic tie-break. With no scope every tier is
-        0, so the order is pure similarity.
+        The pairs ordered by tier, then (when ``cross_source_first``) cross-source
+        before same-source, then similarity (highest first), then the two ids as
+        a deterministic tie-break. With no scope and no source
+        ordering the order is pure similarity.
     """
     if len(candidates) < 2:
         return []
@@ -104,6 +132,7 @@ def enumerate_candidate_pairs(
     )
     emb_matrix = emb_matrix / (np.linalg.norm(emb_matrix, axis=1, keepdims=True) + 1e-10)
 
+    sources = [source_entry_ids(p) for p, _ in candidates]
     pairs: list[CandidatePair] = []
     n = len(candidates)
     for i in range(n):
@@ -130,8 +159,22 @@ def enumerate_candidate_pairs(
             # both read None and pass through.
             if stance_holder(p_a) != stance_holder(p_b):
                 continue
+            # A generic and an instance claim are not an adjudicable pair.
+            # Read last, so only pairs past every cheaper rule
+            # pay the detector.
+            if is_generic_instance_pair(p_a, p_b):
+                continue
 
-            pairs.append(CandidatePair(tier, float(sims[offset]), p_a, p_b))
+            same_source = not sources[i].isdisjoint(sources[i + 1 + offset])
+            pairs.append(CandidatePair(tier, float(sims[offset]), p_a, p_b, same_source))
 
-    pairs.sort(key=lambda c: (c.tier, -c.similarity, c.a.id, c.b.id))
+    pairs.sort(
+        key=lambda c: (
+            c.tier,
+            cross_source_first and c.same_source,
+            -c.similarity,
+            c.a.id,
+            c.b.id,
+        )
+    )
     return pairs

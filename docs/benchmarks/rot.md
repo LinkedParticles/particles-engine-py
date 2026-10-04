@@ -237,6 +237,83 @@ is the user's new manager"). 21 of the 31 remaining stale answers trace to
 that. A few more are genuinely not contradictions the check should confirm:
 learning Tagalog does not mean the user stopped learning Hungarian.
 
+## The slot check on the live probe (2026-09-30)
+
+A later change (1.157.0) added a second check before an update retires
+anything: the newer claim must give a new value for the *same slot* as the
+older one. On LongMemEval that cut the sweep's retirements from 203 to 33
+and ended its loss on multi-session questions (see
+[the re-measurement there](../benchmarks.md#the-re-measurement-with-the-slot-check-2026-09-30)).
+This benchmark measures the other side, whether real updates are still
+retired, and the `probe` arm is the one that answers it: extraction stays
+scripted, so every difference from the oracle is the live checks' judgement.
+Same three worlds, compiled defaults except the checks on
+`claude-haiku-4-5`, engine 1.168.1, about 13 minutes and a projected ~US$0.65.
+Report of record:
+[`rot-probe-adr0282-2026-09-30.json`](rot-probe-adr0282-2026-09-30.json).
+The oracle arm under the same configuration reproduces the figures above to
+the question.
+
+| Metric | Oracle | Probe |
+|---|---|---|
+| `recall_current@k` | 100% (216/216) | **99.5%** (215/216) |
+| `current_first` | 94.0% (203/216) | **93.5%** (202/216) |
+| `stale_over_current` | 0.8% (1/123) | **0.8%** (1/123) |
+| `stale_retained@k` | 4.9% (6/123) | **8.1%** (10/123) |
+| `poison_surfaced@k` | 0% (0/51) | **0%** (0/51) |
+
+**Real updates are still retired.** Of the 58 values the oracle retires, the
+live checks retired 57. The one they kept was a diet change ("kosher" left
+active after "Mediterranean"), which is the four extra `stale_retained`
+questions.
+
+**The live checks read a past-tense statement as a new value.** They retired
+79 claims where the oracle retires 58. The extra 21 are all honest history
+retired by later history: "The user's manager was previously Tomasz" retired
+in favour of "The user's manager was previously Ingrid", though both remain
+true. The scorer counts history as neither current nor stale, so those 21 move
+no metric. Once, the same misreading cost the current value: "The user's diet
+is vegetarian" was retired in favour of "The user's diet was previously
+paleo", which says nothing about the current diet, and the world's last
+checkpoint lost its current answer. A first run under a different
+configuration showed the same failure once, on a car. It is the coexisting
+facts defect again, in a narrower form: two past values are two facts, and a
+statement about the past does not replace a statement about the present.
+
+## Real pairs: your own demotion rulings
+
+The worlds above are synthetic. A store also accumulates real labels: each
+time you affirm or dismiss a `demotion` card in the curation queue, the pair
+and your ruling are appended to `demotion-rulings.jsonl` in
+`benchmark.runs_dir` (see
+[Lint and review: rulings on replaced claims](../operator-guide/lint-and-review.md#rulings-on-replaced-claims)).
+On the `probe` and `live` arms the benchmark reads that file and asks the
+update sweep's two checks about every ruled pair: do the claims conflict, and
+does the later one give the earlier one's slot a new value. The sweep retires
+only when both say yes.
+
+| Ruling | Checks retire | Checks keep |
+|---|---|---|
+| `coexist` (you dismissed the card) | **false positive** | agree |
+| `replacement` (you affirmed it) | agree | **miss** |
+
+A pair whose checks could not complete is counted as undecided. The result
+is printed as its own block, "Real pairs", and stored as `real_pairs` in the
+JSON report. It is never pooled into the world metrics, because a templated
+world and a real store share nothing but the checks under test. The `oracle`
+arm does not score real pairs: its scripted check answers from a world's
+value pools and knows nothing about a real claim.
+
+```bash
+uv run particles benchmark rot --arm probe --estimate     # counts 2 calls per ruled pair
+uv run particles benchmark rot --arm probe --no-real-pairs
+uv run particles benchmark rot --arm probe --rulings path/to/rulings.jsonl
+```
+
+The file is read when it exists and skipped silently when it does not. Claim
+texts appear in the report under `benchmark.record_claim_text`, like every
+other hit text.
+
 ## Reading the numbers
 
 - **The `oracle` arm is not the product.** It is the ceiling a perfect

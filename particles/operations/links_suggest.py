@@ -42,7 +42,7 @@ import json
 import logging
 import uuid
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -463,15 +463,27 @@ async def _judge_batch(
     returns unparseably are left out of the map (the caller defaults them to
     UNSURE).
     """
+    keyed = [
+        (
+            _pair_key(c.particle_a, c.particle_b),
+            content_for.get(c.particle_a, "(content unavailable)"),
+            content_for.get(c.particle_b, "(content unavailable)"),
+        )
+        for c in candidates
+    ]
+    return await _judge_keyed(keyed)
+
+
+async def _judge_keyed(keyed: Sequence[tuple[str, str, str]]) -> dict[str, JudgeVerdictKind]:
+    """One judge call over ``(key, claim_a, claim_b)`` triples; key to verdict.
+
+    The equivalence judge itself: the curation duplicate cards, the
+    ``LLM_JUDGE`` mode, and ``reindex --estimate`` (:func:`judge_claim_pairs`)
+    all ask it the same question in the same words.
+    """
     from particles.operations._llm import _llm_call
 
-    lines: list[str] = []
-    for c in candidates:
-        key = _pair_key(c.particle_a, c.particle_b)
-        a = content_for.get(c.particle_a, "(content unavailable)")
-        b = content_for.get(c.particle_b, "(content unavailable)")
-        lines.append(f"[{key}]\nA: {a}\nB: {b}")
-
+    lines = [f"[{key}]\nA: {a}\nB: {b}" for key, a, b in keyed]
     prompt = (
         "You are curating an epistemic knowledge base. Below are candidate "
         "pairs of claims that may assert the SAME underlying fact (a "
@@ -484,9 +496,30 @@ async def _judge_batch(
         'verdict, e.g. {"c42e15ba+cdcaa152": "PARAPHRASE"}. No prose.\n\n' + "\n\n".join(lines)
     )
     # ~24 tokens per verdict entry is generous; scale with the batch size.
-    max_tokens = max(200, 40 * len(candidates))
+    max_tokens = max(200, 40 * len(keyed))
     response = await _llm_call(prompt, max_tokens=max_tokens)
     return _parse_verdicts(response)
+
+
+async def judge_claim_pairs(
+    pairs: Sequence[tuple[str, str]], *, batch_size: int
+) -> list[JudgeVerdictKind]:
+    """The judge's verdict on each ``(claim_a, claim_b)`` pair, in order.
+
+    For claims with no particle id (a re-extraction not yet stored, as
+    ``reindex --estimate`` holds). Pairs go ``batch_size`` to a call.
+    A pair the model omits or answers unparseably is ``UNSURE``, as in
+    :func:`_judge_cluster`.
+    """
+    verdicts: list[JudgeVerdictKind] = []
+    for start in range(0, len(pairs), batch_size):
+        batch = pairs[start : start + batch_size]
+        keys = [f"{start + i:08x}+{start + i:08x}" for i in range(len(batch))]
+        answered = await _judge_keyed(
+            [(key, a, b) for key, (a, b) in zip(keys, batch, strict=True)]
+        )
+        verdicts.extend(answered.get(key, JudgeVerdictKind.UNSURE) for key in keys)
+    return verdicts
 
 
 def _parse_verdicts(response: str | None) -> dict[str, JudgeVerdictKind]:

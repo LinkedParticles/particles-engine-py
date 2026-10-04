@@ -36,6 +36,7 @@ from particles.benchmark.schema import (
 from particles.core.schema import Snapshot, UncertaintyNature
 from particles.extraction.general import CandidateParticle, ExtractionResult
 from particles.extraction.registry import ExtractorPlugin
+from tests._client_fixtures import stream_via_create
 
 _SEED_SUITE = Path("tests/benchmark/suites/numismatic-seed-001.yaml")
 _FIXTURES = Path(__file__).parent / "conformance" / "fixtures"
@@ -296,22 +297,50 @@ def test_benchmark_compare_cli_rejects_unknown_extractor_id() -> None:
 
 def test_benchmark_compare_cli_emits_json_for_two_real_extractors() -> None:
     """End-to-end: run two registered extractors against the seed suite
-    via the CLI, parse the JSON output, confirm the matrix shape."""
+    via the CLI, parse the JSON output, confirm the matrix shape.
+
+    The general extractor makes one LLM call per case, so the shared client is
+    mocked at the ``set_client`` seam (tests/AGENTS.md § Mocking strategy).
+    Unmocked, this test issued nine live extraction calls whenever
+    ``ANTHROPIC_API_KEY`` was set, which dominated the unit suite's wall time.
+    The mock answers with an empty candidate list: the assertions below are on
+    the matrix shape, which does not depend on what was extracted.
+    """
+    from unittest.mock import MagicMock
+
+    import anthropic
+
+    from particles.llm import set_client
+
+    reply = MagicMock()
+    reply.content = [MagicMock(text="[]")]
+    reply.stop_reason = "end_turn"
+    client = MagicMock(spec=anthropic.Anthropic)
+    client.messages = MagicMock()
+    client.messages.create = MagicMock(return_value=reply)
+    stream_via_create(client)
+
     runner = CliRunner()
-    result = runner.invoke(
-        app,
-        [
-            "extractor",
-            "benchmark-compare",
-            "--extractor-id",
-            "numista-coin-extractor",
-            "--extractor-id",
-            "general-extractor",
-            "--format",
-            "json",
-        ],
-    )
+    set_client(client)
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "extractor",
+                "benchmark-compare",
+                "--extractor-id",
+                "numista-coin-extractor",
+                "--extractor-id",
+                "general-extractor",
+                "--format",
+                "json",
+            ],
+        )
+    finally:
+        set_client(None)
     assert result.exit_code == 0, result.output
+    # The general extractor really ran, through the seam.
+    assert client.messages.create.call_count >= 1
     # The JSON output starts after any log lines the runner emitted.
     # Find the first '{' that begins a JSON object.
     json_start = result.output.find("{")

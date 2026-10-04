@@ -152,7 +152,8 @@ async def build_duplicate_index(
 # Deliberately NOT in this set, because each encodes something other than a
 # verdict on the value: SOURCE_RETRACTED (the *source* was withdrawn — another
 # source making the same claim is new evidence), SUPERSEDED_BY_REINDEX and
-# DOCUMENT_SUPERSEDED (a newer generation replaced it), DUPLICATE_MERGED (an
+# DOCUMENT_SUPERSEDED (a newer generation replaced it), SUPERSEDED_BY_REANCHOR
+# (its referent moved and a dated restatement replaced it), DUPLICATE_MERGED (an
 # identical copy folded away — the claim is still ACTIVE elsewhere),
 # VALIDITY_EXPIRED (time, not judgment), and the trust-differential demotions
 # TRUST_DEMOTED / LOWER_TRUST_SOURCE (a policy about sources, not a verdict on

@@ -11,9 +11,15 @@ Two pure decisions then run around the one expensive gather,
 the LLM contradiction probe:
 
   1. :func:`plan_probes` names exactly the pairs to probe, and in which role;
-  2. :func:`select_pairs` reads the probe results and picks the primary pair
-     for the ladder, the rung 2.5 extras, and the declined pairs recorded as
-     divergences.
+  2. :func:`plan_update_probes` names the confirmed pairs rung 2.5 might
+     settle, which the caller asks the update probe about once it has dated
+     them;
+  3. :func:`select_pairs` reads both probes' results and picks the primary
+     pair for the ladder, the rung 2.5 extras, and the declined pairs recorded
+     as divergences;
+  4. :func:`plan_readings` names the probe-confirmed pairs the pass would act
+     on, which the caller reads a second time, and
+     :func:`apply_readings` lets each reading's verdict replace the probe's.
 
 After the ladder, :func:`plan_update_extras` says which extras rung 2.5
 demotes, in order.
@@ -32,10 +38,11 @@ Performs no I/O.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Container, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
+from particles.core.conflict_resolution import SlotVerdict, admits_update, offers_subject_pair
 from particles.core.observer_scope import PairPrecondition
 from particles.core.schema import CorpusEntry, Particle, ProvenanceRefType
 from particles.ingest.update_supersession import update_order
@@ -90,6 +97,25 @@ class PairSelection:
     """Further confirmed subject pairs, best first, settled by rung 2.5 alone."""
     declined: tuple[Particle, ...] = ()
     """Confirmed pairs the precondition declined, recorded as ``CONTRADICTS``."""
+    slots: Mapping[str, SlotVerdict] = field(default_factory=dict)
+    """The update probe's verdict by existing id, for each pair it answered.
+    Rung 2.5 acts on a pair only when the verdict is
+    :attr:`~SlotVerdict.CHANGES`; a :attr:`~SlotVerdict.FIXED` pair reaches
+    rung 3."""
+    reading: str | None = None
+    """The instruction a second reading confirmed ``primary``'s signal under,
+    stamped on a rung-3 record as ``conflict:reading``. ``None``
+    when no reading confirmed it: none ran, or it failed and the signal was
+    kept (a same-entry pair)."""
+
+    def slot_of(self, existing_id: str) -> SlotVerdict | None:
+        """The update probe's verdict on the pair with ``existing_id``, if it gave one."""
+        return self.slots.get(existing_id)
+
+    @property
+    def updatable(self) -> frozenset[str]:
+        """The existing ids rung 2.5 may act on: a slot that changes over time."""
+        return frozenset(pid for pid, slot in self.slots.items() if admits_update(slot))
 
 
 def _offered(pairs: CandidatePairs, other: Particle) -> bool:
@@ -117,7 +143,41 @@ def plan_probes(pairs: CandidatePairs) -> list[tuple[Particle, PairRole]]:
     return probes
 
 
-def select_pairs(pairs: CandidatePairs, probes: Mapping[str, bool]) -> PairSelection:
+def plan_update_probes(pairs: CandidatePairs, probes: Mapping[str, bool]) -> list[Particle]:
+    """The confirmed pairs rung 2.5 might settle, in probe order.
+
+    A contradiction is not yet an update. Rung 2.5 retires a claim on a date,
+    so it needs a second verdict first: that the two claims fill one slot and
+    the later one gives it a new value. The candidates for that question are
+    the pairs the ladder or the extras could act on: a confirmed nearest claim
+    the precondition does not decline, and each confirmed pool member that is
+    offered. The caller dates each one and asks the update probe only about
+    those rung 2.5 could order, so the question costs a call only where a
+    retirement is otherwise one step away.
+    """
+    out: list[Particle] = []
+    nearest = pairs.nearest
+    if (
+        nearest is not None
+        and probes.get(nearest.id, False)
+        and pairs.precondition_of(nearest) is not PairPrecondition.DECLINE
+    ):
+        out.append(nearest)
+    for other in pairs.subject_pool:
+        if (
+            pairs.precondition_of(other) is not PairPrecondition.DECLINE
+            and _offered(pairs, other)
+            and probes.get(other.id, False)
+        ):
+            out.append(other)
+    return out
+
+
+def select_pairs(
+    pairs: CandidatePairs,
+    probes: Mapping[str, bool],
+    slots: Mapping[str, SlotVerdict] | None = None,
+) -> PairSelection:
     """Pick the primary pair, the rung 2.5 extras and the declined pairs.
 
     ``probes`` holds the result of every probe :func:`plan_probes` named, by
@@ -126,7 +186,20 @@ def select_pairs(pairs: CandidatePairs, probes: Mapping[str, bool]) -> PairSelec
     declined or unconfirmed, the best confirmed pool member takes its place and
     the rest are extras. An unconfirmed nearest claim stays primary when no
     pool member is confirmed: the ladder then corroborates it.
+
+    ``slots`` holds the update probe's verdict on each pair
+    :func:`plan_update_probes` named and the caller could date. A
+    pool member the update probe says fills a different slot is **not
+    offered**: the subject-keyed search exists to find updates, and a
+    same-subject pair about two attributes was expected to cost one probe and
+    change nothing. Both claims stay ACTIVE, the outcome before
+    that search existed. The nearest claim is not filtered: its pair
+    reached the ladder before, and a different-slot verdict only
+    keeps rung 2.5 off it. A pool member that fills the same slot is offered
+    whatever the slot's kind: rung 2.5 settles one that changes over time, and
+    a fixed one, whose two values contradict, falls to rung 3.
     """
+    verdicts = slots or {}
     declined: list[Particle] = []
     primary, signal = pairs.nearest, False
     if primary is not None:
@@ -139,12 +212,20 @@ def select_pairs(pairs: CandidatePairs, probes: Mapping[str, bool]) -> PairSelec
         if pairs.precondition_of(other) is PairPrecondition.DECLINE:
             if probes.get(other.id, False):
                 declined.append(other)
-        elif _offered(pairs, other) and probes.get(other.id, False):
+        elif (
+            _offered(pairs, other)
+            and probes.get(other.id, False)
+            and offers_subject_pair(verdicts.get(other.id))
+        ):
             confirmed.append(other)
     if (primary is None or not signal) and confirmed:
         primary, signal = confirmed.pop(0), True
     return PairSelection(
-        primary=primary, signal=signal, extras=tuple(confirmed), declined=tuple(declined)
+        primary=primary,
+        signal=signal,
+        extras=tuple(confirmed),
+        declined=tuple(declined),
+        slots=dict(verdicts),
     )
 
 
@@ -161,6 +242,7 @@ def plan_update_extras(
     others: Sequence[Particle],
     entries: Mapping[str, CorpusEntry | None],
     precondition: Mapping[str, PairPrecondition],
+    updatable: Container[str],
 ) -> list[str]:
     """The ids rung 2.5 demotes among the extra pairs, in order.
 
@@ -174,9 +256,15 @@ def plan_update_extras(
 
     ``entries`` maps a corpus entry id to the entry (``None`` when missing), and
     ``precondition`` is by existing id, a missing id reading ``RECONCILE``.
+    ``updatable`` holds the ids the update probe confirmed fill a slot that
+    changes over time; any other extra is left as it was. A fixed
+    slot's extra is left too: rung 3 is the primary pair's alone, so no second
+    INCONSISTENCY is manufactured for one claim, and the census reads the pair.
     """
     demoted: list[str] = []
     for other in others:
+        if other.id not in updatable:
+            continue
         ref = next((r for r in other.provenance if r.type is ProvenanceRefType.SOURCE), None)
         if ref is None:
             continue
@@ -200,3 +288,93 @@ def plan_update_extras(
             demoted.append(winner.id)
             break
     return demoted
+
+
+# ---------------------------------------------------------------------------
+# The second reading
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PairReading:
+    """The second reading of one probe-confirmed pair."""
+
+    confirmed: bool | None
+    """Whether the reading confirmed the contradiction; ``None`` when it failed
+    (breaker open, call error, or a reply still cut off after the retry)."""
+    reading: str | None = None
+    """The instruction the pair was read under (``standing/1``, ``observed/1``)."""
+
+
+@dataclass(frozen=True)
+class ReadingTally:
+    """What the second readings did to one candidate's selection."""
+
+    read: int = 0
+    """Pairs sent to the reading."""
+    cleared: int = 0
+    """Pairs the reading did not confirm: their signal was dropped."""
+    unread: int = 0
+    """Pairs whose reading failed (``conflict_unread``)."""
+
+
+def plan_readings(selection: PairSelection) -> list[Particle]:
+    """The probe-confirmed pairs a selection would act on, to be read again.
+
+    The primary pair when its signal is confirmed, then each declined pair:
+    every write that rests on the probe's confirmation (a rung-3 record, a
+    rung 1.5 or 2 retirement, a ``CONTRADICTS`` edge) inherits its precision.
+    The rung 2.5 extras are not read: each already needs the update probe's
+    YES before it retires anything.
+    """
+    out: list[Particle] = []
+    if selection.primary is not None and selection.signal:
+        out.append(selection.primary)
+    out.extend(selection.declined)
+    return out
+
+
+def apply_readings(
+    selection: PairSelection,
+    readings: Mapping[str, PairReading],
+    same_entry: Container[str],
+) -> tuple[PairSelection, ReadingTally]:
+    """Let each second reading's verdict replace the probe's (§2).
+
+    ``readings`` holds the reading of each pair :func:`plan_readings` named,
+    by existing id; a pair with no reading is left as the probe decided.
+
+    * **Confirmed:** unchanged, and a confirmed primary records the
+      instruction in :attr:`PairSelection.reading`.
+    * **Not confirmed:** no signal. The primary routes as a probe NO (it
+      corroborates) and a declined pair writes no edge.
+    * **Failed:** a pair whose existing claim came from the candidate's own
+      entry (``same_entry``) keeps the probe's signal, unstamped: the nightly
+      census never discloses a same-source pair, so nothing else would read
+      it. A cross-entry pair loses it: the census reads cross-source pairs
+      every night.
+    """
+    read = cleared = unread = 0
+
+    def keeps(other: Particle) -> tuple[bool, str | None]:
+        nonlocal read, cleared, unread
+        verdict = readings.get(other.id)
+        if verdict is None:
+            return True, None
+        read += 1
+        if verdict.confirmed is None:
+            unread += 1
+            return other.id in same_entry, None
+        if not verdict.confirmed:
+            cleared += 1
+            return False, None
+        return True, verdict.reading
+
+    primary, signal, stamp = selection.primary, selection.signal, None
+    if primary is not None and signal:
+        signal, stamp = keeps(primary)
+    declined = tuple(other for other in selection.declined if keeps(other)[0])
+    return (
+        replace(selection, signal=signal, declined=declined, reading=stamp),
+        ReadingTally(read=read, cleared=cleared, unread=unread),
+    )

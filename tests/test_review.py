@@ -172,7 +172,12 @@ async def test_no_auto_cascade(db_session: object) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "action",
-    [ResolutionAction.PREFER_A, ResolutionAction.PREFER_B, ResolutionAction.BOTH_VALID],
+    [
+        ResolutionAction.PREFER_A,
+        ResolutionAction.PREFER_B,
+        ResolutionAction.BOTH_VALID,
+        ResolutionAction.DISCARD,
+    ],
 )
 async def test_resolution_closes_wrapper(db_session: object, action: ResolutionAction) -> None:
     """Every non-DEFER resolution terminates its ticket: the wrapper is
@@ -461,3 +466,241 @@ async def test_prefer_without_source_provenance_writes_no_statement(db_session: 
     assert wrapper is not None and wrapper.status is Status.RETRACTED
     loser = await get_particle(session, pb.id)  # type: ignore[arg-type]
     assert loser is not None and loser.status is Status.PROVENANCE_STALE
+
+
+# -- DISCARD ------------------------------------------------------
+
+
+async def _seed_pair(session: object, pa: Particle, pb: Particle) -> Particle:
+    inc = _make_inconsistency(pa.id, pb.id)
+    for obj in [pa, pb, inc]:
+        await insert_particle(session, obj)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+    return inc
+
+
+@pytest.mark.asyncio
+async def test_discard_retracts_both_sides_with_no_trust_verdict(db_session: object) -> None:
+    """ACTIVE A and quarantined B both end RETRACTED / CONFLICT_RESOLVED; only
+    A, which was believed, is stamped retired_at; no statement is written."""
+    from particles.operations.review import resolve
+    from particles.store.particle_store import ParticleRow
+    from particles.store.trust_store import get_trust_statements_for_domain
+
+    session = db_session  # type: ignore[assignment]
+    pa, pb = _make_active("Claim A"), _make_quarantined("Claim B")
+    inc = await _seed_pair(session, pa, pb)
+
+    review = await resolve(
+        session,  # type: ignore[arg-type]
+        inc.id,
+        ResolutionAction.DISCARD,
+        "reviewer-1",
+        note="transient session state",
+    )
+
+    assert review.resolution is ResolutionAction.DISCARD
+    assert review.trust_statement_id is None
+    assert review.note == "transient session state"
+    assert await get_trust_statements_for_domain(session, "general") == []  # type: ignore[arg-type]
+    for pid in (pa.id, pb.id):
+        side = await get_particle(session, pid)  # type: ignore[arg-type]
+        assert side is not None
+        assert (side.status, side.status_reason) == (
+            Status.RETRACTED,
+            StatusReason.CONFLICT_RESOLVED,
+        )
+    row_a = await session.get(ParticleRow, pa.id)  # type: ignore[attr-defined]
+    row_b = await session.get(ParticleRow, pb.id)  # type: ignore[attr-defined]
+    assert row_a.retired_at is not None
+    assert row_b.retired_at is None  # never believed, so never stamped
+    wrapper = await get_particle(session, inc.id)  # type: ignore[arg-type]
+    assert wrapper is not None and wrapper.status is Status.RETRACTED
+
+
+@pytest.mark.asyncio
+async def test_discard_audits_each_believed_retraction(db_session: object) -> None:
+    """One PARTICLE_RETRACTED per believed side, carrying the note; none for a
+    quarantined side; REVIEW_RESOLVED names every retracted id."""
+    from particles.operations.review import resolve
+    from particles.store.event_store import OperatorEventType, list_events
+
+    session = db_session  # type: ignore[assignment]
+    pa, pb = _make_active("Claim A"), _make_quarantined("Claim B")
+    inc = await _seed_pair(session, pa, pb)
+
+    await resolve(
+        session,  # type: ignore[arg-type]
+        inc.id,
+        ResolutionAction.DISCARD,
+        "reviewer-1",
+        note="neither is worth keeping",
+        actor="cli:review",
+    )
+
+    retracted = await list_events(
+        session,  # type: ignore[arg-type]
+        event_type=OperatorEventType.PARTICLE_RETRACTED,
+    )
+    assert len(retracted) == 1
+    event = retracted[0]
+    assert [r.ref_id for r in event.refs] == [pa.id]
+    assert event.actor == "cli:review"
+    assert event.reason == "neither is worth keeping"
+    assert event.payload == {"via": "review", "inconsistency_particle_id": inc.id}
+
+    (resolved,) = await list_events(
+        session,  # type: ignore[arg-type]
+        event_type=OperatorEventType.REVIEW_RESOLVED,
+    )
+    assert resolved.payload is not None
+    assert resolved.payload["action"] == "DISCARD"
+    assert resolved.payload["retracted_particle_ids"] == [pa.id, pb.id]
+    assert resolved.payload["trust_statement_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_discard_of_two_live_claims_retracts_both(db_session: object) -> None:
+    from particles.operations.review import resolve
+    from particles.store.event_store import OperatorEventType, list_events
+
+    session = db_session  # type: ignore[assignment]
+    pa, pb = _make_active("Claim A"), _make_active("Claim B")
+    inc = await _seed_pair(session, pa, pb)
+
+    await resolve(session, inc.id, ResolutionAction.DISCARD, "reviewer-1")  # type: ignore[arg-type]
+
+    retracted = await list_events(
+        session,  # type: ignore[arg-type]
+        event_type=OperatorEventType.PARTICLE_RETRACTED,
+    )
+    assert sorted(r.ref_id for e in retracted for r in e.refs) == sorted([pa.id, pb.id])
+
+
+@pytest.mark.asyncio
+async def test_a_discarded_value_is_not_held_if_restated(db_session: object) -> None:
+    """A discard is no verdict on the value, so neither side lands in the
+    retired-value judgment set."""
+    from particles.ingest.duplicate_suppression import is_judgment_retired
+    from particles.operations.review import resolve
+
+    session = db_session  # type: ignore[assignment]
+    pa, pb = _make_active("Claim A"), _make_quarantined("Claim B")
+    inc = await _seed_pair(session, pa, pb)
+
+    await resolve(session, inc.id, ResolutionAction.DISCARD, "reviewer-1")  # type: ignore[arg-type]
+
+    for pid in (pa.id, pb.id):
+        side = await get_particle(session, pid)  # type: ignore[arg-type]
+        assert side is not None
+        assert not is_judgment_retired(side)
+
+
+async def _census_record(session: object) -> tuple[Particle, Particle, Particle, Particle]:
+    """A census record naming A1, A2 on one side and B on the other."""
+    from particles.core.contradiction_disclosure import (
+        ConfirmedPair,
+        NoteLabel,
+        Sides,
+        build_census_record,
+    )
+
+    a1, a2, b = _make_active("Endpoint exists"), _make_active("It is live"), _make_active("404")
+    for p in (a1, a2, b):
+        await insert_particle(session, p)  # type: ignore[arg-type]
+    record = build_census_record(
+        sides=Sides(a=(a1.id, a2.id), b=(b.id,)),
+        pairs=[
+            ConfirmedPair(a=a1.id, b=b.id, same_source=False, reason="exists vs not found"),
+            ConfirmedPair(a=a2.id, b=b.id, same_source=False, reason="live vs not found"),
+        ],
+        members={p.id: p for p in (a1, a2, b)},
+        labels={p.id: NoteLabel("n.md", "2026-09-18") for p in (a1, a2, b)},
+        sources={p.id: ["e1"] for p in (a1, a2, b)},
+        trigger_entry_id="e1",
+        trigger_snapshot_id="s1",
+    )
+    await insert_particle(session, record)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+    return record, a1, a2, b
+
+
+@pytest.mark.asyncio
+async def test_prefer_b_on_a_census_record_demotes_every_member_of_side_a(
+    db_session: object,
+) -> None:
+    """a record naming more than two claims resolves per side."""
+    from particles.operations.review import resolve
+    from particles.store.event_store import OperatorEventType, list_events
+
+    session = db_session
+    record, a1, a2, b = await _census_record(session)
+
+    await resolve(session, record.id, ResolutionAction.PREFER_B, "owner")  # type: ignore[arg-type]
+
+    for pid in (a1.id, a2.id):
+        loser = await get_particle(session, pid)  # type: ignore[arg-type]
+        assert loser is not None
+        assert (loser.status, loser.status_reason) == (
+            Status.PROVENANCE_STALE,
+            StatusReason.CONFLICT_RESOLVED,
+        )
+    winner = await get_particle(session, b.id)  # type: ignore[arg-type]
+    assert winner is not None and winner.status is Status.ACTIVE
+    events = await list_events(session, event_type=OperatorEventType.REVIEW_RESOLVED)  # type: ignore[arg-type]
+    named = {ref.ref_id for ref in events[0].refs}
+    assert {record.id, a1.id, a2.id, b.id} <= named
+
+
+@pytest.mark.asyncio
+async def test_both_valid_and_discard_reach_every_member(db_session: object) -> None:
+    from particles.operations.review import resolve
+
+    session = db_session
+    record, a1, a2, b = await _census_record(session)
+    await resolve(session, record.id, ResolutionAction.BOTH_VALID, "owner")  # type: ignore[arg-type]
+    for pid in (a1.id, a2.id, b.id):
+        stored = await get_particle(session, pid)  # type: ignore[arg-type]
+        assert stored is not None and stored.uncertainty_nature is UncertaintyNature.ALEATORY
+
+    record2, c1, c2, d = await _census_record(session)
+    await resolve(session, record2.id, ResolutionAction.DISCARD, "owner")  # type: ignore[arg-type]
+    for pid in (c1.id, c2.id, d.id):
+        stored = await get_particle(session, pid)  # type: ignore[arg-type]
+        assert stored is not None and stored.status is Status.RETRACTED
+
+
+@pytest.mark.asyncio
+async def test_prior_reviews_follow_the_replacement_chain(db_session: object) -> None:
+    """a DEFER note on a replaced census record is shown on its replacement."""
+    from particles.core.contradiction_disclosure import REPLACES_KEY
+    from particles.operations.review import prior_reviews, resolve
+    from particles.store.particle_store import update_particle_status
+
+    session = db_session
+    old, a1, _a2, b = await _census_record(session)
+    await resolve(
+        session,  # type: ignore[arg-type]
+        old.id,
+        ResolutionAction.DEFER,
+        "owner",
+        note="check the GoatCounter docs first",
+    )
+    # The sweep closes the old record and opens a replacement naming it.
+    await update_particle_status(
+        session,  # type: ignore[arg-type]
+        old.id,
+        Status.RETRACTED,
+        StatusReason.CONFLICT_RESOLVED,
+    )
+    new = _make_inconsistency(a1.id, b.id).model_copy(
+        update={"properties": {"conflict:origin": "census", REPLACES_KEY: old.id}}
+    )
+    await insert_particle(session, new)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+
+    history = await prior_reviews(session, new)  # type: ignore[arg-type]
+    assert [(h.record_id, h.action, h.note) for h in history] == [
+        (old.id, "DEFER", "check the GoatCounter docs first")
+    ]
+    assert await prior_reviews(session, old) == []  # type: ignore[arg-type]

@@ -16,8 +16,11 @@ async def quality_report() -> dict[str, Any]:
     """Return the extraction-quality dashboard snapshot.
 
     Particle counts by status / calibration_source / schema_version,
-    plus the structural-mix percentages. Computed entirely from live
-    DB queries — no LLM involvement.
+    plus the structural-mix percentages, the store's recorded LLM spend
+    (``llm_spend``), and the curation queue's precision over the default
+    window (``curation_precision``: per card kind, the cards acted on,
+    dismissed, snoozed and untouched, with the denominator). Computed
+    entirely from live DB queries — no LLM involvement.
     """
     from particles.api.client import get_backend
 

@@ -214,10 +214,23 @@ possible at all, and
 [benchmark + compare](../operator-guide/tuning.md#benchmark-compare) is how
 they check a tuning change moved the needle.
 
+The reference runner also reports `calibration_error_semantic` beside
+`calibration_error`. Both are the same expected calibration error over the same
+ten bins, and they differ only in which claims count as correct.
+`calibration_error` counts a full match only, so a correct claim stated below
+its gold `confidence_min` counts as wrong. `calibration_error_semantic` counts
+every claim that matched a gold claim, at any stated confidence, which is the
+label extractor calibration fits on. When a suite's floors are high, compare
+providers on the semantic figure: the full-match one also measures how often a
+model states a correct claim below the floor.
+
 The suite's optional `metrics:` list lets you *document* additional,
 domain-specific metrics you expect a runner to report. The reference
-runner parses that list but computes only the three normative metrics;
-anything else in it is not computed.
+runner parses that list but computes only the three normative metrics and the
+semantic calibration figure above; anything else in it is not computed. The
+other addition the reference runner makes is the subject-resolution column,
+which a `gold_subjects` block turns on
+(see [Gold subjects](#gold-subjects-the-subject-resolution-column)).
 
 ## Repeat runs
 
@@ -238,6 +251,52 @@ can read *why* precision fell without re-running. Set
 `benchmark.record_claim_text: false` if the fixture text must not land in
 report files.
 
+## Gold subjects: the subject-resolution column
+
+The three normative metrics score which claims an extractor emitted. They
+never score which Subject a claim landed on, which is the subject resolver's
+job and the place a common-word name ("POET", "Harbor") gets linked to the
+wrong Wikidata item. A suite can carry a root-level `gold_subjects:` list,
+and the reference runner then adds three fractions to the report beside the
+normative metrics:
+
+| Metric | Meaning |
+|---|---|
+| `resolution_accuracy` | Share of gold subjects whose Subject carries the gold ref, or no ref when the gold says none exists |
+| `resolution_wrong_ref` | Share linked to a ref that is not the gold. This is the costly failure: every later particle about the name joins the wrong entity |
+| `resolution_bare_local` | Share left without a ref where the gold has one. This only fails to join |
+
+```yaml
+gold_subjects:
+  - {case_id: web-article-002, name: "Duluth, Minnesota", ref: "wikidata:Q485708"}
+  - {case_id: web-article-003, name: Harbor, ref: null}
+  - {case_id: web-article-004, name: Go, ref: "wikidata:Q37227",
+     mention: "Ostrander Freight rewrote its billing service in Go."}
+```
+
+- `ref` is `namespace:id`, or `null` when no authority holds the entity and
+  the right answer is a bare local Subject. An invented company is that case.
+- `mention` is the claim text the resolver receives as context, which is what
+  the extract pipeline passes for a candidate. It defaults to the first gold
+  claim in the case that names the subject as a whole word; an entry whose
+  name no gold claim contains must state it.
+- Each gold subject is resolved through the production cascade in a
+  throwaway store of its own, from its mention rather than from the
+  extractor's output. The column therefore measures the resolver with
+  extraction variance held out, makes no LLM call, and does query Wikidata
+  under the usual rate limiter.
+- A stored ref counts at any confidence. Exporters hide a low-confidence link,
+  but the store still joins on it, so scoring only the displayed links would
+  hide the pollution the column exists to count. Each per-subject row in the
+  saved report records every ref with its confidence.
+- List every proper-named entity a gold claim names, whether or not today's
+  extractor emits it as a subject. Listing only the names a resolver happens
+  to get right or wrong tunes the gold set to an outcome.
+
+`gold_subjects` sits at the suite root, outside the frozen schema, because
+the root is where a runner that predates a key ignores it. A §13.3 runner that
+has never heard of the column still runs the suite.
+
 ## What the frozen schema covers
 
 The suite *input* schema (suite, case, expected particle and metric
@@ -245,7 +304,10 @@ declaration) is frozen by the techspec. You cannot add a field to an
 expected particle (a modality label, a validity date, a polarity) for your
 extractor's purposes; the loader will reject it. Properties the §13.3
 shape cannot express are measured by separate harnesses with their own
-suite formats (see [Other harnesses](#other-harnesses)).
+suite formats (see [Other harnesses](#other-harnesses)), or, where the
+property belongs to the suite's own documents rather than to an emitted
+particle, by a root-level extension such as
+[`gold_subjects`](#gold-subjects-the-subject-resolution-column).
 
 ## What good fixtures look like
 
@@ -312,6 +374,7 @@ names the reason:
 | predictor degeneracy (fewer than two distinct movable confidences, including all-saturated 0.0 / 1.0 output) | Not by the gold set. It *can* be moved by **fixture** design: prose in which the author's own certainty varies (a firm count beside a provisional one, two sources that disagree, a printed correction) draws a spread out of the same extractor that flatly stated prose never does. |
 | fit landed on the optimizer bound | No: a property of the data, not the file. |
 | non-improving fit | No: a property of the extractor. |
+| held-out regression (the fit raises calibration error on recorded benchmark runs it was not fitted on), or no recorded run to check against | Not by this suite. It is a property of how far the suite's genre is from the benchmark suites'. The fixture design that cures predictor degeneracy (hedged prose) is what produces it: a temperature fitted there miscorrects flatly stated prose. Record runs with `extractor benchmark --runs 3` first. |
 
 If you are editing a suite to make a refusal go away, check which
 condition fired first.

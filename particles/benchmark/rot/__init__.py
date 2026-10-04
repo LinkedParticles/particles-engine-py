@@ -37,6 +37,7 @@ from particles.benchmark.rot.oracle import (
     oracle_claims,
     oracle_contradiction,
 )
+from particles.benchmark.rot.real_pairs import score_real_pairs, score_rulings_file
 from particles.benchmark.rot.render import render_report
 from particles.benchmark.rot.rescore import RescoreError, rescore_report
 from particles.benchmark.rot.runner import (
@@ -51,6 +52,7 @@ from particles.benchmark.rot.schema import (
     HitClass,
     ProbeResult,
     Rate,
+    RealPairsReport,
     RotBenchmarkReport,
     RotMetrics,
     RotWorld,
@@ -76,6 +78,7 @@ __all__ = [
     "RefusingProvider",
     "RescoreError",
     "RotArmError",
+    "RealPairsReport",
     "RotBenchmarkReport",
     "RotMetrics",
     "RotRunEstimate",
@@ -93,6 +96,8 @@ __all__ = [
     "render_report",
     "render_session",
     "rescore_report",
+    "score_real_pairs",
+    "score_rulings_file",
     "run_rot_benchmark",
     "slot_state",
 ]

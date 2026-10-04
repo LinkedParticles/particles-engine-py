@@ -1,0 +1,58 @@
+suite_id: premise-scope-negative-001
+name: Abstraction premise-scope negative cases
+version: 0.1.0
+# negative case. Each case is a cluster of instance
+# claims about members of a group. The only abstraction that may pass the
+# promotion gate is one scoped to the observed premise set; a generic over the
+# group's kind is an induction the engine would be making and asserting.
+#
+#   population_generics  the deterministic pre-check rejects these before any
+#                        judge call (the judge alone is not enough: it reads an
+#                        evidential clause as a scope, and it has flipped on
+#                        "Most operators use zsh")
+#   judge_only_generics  generics the pre-check lets through (a verb outside
+#                        its list, or a marker it cannot tell from a scope),
+#                        so the entailment judge is the only line and must
+#                        reject them
+#   premise_scoped       the passing shape: clears the pre-check
+#
+# Driven by tests/test_abstraction_premise_scope.py (pre-check, unit tier) and
+# tests/test_integration_abstraction_scope.py (live judge, integration tier).
+cases:
+  - case_id: parish-food-bank
+    subject: St. Brendan's parish
+    premises:
+      - Maria Lopez, a parishioner of St. Brendan's, volunteers at the parish food bank.
+      - Tomás Reyes, a parishioner of St. Brendan's, volunteers at the parish food bank.
+      - Aisling Byrne, a parishioner of St. Brendan's, volunteers at the parish food bank.
+      - Joseph Okafor, a parishioner of St. Brendan's, volunteers at the parish food bank.
+    population_generics:
+      - Most parishioners of St. Brendan's volunteer at the parish food bank.
+      - Everyone in St. Brendan's parish volunteers at the food bank.
+      - Catholics generally volunteer at their parish food bank.
+      - Parishioners are food-bank volunteers.
+      - The vast majority of churchgoers volunteer at food banks.
+      - Parishioners volunteer at the parish food bank, as these four records show.
+    judge_only_generics:
+      - Parishioners volunteer at the parish food bank.
+    premise_scoped:
+      - Maria Lopez, Tomás Reyes, Aisling Byrne and Joseph Okafor all volunteer at the parish food bank.
+      - The four St. Brendan's parishioners observed each volunteer at the parish food bank.
+
+  - case_id: operators-login-shell
+    subject: zsh
+    premises:
+      - The operator dana uses zsh as her login shell.
+      - The operator kofi uses zsh as his login shell.
+      - The operator mei uses zsh as her login shell.
+    population_generics:
+      - Most operators use zsh as their login shell.
+      - Operators typically use zsh as their login shell.
+      - Operators prefer zsh to bash.
+      - All operators use zsh.
+      - Operators, as these three observations show, use zsh as their login shell.
+    judge_only_generics:
+      - Operators log in through zsh.
+    premise_scoped:
+      - The three operators observed all use zsh as their login shell.
+      - Each of the three operators observed uses zsh as their login shell.

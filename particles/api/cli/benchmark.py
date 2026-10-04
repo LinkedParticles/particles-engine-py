@@ -816,6 +816,20 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
         help="Stamp this author id on every session, which is what a multi-store "
         "needs before the attribution rule lets an update supersede.",
     ),
+    real_pairs: bool = typer.Option(
+        True,
+        "--real-pairs/--no-real-pairs",
+        help="On the probe and live arms, also score the live update checks against "
+        "your demotion rulings from the curation queue "
+        "(<benchmark.runs_dir>/demotion-rulings.jsonl), reported in a section of "
+        "their own. Skipped when the file is absent.",
+    ),
+    rulings: Path | None = typer.Option(
+        None,
+        "--rulings",
+        dir_okay=False,
+        help="Read demotion rulings from this file instead of the default one.",
+    ),
 ) -> None:
     """Run the memory-rot benchmark.
 
@@ -842,6 +856,8 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
             store_dir=store_dir,
             cache_dir=cache_dir,
             attribute=attribute,
+            real_pairs=real_pairs,
+            rulings=rulings,
         )
     )
 
@@ -860,6 +876,8 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
     store_dir: Path | None,
     cache_dir: Path | None = None,
     attribute: str | None = None,
+    real_pairs: bool = True,
+    rulings: Path | None = None,
 ) -> None:
     from particles.benchmark.rot import (
         RotArmError,
@@ -869,14 +887,28 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
         run_rot_benchmark,
     )
     from particles.config import get_config
+    from particles.operations.curation import rulings_path
 
     cfg = get_config().benchmark_rot
     effective_seeds = seeds or list(cfg.seeds)
     effective_days = days if days is not None else cfg.days
     checkpoints = [c for c in cfg.checkpoints if c <= effective_days]
+    # the operator's demotion rulings, scored apart from the worlds.
+    rulings_file = (rulings or rulings_path()) if real_pairs else None
+    if rulings_file is not None and not rulings_file.exists():
+        if rulings is not None:
+            typer.echo(f"Error: rulings file {rulings} not found.", err=True)
+            raise typer.Exit(1)
+        rulings_file = None
 
     # Estimate ALWAYS printed before any LLM call.
-    est = estimate_rot_run(arm, seeds=effective_seeds, days=effective_days, checkpoints=checkpoints)
+    est = estimate_rot_run(
+        arm,
+        seeds=effective_seeds,
+        days=effective_days,
+        checkpoints=checkpoints,
+        real_pairs=rulings_file,
+    )
     typer.echo(render_estimate(est), err=True)
     if estimate_only:
         typer.echo("--estimate: nothing was run.", err=True)
@@ -912,6 +944,7 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
             cache_dir=cache_dir,
             attribute=attribute,
             progress=_progress_line,
+            real_pairs=rulings_file,
         )
     except RotArmError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -1334,6 +1367,229 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
     report = build_report(selection, results)
     rendered = (
         report.model_dump_json(indent=2) if output_format is _Format.json else render_report(report)
+    )
+    typer.echo(rendered)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered + ("" if rendered.endswith("\n") else "\n"))
+        typer.echo(f"Report written to {output}", err=True)
+
+
+# ---------------------------------------------------------------------------
+# `benchmark leakage` — unsupported sentences in query answers
+# ---------------------------------------------------------------------------
+
+
+@benchmark_app.command("leakage")
+def benchmark_leakage_cmd(  # noqa: PLR0913 — CLI option list is the API
+    question: list[str] | None = typer.Option(
+        None,
+        "--question",
+        "-q",
+        help="Measure this question instead of the held-out set; repeat for several. "
+        "Prints one row per question.",
+    ),
+    heldout: Path | None = typer.Option(
+        None,
+        "--heldout",
+        help="Held-out JSONL from `benchmark relevance-floor harvest` "
+        "(default: benchmark_relevance_floor.heldout_path).",
+    ),
+    store: str | None = typer.Option(
+        None, "--store", help="Store handle to query (default: the default store)."
+    ),
+    top_k: int | None = typer.Option(
+        None,
+        "--top-k",
+        min=1,
+        max=200,
+        help="Retrieval depth the answer is composed over (default: benchmark_leakage.top_k).",
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", min=1, help="Measure a seeded sample of N questions, stratified by source."
+    ),
+    estimate: bool = typer.Option(
+        False, "--estimate", help="Print the projection and exit before any LLM call."
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation above the call threshold."
+    ),
+    per_question: bool | None = typer.Option(
+        None,
+        "--per-question/--aggregate-only",
+        help="One table row per question id (default: on with --question, off otherwise).",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o", help="Write the rendered report to this path as well."
+    ),
+    output_format: _Format = typer.Option(
+        _Format.table,
+        "--format",
+        help="table (default; no question, answer, or sentence text) or json (the "
+        "report of record; carries that text).",
+    ),
+    checkpoint: Path | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint file for a held-out run (default: beside the held-out set), so "
+        "an interrupted run never re-pays a finished question.",
+    ),
+    allow_in_repo: bool = typer.Option(
+        False, "--allow-in-repo", help="Permit a --format json --output inside a git work tree."
+    ),
+    grounded: bool | None = typer.Option(
+        None,
+        "--grounded/--ungrounded",
+        help="Measure grounded answers, where the composer cites particle ids per "
+        "sentence and labels its own inference and background. Cited sentences are "
+        "judged against the ids they cite, and the labels are reported beside the "
+        "silent unsupported count. Default: query.grounded_answers.",
+    ),
+) -> None:
+    """Measure how much of each query answer the retrieved particles do not support.
+
+    Each question runs through the query operation as configured. Every sentence
+    of its answer is then judged against the particles the answer was composed
+    from, on the llm.benchmark model, which must differ from the composer's.
+    The headline is the share of claim-bearing sentences judged unsupported.
+    The run is LLM-priced and estimate-gated, and it never writes to the store.
+    """
+    run(
+        _benchmark_leakage(
+            questions=question or [],
+            heldout=heldout,
+            store=store,
+            top_k=top_k,
+            limit=limit,
+            estimate_only=estimate,
+            yes=yes,
+            per_question=per_question,
+            output=output,
+            output_format=output_format,
+            checkpoint=checkpoint,
+            allow_in_repo=allow_in_repo,
+            grounded=grounded,
+        )
+    )
+
+
+async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
+    *,
+    questions: list[str],
+    heldout: Path | None,
+    store: str | None,
+    top_k: int | None,
+    limit: int | None,
+    estimate_only: bool,
+    yes: bool,
+    per_question: bool | None,
+    output: Path | None,
+    output_format: _Format,
+    checkpoint: Path | None,
+    allow_in_repo: bool,
+    grounded: bool | None = None,
+) -> None:
+    from particles.benchmark.leakage import (
+        LeakageError,
+        build_report,
+        build_selection,
+        check_distinct_judge,
+        estimate_run,
+        render_estimate,
+        render_report,
+        run_leakage,
+    )
+    from particles.benchmark.relevance_floor import (
+        HeldOutQuestion,
+        QuestionSource,
+        load_heldout,
+        question_id,
+        sample_questions,
+    )
+    from particles.config import get_config
+    from particles.db import DEFAULT_STORE
+
+    cfg = get_config().benchmark_leakage
+    ad_hoc = bool(questions)
+    checkpoint_path: Path | None = None
+    if ad_hoc:
+        if heldout is not None or limit is not None:
+            typer.echo(
+                "Error: --question replaces the held-out set; drop --heldout/--limit.", err=True
+            )
+            raise typer.Exit(1)
+        held = [
+            HeldOutQuestion(question_id=question_id(q), question=q, source=QuestionSource.CLI_QUERY)
+            for q in dict.fromkeys(q.strip() for q in questions if q.strip())
+        ]
+    else:
+        heldout_path = (
+            heldout or Path(get_config().benchmark_relevance_floor.heldout_path)
+        ).expanduser()
+        if not heldout_path.is_file():
+            typer.echo(
+                f"Error: no held-out set at {heldout_path}. Build one with "
+                f"`particles benchmark relevance-floor harvest`, or pass --question.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        held = sample_questions(load_heldout(heldout_path), limit, cfg.sample_seed)
+        checkpoint_path = (
+            checkpoint or heldout_path.with_name("leakage-checkpoint.jsonl")
+        ).expanduser()
+    if not held:
+        typer.echo("Error: no questions to measure.", err=True)
+        raise typer.Exit(1)
+    if output is not None and output_format is _Format.json:
+        _refuse_inside_repository(output, what="the JSON report", allow=allow_in_repo)
+    handle = store or DEFAULT_STORE
+    depth = top_k if top_k is not None else cfg.top_k
+
+    try:
+        check_distinct_judge()
+        est = estimate_run(held, top_k=depth)
+        typer.echo(render_estimate(est), err=True)
+        if estimate_only:
+            typer.echo("--estimate: no LLM call was made.", err=True)
+            return
+        if est.llm_calls > cfg.confirm_call_threshold and not yes:
+            if not sys.stdin.isatty():
+                typer.echo(
+                    f"Estimated LLM calls ({est.llm_calls}) exceed "
+                    f"benchmark_leakage.confirm_call_threshold ({cfg.confirm_call_threshold}) "
+                    f"and no --yes was given; aborting (non-interactive run).",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            dollars = f" (~US${est.cost_usd:,.2f})" if est.cost_usd is not None else ""
+            if not typer.confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
+                typer.echo("Aborted.")
+                raise typer.Exit(1)
+        _refuse_without_key(purposes=("query_response", "benchmark"))
+        selection = await build_selection(
+            held,
+            store=handle,
+            top_k=depth,
+            ad_hoc=ad_hoc,
+            sample_limit=limit,
+            grounded=grounded,
+        )
+        results = await run_leakage(
+            held,
+            store=handle,
+            selection=selection,
+            checkpoint_path=checkpoint_path,
+            progress=_progress_line,
+        )
+    except LeakageError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    report = build_report(selection, results)
+    rendered = (
+        report.model_dump_json(indent=2)
+        if output_format is _Format.json
+        else render_report(report, per_question=ad_hoc if per_question is None else per_question)
     )
     typer.echo(rendered)
     if output is not None:

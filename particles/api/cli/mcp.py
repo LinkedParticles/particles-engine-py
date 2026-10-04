@@ -20,7 +20,8 @@ import json
 
 import typer
 
-from particles.api.cli import app
+from particles.api.cli import app, require_store_directory
+from particles.db import DEFAULT_STORE
 
 mcp_app = typer.Typer(
     help="Model Context Protocol server (read-only).",
@@ -65,6 +66,9 @@ def mcp_serve_cmd(
         from particles.api.cli._claude_code import claude_project_slug, repository_root
 
         bind_project(claude_project_slug(repository_root(Path.cwd())))
+    # Named stores are reached per tool call and fail there with the same one-line
+    # message; the default store is the one a fresh install's DATABASE_URL names.
+    require_store_directory(DEFAULT_STORE)
     serve_main()
 
 

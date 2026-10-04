@@ -1,16 +1,25 @@
 /*
  * Compose sheets: content-/judgment-bearing gestures
- * (supersede / comment / deposit) and confirmations (whole-source retract's
+ * (supersede / resolve / deposit) and confirmations (whole-source retract's
  * "this retracts all N beliefs") open a small bottom sheet rather than firing
  * blind. Promise-based, so feed.ts can `await` the operator's input.
  */
 
+/** One option of a `choice` field: the submitted value, a label, and what it does. */
+export type ChoiceOption = {
+  value: string;
+  label: string;
+  detail?: string;
+};
+
 type FieldSpec = {
   name: string;
   label: string;
-  type: "text" | "textarea";
+  type: "text" | "textarea" | "choice";
   placeholder?: string;
   value?: string;
+  /** Required for `choice`: rendered as a radio list, one option per row. */
+  options?: ChoiceOption[];
 };
 
 type SheetOptions = {
@@ -46,12 +55,47 @@ export function openSheet(opts: SheetOptions): Promise<Record<string, string> | 
     }
 
     const inputs: Record<string, HTMLInputElement | HTMLTextAreaElement> = {};
+    const choices: Record<string, HTMLInputElement[]> = {};
     for (const f of fields) {
       const wrap = document.createElement("div");
       wrap.className = "field";
       const label = document.createElement("label");
       label.textContent = f.label;
       wrap.appendChild(label);
+      if (f.type === "choice") {
+        // A radio list rather than a free-text box: the operator picks from
+        // what the endpoint accepts, and each option says what it does.
+        const group = document.createElement("div");
+        group.className = "choices";
+        const radios: HTMLInputElement[] = [];
+        const groupName = `choice-${f.name}-${Math.random().toString(36).slice(2)}`;
+        for (const opt of f.options ?? []) {
+          const row = document.createElement("label");
+          row.className = "choice";
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = groupName;
+          radio.value = opt.value;
+          if (opt.value === f.value) radio.checked = true;
+          const text = document.createElement("span");
+          const strong = document.createElement("strong");
+          strong.textContent = opt.label;
+          text.appendChild(strong);
+          if (opt.detail) {
+            const detail = document.createElement("span");
+            detail.className = "choice-detail";
+            detail.textContent = opt.detail;
+            text.appendChild(detail);
+          }
+          row.append(radio, text);
+          group.appendChild(row);
+          radios.push(radio);
+        }
+        choices[f.name] = radios;
+        wrap.appendChild(group);
+        sheet.appendChild(wrap);
+        continue;
+      }
       const el =
         f.type === "textarea"
           ? document.createElement("textarea")
@@ -76,8 +120,13 @@ export function openSheet(opts: SheetOptions): Promise<Record<string, string> | 
 
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
-    const first = fields.length > 0 ? inputs[fields[0].name] : confirm;
-    first.focus();
+    const firstField = fields[0];
+    const first: HTMLElement | undefined = !firstField
+      ? confirm
+      : firstField.type === "choice"
+        ? (choices[firstField.name].find((r) => r.checked) ?? choices[firstField.name][0])
+        : inputs[firstField.name];
+    (first ?? confirm).focus();
 
     const close = (result: Record<string, string> | null): void => {
       document.body.removeChild(backdrop);
@@ -90,6 +139,9 @@ export function openSheet(opts: SheetOptions): Promise<Record<string, string> | 
     confirm.onclick = () => {
       const out: Record<string, string> = {};
       for (const [name, el] of Object.entries(inputs)) out[name] = el.value.trim();
+      for (const [name, radios] of Object.entries(choices)) {
+        out[name] = radios.find((r) => r.checked)?.value ?? "";
+      }
       close(out);
     };
   });

@@ -5,6 +5,13 @@
 [2026-08 survey](provider-survey-2026-08.md) scheduled for itself, and adds the
 thing that survey had no figures for at all: **measured dollar cost per run.**
 
+!!! info "A newer survey exists"
+    The [2026-10 survey](provider-survey-2026-10.md) fits the per-provider
+    calibration this page never fitted and re-measures every row on the next
+    suite version. Its figures are not comparable with this page's, and where
+    the two bear on the same question, prefer the newer page. This page remains
+    the record of the raw-calibration matrix and of the method findings below.
+
 Four configurations were run against the general extractor, **three times
 each**, on the same suite and judge the 2026-08 table used. Two are the
 Anthropic incumbents the re-evaluation is about; two are cheap models that did
@@ -231,6 +238,15 @@ stated plainly:
 ### What the owner now needs to decide
 
 Three questions, in the order that makes them answerable:
+
+!!! success "The calibration question, measured: see the 2026-10 survey"
+    The [2026-10 survey](provider-survey-2026-10.md) fitted a temperature for
+    every row and scored it on held-out claims. The fit made calibration worse
+    for every row, so it does not close the gap this page found, and no cheaper
+    extraction preset was shipped. It also found that most of the gap is the
+    benchmark's labelling of timidly stated correct claims rather than the
+    model, and that what remains is run-to-run stability. Questions 1 and 2
+    below still stand, now framed by that page's figures.
 
 1. **What is the minimum acceptable recall for production extraction**, and,
    separately, the minimum acceptable **precision** and **calibration**?

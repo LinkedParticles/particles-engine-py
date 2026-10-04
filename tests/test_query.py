@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -48,6 +50,18 @@ def _make_active_particle(
     )
 
 
+@contextmanager
+def _shared_client(client: MagicMock) -> Iterator[MagicMock]:
+    """Install ``client`` at the ``set_client`` seam for the block (tests/AGENTS.md)."""
+    from particles.llm import set_client
+
+    set_client(client)
+    try:
+        yield client
+    finally:
+        set_client(None)
+
+
 class TestEffectiveConfidence:
     def test_no_trust_weights(self) -> None:
         ec = compute_effective_confidence(0.8)
@@ -86,34 +100,19 @@ async def test_query_returns_particles(db_session: object) -> None:
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
 
-    import anthropic
-
-    mock_content = MagicMock()
-    mock_content.text = "Water is composed of hydrogen and oxygen."
-    mock_resp = MagicMock()
-    mock_resp.content = [mock_content]
-    mock_client = MagicMock(spec=anthropic.Anthropic)
-    mock_client.messages = MagicMock()
-    mock_client.messages.create = MagicMock(return_value=mock_resp)
-
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
-
-    with MagicMock() as _m:
-        import particles.operations.query as oq
-
-        getattr(oq, "anthropic", None)
-        try:
-            # Patch the Anthropic client directly
-            with __import__("unittest.mock", fromlist=["patch"]).patch(
-                "anthropic.Anthropic", return_value=mock_client
-            ):
-                req = QueryRequest(question="What is water made of?", top_k=5)
-                result = await query(session, req)  # type: ignore[arg-type]
-                assert len(result.particles) >= 1
-                assert result.particles[0].content == "Water is composed of hydrogen and oxygen."
-        finally:
-            ep.set_embedding_model(original_model)
+    try:
+        with _shared_client(_mock_llm_client("Water is H2O.")) as client:
+            req = QueryRequest(question="What is water made of?", top_k=5)
+            result = await query(session, req)  # type: ignore[arg-type]
+    finally:
+        ep.set_embedding_model(original_model)
+    assert len(result.particles) >= 1
+    assert result.particles[0].content == "Water is composed of hydrogen and oxygen."
+    # The NL answer came through the mocked seam, not a live call.
+    assert client.messages.create.call_count == 1
+    assert result.answer.endswith("Water is H2O.")
 
 
 @pytest.mark.asyncio
@@ -135,24 +134,13 @@ async def test_query_filters_by_assertion_modality(db_session: object) -> None:
     await insert_particle(session, opinion, emb)  # type: ignore[arg-type]
     await session.commit()  # type: ignore[union-attr]
 
-    import anthropic
-
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
-    mock_content = MagicMock()
-    mock_content.text = "An answer."
-    mock_resp = MagicMock()
-    mock_resp.content = [mock_content]
-    mock_client = MagicMock(spec=anthropic.Anthropic)
-    mock_client.messages = MagicMock()
-    mock_client.messages.create = MagicMock(return_value=mock_resp)
 
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
     try:
-        with __import__("unittest.mock", fromlist=["patch"]).patch(
-            "anthropic.Anthropic", return_value=mock_client
-        ):
+        with _shared_client(_mock_llm_client("An answer.")):
             # Unset → both modalities returned.
             req_all = QueryRequest(question="Tell me about the store.", top_k=5)
             ids_all = {p.id for p in (await query(session, req_all)).particles}  # type: ignore[arg-type]
@@ -205,24 +193,13 @@ async def test_query_include_ancestors_up_expansion(db_session: object) -> None:
     await set_particle_tags(session, broad.id, ["coins"])  # type: ignore[arg-type]
     await session.commit()  # type: ignore[union-attr]
 
-    import anthropic
-
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
-    mock_content = MagicMock()
-    mock_content.text = "An answer."
-    mock_resp = MagicMock()
-    mock_resp.content = [mock_content]
-    mock_client = MagicMock(spec=anthropic.Anthropic)
-    mock_client.messages = MagicMock()
-    mock_client.messages.create = MagicMock(return_value=mock_resp)
 
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
     try:
-        with __import__("unittest.mock", fromlist=["patch"]).patch(
-            "anthropic.Anthropic", return_value=mock_client
-        ):
+        with _shared_client(_mock_llm_client("An answer.")):
             # Without the flag: only the leaf-tagged particle matches.
             req = QueryRequest(
                 question="coins from germany", top_k=5, tags=["coins/by-region/germany"]
@@ -255,7 +232,7 @@ async def test_query_empty_store(db_session: object) -> None:
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
     try:
-        with __import__("unittest.mock", fromlist=["patch"]).patch("anthropic.Anthropic"):
+        with _shared_client(_mock_llm_client("unused")):
             req = QueryRequest(question="Anything?", top_k=5)
             result = await query(db_session, req)  # type: ignore[arg-type]
             assert result.particles == []
@@ -1027,7 +1004,8 @@ async def test_query_without_an_encoder_discloses_the_degradation(
     await session.commit()  # type: ignore[union-attr]
 
     req = QueryRequest(question="What is the capital of Peru?", top_k=5)
-    result = await query(session, req)  # type: ignore[arg-type]
+    with _shared_client(_mock_llm_client("Ferrets eat meat.")):
+        result = await query(session, req)  # type: ignore[arg-type]
 
     # The machine-readable disclosure, for UI banners and agent consumers.
     assert result.ranking_degraded is not None
@@ -1038,6 +1016,8 @@ async def test_query_without_an_encoder_discloses_the_degradation(
     # And the answer string itself, for plain-text consumers who see only that.
     assert result.answer.startswith("[")
     assert "not necessarily" in result.answer.lower()
+    # The disclosure is prepended to the generated prose, not a replacement.
+    assert result.answer.endswith("Ferrets eat meat.")
     # `relevance is None` alone stays ambiguous — which is exactly why the
     # dedicated field has to exist rather than being inferred from it.
     assert result.relevance is None
@@ -1063,14 +1043,15 @@ async def test_query_with_an_encoder_reports_no_degradation(db_session: object) 
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
     try:
-        result = await query(  # type: ignore[arg-type]
-            session, QueryRequest(question="What is water made of?", top_k=5)
-        )
+        with _shared_client(_mock_llm_client("Water is H2O.")):
+            result = await query(  # type: ignore[arg-type]
+                session, QueryRequest(question="What is water made of?", top_k=5)
+            )
     finally:
         ep.set_embedding_model(original_model)
 
     assert result.ranking_degraded is None
-    assert not result.answer.startswith("[Semantic ranking unavailable")
+    assert result.answer == "Water is H2O."
 
 
 class _ScriptedAnswerProvider:

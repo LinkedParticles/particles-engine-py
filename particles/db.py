@@ -118,6 +118,62 @@ class WriteLockTimeout(Exception):
 _sqlite_file_path = sqlite_file_path
 
 
+class StoreDirectoryError(Exception):
+    """The directory that should hold a file-backed SQLite store cannot be created.
+
+    SQLite creates a missing database file but never its parent directory, so a
+    ``DATABASE_URL`` naming a fresh path used to fail deep inside the driver with
+    ``unable to open database file``. :func:`_ensure_sqlite_parent_dir` creates
+    the directory instead, and raises this when it cannot (permission denied, or
+    a file already sits at that path). The message is one operator-readable line
+    naming the path and the reason; the CLI ``run()`` helper echoes it verbatim.
+    """
+
+
+def _ensure_sqlite_parent_dir(url: str) -> None:
+    """Create the parent directory of a file-backed SQLite ``url``, if missing.
+
+    A no-op for in-memory SQLite and non-SQLite URLs. Called at every point that
+    first touches a store's file (engine creation, table creation, the write
+    lock beside the DB), so every entry point accepts a database path whose
+    directory does not exist yet, not just ``particles db init``.
+
+    The path is used exactly as the driver will open it (no ``~`` expansion),
+    so the directory created is the one SQLite looks in.
+
+    Raises:
+        StoreDirectoryError: If the directory cannot be created.
+    """
+    path = _sqlite_file_path(url)
+    if path is None:
+        return
+    parent = Path(path).parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        raise StoreDirectoryError(
+            f"cannot create database directory {parent}: a file already exists at that path"
+        ) from exc
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise StoreDirectoryError(f"cannot create database directory {parent}: {reason}") from exc
+
+
+def ensure_store_directory(store: StoreHandle = DEFAULT_STORE) -> None:
+    """Create ``store``'s SQLite directory now rather than on first use.
+
+    The engine creates it lazily anyway; this is for a long-running surface (the
+    stdio MCP servers) that must fail at startup, while it can still exit with a
+    clean message, instead of on a client's first tool call.
+
+    Raises:
+        KeyError: If ``store`` is not a configured store handle.
+        StoreDirectoryError: If a file-backed SQLite store's directory cannot be
+            created.
+    """
+    _ensure_sqlite_parent_dir(_resolve_store_dsn(store))
+
+
 def _store_is_file_sqlite(store: StoreHandle) -> bool:
     return _sqlite_file_path(_resolve_store_dsn(store)) is not None
 
@@ -167,6 +223,8 @@ async def write_lock(store: StoreHandle = DEFAULT_STORE) -> AsyncGenerator[None,
     try:
         flock = _file_write_locks.get(store)
         if flock is None:
+            # The lockfile lives beside the DB, so its directory must exist first.
+            _ensure_sqlite_parent_dir(_resolve_store_dsn(store))
             # ``thread_local=False`` is load-bearing: we acquire and release via
             # ``asyncio.to_thread``, which may run them on *different* pool
             # threads. filelock's default thread-local lock state would then make
@@ -187,6 +245,33 @@ async def write_lock(store: StoreHandle = DEFAULT_STORE) -> AsyncGenerator[None,
             await asyncio.to_thread(flock.release)
     finally:
         async_lock.release()
+
+
+@asynccontextmanager
+async def write_transaction(
+    session: AsyncSession, store: StoreHandle = DEFAULT_STORE
+) -> AsyncGenerator[None, None]:
+    """Write inside the writer lock and commit before releasing it.
+
+    The shape for a long-running pass that interleaves slow work (an LLM probe,
+    a batch wait) with small writes on one session: gather and call the LLM
+    outside, then apply each unit of writes in this block. Committing *inside*
+    the lock is the load-bearing half. A write merely flushed under
+    :func:`write_lock` keeps SQLite's own write lock after the advisory lock is
+    released, until the session next commits, and every other writer then waits
+    out ``busy_timeout`` behind it and fails with ``database is locked``.
+
+    On an exception the session is rolled back before the lock is released, for
+    the same reason. Anything the session wrote before the block, uncommitted, is
+    committed or rolled back with it.
+    """
+    async with write_lock(store):
+        try:
+            yield
+        except BaseException:
+            await session.rollback()
+            raise
+        await session.commit()
 
 
 _engines: dict[StoreHandle, AsyncEngine] = {}
@@ -225,6 +310,10 @@ def get_engine(store: StoreHandle = DEFAULT_STORE) -> AsyncEngine:
     an ``extract_snapshot`` run on a fat snapshot (hundreds of particles +
     subject resolution). PostgreSQL URLs are untouched.
 
+    A file-backed SQLite URL whose directory does not exist yet gets that
+    directory created here (:func:`_ensure_sqlite_parent_dir`); an uncreatable
+    one raises :class:`StoreDirectoryError`.
+
     SQLite engines also get a ``handle_error`` listener that increments the
     ``particles.sqlite.busy`` OTel counter on ``database is locked`` (
     Phase 2) — the metric that measures the write-lock
@@ -233,6 +322,8 @@ def get_engine(store: StoreHandle = DEFAULT_STORE) -> AsyncEngine:
     engine = _engines.get(store)
     if engine is None:
         url = _resolve_store_dsn(store)
+        # SQLite creates the database file on first connect, never its directory.
+        _ensure_sqlite_parent_dir(url)
         engine = create_async_engine(url, echo=False)
         if url.startswith("sqlite"):
             event.listen(engine.sync_engine, "connect", _sqlite_set_pragmas)
@@ -419,6 +510,13 @@ async def create_tables(store: StoreHandle = DEFAULT_STORE) -> None:
     without a manual ``alembic stamp``. The target store's DSN is passed to the
     Alembic environment via ``config.attributes['store_url']`` (see
     ``alembic/env.py``), which takes precedence over the ``DATABASE_URL`` env var.
+
+    Alembic opens its own connection from the DSN rather than through
+    :func:`get_engine`, so a missing SQLite directory is created here too.
+
+    Raises:
+        StoreDirectoryError: If a file-backed SQLite store's directory cannot be
+            created.
     """
     import asyncio
 
@@ -433,6 +531,8 @@ async def create_tables(store: StoreHandle = DEFAULT_STORE) -> None:
     # directory (e.g. ``particles init claude-code`` run outside the repo root)
     # and from an installed wheel with no checkout at all.
     alembic_cfg.set_main_option("script_location", str(script_location))
-    alembic_cfg.attributes["store_url"] = _resolve_store_dsn(store)
+    store_url = _resolve_store_dsn(store)
+    _ensure_sqlite_parent_dir(store_url)
+    alembic_cfg.attributes["store_url"] = store_url
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, command.upgrade, alembic_cfg, "head")

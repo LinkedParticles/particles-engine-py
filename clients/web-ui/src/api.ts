@@ -23,6 +23,8 @@ export type CurationCard = Schemas["CurationCard"];
 export type CurationQueueResponse = Schemas["CurationQueueResponse"];
 export type CardKind = Schemas["CardKind"];
 export type ParticleBrief = Schemas["ParticleBrief"];
+/** Both sides (claims A and B) of the INCONSISTENCY behind a contested card. */
+export type ConflictBrief = Schemas["ConflictBrief"];
 /** the LLM judge's advisory same-claim verdict on a duplicate-pair card. */
 export type DuplicateVerdict = Schemas["DuplicateVerdict"];
 export type ReviewRequest = Schemas["ReviewRequest"];
@@ -52,6 +54,8 @@ export type CurationSnoozeRequest = Schemas["CurationSnoozeRequest"];
 export type CurationEventResponse = Schemas["CurationEventResponse"];
 export type ReindexRequest = Schemas["ReindexRequest"];
 export type ReindexResponse = Schemas["ReindexResponse"];
+export type RelinkGatedRequest = Schemas["RelinkGatedRequest"];
+export type RelinkReport = Schemas["RelinkReport"];
 export type CorpusLinksDismissRequest = Schemas["CorpusLinksDismissRequest"];
 export type CorpusLinksDismissResponse = Schemas["CorpusLinksDismissResponse"];
 export type HealthResponse = Schemas["HealthResponse"];
@@ -138,7 +142,7 @@ export type AuthProbe =
 
 /** Curation queue session controls — the existing `GET /curation` query params. */
 export interface QueueOptions {
-  /** One-run `curation.session_size` override (today's N). */
+  /** One-run `curation.session_size` override (the batch size). */
   limit?: number;
   /** Restrict to a single CardKind (e.g. "stale", "contested"). */
   kind?: string;
@@ -365,7 +369,7 @@ export class ParticlesApiClient {
     return this.request<HealthResponse>("GET", "/health", undefined, { open: true });
   }
 
-  /** GET /curation — the leverage-ranked, finite "today's N" queue. */
+  /** GET /curation — the leverage-ranked batch plus its backlog's `open_count`. */
   async curation(opts: QueueOptions = {}): Promise<CurationQueueResponse> {
     const params = new URLSearchParams();
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
@@ -425,9 +429,13 @@ export class ParticlesApiClient {
 
   // --- Write gestures — each one authenticated call ----------
 
-  /** comment → POST /review/{id} (resolve an INCONSISTENCY with an action + note). */
+  /**
+   * comment ("Resolve…") → POST /review/{id}. The id is the INCONSISTENCY
+   * record's (`card.inconsistency_id`), never the contested belief's: the
+   * route resolves only INCONSISTENCY particles and 404s anything else.
+   */
   async review(
-    particleId: string,
+    inconsistencyId: string,
     action: ResolutionAction,
     reviewerId: string,
     note?: string,
@@ -439,7 +447,7 @@ export class ParticlesApiClient {
     };
     return this.request<unknown>(
       "POST",
-      `/review/${encodeURIComponent(particleId)}`,
+      `/review/${encodeURIComponent(inconsistencyId)}`,
       req,
     );
   }
@@ -586,10 +594,9 @@ export class ParticlesApiClient {
 
   /**
    * assign-subject → POST /particles/{id}/subjects. Attaches a subject
-   * to a NO_SUBJECT orphan via a provenance-preserving operator-supersede: the
-   * successor keeps the predecessor's confidence + extractor_ref + source, only
-   * the subject linkage is corrected. Resolution by explicit subject_id or by
-   * subject_name through the standard resolver.
+   * to a NO_SUBJECT orphan in place: the belief keeps its id,
+   * confidence and provenance; only the subject link is written. Resolution by
+   * explicit subject_id or by subject_name through the standard resolver.
    */
   async assignSubject(
     particleId: string,
@@ -647,6 +654,16 @@ export class ParticlesApiClient {
       `/corpus/${encodeURIComponent(entryId)}/retract`,
       req,
     );
+  }
+
+  /**
+   * relink (gated_subjects card) → POST /subjects/relink-gated.
+   * `dryRun` plans and reports; otherwise the engine links every recoverable
+   * orphan in place over its accepted tiers.
+   */
+  async relinkGated(dryRun: boolean): Promise<RelinkReport> {
+    const req: RelinkGatedRequest = { dry_run: dryRun };
+    return this.request<RelinkReport>("POST", "/subjects/relink-gated", req);
   }
 
   /** reindex → POST /reindex (over FAILED snapshots). */

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import ipaddress
 import json
 from datetime import UTC, datetime
@@ -88,6 +89,17 @@ _GIST_BLOB = {
     "created_at": "2026-01-15T08:00:00Z",
     "updated_at": "2026-02-20T10:30:00Z",
 }
+
+
+def _gist_blob() -> dict[str, object]:
+    """A fresh copy of ``_GIST_BLOB`` for a mocked ``response.json()``.
+
+    The importer attaches the fetched comments to the dict it parsed
+    (``data["comments"] = ...``). Handing it the module-level constant let
+    the pagination test leave 123 comments on it, and a later extractor test
+    then saw a two-chunk gist whenever the two shared a worker.
+    """
+    return copy.deepcopy(_GIST_BLOB)
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +373,7 @@ class TestGitHubImporterGist:
         mock_response = MagicMock()
         mock_response.content = gist_bytes
         mock_response.status_code = 200
-        mock_response.json = MagicMock(return_value=_GIST_BLOB)
+        mock_response.json = MagicMock(side_effect=_gist_blob)
         mock_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
@@ -395,7 +407,7 @@ class TestGitHubImporterGist:
         """REST deposit must fetch /gists/{id}/comments and store it in the envelope."""
         gist_resp = MagicMock()
         gist_resp.status_code = 200
-        gist_resp.json = MagicMock(return_value=_GIST_BLOB)
+        gist_resp.json = MagicMock(side_effect=_gist_blob)
         gist_resp.raise_for_status = MagicMock()
         gist_resp.headers = {}
 
@@ -455,7 +467,7 @@ class TestGitHubImporterGist:
         follows it to fetch additional pages."""
         gist_resp = MagicMock()
         gist_resp.status_code = 200
-        gist_resp.json = MagicMock(return_value=_GIST_BLOB)
+        gist_resp.json = MagicMock(side_effect=_gist_blob)
         gist_resp.raise_for_status = MagicMock()
         gist_resp.headers = {}
 
@@ -514,7 +526,7 @@ class TestGitHubImporterGist:
         monkeypatch.setattr("particles.http.DEFAULT_RETRY_BACKOFFS", (0.0, 0.0))
         gist_resp = MagicMock()
         gist_resp.status_code = 200
-        gist_resp.json = MagicMock(return_value=_GIST_BLOB)
+        gist_resp.json = MagicMock(side_effect=_gist_blob)
         gist_resp.raise_for_status = MagicMock()
 
         comments_resp = MagicMock()
@@ -1321,7 +1333,7 @@ class TestTransientRetry:
         r = MagicMock()
         r.status_code = 200
         r.content = json.dumps(_GIST_BLOB).encode()
-        r.json = MagicMock(return_value=_GIST_BLOB)
+        r.json = MagicMock(side_effect=_gist_blob)
         r.headers = {}
         return r
 

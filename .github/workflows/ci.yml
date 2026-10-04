@@ -241,9 +241,9 @@ jobs:
       # published, so a different version can fail on a no-op diff. Needs no
       # project install.
       - name: ruff check
-        run: uvx --from 'ruff==0.15.17' ruff check .
+        run: uvx --from 'ruff==0.16.9' ruff check .
       - name: ruff format --check
-        run: uvx --from 'ruff==0.15.17' ruff format --check .
+        run: uvx --from 'ruff==0.16.9' ruff format --check .
 
   reuse:
     name: REUSE licensing

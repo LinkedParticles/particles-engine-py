@@ -105,7 +105,7 @@ rate-limited like `POST /query` (query scope drives a paid embedding); see
 standing the engine up and issuing the token.
 
 In the web UI, contested rows link straight into the inconsistency scope:
-the Curate tab's CONTESTED card and any particle row's contested text carry
+the Curate tab's open-conflict card and any particle row's contested text carry
 a "show the conflict" link that opens the evidence render with the panel
 already listing the INCONSISTENCY and both disputants.
 

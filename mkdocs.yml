@@ -225,6 +225,13 @@ nav:
       - Agent memory (LongMemEval): benchmarks.md
       - Memory rot (currency, supersession, trust): benchmarks/rot.md
       - Relevance floor (the query gate, real questions): benchmarks/relevance-floor.md
+      - Model-prior leakage (unsupported answer sentences): benchmarks/leakage.md
+      - Subject resolution (2026-09-30): benchmarks/subject-resolution-2026-09-30.md
+      - Subject resolution (2026-10-01): benchmarks/subject-resolution-2026-10-01.md
+      - Subject resolution, judged (2026-10-01): benchmarks/subject-resolution-judge-2026-10-01.md
+      - Predicate canonicalisation (2026-10-01): benchmarks/predicate-canonicalisation-2026-10-01.md
+      - Vocabulary report (2026-10-02): benchmarks/vocabulary-report-2026-10-02.md
+      - Provider survey (2026-10): benchmarks/provider-survey-2026-10.md
       - Provider survey (2026-09): benchmarks/provider-survey-2026-09.md
       - Provider survey (2026-08): benchmarks/provider-survey-2026-08.md
   - The standard:

@@ -279,12 +279,21 @@ connection.
 
 The consolidation lockfile is retained; it still guards
 a host-side `particles memory consolidate` colliding with a daemon over a
-shared mount. Inside a container its `os.kill(pid, 0)` stale-reclaim is
-meaningless (pids are namespaced), so **`consolidation.lock_timeout_minutes` is
-the reclaim authority there**: a lock older than that is reclaimed regardless of
-what its recorded pid appears to be. The daemon serializes its own passes
-in-process, and the cross-process write lock continues to
-referee every writer.
+shared mount. The lock is a kernel advisory lock, and a kernel lock
+taken inside a container's VM (Docker Desktop's file sharing, for example) is
+not always visible on the host. The lock file therefore also records the
+holder's host and a `heartbeat_at` the holder refreshes every
+`consolidation.lock_heartbeat_seconds` (default 60) from a background thread.
+A caller on another host treats the lock as held while that heartbeat is
+younger than `consolidation.lock_heartbeat_stale_minutes` (default 10), so a
+long batch wait inside the container is never reclaimed, and a crashed
+container frees the lock within ten minutes. The daemon serializes its own
+passes in-process, and the cross-process write lock
+continues to referee every writer.
+
+Upgrade the image and any host-side venv together. A pre-change binary takes
+no kernel lock and still reclaims a lock older than
+`consolidation.lock_timeout_minutes`, even from a live cycle.
 
 Run one engine per store. `replicas: 1` is load-bearing: SQLite has one writer.
 

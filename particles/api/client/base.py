@@ -57,10 +57,13 @@ if TYPE_CHECKING:
     # Imported only for annotations (this module is
     # ``from __future__`` lazy), so the seam stays import-light and the protocol
     # carries no Engine import at runtime.
+    from particles.llm.usage import LLMUsage
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.digest import RenderedDigest
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
+    from particles.store.session_exposure_store import SessionExposure
 
 
 class NotYetRemoteError(RuntimeError):
@@ -122,6 +125,10 @@ class ExtractOutcome:
     particles, so over HTTP these display extras are empty (graceful
     degradation). ``entry_id`` echoes the (possibly prefix-resolved) entry the
     run targeted.
+
+    ``llm_usage`` is the run's measured LLM usage, set by
+    ``LocalBackend``; over HTTP the calls are made and recorded on the engine,
+    so it is ``None`` and the CLI prints no usage line.
     """
 
     entry_id: str
@@ -131,6 +138,7 @@ class ExtractOutcome:
     #: one entry per candidate suppressed as an exact duplicate,
     #: holding the id of the existing ACTIVE particle it was folded into.
     suppressed_ids: list[str] = field(default_factory=list)
+    llm_usage: LLMUsage | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +356,7 @@ class Backend(Protocol):
         dry_run: bool = False,
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
+        only_changed_components: bool = False,
     ) -> dict[str, object]: ...
 
     # ------------------------------------------------------------------
@@ -415,6 +424,14 @@ class Backend(Protocol):
     ) -> list[CorpusEntry]: ...
 
     async def digest(self, store: str, project: str | None = None) -> str: ...
+
+    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+        """The digest with the belief id behind each line, in order.
+
+        An engine that predates the line ids returns none, and the caller then
+        records no digest ids.
+        """
+        ...
 
     async def events_list(
         self,
@@ -557,6 +574,14 @@ class Backend(Protocol):
 
         Passing ``deposited_by`` is what selects the operator path; it is not a
         cosmetic label.
+        """
+        ...
+
+    async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
+        """Append what one session was shown at session start.
+
+        The engine resolves short ``p-`` ids to full ids. On the HTTP backend the
+        row lands in the engine's own store, like every hook write.
         """
         ...
 

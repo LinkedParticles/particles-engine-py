@@ -114,7 +114,10 @@ class _SlotProbe:
         found = {v for v in VALUES if f" {v}." in prompt}
         if not found:
             raise CompletionError("not a probe prompt")
-        return "YES: different values" if len(found) > 1 else "NO"
+        verdict = "YES" if len(found) > 1 else "NO"
+        # The slot check also names the slot's kind; every scripted
+        # slot is one that changes over time.
+        return f"REASON: scripted\nSLOT: CHANGES\nVERDICT: {verdict}"
 
 
 @pytest.fixture

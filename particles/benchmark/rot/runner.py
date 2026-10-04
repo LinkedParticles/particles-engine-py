@@ -59,10 +59,12 @@ from particles.benchmark.rot.oracle import (
     RefusingProvider,
     oracle_claims,
 )
+from particles.benchmark.rot.real_pairs import score_rulings_file
 from particles.benchmark.rot.schema import (
     HitClass,
     HitRecord,
     ProbeResult,
+    RealPairsReport,
     RotBenchmarkReport,
     RotRunSelection,
     RotSession,
@@ -88,6 +90,7 @@ from particles.extraction.general import ExtractionResult
 from particles.extraction.registry import ExtractorPlugin, select_extractor
 from particles.ingest.pipeline import extract_snapshot
 from particles.llm import CompletionProvider, LLMPurpose, get_provider, override_providers
+from particles.operations.curation.rulings import load_rulings
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.main import retrieve_ranked
 from particles.store.particle_store import ParticleRow
@@ -250,7 +253,7 @@ class RotRunEstimate(BaseModel):
     extraction_model: str = ""
     probe_model: str = ""
     #: ``None`` when any priced component's model has no
-    #: ``benchmark_memory.price_per_mtok`` entry — never a partial total.
+    #: ``llm.price_per_mtok`` entry — never a partial total.
     cost_usd: float | None = None
     assumptions: list[str] = Field(default_factory=list)
 
@@ -262,12 +265,10 @@ class RotRunEstimate(BaseModel):
 
 def _price(purpose: LLMPurpose) -> tuple[str, float, float] | None:
     """``(model, input $/MTok, output $/MTok)`` for a purpose, or ``None`` if unpriced."""
-    sel = get_config().llm.for_purpose(purpose)
-    prices = get_config().benchmark_memory.price_per_mtok
-    for key in (f"{sel.provider}:{sel.model}", sel.model):
-        if key in prices:
-            return sel.model, prices[key].input, prices[key].output
-    return None
+    llm = get_config().llm
+    sel = llm.for_purpose(purpose)
+    price = llm.price_for(sel)
+    return None if price is None else (sel.model, price.input, price.output)
 
 
 def _chars_per_token(purpose: LLMPurpose) -> float:
@@ -285,6 +286,7 @@ def estimate_rot_run(
     seeds: list[int],
     days: int,
     checkpoints: list[int],
+    real_pairs: Path | None = None,
 ) -> RotRunEstimate:
     """Project calls, tokens, and — when every model is priced — dollars.
 
@@ -292,7 +294,8 @@ def estimate_rot_run(
     ``live`` adds one extraction call per session (a rot session is far below
     the chunking threshold). Probe count is bounded from the world's
     value-bearing events × ``benchmark_rot.estimate_probe_calls_per_update``;
-    every assumption is listed on the estimate.
+    every assumption is listed on the estimate. ``real_pairs`` adds
+    at most two probe calls per operator-ruled pair on the paid arms.
     """
     if arm not in ARMS:
         raise RotArmError(f"unknown arm {arm!r}; expected one of {', '.join(ARMS)}")
@@ -313,17 +316,17 @@ def estimate_rot_run(
         session_chars += sum(len(render_session(s, "2026-01-01")) for s in world.sessions)
     if arm == "live":
         est.extraction_calls = est.sessions
+        overhead = get_config().extraction.estimate_prompt_overhead_tokens
         est.extraction_input_tokens = int(
-            session_chars / _chars_per_token("extraction")
-            + est.extraction_calls * cfg.estimate_extraction_prompt_overhead_tokens
+            session_chars / _chars_per_token("extraction") + est.extraction_calls * overhead
         )
         est.extraction_output_tokens = (
             est.extraction_calls * cfg.estimate_output_tokens_per_extraction_call
         )
         est.assumptions.append(
             f"{cfg.estimate_output_tokens_per_extraction_call} output + "
-            f"{cfg.estimate_extraction_prompt_overhead_tokens} prompt-overhead tokens "
-            f"per extraction call (benchmark_rot.estimate_*)"
+            f"{overhead} prompt-overhead tokens per extraction call "
+            f"(benchmark_rot.estimate_*, extraction.estimate_prompt_overhead_tokens)"
         )
     if arm in ("probe", "live"):
         est.probe_calls = int(events * cfg.estimate_probe_calls_per_update)
@@ -335,6 +338,17 @@ def estimate_rot_run(
             f"{cfg.estimate_probe_output_tokens} out tokens each — an upper-leaning "
             f"bound; the real count is the candidates over the similarity threshold"
         )
+        if real_pairs is not None:
+            rulings, _ = load_rulings(real_pairs)
+            if rulings:
+                pair_calls = 2 * len(rulings)
+                est.probe_calls += pair_calls
+                est.probe_input_tokens += pair_calls * cfg.estimate_probe_input_tokens
+                est.probe_output_tokens += pair_calls * cfg.estimate_probe_output_tokens
+                est.assumptions.append(
+                    f"at most 2 update-check calls per operator-ruled pair "
+                    f"({len(rulings)} in {real_pairs})"
+                )
     total = 0.0
     priced = True
     if est.extraction_calls:
@@ -367,9 +381,7 @@ def render_estimate(est: RotRunEstimate) -> str:
     if est.llm_calls == 0:
         lines.append("  cost: US$0.00 — no LLM call is made (scripted perception)")
     elif est.cost_usd is None:
-        lines.append(
-            "  cost: no price configured for every model (benchmark_memory.price_per_mtok)"
-        )
+        lines.append("  cost: no price configured for every model (llm.price_per_mtok)")
     else:
         lines.append(f"  cost: ~US${est.cost_usd:,.2f}")
     lines += [f"  assumption: {a}" for a in est.assumptions]
@@ -398,8 +410,16 @@ def _arm_routing(
         overrides["semantic_lint"] = probe
     else:  # probe arm: the live contradiction probe is the one paid purpose
         del overrides["semantic_lint"]
-    with override_providers(overrides):
-        yield probe
+    # The arm pays for the probe alone, so the probe alone decides: the second
+    # reading on ``verification`` is off, as it is refused.
+    extraction = get_config().extraction
+    verify_before = extraction.verify_conflicts
+    extraction.verify_conflicts = False
+    try:
+        with override_providers(overrides):
+            yield probe
+    finally:
+        extraction.verify_conflicts = verify_before
 
 
 def _resolved_models(arm: str) -> tuple[str, str]:
@@ -448,6 +468,7 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
     cache_dir: Path | None = None,
     attribute: str | None = None,
     progress: Callable[[str], None] | None = None,
+    real_pairs: Path | None = None,
 ) -> RotBenchmarkReport:
     """Run the memory-rot benchmark and return the report of record.
 
@@ -455,6 +476,9 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
     a re-run that changes only candidacy or the ladder pays probes alone.
     ``attribute`` stamps one author id on every session, which is what the
     attribution rule needs to fire in a ``multi`` store.
+    ``real_pairs`` names an operator rulings file: on the ``probe``
+    and ``live`` arms each ruled pair is re-asked through the live update
+    checks and scored in ``report.real_pairs``, apart from the world metrics.
     """
     if arm not in ARMS:
         raise RotArmError(f"unknown arm {arm!r}; expected one of {', '.join(ARMS)}")
@@ -508,9 +532,16 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
         if own_dir and not keep_stores:
             shutil.rmtree(base, ignore_errors=True)
 
+    real = await _score_real_pairs(arm, real_pairs, probe_world, refused, progress)
     all_probes = [p for w in worlds for p in w.probes]
     by_cp, by_ph, by_ch = breakdowns(all_probes)
     notes = _run_notes(arm, trust_policy, refused)
+    if real_pairs is not None and arm == "oracle":
+        notes.append(
+            "Real pairs not scored: the ORACLE arm's scripted check answers from a "
+            "world's value pools and has no ground truth for a real claim. Run the "
+            "probe arm to score the operator's demotion rulings."
+        )
     selection = RotRunSelection(
         arm=arm,
         seeds=seeds,
@@ -537,8 +568,26 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
         floor_sweep=floor_sweep(all_probes, list(cfg.floor_sweep)),
         worlds=worlds,
         refused_llm_calls=dict(sorted(refused.items())),
+        real_pairs=real,
         quality_notes=notes,
     )
+
+
+async def _score_real_pairs(
+    arm: str,
+    path: Path | None,
+    world: RotWorld,
+    refused: dict[str, int],
+    progress: Callable[[str], None] | None,
+) -> RealPairsReport | None:
+    """Score the operator's demotion rulings under the arm's routing."""
+    if path is None or arm == "oracle":
+        return None
+    with _arm_routing(arm, world, refused):
+        report = await score_rulings_file(path)
+    if report is not None and progress is not None:
+        progress(f"real pairs: {report.pairs} operator-ruled pair(s) scored from {path}")
+    return report
 
 
 async def _run_seed(  # noqa: PLR0913 — one world's slice of the run tuple

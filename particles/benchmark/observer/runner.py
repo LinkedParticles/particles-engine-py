@@ -103,8 +103,16 @@ def _scripted_perception(refused: dict[str, int]) -> Iterator[SlotProbeProvider]
     }
     probe = SlotProbeProvider()
     overrides["semantic_lint"] = probe
-    with override_providers(overrides):
-        yield probe
+    # The scripted probe alone decides: the second reading on ``verification``
+    # is refused here, so it is off for the run.
+    extraction = get_config().extraction
+    verify_before = extraction.verify_conflicts
+    extraction.verify_conflicts = False
+    try:
+        with override_providers(overrides):
+            yield probe
+    finally:
+        extraction.verify_conflicts = verify_before
 
 
 @contextlib.contextmanager

@@ -54,6 +54,7 @@ from particles.core.observer_scope import PROJECT_TAG_PREFIX, project_keys, proj
 from particles.core.schema import (
     Confidence,
     Particle,
+    ParticleType,
     PolicyProvenance,
     ProvenanceRef,
     ProvenanceRefType,
@@ -198,6 +199,7 @@ async def _construct_and_insert(
     subject_ids: list[str] | None = None,
     granularity: tuple[int, int] | None = None,
     project_key: str | None = None,
+    operator: bool = False,
 ) -> tuple[str, Particle | None]:
     """Server-side particle construction + §6.6 consensus/fail-closed insert (§4a/§6b).
 
@@ -218,6 +220,12 @@ async def _construct_and_insert(
     ``corpus_entry_id`` provenance args are then ignored. ``subject_ids``, when
     given, is used directly (already-resolved Subject ids) instead of resolving
     ``subject_names``.
+
+    ``operator=True`` builds the operator's belief: ``identity`` is
+    then the operator principal, the confidence is the operator's value
+    labelled ``HUMAN_REVIEW`` (range-checked, never clamped by the agent
+    ceiling), and no AUTHOR trust is seeded, since the operator is the baseline
+    agent content is demoted against.
     """
     from particles.ingest.pipeline import reconcile_and_insert
     from particles.ingest.subject_resolver import resolve_subjects
@@ -278,10 +286,16 @@ async def _construct_and_insert(
             corpus_entry_id=corpus_entry_id,
             project_key=project_key,
         )
-        confidence = Confidence(
-            value=_clamp_confidence(confidence_value),
-            calibration_source=CalibrationSource.AGENT_ASSERTED,
-        )
+        if operator:
+            # Range-checked by supersede_belief before any write.
+            confidence = Confidence(
+                value=confidence_value, calibration_source=CalibrationSource.HUMAN_REVIEW
+            )
+        else:
+            confidence = Confidence(
+                value=_clamp_confidence(confidence_value),
+                calibration_source=CalibrationSource.AGENT_ASSERTED,
+            )
         provenance = [
             ProvenanceRef(
                 type=ProvenanceRefType.SOURCE,
@@ -308,7 +322,8 @@ async def _construct_and_insert(
         extractor_ref=extractor_ref,
         extraction_provider_model=provider_model,
     )
-    await _seed_author_trust(session, identity)
+    if not operator:
+        await _seed_author_trust(session, identity)
     single = get_config().reconciliation_mode_for(store) == "single"
     result = await reconcile_and_insert(
         session, particle, single_trust_order=single, fail_closed=True
@@ -379,11 +394,12 @@ async def _load_mutable_target(
 
     The default (agent) path is own-beliefs-only: a target asserted by another
     principal is rejected unless ``mcp.write.allow_cross_asserter``. The
-    ``operator`` path skips **only** the ownership check, so an
-    operator may supersede / retract an *extracted* belief (asserted by the
-    extractor, not the agent) — the case that fills a curation queue. It does
-    **not** relax the other guards: the HUMAN_REVIEW guard and the ACTIVE-status
-    check still apply. The operator path is reached only behind the
+    ``operator`` path skips the ownership check, so an operator may
+    supersede / retract an *extracted* belief (asserted by the extractor, not
+    the agent) — the case that fills a curation queue. Since it may
+    also mutate a HUMAN_REVIEW *claim* (the operator's own earlier correction);
+    a HUMAN_REVIEW non-claim record is still refused, and the ACTIVE-status
+    check still applies. The operator path is reached only behind the
     ``mcp.write.enabled_stores`` + bearer gate (the surface concern), never the
     dev-key loopback skip.
     """
@@ -393,10 +409,20 @@ async def _load_mutable_target(
     if target is None:
         raise ValueError(f"Particle {particle_id!r} not found.")
     if target.confidence.calibration_source == CalibrationSource.HUMAN_REVIEW:
-        raise ValueError(
-            f"Particle {particle_id!r} is operator-asserted (HUMAN_REVIEW) and is not "
-            "agent-mutable — revising it is Review's job."
-        )
+        # an operator may revise an operator claim; agents may not,
+        # and a non-claim record (a REVIEW annotation) stays Review's.
+        if not operator:
+            raise ValueError(
+                f"Particle {particle_id!r} is operator-asserted (HUMAN_REVIEW) and is not "
+                "agent-mutable — revising it is Review's job."
+            )
+        if target.particle_type is not ParticleType.CLAIM:
+            raise ValueError(
+                f"Particle {particle_id!r} is a {target.particle_type.value} record "
+                "(HUMAN_REVIEW); only claims are operator-mutable — revising it is "
+                "Review's job "
+                "."
+            )
     if (
         not operator
         and target.asserted_by != identity
@@ -493,6 +519,8 @@ async def supersede_belief(
     actor: str | None = None,
     reason: str | None = None,
     project_key: str | None = None,
+    subject_ids: list[str] | None = None,
+    card_key: str | None = None,
 ) -> AgentWriteResult:
     """Revise a belief: retire the predecessor to SUPERSEDED, then assert a successor.
 
@@ -504,10 +532,11 @@ async def supersede_belief(
 
     ``operator=True`` takes the operator-scoped path: it may supersede
     a belief the agent does **not** own (incl. an extracted belief) and records
-    the event under ``actor`` instead of the agent identity. The HUMAN_REVIEW and
-    ACTIVE guards still apply, and the surface keeps the
-    ``mcp.write.enabled_stores`` + bearer gate. Does not commit — the caller owns
-    the transaction.
+    the event under ``actor`` instead of the agent identity. The successor is the
+    operator's: asserted by ``curation.operator_identity``, labelled
+    ``HUMAN_REVIEW`` with the operator's unclamped confidence, its excerpt
+    authored by the operator. Each surface keeps its own gate. Does not commit —
+    the caller owns the transaction.
 
     ``reason`` is the free-text *why* of the revision, recorded on the
     ``PARTICLE_SUPERSEDED`` audit event exactly as ``retract_belief`` records
@@ -516,24 +545,45 @@ async def supersede_belief(
     to explain. **Required, non-empty, on the operator path**; optional on the
     agent path, where a required reason would only suppress agent
     self-corrections. Raises ``ValueError`` on an empty operator reason.
+
+    ``subject_ids`` links already-resolved Subject ids directly (
+    the curation supersede inherits the predecessor's subjects by id rather than
+    re-resolving their names). Any ``subject_names`` are resolved and appended.
     """
+    from particles.ingest.subject_resolver import resolve_subjects
     from particles.store.particle_store import update_particle_status
 
     reason = reason.strip() if reason else None
     if operator and not reason:
         raise ValueError("An operator supersede requires a non-empty reason.")
+    if operator and not 0.0 <= confidence <= 1.0:
+        # no agent ceiling on the operator path, so validate the range
+        # here, before the predecessor is retired.
+        raise ValueError(f"confidence must be between 0 and 1, got {confidence}.")
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
     await _load_mutable_target(session, supersedes_id, identity, operator=operator)
+    # the successor's principal. The agent identity above still keys
+    # the ownership check on the agent path.
+    author = get_config().curation.operator_identity if operator else identity
     # Retire the prior belief first so the successor reconciles against the rest
     # of the store, not against the claim it is replacing.
     await update_particle_status(
         session, supersedes_id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
     )
+    if subject_ids is not None:
+        named = await resolve_subjects(
+            session,
+            list(subject_names),
+            author,
+            particle_content=content,
+            source_type=SourceType.CONVERSATION,
+        )
+        subject_ids = list(dict.fromkeys([*subject_ids, *named]))
     candidate_id, result = await _construct_and_insert(
         session,
         store,
-        identity,
+        author,
         content=content,
         subject_names=subject_names,
         confidence_value=confidence,
@@ -542,7 +592,9 @@ async def supersede_belief(
         corpus_entry_id=corpus_entry_id,
         tags=tags,
         supersedes=supersedes_id,
+        subject_ids=subject_ids,
         project_key=project_key,
+        operator=operator,
     )
     await record_event(
         session,
@@ -553,7 +605,15 @@ async def supersede_belief(
             (EventRefKind.PARTICLE, supersedes_id),
             *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
         ],
-        payload={"store": store, "supersedes": supersedes_id, "operator": operator},
+        payload={
+            "store": store,
+            "supersedes": supersedes_id,
+            "operator": operator,
+            # The curation card this supersession resolves, when it came from
+            # a `curate` gesture, so the precision report can
+            # attribute it after the card leaves the retained collections.
+            **({"card_key": card_key} if card_key else {}),
+        },
     )
     return _map_result(candidate_id, result)
 
@@ -567,39 +627,48 @@ async def assign_subject_belief(
     subject_name: str | None = None,
     actor: str | None = None,
 ) -> AgentWriteResult:
-    """Attach a subject to an orphan via a provenance-preserving operator-supersede.
+    """Attach a subject to an orphan belief in place (amended).
 
-    The subject-assign: supersede the ``NO_SUBJECT`` particle with a
-    successor carrying the **same content** plus the resolved subject(s), in
-    *provenance-carry-over* mode — the successor copies the predecessor's full
-    ``confidence`` record, ``extractor_ref``, and source provenance (it is the
-    same extracted claim, only the subject linkage is corrected), so the
-    calibrated confidence and the extractor's authorship are preserved. The
-    operator's act is the recorded ``PARTICLE_SUPERSEDED`` event.
+    The subject link is an annotation, changed in place, so the
+    belief keeps its id, its calibrated confidence, its provenance, its utility
+    evidence and its observer scope. Before this superseded the orphan
+    with a same-content successor, which reset utility (up to a 20× demotion)
+    and lost observer scope. The operator's act is
+    the recorded ``SUBJECTS_RELINKED`` event.
 
     The subject is resolved from an explicit ``subject_id`` (linked directly) or
     a ``subject_name`` run through the standard resolver, so
     identity stays canonical (no ad-hoc duplicate Subjects). Operator-scoped:
     the orphan is extracted, so the own-beliefs-only agent path cannot touch it.
-    Does not commit — the caller owns the transaction.
+    A belief that already has a subject is refused, since reassignment is a
+    separate decision.
+    ``store`` is unused since the write no longer constructs a successor; it is
+    kept so the surfaces' call shape is unchanged. Does not commit — the caller
+    owns the transaction.
     """
     from particles.ingest.subject_resolver import resolve_subject
-    from particles.store.particle_store import update_particle_status
+    from particles.operations.subject_relink import relink_subjects
 
+    del store
     if (subject_id is None) == (subject_name is None):
         raise ValueError("Provide exactly one of subject_id or subject_name.")
 
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
     target = await _load_mutable_target(session, particle_id, identity, operator=True)
+    if target.subject_ids:
+        raise ValueError(
+            f"Particle {particle_id!r} already has a subject; assign-subject attaches a "
+            "subject to a belief that has none."
+        )
 
+    names: list[str] = []
     if subject_id is not None:
         from particles.store.subject_store import get_subject
 
         subject = await get_subject(session, subject_id)
         if subject is None:
             raise ValueError(f"Subject {subject_id!r} not found.")
-        resolved_id = subject.id
     else:
         assert subject_name is not None
         if not subject_name.strip():
@@ -610,50 +679,12 @@ async def assign_subject_belief(
             asserted_by=event_actor,
             particle_content=target.content,
         )
-        resolved_id = subject.id
+        names = [subject_name.strip()]
 
-    # Carry the existing subjects forward too — assign *adds* the resolved subject
-    # to whatever the orphan already had (which for a NO_SUBJECT card is none).
-    new_subject_ids = list(dict.fromkeys([*target.subject_ids, resolved_id]))
-
-    await update_particle_status(
-        session, particle_id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+    await relink_subjects(session, particle_id, [subject.id], actor=event_actor, names=names)
+    return AgentWriteResult(
+        asserted_particle_id=particle_id, verdict="SUBJECT_ASSIGNED", status=Status.ACTIVE.value
     )
-    candidate_id, result = await _construct_and_insert(
-        session,
-        store,
-        identity,
-        content=target.content,
-        subject_names=[],
-        confidence_value=target.confidence.value,
-        uncertainty_nature=target.uncertainty_nature.value,
-        source_excerpt=None,
-        corpus_entry_id=None,
-        tags=target.tags,
-        supersedes=particle_id,
-        carry_over=target,
-        subject_ids=new_subject_ids,
-    )
-    await record_event(
-        session,
-        actor=event_actor,
-        event_type=OperatorEventType.PARTICLE_SUPERSEDED,
-        # The why of this supersession is mechanical and known: the subject
-        # assignment itself.
-        reason=f"subject assigned: {subject.canonical_name} ({resolved_id})",
-        refs=[
-            (EventRefKind.PARTICLE, particle_id),
-            *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
-            (EventRefKind.SUBJECT, resolved_id),
-        ],
-        payload={
-            "store": store,
-            "supersedes": particle_id,
-            "operator": True,
-            "subject_assign": resolved_id,
-        },
-    )
-    return _map_result(candidate_id, result)
 
 
 async def retract_belief(

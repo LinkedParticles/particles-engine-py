@@ -514,6 +514,103 @@ def _required(content: str) -> ExpectedParticle:
 
 
 # ---------------------------------------------------------------------------
+# Semantic-match calibration error — reported beside the full-match one
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticCalibrationError:
+    """``calibration_error_semantic``."""
+
+    @pytest.mark.asyncio
+    async def test_under_confident_claim_is_wrong_only_under_full_match(self) -> None:
+        """One correct claim stated at 0.95 under a 0.99 floor.
+
+        Full match scores it wrong (ECE 0.95); semantic match scores it right
+        (ECE 0.05). The full-match figure keeps its meaning beside the new one.
+        """
+        expected = [
+            ExpectedParticle(
+                content="Mercury is a planet",
+                confidence_min=0.99,
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                required=True,
+            )
+        ]
+        report = await run_benchmark(
+            _stub_suite(expected), _PerfectStub(["Mercury is a planet"]), fixture_dir=Path(".")
+        )
+        assert report.per_case[0].under_confidence
+        assert report.metrics["calibration_error"] == pytest.approx(0.95)
+        assert report.metrics["calibration_error_semantic"] == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_agrees_with_the_calibration_label_population(self) -> None:
+        """The semantic figure is the ECE of exactly what ``calibrate`` fits on."""
+        from particles.extraction.calibration import expected_calibration_error
+
+        expected = [_required("Mercury is a planet")]
+        report = await run_benchmark(
+            _stub_suite(expected),
+            _PartialStub(["Mercury is a planet"], ["a spurious claim"]),
+            fixture_dir=Path("."),
+        )
+        raws, labels = graded_pairs(report)
+        assert expected_calibration_error(raws, labels) == pytest.approx(
+            report.metrics["calibration_error_semantic"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_recomputes_exactly_from_a_saved_report(self) -> None:
+        """A run file carries every input, so the figure is auditable offline."""
+        import json as _json
+        from dataclasses import asdict
+
+        from particles.benchmark.metrics import compute_semantic_calibration_error
+
+        expected = [
+            ExpectedParticle(
+                content="Mercury is a planet",
+                confidence_min=0.99,
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                required=True,
+            ),
+            _required("Venus is a planet"),
+        ]
+        report = await run_benchmark(
+            _stub_suite(expected),
+            _PartialStub(["Mercury is a planet", "Venus is a planet"], ["a spurious claim"]),
+            fixture_dir=Path("."),
+        )
+        saved = _json.loads(_json.dumps(asdict(report), default=str))
+        scored = [
+            (claim["confidence"], claim["outcome"])
+            for case in saved["per_case"]
+            for claim in case["emitted_claims"]
+        ]
+        assert compute_semantic_calibration_error(scored) == pytest.approx(
+            saved["metrics"]["calibration_error_semantic"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_crashing_case_contributes_nothing(self) -> None:
+        report = await run_benchmark(
+            _stub_suite([_required("x")]), _RaisesOnExtract(), fixture_dir=Path(".")
+        )
+        assert report.metrics["calibration_error_semantic"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_repeat_runs_summarise_it_like_every_other_metric(self) -> None:
+        expected = [_required("Mercury is a planet")]
+        extractor = _FlakyStub([e.content for e in expected], hit_on={0})
+        aggregate = await run_benchmark_repeated(
+            _stub_suite(expected), extractor, runs=2, fixture_dir=Path(".")
+        )
+        stat = aggregate.metric_stats["calibration_error_semantic"]
+        assert stat.values == [r.metrics["calibration_error_semantic"] for r in aggregate.reports]
+        assert stat.runs == 2
+
+
+# ---------------------------------------------------------------------------
 # Emitted-claim records — what makes a saved report auditable
 # ---------------------------------------------------------------------------
 
@@ -878,6 +975,21 @@ class TestBenchmarkCLI:
         assert "precision" in result.output
         assert "calibration_error" in result.output
 
+    def test_table_reports_both_calibration_labels(self, runner: CliRunner) -> None:
+        """Both ECE rows print, and a legend says which label each uses."""
+        result = runner.invoke(
+            app,
+            ["extractor", "benchmark", "numista-coin-extractor", "--no-save"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        rows = [line.split() for line in result.stdout.splitlines()]
+        assert ["calibration_error", _rows_value(rows, "calibration_error")] in rows
+        assert ["calibration_error_semantic", _rows_value(rows, "calibration_error_semantic")] in (
+            rows
+        )
+        assert "calibration_error counts only full matches as correct." in result.stdout
+
     def test_json_output_is_parseable(self, runner: CliRunner) -> None:
         import json as _json
 
@@ -995,6 +1107,10 @@ class TestBenchmarkCLI:
         assert report["suite_id"] == "numismatic-seed-001"
         assert report["extractor_id"] == "numista-coin-extractor"
         assert "precision" in report["metrics"]
+        # both calibration labels ride the report's metrics, the
+        # full-match figure under its unchanged name, so format 1 holds.
+        assert "calibration_error" in report["metrics"]
+        assert "calibration_error_semantic" in report["metrics"]
         assert report["per_case"]
         # The save notice goes to stderr, keeping stdout clean for --format json
         assert "Run report saved to" in (result.stderr or "")
@@ -1076,6 +1192,24 @@ class TestBenchmarkCLIRepeatRuns:
         assert stat["runs"] == 2
         assert len(stat["values"]) == 2
         assert {"mean", "minimum", "maximum", "spread", "stdev"} <= set(stat)
+        semantic = payload["metric_stats"]["calibration_error_semantic"]
+        assert semantic["runs"] == 2
+        assert {"mean", "minimum", "maximum", "spread", "stdev"} <= set(semantic)
+
+    def test_repeat_run_table_summarises_both_calibration_labels(self, runner: CliRunner) -> None:
+        result = runner.invoke(app, self._base("--runs", "2", "--no-save"), catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        lines = result.stdout.splitlines()
+        stats_row = [
+            line
+            for line in lines
+            if line.startswith("  ") and line.split()[:1] == ["calibration_error_semantic"]
+        ]
+        # Once in the MEAN/SPREAD/MIN/MAX/STDEV table, once under per-run values.
+        assert len(stats_row) == 2
+        assert len(stats_row[0].split()) == 6
+        assert len(stats_row[1].split()) == 3
+        assert "calibration_error counts only full matches as correct." in result.stdout
 
     def test_each_pass_persists_its_own_report_file(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1142,6 +1276,11 @@ class TestBenchmarkCLIRepeatRuns:
             catch_exceptions=False,
         )
         assert result_ok.exit_code == 0, result_ok.output
+
+
+def _rows_value(rows: list[list[str]], name: str) -> str:
+    """The printed value beside one metric name in a whitespace-split table."""
+    return next(row[1] for row in rows if row[:1] == [name] and len(row) == 2)
 
 
 # ---------------------------------------------------------------------------

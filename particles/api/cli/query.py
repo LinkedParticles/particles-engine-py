@@ -14,9 +14,12 @@ from particles.core.schema import (
     AnswerFailureCause,
     AssertionModality,
     AudienceHint,
+    LinkBand,
+    ObjectShape,
     QueryRequest,
     QueryResponse,
     StructuralGroupBy,
+    VocabularyReport,
 )
 
 #: Per-cause operator advice for a failed answer call. The provider's own
@@ -36,6 +39,37 @@ _ANSWER_FAILURE_ADVICE: dict[AnswerFailureCause, str] = {
         "this is not a token-budget problem."
     ),
 }
+
+
+def _render_attribution(result: QueryResponse) -> None:
+    """The grounded answer's attribution footer.
+
+    One count line, then each cited particle once under the handle the answer
+    cites it by. An invalid citation is a warning (stderr).
+    """
+    from particles.core.schema import AttributionKind
+    from particles.operations.query.grounding import composed_particles, particle_handles
+
+    attribution = result.answer_attribution
+    if attribution is None:
+        return
+    shown = composed_particles(result.particles, result.narrative_constituents)
+    handles = particle_handles(shown)
+    by_id = {p.id: p for p in shown}
+    counts = " · ".join(f"{attribution.count(kind)} {kind.value}" for kind in AttributionKind)
+    typer.echo(f"\nAttribution: {counts}")
+    cited = dict.fromkeys(pid for s in attribution.sentences for pid in s.cited_ids)
+    for pid in cited:
+        particle = by_id.get(pid)
+        if particle is not None:
+            typer.echo(f"  [{handles[pid]}] {particle.content[:80]}")
+    invalid = attribution.invalid_citation_count
+    if invalid:
+        typer.echo(
+            f"⚠  {invalid} citation(s) named a particle that was not retrieved for this "
+            "answer. A sentence left with no valid citation is labelled [unattributed].",
+            err=True,
+        )
 
 
 def _answer_failure_lines(result: QueryResponse) -> list[str]:
@@ -170,6 +204,29 @@ def query_cmd(
         help="List the distinct predicate terms with kind and claim count: "
         "the vocabulary the exact-string --predicate filter matches against.",
     ),
+    vocabulary: bool = typer.Option(
+        False,
+        "--vocabulary",
+        help="Report the store's vocabulary: each canonical predicate with its "
+        "surface forms, claim count, object value shapes, the subject classes "
+        "it attaches to, and its alignment, under a header of subject "
+        "alignment and class counts and confirmed modelling decisions. "
+        "Computed at read time, never stored. No question, no LLM call.",
+    ),
+    output_format: str = typer.Option(
+        "table",
+        "--format",
+        help="Output format for --vocabulary: 'table' (default) or 'json'.",
+    ),
+    grounded: bool | None = typer.Option(
+        None,
+        "--grounded/--ungrounded",
+        help="Grounded answer: every sentence cites the retrieved particle ids it "
+        "rests on, and a sentence the model added is labelled [inference] (drawn "
+        "over cited claims) or [background] (from nothing in the store). Cited ids "
+        "are checked against the retrieved set and nothing is dropped. Default: "
+        "query.grounded_answers.",
+    ),
     as_of: str | None = typer.Option(
         None,
         "--as-of",
@@ -183,6 +240,12 @@ def query_cmd(
     """Query the particle store with a natural language question."""
     from datetime import datetime
 
+    if output_format not in ("table", "json"):
+        typer.echo(f"Unknown --format {output_format!r}. Valid: table, json.", err=True)
+        raise typer.Exit(1)
+    if output_format == "json" and not vocabulary:
+        typer.echo("--format json applies to --vocabulary only.", err=True)
+        raise typer.Exit(1)
     backend = get_backend()
     as_of_dt: datetime | None = None
     if as_of is not None:
@@ -248,6 +311,8 @@ def query_cmd(
             group_by=group_by_val,
             min_effective_confidence=min_effective_confidence,
             list_predicates=predicates,
+            list_vocabulary=vocabulary,
+            grounded=grounded,
         )
     except ValueError as exc:
         # Pydantic validation — e.g. a future --as-of instant,
@@ -275,6 +340,10 @@ def query_cmd(
         result = run(query_federated(list(store), req))
     else:
         result = run(backend.query(req))
+    if req.list_vocabulary and output_format == "json":
+        if result.vocabulary_report is not None:
+            typer.echo(result.vocabulary_report.model_dump_json(indent=2))
+        return
     if req.is_structural_mode:
         _render_structural(result, req)
         if show_source:
@@ -335,6 +404,8 @@ def query_cmd(
         for line in _answer_failure_lines(result):
             typer.echo(line, err=True)
     typer.echo(result.answer)
+    if result.answer_attribution is not None:
+        _render_attribution(result)
     # on a claim-prefiltered semantic query, the coverage
     # footer + the gt/lt non-normalizable disclosure ride below the answer.
     if result.claim_coverage is not None:
@@ -419,6 +490,91 @@ def _render_sources(backend: Backend, result: QueryResponse) -> None:
             typer.echo(f"  │ {text_line}")
 
 
+#: The vocabulary table's column heading for each object shape.
+_SHAPE_COLUMNS: dict[ObjectShape, str] = {
+    ObjectShape.TEXT: "TEXT",
+    ObjectShape.NUMERIC: "NUM",
+    ObjectShape.DATED: "DATE",
+    ObjectShape.URI: "URI",
+    ObjectShape.TOKEN: "TOKEN",
+}
+
+#: How many subject classes a vocabulary row lists before folding the rest.
+_VOCAB_CLASSES_SHOWN = 5
+
+
+def _joined(pairs: list[tuple[str, int]], limit: int | None = None) -> str:
+    shown = pairs if limit is None else pairs[:limit]
+    text = " · ".join(f"{name} {n:,}" for name, n in shown)
+    if limit is not None and len(pairs) > limit:
+        text += f" · +{len(pairs) - limit} more"
+    return text
+
+
+def _render_vocabulary(report: VocabularyReport) -> None:
+    """Render the vocabulary report: the store header, then one block per predicate."""
+    if report.as_of is not None:
+        typer.echo(
+            f"As of {report.as_of.isoformat()}: subjects created and decisions "
+            "recorded by then; classes and links as they stand now."
+        )
+    typer.echo(
+        f"Subjects: {report.subjects_total:,} · aligned {report.subjects_aligned:,} · "
+        f"classed {report.subjects_classed:,}"
+    )
+    if report.aligned_by_namespace:
+        bands = " / ".join(band.value for band in LinkBand)
+        typer.echo(
+            f"  aligned by namespace, by link band ({bands}; suppress threshold "
+            f"{report.link_suppress_threshold:g}):"
+        )
+        for ns in report.aligned_by_namespace:
+            counts = " / ".join(f"{ns.bands.get(band, 0):,}" for band in LinkBand)
+            typer.echo(f"    {ns.namespace:<16} {ns.subjects:>7,}   {counts}")
+    if report.classed_by_namespace:
+        pairs = [(c.subject_class, c.count) for c in report.classed_by_namespace]
+        typer.echo(f"  classed by namespace: {_joined(pairs)}")
+        pairs = [(c.subject_class, c.count) for c in report.classed_by_class]
+        typer.echo(f"  classed by class: {_joined(pairs)}")
+    typer.echo(
+        f"Structured claims: {report.structured_claims_total:,} in store · "
+        f"{report.claims_in_view:,} in view"
+    )
+    kinds = [(k.value, n) for k, n in report.object_kinds.items()]
+    typer.echo(f"  object kinds: {_joined(kinds)}")
+    shapes = [(k.value, n) for k, n in report.object_shapes.items()]
+    typer.echo(f"  object shapes: {_joined(shapes)}")
+    typer.echo(
+        f"Predicates: {report.predicates_distinct:,} distinct terms in "
+        f"{report.predicates_canonical:,} canonical forms"
+    )
+    if report.alignment_source is None:
+        typer.echo("Alignment: no vocabulary document adopted; every predicate is unaligned.")
+    else:
+        typer.echo(f"Alignment: from {report.alignment_source}")
+    recorded = [(t, n) for t, n in report.modelling_decisions.items() if n]
+    line = f"Modelling decisions in the operator log: {sum(n for _, n in recorded):,}"
+    typer.echo(f"{line} ({_joined(recorded)})" if recorded else line)
+    typer.echo("")
+    header = "".join(f"{_SHAPE_COLUMNS[s]:>7}" for s in ObjectShape)
+    typer.echo(f"{'CLAIMS':>7}{header}  {'ALN':>3}  PREDICATE  [canonical]")
+    typer.echo("-" * 100)
+    pad = " " * (7 + 7 * len(ObjectShape) + 7)
+    for row in report.predicates:
+        cells = "".join(f"{row.object_shapes.get(s, 0):>7,}" for s in ObjectShape)
+        aligned = f"{len(row.alignments)}" if row.alignments else "—"
+        canonical = f"  [{row.canonical}]" if row.canonical != row.label else ""
+        typer.echo(f"{row.claim_count:>7,}{cells}  {aligned:>3}  {row.label}{canonical}")
+        if len(row.surface_forms) > 1:
+            forms = [(f.value, f.claim_count) for f in row.surface_forms]
+            typer.echo(f"{pad}forms: {_joined(forms)}")
+        classes = [(c.subject_class, c.count) for c in row.subject_classes]
+        typer.echo(f"{pad}classes: {_joined(classes, _VOCAB_CLASSES_SHOWN)}")
+        if row.alignments:
+            typer.echo(f"{pad}aligned: {', '.join(row.alignments)}")
+    typer.echo("")
+
+
 def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
     """Render a deterministic result (listing / aggregate / vocabulary).
 
@@ -427,7 +583,10 @@ def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
     """
     from particles.operations.query.structural import coverage_line, disclosure_lines
 
-    if req.list_predicates:
+    if req.list_vocabulary:
+        if result.vocabulary_report is not None:
+            _render_vocabulary(result.vocabulary_report)
+    elif req.list_predicates:
         typer.echo(f"{'COUNT':>6}  {'KIND':<7}  PREDICATE")
         typer.echo("-" * 70)
         for info in result.predicate_vocabulary:

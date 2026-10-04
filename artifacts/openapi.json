@@ -105,6 +105,20 @@
         "title": "AggregateBucket",
         "type": "object"
       },
+      "AnswerAttribution": {
+        "description": "Per-sentence attribution of a grounded answer.\n\nA **response model, not particle substrate**: parsed from the composer's\ntags at read time and never stored. The composer's own contribution is\nlabelled, not removed: every unit of the answer appears here, in order.",
+        "properties": {
+          "sentences": {
+            "items": {
+              "$ref": "#/components/schemas/AttributedSentence"
+            },
+            "title": "Sentences",
+            "type": "array"
+          }
+        },
+        "title": "AnswerAttribution",
+        "type": "object"
+      },
       "AnswerFailureCause": {
         "description": "Why NL answer generation failed, for a caller that must tell them apart.\n\n``answer_generation_error`` carries the provider's message, which is the\nactionable part for a human but opaque to a program: a benchmark that\nmust exclude unscoreable calls, or a UI choosing what to advise, cannot\nread a free-text string. The split is the one the memory benchmark\nalready draws between its two exclusion classes (the\n``EmptyCompletionError`` carve, 1.137.1) \u2014 an operator's too-low budget\nmust never be laundered as infrastructure noise, or the other way round.\n\n* ``BUDGET`` \u2014 the model replied HTTP-200 with no text block, having\n  spent the whole ``max_tokens`` allowance before emitting an answer\n  (the extended-thinking failure mode). Deterministic at a fixed\n  budget, so ``query`` has already retried once at\n  ``config.query.answer_retry_max_tokens``; reaching the caller means\n  even that was not enough. The fix is the operator's cap.\n* ``PROVIDER`` \u2014 everything else: billing, network, timeout, a safety\n  refusal, a malformed reply. Not deterministic, and not the\n  operator's budget.",
         "enum": [
@@ -190,7 +204,7 @@
         "type": "object"
       },
       "AssertionModality": {
-        "description": "What *kind* of assertion a particle makes: its truth-aptness.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The Core\nengine applies truth-semantics (the \u00a76.4 conflict ladder, L-SEM-01,\nL-IDX-01) only to ``FALSIFIABLE`` particles (see :func:`is_truth_apt`);\nthe other modalities co-exist and are never contradiction-checked or\ntrust-arbitrated. Default ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
+        "description": "What *kind* of assertion a particle makes: the default for its adjudicability.\n\nOrthogonal to ``uncertainty_nature`` (which presupposes a fact of the\nmatter) and to scope (which lives in ``properties``). The write\npath arbitrates (the \u00a76.6 conflict ladder, L-SEM-01, L-IDX-01) only pairs\nof ``FALSIFIABLE`` particles (see :func:`is_truth_apt`); the other\nmodalities co-exist and are never contradiction-checked or\ntrust-arbitrated. The value is a regenerable default, not a property of\nthe claim: it is stamped with the classifier that set it, an operator may\ncorrect it, and a lens may read it differently at read time only.\nDefault ``FALSIFIABLE`` keeps every existing particle\nunchanged. Closed enum: adding a modality is an additive minor change.",
         "enum": [
           "FALSIFIABLE",
           "EVALUATIVE",
@@ -198,6 +212,49 @@
           "CONSTITUTIVE"
         ],
         "title": "AssertionModality",
+        "type": "string"
+      },
+      "AttributedSentence": {
+        "description": "One attributed unit of a grounded answer.\n\n``text`` is the unit with its tag removed. ``cited_ids`` are full particle\nids, each validated against the particles the composer was given;\n``invalid_citations`` keeps what the composer wrote for a citation that\nmatched none of them.",
+        "properties": {
+          "cited_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cited Ids",
+            "type": "array"
+          },
+          "invalid_citations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Invalid Citations",
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AttributionKind"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "kind"
+        ],
+        "title": "AttributedSentence",
+        "type": "object"
+      },
+      "AttributionKind": {
+        "description": "Where one sentence of a grounded answer came from.\n\n* ``CITED`` \u2014 the composer cited at least one retrieved particle id for\n  it, and the parser found that id in the set the composer was given.\n* ``INFERENCE`` \u2014 uncited; the composer declared it an inference drawn\n  over the cited claims.\n* ``BACKGROUND`` \u2014 uncited; the composer declared it its own background,\n  drawn from nothing in the store.\n* ``UNATTRIBUTED`` \u2014 the composer neither cited a retrieved id nor\n  declared it, either by omitting the tag or by citing only ids it was\n  never given. Recorded, never dropped, and never guessed into one of\n  the other three.",
+        "enum": [
+          "cited",
+          "inference",
+          "background",
+          "unattributed"
+        ],
+        "title": "AttributionKind",
         "type": "string"
       },
       "AudienceHint": {
@@ -353,10 +410,14 @@
           "contradiction",
           "contested",
           "no_subject",
+          "gated_subjects",
           "duplicate_pair",
           "uncited_url",
           "failed_snapshots",
-          "proposed_abstraction"
+          "proposed_abstraction",
+          "stale_basis",
+          "inconsistency",
+          "demotion"
         ],
         "title": "CardKind",
         "type": "string"
@@ -528,6 +589,54 @@
           "value"
         ],
         "title": "Confidence",
+        "type": "object"
+      },
+      "ConflictBrief": {
+        "description": "Both sides of an open INCONSISTENCY record.\n\nCarried by the record's own ``INCONSISTENCY`` card, and by a ``CONTESTED``\ncard whose belief also sits in a conflict. ``a`` and ``b`` are the\nrecord's claims A and B in the order ``review`` names them, so a client\ncan offer \"keep A\" / \"keep B\" as ``PREFER_A`` / ``PREFER_B`` without\nguessing which side is which. Either may be ``None`` when the record\nnames a particle that no longer exists. ``further_a`` / ``further_b`` are\na census record's further members by side, empty for every\nother record. Attached live to the served slice, never stored.",
+        "properties": {
+          "a": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ParticleBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "b": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ParticleBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "further_a": {
+            "items": {
+              "$ref": "#/components/schemas/ParticleBrief"
+            },
+            "title": "Further A",
+            "type": "array"
+          },
+          "further_b": {
+            "items": {
+              "$ref": "#/components/schemas/ParticleBrief"
+            },
+            "title": "Further B",
+            "type": "array"
+          },
+          "inconsistency_id": {
+            "title": "Inconsistency Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inconsistency_id"
+        ],
+        "title": "ConflictBrief",
         "type": "object"
       },
       "ContestedBadge": {
@@ -932,6 +1041,16 @@
             ],
             "title": "Candidate Event Id"
           },
+          "conflict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConflictBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "contested_bases": {
             "anyOf": [
               {
@@ -1000,6 +1119,26 @@
             "title": "Particles",
             "type": "array"
           },
+          "question": {
+            "description": "The question this kind puts to the curator (from ``KIND_TITLES``).",
+            "readOnly": true,
+            "title": "Question",
+            "type": "string"
+          },
+          "resolve_actions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolve Actions"
+          },
           "subject_ids": {
             "items": {
               "type": "string"
@@ -1013,6 +1152,12 @@
             },
             "title": "Suggested Gestures",
             "type": "array"
+          },
+          "title": {
+            "description": "The kind's human title, e.g. \"Contested belief\" (from ``KIND_TITLES``).",
+            "readOnly": true,
+            "title": "Title",
+            "type": "string"
           },
           "verdict": {
             "anyOf": [
@@ -1028,6 +1173,8 @@
         "required": [
           "kind",
           "diagnostic",
+          "title",
+          "question",
           "key"
         ],
         "title": "CurationCard",
@@ -1036,6 +1183,17 @@
       "CurationEventResponse": {
         "description": "Outcome of a curation operator-event write.",
         "properties": {
+          "benchmark_fixture": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Fixture"
+          },
           "card_key": {
             "anyOf": [
               {
@@ -1070,8 +1228,170 @@
         "title": "CurationEventResponse",
         "type": "object"
       },
+      "CurationPrecision": {
+        "description": "Queue precision: how often the curation queue was right.\n\nA read-time view over the operator event log and the retained curation\ncollections for one window, never stored. Per card kind, the\nshare of cards the operator acted on, dismissed, snoozed or never touched,\nwith the denominator shown. ``precision`` is over decided cards only:\n``acted / (acted + dismissed)``. ``unattributed_events`` counts resolving\nevents in the window (a retraction, a supersession) that named no card the\nstore still holds, so the acted figure is a floor.",
+        "properties": {
+          "acted": {
+            "default": 0,
+            "title": "Acted",
+            "type": "integer"
+          },
+          "dismissed": {
+            "default": 0,
+            "title": "Dismissed",
+            "type": "integer"
+          },
+          "events_read": {
+            "default": 0,
+            "title": "Events Read",
+            "type": "integer"
+          },
+          "expired": {
+            "default": 0,
+            "title": "Expired",
+            "type": "integer"
+          },
+          "kinds": {
+            "items": {
+              "$ref": "#/components/schemas/CurationPrecisionKind"
+            },
+            "title": "Kinds",
+            "type": "array"
+          },
+          "offered": {
+            "default": 0,
+            "title": "Offered",
+            "type": "integer"
+          },
+          "open": {
+            "default": 0,
+            "title": "Open",
+            "type": "integer"
+          },
+          "precision": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Precision"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "snapshot_built_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Built At"
+          },
+          "snapshots_read": {
+            "default": 0,
+            "title": "Snapshots Read",
+            "type": "integer"
+          },
+          "snoozed": {
+            "default": 0,
+            "title": "Snoozed",
+            "type": "integer"
+          },
+          "unattributed_events": {
+            "default": 0,
+            "title": "Unattributed Events",
+            "type": "integer"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until"
+        ],
+        "title": "CurationPrecision",
+        "type": "object"
+      },
+      "CurationPrecisionKind": {
+        "description": "How one card kind fared with the operator over a window.\n\n``acted``, ``dismissed`` and ``snoozed`` count cards by the strongest\ngesture or ruling recorded on them in the window; ``open`` and ``expired``\ncount cards the retained collections hold that got no gesture at all.\n``precision`` is ``acted / (acted + dismissed)``: of the cards the operator\nruled on, the share that were real. ``acted_means`` and\n``dismissed_means`` say what those two outcomes mean for this kind, since a\ndismissed duplicate pair (the finder was wrong) and a dismissed expiry\n(not worth a ruling) are different findings.",
+        "properties": {
+          "acted": {
+            "title": "Acted",
+            "type": "integer"
+          },
+          "acted_means": {
+            "title": "Acted Means",
+            "type": "string"
+          },
+          "dismissed": {
+            "title": "Dismissed",
+            "type": "integer"
+          },
+          "dismissed_means": {
+            "title": "Dismissed Means",
+            "type": "string"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "offered": {
+            "title": "Offered",
+            "type": "integer"
+          },
+          "open": {
+            "title": "Open",
+            "type": "integer"
+          },
+          "precision": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Precision"
+          },
+          "snoozed": {
+            "title": "Snoozed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "offered",
+          "acted",
+          "dismissed",
+          "snoozed",
+          "open",
+          "expired",
+          "precision",
+          "acted_means",
+          "dismissed_means"
+        ],
+        "title": "CurationPrecisionKind",
+        "type": "object"
+      },
       "CurationQueueResponse": {
-        "description": "The leverage-ranked, finite, snooze-filtered curation queue.\n\n``cards`` is the ranked \"today's N\" worklist (highest leverage first), each a\nnormalized projection of an existing read diagnostic. ``count`` is\n``len(cards)`` for convenience. The HTTP mirror of `particles curate`.\n\nThe cards come from a persisted collection, so the response\nalso carries the \u00a75 staleness stamp: ``built_at`` / ``age_seconds`` /\n``stale`` say how old the *detection* is (suppression, belief status and\npost-build resolutions are always live), and ``per_kind_scope`` discloses\nwhich kinds a delta-scoped nightly build did not re-census store-wide. A\nclient renders \"as of 03:30\" rather than implying freshness it lacks.",
+        "description": "The leverage-ranked, finite, snooze-filtered curation queue.\n\n``cards`` is the ranked batch (highest leverage first), each a normalized\nprojection of an existing read diagnostic. ``count`` is ``len(cards)`` for\nconvenience; ``open_count`` is the backlog the batch was cut from. The HTTP\nmirror of `particles curate`.\n\nThe cards come from a persisted collection, so the response\nalso carries the \u00a75 staleness stamp: ``built_at`` / ``age_seconds`` /\n``stale`` say how old the *detection* is (suppression, belief status and\npost-build resolutions are always live), and ``per_kind_scope`` discloses\nwhich kinds a delta-scoped nightly build did not re-census store-wide. A\nclient renders \"as of 03:30\" rather than implying freshness it lacks.",
         "properties": {
           "age_seconds": {
             "anyOf": [
@@ -1110,6 +1430,19 @@
           },
           "count": {
             "title": "Count",
+            "type": "integer"
+          },
+          "kind_as_of": {
+            "additionalProperties": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": "Kind As Of",
+            "type": "object"
+          },
+          "open_count": {
+            "default": 0,
+            "title": "Open Count",
             "type": "integer"
           },
           "per_kind_scope": {
@@ -1597,9 +1930,45 @@
         "title": "DepositUrlRequest",
         "type": "object"
       },
+      "DigestLine": {
+        "description": "Which belief one digest line shows, and where the line starts.",
+        "properties": {
+          "contested_bases": {
+            "description": "The contested bases the line displays.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Contested Bases",
+            "type": "array"
+          },
+          "offset": {
+            "description": "Character offset in the digest text where the line starts.",
+            "title": "Offset",
+            "type": "integer"
+          },
+          "particle_id": {
+            "title": "Particle Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "particle_id",
+          "offset"
+        ],
+        "title": "DigestLine",
+        "type": "object"
+      },
       "DigestResponse": {
         "description": "The compiled session-start memory digest as one Markdown document.",
         "properties": {
+          "lines": {
+            "description": "The belief behind each digest line, in order, with the line's character offset in `markdown`. A caller that cuts the text keeps the lines whose offset fell inside the cut.",
+            "items": {
+              "$ref": "#/components/schemas/DigestLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
           "markdown": {
             "title": "Markdown",
             "type": "string"
@@ -2179,6 +2548,17 @@
         "title": "JudgeVerdictKind",
         "type": "string"
       },
+      "LinkBand": {
+        "description": "Which confidence band one external link falls in.\n\n``ASSERTED`` is confidence 1.0 (a structured extractor or an operator\nasserted it); ``UNSCORED`` is the 0.5 sentinel for a link no content\ncould score; ``SCORED`` is any other value at or above\n``subjects.wikidata_link_suppress_threshold``; ``SUPPRESSED`` is below it,\nstored but hidden from export and query output.",
+        "enum": [
+          "asserted",
+          "scored",
+          "unscored",
+          "suppressed"
+        ],
+        "title": "LinkBand",
+        "type": "string"
+      },
       "LinkDeleteResponse": {
         "properties": {
           "deleted": {
@@ -2261,6 +2641,23 @@
       },
       "LintFinding": {
         "properties": {
+          "conflict_sides": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Sides"
+          },
           "contested_bases": {
             "anyOf": [
               {
@@ -2486,6 +2883,36 @@
         "title": "Mutability",
         "type": "string"
       },
+      "NamespaceAlignment": {
+        "description": "Subjects aligned to one external namespace, by link band.\n\nA subject with several links in one namespace counts once, in the band of\nits most confident link.",
+        "properties": {
+          "bands": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/LinkBand"
+            },
+            "title": "Bands",
+            "type": "object"
+          },
+          "namespace": {
+            "title": "Namespace",
+            "type": "string"
+          },
+          "subjects": {
+            "title": "Subjects",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "namespace",
+          "subjects",
+          "bands"
+        ],
+        "title": "NamespaceAlignment",
+        "type": "object"
+      },
       "NarrativeArticleResponse": {
         "description": "A NARRATIVE rendered as one cited prose article.\n\n``body`` is the Markdown article (cited footnotes + References).\n``used_synthesis`` is False when the deterministic structured-listing\nfallback was used (no key, LLM error, or a validation failure).\n``constituent_count`` is the number of SEQUENCE_IN members rendered\n(0 \u21d2 the narrative has no constituents yet and ``body`` is empty).",
         "properties": {
@@ -2534,6 +2961,18 @@
         ],
         "title": "NarrativeResponse",
         "type": "object"
+      },
+      "ObjectShape": {
+        "description": "The form of a structured claim's object, as the vocabulary report counts it.\n\nA reading of *form*, for datatype induction: ``NUMERIC`` and ``DATED``\ncount a literal whose lexical form parses as a number or an ISO-8601 date,\ntyped or not. The comparison rule is unchanged and stays\ntyped-only; this enum never feeds a filter.",
+        "enum": [
+          "text",
+          "numeric",
+          "dated",
+          "uri",
+          "token"
+        ],
+        "title": "ObjectShape",
+        "type": "string"
       },
       "ObserverScopeNote": {
         "description": "What reading through a project observer did to one result.\n\nDisclosure only \u2014 it never feeds ranking or confidence. ``engaged`` is\n``False`` when an observer was asked for but the store has not been\nrescoped yet, in which case the read stayed store-wide and says so rather\nthan returning a silently emptied result.",
@@ -2665,6 +3104,7 @@
           "SUBJECT_RECLASSIFIED",
           "SUBJECT_LINK_CONFIRMED",
           "SUBJECT_LINK_REMOVED",
+          "SUBJECTS_RELINKED",
           "TRUST_CHANGED",
           "REVIEW_RESOLVED",
           "RELATION_ADDED",
@@ -2678,6 +3118,9 @@
           "BELIEF_AFFIRMED",
           "CURATION_CARD_SNOOZED",
           "CONSOLIDATION_RUN",
+          "EXTRACT_RUN",
+          "INCONSISTENCY_CLOSED",
+          "DEPENDENT_CLAIM_EXAMINED",
           "ABSTRACTION_CANDIDATE",
           "ABSTRACTION_RESOLVED",
           "DUPLICATES_MERGED",
@@ -2686,7 +3129,12 @@
           "OBSERVER_SCOPE_RESCOPED",
           "OBSERVER_SCOPE_KEY_ASSIGNED",
           "OBSERVER_SCOPE_WIDENED",
-          "OBSERVER_SCOPE_WIDEN_REVOKED"
+          "OBSERVER_SCOPE_WIDEN_REVOKED",
+          "VOCABULARY_CHANGED",
+          "VOCABULARY_PROPOSED",
+          "VOCABULARY_RULED",
+          "MODALITY_RECLASSIFIED",
+          "MODALITY_GRANT_QUEUED"
         ],
         "title": "OperatorEventType",
         "type": "string"
@@ -3093,8 +3541,20 @@
         "type": "object"
       },
       "ParticleBrief": {
-        "description": "A compact summary of one particle a card references.\n\nJust enough context to judge the card's gesture (the claim ``content``, the\n``subject_labels`` it attaches to, its query-time ``effective_confidence``,\nand its ``status``) so a client (the bus-stop PWA) can\ndecide *which* of a duplicate pair to keep without a second\n``particles particle show <id>`` round-trip. Populated server-side when the queue is\nbuilt; never stored. Deliberately **not** the full ``Particle`` (the\nprovenance/expand view is deferred).",
+        "description": "A compact summary of one particle a card references.\n\nJust enough context to judge the card's gesture (the claim ``content``, the\n``subject_labels`` it attaches to, its query-time ``effective_confidence``,\nand its ``status``) so a client (the curation PWA) can\ndecide *which* of a duplicate pair to keep without a second\n``particles particle show <id>`` round-trip. Populated server-side when the queue is\nbuilt; never stored. Deliberately **not** the full ``Particle`` (the\nprovenance/expand view is deferred).",
         "properties": {
+          "asserted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asserted At"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -3107,9 +3567,31 @@
             "title": "Particle Id",
             "type": "string"
           },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "status_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Reason"
           },
           "subject_labels": {
             "items": {
@@ -3206,7 +3688,7 @@
         "type": "object"
       },
       "ParticleSubjectAssignRequest": {
-        "description": "Assign a subject to an orphan particle. Resolution accepts an\nexplicit ``subject_id`` (link a Subject the operator picked) OR a\n``subject_name`` run through the standard resolver (local \u2192 Wikidata \u2192\nbare-local). Provide exactly one.",
+        "description": "Assign a subject to an orphan particle, in place. Resolution accepts an\nexplicit ``subject_id`` (link a Subject the operator picked) OR a\n``subject_name`` run through the standard resolver (local \u2192 Wikidata \u2192\nbare-local). Provide exactly one.",
         "properties": {
           "subject_id": {
             "anyOf": [
@@ -3506,6 +3988,16 @@
             "title": "Calibration",
             "type": "array"
           },
+          "curation_precision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CurationPrecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "extractor_direct_fraction": {
             "title": "Extractor Direct Fraction",
             "type": "number"
@@ -3518,6 +4010,16 @@
           "inconsistency_particles": {
             "title": "Inconsistency Particles",
             "type": "integer"
+          },
+          "llm_spend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StoreLLMSpend"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "snapshots_complete": {
             "title": "Snapshots Complete",
@@ -3609,6 +4111,17 @@
             "title": "Count",
             "type": "boolean"
           },
+          "grounded": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounded"
+          },
           "group_by": {
             "anyOf": [
               {
@@ -3647,6 +4160,11 @@
           "list_predicates": {
             "default": false,
             "title": "List Predicates",
+            "type": "boolean"
+          },
+          "list_vocabulary": {
+            "default": false,
+            "title": "List Vocabulary",
             "type": "boolean"
           },
           "min_confidence": {
@@ -3830,6 +4348,16 @@
           "answer": {
             "title": "Answer",
             "type": "string"
+          },
+          "answer_attribution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AnswerAttribution"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "answer_generation_error": {
             "anyOf": [
@@ -4030,6 +4558,16 @@
               }
             ],
             "title": "Truncation Warning"
+          },
+          "vocabulary_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VocabularyReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -4326,12 +4864,209 @@
         "title": "RelevanceNote",
         "type": "object"
       },
+      "RelinkGatedRequest": {
+        "description": "Relink the subjectless beliefs whose gated names a relink recovers.\n\n``dry_run`` (the default) plans and reports without writing. ``tiers``\ndefaults to ``subject_gate.relink_tiers``. ``sample`` returns that many\nplanned relinks, chosen reproducibly by ``seed``, for a precision check.",
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "sample": {
+            "default": 0,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Sample",
+            "type": "integer"
+          },
+          "seed": {
+            "default": 0,
+            "title": "Seed",
+            "type": "integer"
+          },
+          "tiers": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    1,
+                    2,
+                    3
+                  ],
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tiers"
+          }
+        },
+        "title": "RelinkGatedRequest",
+        "type": "object"
+      },
+      "RelinkReport": {
+        "description": "A relink's plan, and what it wrote when applied.\n\nThe dry run and ``--apply`` print this same shape from the same plan.\n``sample`` is reproducible for a given ``seed``: it is the list an operator\nhand-checks before accepting a tier.",
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "by_class": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Class",
+            "type": "object"
+          },
+          "by_tier": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Tier",
+            "type": "object"
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "fail_closed_no_key": {
+            "title": "Fail Closed No Key",
+            "type": "integer"
+          },
+          "fail_closed_several": {
+            "title": "Fail Closed Several",
+            "type": "integer"
+          },
+          "orphans": {
+            "title": "Orphans",
+            "type": "integer"
+          },
+          "recoverable": {
+            "title": "Recoverable",
+            "type": "integer"
+          },
+          "relinked": {
+            "default": 0,
+            "title": "Relinked",
+            "type": "integer"
+          },
+          "sample": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RelinkReportItem"
+            },
+            "title": "Sample",
+            "type": "array"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "subjects": {
+            "default": 0,
+            "title": "Subjects",
+            "type": "integer"
+          },
+          "tiers": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Tiers",
+            "type": "array"
+          },
+          "unrecovered": {
+            "title": "Unrecovered",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tiers",
+          "orphans",
+          "recoverable",
+          "by_tier",
+          "by_class",
+          "fail_closed_no_key",
+          "fail_closed_several",
+          "unrecovered"
+        ],
+        "title": "RelinkReport",
+        "type": "object"
+      },
+      "RelinkReportItem": {
+        "description": "One sampled orphan and the names a relink would link it to.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "names": {
+            "items": {
+              "$ref": "#/components/schemas/RelinkReportName"
+            },
+            "title": "Names",
+            "type": "array"
+          },
+          "namespace_key": {
+            "title": "Namespace Key",
+            "type": "string"
+          },
+          "particle_id": {
+            "title": "Particle Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "particle_id",
+          "content",
+          "namespace_key",
+          "names"
+        ],
+        "title": "RelinkReportItem",
+        "type": "object"
+      },
+      "RelinkReportName": {
+        "description": "One recovered name in a report.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          },
+          "token_class": {
+            "title": "Token Class",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "token_class",
+          "tier"
+        ],
+        "title": "RelinkReportName",
+        "type": "object"
+      },
       "ResolutionAction": {
         "enum": [
           "PREFER_A",
           "PREFER_B",
           "BOTH_VALID",
-          "DEFER"
+          "DEFER",
+          "DISCARD"
         ],
         "title": "ResolutionAction",
         "type": "string"
@@ -4391,7 +5126,7 @@
         "type": "object"
       },
       "ReviewRequest": {
-        "description": "Resolve an INCONSISTENCY: pick a ``ResolutionAction`` (trust A,\ntrust B, both wrong, both right) and optionally annotate.",
+        "description": "Resolve an INCONSISTENCY: pick a ``ResolutionAction`` (prefer A,\nprefer B, both valid, defer, or discard both) and optionally annotate.",
         "properties": {
           "action": {
             "$ref": "#/components/schemas/ResolutionAction"
@@ -4422,6 +5157,108 @@
           "reviewer_id"
         ],
         "title": "ReviewRequest",
+        "type": "object"
+      },
+      "SessionExposure": {
+        "description": "One SessionStart's delivered context.",
+        "properties": {
+          "action": {
+            "enum": [
+              "full",
+              "diff",
+              "skip"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "beliefs": {
+            "items": {
+              "$ref": "#/components/schemas/ShownBelief"
+            },
+            "title": "Beliefs",
+            "type": "array"
+          },
+          "observer_scope_applied": {
+            "description": "Whether the session read the store through its project observer.",
+            "title": "Observer Scope Applied",
+            "type": "boolean"
+          },
+          "project_key": {
+            "description": "The session's resolved project key.",
+            "title": "Project Key",
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source": {
+            "description": "The SessionStart source: startup, clear or compact.",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "recorded_at",
+          "source",
+          "action",
+          "project_key",
+          "observer_scope_applied"
+        ],
+        "title": "SessionExposure",
+        "type": "object"
+      },
+      "SessionExposureResponse": {
+        "description": "The id of the appended session-start row.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SessionExposureResponse",
+        "type": "object"
+      },
+      "ShownBelief": {
+        "description": "One belief a session was shown, in the order it was shown.",
+        "properties": {
+          "contested_bases": {
+            "description": "The contested bases the shown line displayed; empty when none.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Contested Bases",
+            "type": "array"
+          },
+          "particle_id": {
+            "description": "The belief's id. A short id that matches no stored particle is kept as given.",
+            "title": "Particle Id",
+            "type": "string"
+          },
+          "shown_as": {
+            "description": "How it was shown: a projected MEMORY.md line, or a digest line.",
+            "enum": [
+              "projection",
+              "digest"
+            ],
+            "title": "Shown As",
+            "type": "string"
+          }
+        },
+        "required": [
+          "particle_id",
+          "shown_as"
+        ],
+        "title": "ShownBelief",
         "type": "object"
       },
       "Snapshot": {
@@ -4551,9 +5388,19 @@
             "title": "Particles",
             "type": "integer"
           },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
           "snapshot_id": {
             "title": "Snapshot Id",
             "type": "string"
+          },
+          "source_bytes": {
+            "default": 0,
+            "title": "Source Bytes",
+            "type": "integer"
           },
           "uri": {
             "default": "",
@@ -4800,6 +5647,7 @@
           "EXPLICIT_SUPERSESSION",
           "DOCUMENT_SUPERSEDED",
           "SUPERSEDED_BY_UPDATE",
+          "SUPERSEDED_BY_REANCHOR",
           "DUPLICATE_MERGED"
         ],
         "title": "StatusReason",
@@ -4817,6 +5665,36 @@
           "status"
         ],
         "title": "StatusResponse",
+        "type": "object"
+      },
+      "StoreLLMSpend": {
+        "description": "A store's cumulative LLM spend, summed from its recorded run events.\n\nRead-time view over the append-only ``CONSOLIDATION_RUN`` and\n``EXTRACT_RUN`` events that carry measured usage (derived, never\nstored as a counter). The dollar figure is list price from recorded token\ncounts, never a billing API, and runs made before usage was recorded are\nnot in it, so it is a figure *since* ``since``.",
+        "properties": {
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "unpriced_runs": {
+            "default": 0,
+            "title": "Unpriced Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cost_usd",
+          "runs",
+          "since"
+        ],
+        "title": "StoreLLMSpend",
         "type": "object"
       },
       "StructuralAggregate": {
@@ -5494,6 +6372,249 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VocabularyClassCount": {
+        "description": "A subject class and how many claims or subjects carry it.\n\n``(unclassed)`` names a resolved subject with no class, and\n``(unresolved)`` a claim whose subject term resolved to no Subject.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "subject_class": {
+            "title": "Subject Class",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_class",
+          "count"
+        ],
+        "title": "VocabularyClassCount",
+        "type": "object"
+      },
+      "VocabularyPredicate": {
+        "description": "One canonical predicate of the vocabulary report.\n\n``canonical`` is the normalised form (an inflectional stem, so\n``moved to`` and ``moves to`` share ``mov to``); a ``URI`` predicate is its\nown canonical form. ``label`` is the commonest surface form, for reading.\n``alignments`` lists what the adopted vocabulary documents say the form\nis: the term a document mints or aliases for it, then that term's outward\nalignments, each naming its subject class. Empty while the store adopts\nno document.",
+        "properties": {
+          "alignments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Alignments",
+            "type": "array"
+          },
+          "canonical": {
+            "title": "Canonical",
+            "type": "string"
+          },
+          "claim_count": {
+            "title": "Claim Count",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "object_shapes": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/ObjectShape"
+            },
+            "title": "Object Shapes",
+            "type": "object"
+          },
+          "subject_classes": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularyClassCount"
+            },
+            "title": "Subject Classes",
+            "type": "array"
+          },
+          "surface_forms": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularySurfaceForm"
+            },
+            "title": "Surface Forms",
+            "type": "array"
+          }
+        },
+        "required": [
+          "canonical",
+          "label",
+          "claim_count",
+          "surface_forms",
+          "object_shapes",
+          "subject_classes"
+        ],
+        "title": "VocabularyPredicate",
+        "type": "object"
+      },
+      "VocabularyReport": {
+        "description": "The read-time vocabulary report: the evidence an ontology is built from.\n\nComputed on every call and never stored. The predicate rows and the claim\ncounts follow the request's candidate set, observer included.\nThe subject header and the modelling-decision counts are store-wide:\nsubjects and operator events are not beliefs a project observes. With\n``as_of`` the header counts the Subjects created by then, as\nthey stand now, and the decisions recorded by then;\n``structured_claims_total`` stays the current store's.",
+        "properties": {
+          "aligned_by_namespace": {
+            "items": {
+              "$ref": "#/components/schemas/NamespaceAlignment"
+            },
+            "title": "Aligned By Namespace",
+            "type": "array"
+          },
+          "alignment_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alignment Source"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "claims_in_view": {
+            "title": "Claims In View",
+            "type": "integer"
+          },
+          "classed_by_class": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularyClassCount"
+            },
+            "title": "Classed By Class",
+            "type": "array"
+          },
+          "classed_by_namespace": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularyClassCount"
+            },
+            "title": "Classed By Namespace",
+            "type": "array"
+          },
+          "link_suppress_threshold": {
+            "title": "Link Suppress Threshold",
+            "type": "number"
+          },
+          "modelling_decisions": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Modelling Decisions",
+            "type": "object"
+          },
+          "object_kinds": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/TermKind"
+            },
+            "title": "Object Kinds",
+            "type": "object"
+          },
+          "object_shapes": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/ObjectShape"
+            },
+            "title": "Object Shapes",
+            "type": "object"
+          },
+          "observer_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObserverScopeNote"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "predicates": {
+            "items": {
+              "$ref": "#/components/schemas/VocabularyPredicate"
+            },
+            "title": "Predicates",
+            "type": "array"
+          },
+          "predicates_canonical": {
+            "title": "Predicates Canonical",
+            "type": "integer"
+          },
+          "predicates_distinct": {
+            "title": "Predicates Distinct",
+            "type": "integer"
+          },
+          "structured_claims_total": {
+            "title": "Structured Claims Total",
+            "type": "integer"
+          },
+          "subjects_aligned": {
+            "title": "Subjects Aligned",
+            "type": "integer"
+          },
+          "subjects_classed": {
+            "title": "Subjects Classed",
+            "type": "integer"
+          },
+          "subjects_total": {
+            "title": "Subjects Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subjects_total",
+          "subjects_aligned",
+          "aligned_by_namespace",
+          "link_suppress_threshold",
+          "subjects_classed",
+          "classed_by_class",
+          "classed_by_namespace",
+          "structured_claims_total",
+          "claims_in_view",
+          "object_kinds",
+          "object_shapes",
+          "predicates_distinct",
+          "predicates_canonical",
+          "modelling_decisions"
+        ],
+        "title": "VocabularyReport",
+        "type": "object"
+      },
+      "VocabularySurfaceForm": {
+        "description": "One predicate term as stored, under its canonical form.",
+        "properties": {
+          "claim_count": {
+            "title": "Claim Count",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TermKind"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "kind",
+          "claim_count"
+        ],
+        "title": "VocabularySurfaceForm",
+        "type": "object"
+      },
       "WarcRecordType": {
         "enum": [
           "RESPONSE",
@@ -6025,7 +7146,7 @@
     },
     "/curation": {
       "get": {
-        "description": "Return the bus-stop-editing curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist;\nno new detection logic. ``limit`` overrides ``curation.session_size`` for\none call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``). 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** (correct, but as slow as it was before\nthe persisted-collection cutover) and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
+        "description": "Return the curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist;\nno new detection logic. ``limit`` overrides ``curation.session_size`` for\none call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``). 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** (correct, but as slow as it was before\nthe persisted-collection cutover) and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
         "operationId": "get_curation_queue_curation_get",
         "parameters": [
           {
@@ -6551,7 +7672,7 @@
     },
     "/extract": {
       "post": {
-        "description": "Run the extractor pipeline against a corpus snapshot. Returns\nthe ACTIVE particles produced by the run (excludes any that\nimmediately transitioned to SUPERSEDED / INCONSISTENCY).",
+        "description": "Run the extractor pipeline against a corpus snapshot. Returns\nthe ACTIVE particles produced by the run (excludes any that\nimmediately transitioned to SUPERSEDED / INCONSISTENCY).\n\nThe run's measured LLM usage is recorded as an ``EXTRACT_RUN`` event, so a\nremote caller's extraction counts toward the store's recorded spend.",
         "operationId": "extract_extract_post",
         "requestBody": {
           "content": {
@@ -7905,7 +9026,7 @@
     },
     "/particles/{particle_id}/subjects": {
       "post": {
-        "description": "Attach a subject to a NO_SUBJECT orphan (provenance-preserving).\n\nSupersedes the orphan with a successor that has the same content + the\nresolved subject(s), carrying over the predecessor's confidence record,\nextractor_ref, and source; it is the same extracted claim with a corrected\nlinkage. 400 on a bad resolution / guard violation; 403 when writes are\ndisabled.",
+        "description": "Attach a subject to a belief that has none (in place since).\n\nWrites the subject link on the same belief, which keeps its id, confidence,\nprovenance and utility evidence; the response names that same id. 400 on a\nbad resolution, a guard violation, or a belief that already has a subject;\n403 when writes are disabled.",
         "operationId": "assign_subject_endpoint_particles__particle_id__subjects_post",
         "parameters": [
           {
@@ -8255,7 +9376,7 @@
     },
     "/reindex": {
       "post": {
-        "description": "Re-extract stale / failed snapshots. Honours chunk-hash\ncarry-forward so unchanged source chunks skip\nthe LLM call.",
+        "description": "Re-extract stale / failed snapshots. Honours chunk-hash\ncarry-forward so unchanged source chunks skip\nthe LLM call.\n\nA run that is not a dry run records its measured LLM usage, the\nre-extraction and the post-reindex lint pass together, as an\n``EXTRACT_RUN`` event with ``route: reindex``, so it counts toward the\nstore's recorded spend.",
         "operationId": "run_reindex_reindex_post",
         "requestBody": {
           "content": {
@@ -8327,7 +9448,7 @@
     },
     "/review/{particle_id}": {
       "post": {
-        "description": "Resolve an INCONSISTENCY particle. The resolution is annotation-\nonly by default; the originals keep their status. A new\nSourceTrustStatement may be created depending on the action.",
+        "description": "Resolve an INCONSISTENCY particle (\u00a79.6).\n\nEvery action except DEFER closes the record. PREFER_A and PREFER_B demote\nthe other claim and may write a SourceTrustStatement. BOTH_VALID keeps\nboth claims as ALEATORY. DISCARD retracts both claims and writes no trust\nstatement.",
         "operationId": "review_particle_review__particle_id__post",
         "parameters": [
           {
@@ -8388,6 +9509,50 @@
           }
         ],
         "summary": "Review Particle"
+      }
+    },
+    "/session-exposures": {
+      "post": {
+        "description": "Append the beliefs one session was shown at session start.\n\nThe SessionStart hook calls this after it has cut what it injects to its\nbyte budget. Short ``p-`` ids are resolved to full ids here. Rows are only\nappended, and no route reads them back.",
+        "operationId": "record_session_exposure_endpoint_session_exposures_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionExposure"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionExposureResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Record Session Exposure Endpoint"
       }
     },
     "/subjects": {
@@ -8512,6 +9677,60 @@
           }
         ],
         "summary": "Create Subject"
+      }
+    },
+    "/subjects/relink-gated": {
+      "post": {
+        "description": "Link subjectless beliefs to the project-scoped subjects they name.\n\nRecovers each belief's names from its own gated-subjects record, its\nstructured claim's subject term, or its backtick spans, and links them in\nplace, one event per run. The `relink` gesture of the `gated_subjects`\ncuration card. 403 when writes are disabled and `dry_run` is false.",
+        "operationId": "relink_gated_endpoint_subjects_relink_gated_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelinkGatedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelinkReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Relink Gated Endpoint"
       }
     },
     "/subjects/search": {
@@ -9166,6 +10385,79 @@
           }
         ],
         "summary": "Set Trust Statement Endpoint"
+      }
+    },
+    "/vocabulary": {
+      "get": {
+        "description": "The read-time vocabulary report: the evidence an ontology is built from.\n\nEach canonical predicate with its surface forms, claim count, object value\nshapes, the subject classes it attaches to, and its alignment, under a\nstore header of subject alignment by namespace and link-confidence band,\nclass counts, and the confirmed modelling decisions in the\noperator log.\nComputed per request and never stored; deterministic, with no embedding\nand no LLM call. ``observer_project`` reads the claims through a project\nobserver; the subject header and the decision counts are\nstore-wide. The same report rides ``POST /query`` with ``list_vocabulary``.",
+        "operationId": "vocabulary_report_route_vocabulary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "observer_project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Observer Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_document_meta",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Document Meta",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_non_asserted",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Non Asserted",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VocabularyReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Vocabulary Report Route"
       }
     }
   }

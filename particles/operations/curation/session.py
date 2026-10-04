@@ -19,15 +19,22 @@ status machine — no bespoke undo stack.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import CurationConfig, get_config
-from particles.core.schema import Particle, RelationCreatedBy, RelationType
+from particles.core.schema import Particle, RelationCreatedBy, RelationType, ResolutionAction
 from particles.core.status import Status, StatusReason
+from particles.corpus.store import get_particle_source_uris
 from particles.operations.abstraction import accept_candidate, reject_candidate
+from particles.operations.lint.open_inconsistency import (
+    open_inconsistency_findings,
+    record_sides,
+)
 from particles.operations.query.effective_confidence import score_effective_confidence
+from particles.operations.review import resolve
 from particles.store.curation_snapshot_store import get_snapshot, latest_snapshot
 from particles.store.event_store import (
     EventRefKind,
@@ -39,14 +46,24 @@ from particles.store.event_store import (
 from particles.store.particle_store import get_particle, update_particle_status
 from particles.store.subject_store import get_subject
 
-from .cards import CardKind, CurationCard, ParticleBrief
-from .collect import collect_cards
+from .cards import (
+    RESOLVE_ACTIONS,
+    CardKind,
+    ConflictBrief,
+    CurationCard,
+    ParticleBrief,
+    resolve_actions_for,
+)
+from .collect import cards_from_findings, collect_cards
 from .leverage import _as_utc, contested_ids_from, score_cards
+from .rulings import record_demotion_ruling
 from .snapshot import (
     CurationQueueResult,
     QueueSource,
+    Resolved,
     collect_and_persist,
-    load_collection,
+    lacks_conflict_cards,
+    read_prior,
     stamp_from,
 )
 
@@ -72,8 +89,19 @@ _RESOLVING_EVENTS: frozenset[OperatorEventType] = frozenset(
         OperatorEventType.SUBJECT_LINK_CONFIRMED,
         OperatorEventType.DEPOSIT_SUGGESTION_DISMISSED,
         OperatorEventType.SOURCE_RETRACTED,
+        # an in-place relink (a per-card assign-subject, or the batch).
+        OperatorEventType.SUBJECTS_RELINKED,
     }
 )
+
+# A batch card's key; it is resolved by a batch relink event, never by
+# membership, since touching one of thousands of beliefs for an
+# unrelated reason must not hide the whole card.
+_GATED_KEY = "gated_subjects"
+
+# How many of a batch card's beliefs get a brief: the card is judged as one
+# decision, and briefing thousands of beliefs would dominate the queue's cost.
+_BATCH_BRIEF_SAMPLE = 5
 
 # Tiebreak within equal leverage — more urgent kinds first. The
 # leverage score is always primary; this only orders cards that tie (e.g. the
@@ -81,15 +109,23 @@ _RESOLVING_EVENTS: frozenset[OperatorEventType] = frozenset(
 _KIND_PRIORITY: dict[CardKind, int] = {
     CardKind.CONTRADICTION: 0,
     CardKind.CONTESTED: 1,
+    # the conflict the store has recorded, beside the claims it touches.
+    CardKind.INCONSISTENCY: 1,
     CardKind.RETRACTION_CASCADE: 2,
+    # the same question as a retraction cascade, asked of an update.
+    CardKind.STALE_BASIS: 2,
     CardKind.BROKEN_PROVENANCE: 3,
     CardKind.NO_SUBJECT: 4,
+    CardKind.GATED_SUBJECTS: 4,
     CardKind.STALE: 5,
     CardKind.CONFIDENCE_DECAY: 6,
     CardKind.RECENCY_DECAY: 7,
     # a pending abstraction candidate outranks the housekeeping tail
     # — an operator verdict here changes the projection's population.
     CardKind.PROPOSED_ABSTRACTION: 8,
+    # a ruling on a retirement already made; no belief is degraded
+    # while it waits, so it sits with the housekeeping tail.
+    CardKind.DEMOTION: 9,
     CardKind.FAILED_SNAPSHOTS: 9,
     CardKind.DUPLICATE_PAIR: 10,
     CardKind.UNCITED_URL: 11,
@@ -98,15 +134,32 @@ _KIND_PRIORITY: dict[CardKind, int] = {
 # Session-model gestures available on every card regardless of kind.
 _SESSION_GESTURES = frozenset({"snooze", "dismiss"})
 
-# Gestures that need operator content or judgment — surfaced (the card shows the
-# resolving command) rather than dispatched from a one-line gesture.
+# Gestures resolved by a different verb — surfaced (the card shows the resolving
+# command) rather than dispatched. ``supersede`` left this set: its
+# content arrives as a ``BeliefRevision``, so it dispatches like the others.
 _SURFACED: dict[str, str] = {
-    "supersede": "supersession is operator-authored — assert the replacement, then "
-    "retire the old belief",
-    "edit": "an edit is a supersession — assert the revised belief",
-    "comment": "run `particles review` to annotate / resolve the INCONSISTENCY",
+    "edit": "an edit is a supersession — run `particles curate apply supersede KEY "
+    "--content TEXT --reason TEXT --confidence F`",
     "reindex": "run `particles reindex` to re-extract the failed snapshots",
 }
+
+
+@dataclass(frozen=True)
+class BeliefRevision:
+    """The operator's replacement belief for the ``supersede`` gesture.
+
+    ``subjects`` empty means inherit the predecessor's subjects by id; otherwise
+    it replaces them, each value an existing Subject id or a name for the
+    standard resolver. With neither ``source_excerpt`` nor ``corpus_entry_id``
+    the gesture's reason is deposited as the successor's source (§4).
+    ``confidence`` has no default (§3).
+    """
+
+    content: str
+    confidence: float
+    subjects: list[str] = field(default_factory=list)
+    source_excerpt: str | None = None
+    corpus_entry_id: str | None = None
 
 
 async def build_curation_queue(
@@ -170,17 +223,13 @@ async def build_curation_queue(
     # records an operator event, so anything touched after the collection was
     # built is treated as resolved. Skipped on a live build (nothing predates
     # it).
-    resolved_ids: set[str] = set()
+    resolved = Resolved()
     if stamp.built_at is not None:
-        resolved_keys, resolved_ids = await _resolved_since(session, stamp.built_at)
-        suppressed |= resolved_keys
-    collection = [
-        c
-        for c in collection
-        if c.key not in suppressed and not any(pid in resolved_ids for pid in c.particle_ids)
-    ]
+        resolved = await _resolved_since(session, stamp.built_at)
+    collection = [c for c in collection if c.key not in suppressed and not resolved.covers(c)]
 
     collection.sort(key=lambda c: (-c.leverage, _KIND_PRIORITY.get(c.kind, 99), c.key))
+    stamp.open_count = len(collection)
     size = cfg.session_size if limit is None else limit
     # Level 2: belief status. Walked over the ranked list rather than the whole
     # collection, so a dropped card promotes the next real one instead of
@@ -212,7 +261,16 @@ async def _collection_for(
 
     row = await latest_snapshot(session)
     if row is not None:
-        return load_collection(row), stamp_from(row)
+        prior = read_prior(row)
+        stored = list(prior.cards)
+        if lacks_conflict_cards(row):
+            # a collection built before open conflicts had their own
+            # cards is served with them added from the cheap status scan, until
+            # the next build writes the current format.
+            conflicts = cards_from_findings(await open_inconsistency_findings(session))
+            await score_cards(session, conflicts, contested_ids=contested_ids_from(conflicts))
+            stored += conflicts
+        return stored, stamp_from(row, kind_as_of=prior.kind_as_of)
 
     # Cold start: no snapshot yet, so collect live and serve
     # that — correct, just slow, exactly as before this ADR.
@@ -254,34 +312,53 @@ async def rebuild_curation_snapshot(
     return stamp
 
 
-async def _resolved_since(session: AsyncSession, built_at: datetime) -> tuple[set[str], set[str]]:
+async def _resolved_since(session: AsyncSession, built_at: datetime) -> Resolved:
     """What an operator resolved after the collection was built.
 
     Level 3 of the staleness ladder. A snapshot cannot know about a merge, a
     subject assignment or a deposit that happened at 09:00 — but the operator
-    event log does, because every resolving gesture records one. Returns
-    ``(card_keys, particle_ids)``: URL cards suppress by key (they carry no
-    particle, and reuse the deposit-suggestion path already built for them),
-    while belief cards suppress by *membership* — a card is keyed by
-    kind plus its sorted particle ids, so the key cannot be reconstructed from
-    an event ref alone, but "does this card name a touched belief?" answers the
-    same question for every kind at once.
+    event log does, because every resolving gesture records one. URL cards
+    suppress by key (they carry no particle, and reuse the deposit-suggestion
+    path already built for them), while belief cards suppress by
+    *membership* — a card is keyed by kind plus its sorted particle ids, so the
+    key cannot be reconstructed from an event ref alone, but "does this card
+    name a touched belief?" answers the same question for every kind at once.
+    Conflict cards are the exception, matched by record (``Resolved.covers``).
 
     Deliberately over-suppresses rather than under-suppresses: a belief touched
     for an unrelated reason costs the operator one card that reappears after the
     next build, whereas showing a card the operator already handled is the exact
     failure this section exists to prevent.
     """
-    keys: set[str] = set()
-    touched: set[str] = set()
-    for ev in await list_events_since(session, since=built_at, event_types=_RESOLVING_EVENTS):
-        for ref in ev.refs:
-            if ref.ref_kind is EventRefKind.PARTICLE:
-                touched.add(ref.ref_id)
-        url = (ev.payload or {}).get("canonical_url")
+    return Resolved.union(r for _, r in await _resolutions_since(session, built_at))
+
+
+async def _resolutions_since(
+    session: AsyncSession, since: datetime
+) -> list[tuple[datetime, Resolved]]:
+    """Each resolving event after ``since``, with when it happened.
+
+    The per-event form of :func:`_resolved_since`: the carry-forward rule
+    needs each event's time, to drop only a carried card that a
+    resolution postdates.
+    """
+    out: list[tuple[datetime, Resolved]] = []
+    for ev in await list_events_since(session, since=since, event_types=_RESOLVING_EVENTS):
+        refs = [ref.ref_id for ref in ev.refs if ref.ref_kind is EventRefKind.PARTICLE]
+        payload = ev.payload or {}
+        records: frozenset[str] = frozenset()
+        if ev.event_type is OperatorEventType.REVIEW_RESOLVED and payload.get("action") != "DEFER":
+            # The record is the event's first ref; members are never records,
+            # so membership in the whole ref set identifies it.
+            records = frozenset(refs)
+        keys: set[str] = set()
+        url = payload.get("canonical_url")
         if isinstance(url, str):
             keys.add(f"uncited_url:{url}")
-    return keys, touched
+        if ev.event_type is OperatorEventType.SUBJECTS_RELINKED and payload.get("batch"):
+            keys.add(_GATED_KEY)
+        out.append((_as_utc(ev.occurred_at), Resolved(frozenset(keys), frozenset(refs), records)))
+    return out
 
 
 async def _take_live_cards(
@@ -299,7 +376,23 @@ async def _take_live_cards(
     for card in ranked:
         if len(out) >= size:
             break
-        if not card.particle_ids:
+        if card.kind is CardKind.INCONSISTENCY:
+            # live while the record is open, whatever its members'
+            # statuses. Reading the record's own status catches every closing
+            # path (review, the second-reading close, a lapse).
+            record = await get_particle(session, card.inconsistency_id or "")
+            if record is not None and record.status is Status.INCONSISTENCY:
+                out.append(card)
+            continue
+        if card.kind is CardKind.DEMOTION:
+            # the retired claim is never ACTIVE. The card is live
+            # while the retirement stands and its replacement is ACTIVE.
+            if await _demotion_live(session, card):
+                out.append(card)
+            continue
+        if not card.particle_ids or card.kind is CardKind.GATED_SUBJECTS:
+            # A batch card's gesture re-plans from the store, so a member that
+            # changed since the build is skipped then, not checked one by one.
             out.append(card)
             continue
         alive = True
@@ -313,18 +406,42 @@ async def _take_live_cards(
     return out
 
 
-async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCard]) -> None:
-    """Populate each card's ``particles`` with a compact brief.
+async def _demotion_live(session: AsyncSession, card: CurationCard) -> bool:
+    """A demotion card is live while its claims are still one retired, one ACTIVE."""
+    if len(card.particle_ids) != 2:
+        return False
+    retired = await get_particle(session, card.particle_ids[0])
+    replacement = await get_particle(session, card.particle_ids[1])
+    return (
+        retired is not None
+        and replacement is not None
+        and retired.status is not Status.ACTIVE
+        and replacement.status is Status.ACTIVE
+    )
 
-    One pass over the union of every (already-sliced) card's ``particle_ids`` —
-    each referenced particle and subject is loaded once — so a client can judge a
-    card (e.g. which of a duplicate pair to keep) without a per-id
-    ``particles particle show`` round-trip. ``effective_confidence`` is scored exactly as
-    the query path does (``score_effective_confidence``), so the feed and a query
-    cannot disagree. Cards with no particle (uncited_url / failed_snapshots) keep
-    the empty default.
+
+async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCard]) -> None:
+    """Populate each card's ``particles`` (and ``conflict``) with compact briefs.
+
+    One pass over the union of every (already-sliced) card's ``particle_ids``
+    plus, for a card backed by an INCONSISTENCY, the record's claims A and B —
+    each referenced particle and subject is loaded once — so a client can judge
+    a card (which of a duplicate pair to keep, which side of a conflict is
+    right) without a per-id ``particles particle show`` round-trip.
+    ``effective_confidence`` is scored exactly as the query path does
+    (``score_effective_confidence``), so the feed and a query cannot disagree.
+    Cards with no particle (uncited_url / failed_snapshots) keep the empty
+    default.
     """
-    ids = {pid for c in cards for pid in c.particle_ids}
+    sides: dict[str, tuple[list[str], list[str]]] = {}
+    for card in cards:
+        if card.inconsistency_id and card.inconsistency_id not in sides:
+            record = await get_particle(session, card.inconsistency_id)
+            if record is not None:
+                sides[card.inconsistency_id] = record_sides(record)
+
+    ids = {pid for c in cards for pid in _brief_ids(c)}
+    ids |= {pid for a, b in sides.values() for pid in a + b}
     if not ids:
         return
 
@@ -337,6 +454,7 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
         return
 
     eff = await score_effective_confidence(session, list(particles.values()), populate_cache=True)
+    sources = await get_particle_source_uris(session, list(particles.values()))
     labels: dict[str, str] = {}
     for p in particles.values():
         for sid in p.subject_ids:
@@ -345,18 +463,48 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
                 if subject is not None:
                     labels[sid] = subject.canonical_name
 
+    def brief(pid: str | None) -> ParticleBrief | None:
+        p = particles.get(pid) if pid is not None else None
+        if p is None:
+            return None
+        return ParticleBrief(
+            particle_id=p.id,
+            content=p.content,
+            subject_labels=[labels[s] for s in p.subject_ids if s in labels],
+            effective_confidence=eff.get(p.id, p.confidence.value),
+            status=p.status.value,
+            status_reason=p.status_reason.value if p.status_reason is not None else None,
+            source_uri=sources.get(p.id),
+            asserted_at=p.asserted_at,
+        )
+
     for card in cards:
-        card.particles = [
-            ParticleBrief(
-                particle_id=pid,
-                content=p.content,
-                subject_labels=[labels[s] for s in p.subject_ids if s in labels],
-                effective_confidence=eff.get(pid, p.confidence.value),
-                status=p.status.value,
+        card.particles = [b for pid in _brief_ids(card) if (b := brief(pid)) is not None]
+        if card.inconsistency_id is None or card.inconsistency_id not in sides:
+            continue
+        a_side, b_side = sides[card.inconsistency_id]
+        a_id = a_side[0] if a_side else None
+        b_id = b_side[0] if b_side else None
+        card.conflict = ConflictBrief(
+            inconsistency_id=card.inconsistency_id,
+            a=brief(a_id),
+            b=brief(b_id),
+            further_a=[x for pid in a_side[1:] if (x := brief(pid)) is not None],
+            further_b=[x for pid in b_side[1:] if (x := brief(pid)) is not None],
+        )
+        if card.kind is CardKind.INCONSISTENCY:
+            # offer only the actions that can do what they say.
+            card.resolve_actions = resolve_actions_for(
+                particles.get(a_id) if a_id else None,
+                particles.get(b_id) if b_id else None,
             )
-            for pid in card.particle_ids
-            if (p := particles.get(pid)) is not None
-        ]
+
+
+def _brief_ids(card: CurationCard) -> list[str]:
+    """The beliefs a card is briefed with: all of them, or a batch card's sample."""
+    if card.kind is CardKind.GATED_SUBJECTS:
+        return card.particle_ids[:_BATCH_BRIEF_SAMPLE]
+    return card.particle_ids
 
 
 async def _suppressed_keys(session: AsyncSession) -> set[str]:
@@ -393,7 +541,11 @@ async def _suppressed_keys(session: AsyncSession) -> set[str]:
 
 
 def _particle_refs(card: CurationCard) -> list[tuple[EventRefKind, str]]:
-    return [(EventRefKind.PARTICLE, pid) for pid in card.particle_ids]
+    ids = list(card.particle_ids)
+    if card.kind is CardKind.INCONSISTENCY and card.inconsistency_id:
+        # A conflict card's subject is its record.
+        ids = [card.inconsistency_id, *(pid for pid in ids if pid != card.inconsistency_id)]
+    return [(EventRefKind.PARTICLE, pid) for pid in ids]
 
 
 async def apply_gesture(
@@ -406,18 +558,33 @@ async def apply_gesture(
     reason: str | None = None,
     days: int | None = None,
     subject: str | None = None,
+    revision: BeliefRevision | None = None,
+    action: str | None = None,
+    note: str | None = None,
 ) -> str:
     """Dispatch a card's gesture onto an existing write op.
 
-    Executes the safe, card-resolvable gestures (affirm / snooze / dismiss /
-    retract / merge / deposit / assign-subject); the content- or judgment-bearing
-    gestures (supersede / edit / comment / reindex) are *surfaced* with the
-    resolving command rather than dispatched. ``subject`` carries the resolved
-    Subject id or a subject name for the ``assign-subject`` gesture.
-    Does not commit — the caller owns the transaction. Returns a human-readable
-    result line.
+    Executes affirm / snooze / dismiss / retract / merge / deposit /
+    assign-subject / accept / reject, supersede from the operator's
+    ``revision``, and resolve with the review ``action`` and an
+    optional ``note``; the gestures another verb resolves (edit / reindex) are
+    *surfaced* with the resolving command rather than dispatched. ``subject``
+    carries the resolved Subject id or a subject name for the
+    ``assign-subject`` gesture. Does not commit — the caller owns
+    the transaction, except that ``resolve`` runs ``review.resolve``, which
+    commits its own work. Returns a human-readable result line.
     """
     g = gesture.lower()
+    if card.kind is CardKind.INCONSISTENCY:
+        if g == "comment":
+            # The resolving gesture's earlier name, kept as an alias.
+            g = "resolve"
+        if g in ("affirm", "dismiss"):
+            raise ValueError(
+                f"An open conflict cannot be hidden for good while it stays open ({g}). "
+                "Resolve it instead: BOTH_VALID if the claims do not really conflict, "
+                "DISCARD if neither is worth keeping. Snooze it to decide later."
+            )
     if g not in _SESSION_GESTURES and g not in card.suggested_gestures:
         offered = ", ".join(card.suggested_gestures)
         raise ValueError(
@@ -436,13 +603,15 @@ async def apply_gesture(
                 refs=_particle_refs(card),
                 payload={"card_key": card.key, "kind": card.kind.value},
             )
-            return f"Affirmed — {card.key} will not resurface."
+            line = f"Affirmed — {card.key} will not resurface."
+            return await _with_ruling(session, card, g, line, actor=actor, store=store)
 
         case "snooze":
             return await _snooze(session, card, actor=actor, days=days, permanent=False)
 
         case "dismiss":
-            return await _snooze(session, card, actor=actor, days=days, permanent=days is None)
+            line = await _snooze(session, card, actor=actor, days=days, permanent=days is None)
+            return await _with_ruling(session, card, g, line, actor=actor, store=store)
 
         case "retract":
             return await _retract(session, card, actor=actor, reason=reason)
@@ -456,13 +625,86 @@ async def apply_gesture(
         case "assign-subject":
             return await _assign_subject(session, card, actor=actor, store=store, subject=subject)
 
+        case "relink":
+            return await _relink(session, card, actor=actor)
+
+        case "supersede":
+            return await _supersede(
+                session, card, actor=actor, store=store, reason=reason, revision=revision
+            )
+
         case "accept":
             return await _accept_abstraction(session, card, actor=actor)
 
         case "reject":
             return await _reject_abstraction(session, card, actor=actor, reason=reason)
 
+        case "resolve":
+            return await _resolve(session, card, actor=actor, action=action, note=note)
+
     raise ValueError(f"Unknown gesture {g!r}.")
+
+
+async def _with_ruling(
+    session: AsyncSession,
+    card: CurationCard,
+    gesture: str,
+    line: str,
+    *,
+    actor: str,
+    store: str,
+) -> str:
+    """``line``, plus the disclosure when the gesture ruled on a demotion.
+
+    The ruling is kept as a labelled benchmark pair; the gesture's meaning is
+    unchanged and no status moves.
+    """
+    disclosure = await record_demotion_ruling(session, card, gesture, actor=actor, store=store)
+    return line if disclosure is None else f"{line} {disclosure}"
+
+
+async def _resolve(
+    session: AsyncSession,
+    card: CurationCard,
+    *,
+    actor: str,
+    action: str | None,
+    note: str | None,
+) -> str:
+    """Resolve a conflict card's record through ``review.resolve``.
+
+    Refuses an action the card withholds (``resolve_actions_for``); DEFER is
+    always accepted, since it only records a note and leaves the record open.
+    """
+    if card.inconsistency_id is None:
+        raise ValueError("Card carries no INCONSISTENCY id.")
+    choices = "|".join((*RESOLVE_ACTIONS, "DEFER"))
+    if not action:
+        raise ValueError(f"resolve needs --action {choices}.")
+    try:
+        chosen = ResolutionAction(action.upper())
+    except ValueError as exc:
+        raise ValueError(f"Unknown action {action!r}; use {choices}.") from exc
+
+    record = await get_particle(session, card.inconsistency_id)
+    if record is None or record.status is not Status.INCONSISTENCY:
+        raise ValueError(f"{card.key} is no longer an open conflict.")
+    a_side, b_side = record_sides(record)
+    a = await get_particle(session, a_side[0]) if a_side else None
+    b = await get_particle(session, b_side[0]) if b_side else None
+    offered = resolve_actions_for(a, b)
+    if chosen is not ResolutionAction.DEFER and chosen.value not in offered:
+        side, member = ("A", a) if chosen is ResolutionAction.PREFER_A else ("B", b)
+        state = member.status.value if member is not None else "no longer in the store"
+        raise ValueError(
+            f"{chosen.value} is not offered on this conflict: claim {side} is {state}, "
+            f"so it cannot be the one kept. Offered: {', '.join(offered)}."
+        )
+
+    await resolve(session, record.id, chosen, reviewer_id=actor, note=note, actor=actor)
+    if chosen is ResolutionAction.DEFER:
+        return f"Deferred {card.key}: note recorded, the conflict stays open."
+    return f"Resolved {card.key} as {chosen.value}."
 
 
 async def _accept_abstraction(session: AsyncSession, card: CurationCard, *, actor: str) -> str:
@@ -541,7 +783,10 @@ async def _retract(
         event_type=OperatorEventType.PARTICLE_RETRACTED,
         reason=reason,
         refs=[(EventRefKind.PARTICLE, pid)],
-        payload={"via": "curate"},
+        # The card key rides the event so the precision report can
+        # attribute the retraction to this card after the card has left the
+        # retained collections.
+        payload={"via": "curate", "card_key": card.key, "kind": card.kind.value},
     )
     return f"Retracted {pid[:8]}…"
 
@@ -554,25 +799,25 @@ async def _assign_subject(
     store: str,
     subject: str | None,
 ) -> str:
-    """Assign a subject to a NO_SUBJECT orphan via the operator-supersede.
+    """Assign a subject to a NO_SUBJECT orphan in place.
 
     ``subject`` is an existing Subject id (linked directly) or a subject name run
-    through the standard resolver. The orphan is superseded by a successor with
-    the same content + the resolved subject, in provenance-carry-over mode.
+    through the standard resolver. The orphan keeps its id; only its subject
+    link is written.
     """
     if card.kind is not CardKind.NO_SUBJECT or len(card.particle_ids) != 1:
         raise ValueError("assign-subject resolves a no_subject card.")
     if not subject or not subject.strip():
         raise ValueError("assign-subject requires a subject (id or name) via --subject.")
 
-    # Deferred import: the operator-supersede primitive lives in agent_write,
-    # which pulls the ingest reconciliation stack — load it only on dispatch.
+    # Deferred import: agent_write pulls the ingest reconciliation stack, so
+    # load it only on dispatch.
     from particles.operations.agent_write import assign_subject_belief
 
     sval = subject.strip()
     existing = await get_subject(session, sval)
     pid = card.particle_ids[0]
-    result = await assign_subject_belief(
+    await assign_subject_belief(
         session,
         store=store,
         particle_id=pid,
@@ -580,7 +825,104 @@ async def _assign_subject(
         subject_name=None if existing is not None else sval,
         actor=actor,
     )
-    return f"Assigned subject to {pid[:8]}… → successor {(result.asserted_particle_id or '?')[:8]}…"
+    return f"Assigned subject to {pid[:8]}…"
+
+
+async def _relink(session: AsyncSession, card: CurationCard, *, actor: str) -> str:
+    """Relink the batch card's orphans in place over the accepted tiers.
+
+    Re-plans from the store rather than trusting the snapshot's member list,
+    so a belief linked, retracted or superseded since the build is skipped.
+    """
+    if card.kind is not CardKind.GATED_SUBJECTS:
+        raise ValueError("relink resolves the gated_subjects card.")
+    from particles.operations.subject_relink import apply_gated_relink, plan_gated_relink
+
+    plan = await plan_gated_relink(session)
+    result = await apply_gated_relink(session, plan, actor=actor)
+    return (
+        f"Relinked {len(result.relinked)} belief(s) to {len(result.subjects)} subject(s)"
+        + (f"; skipped {len(result.skipped)}" if result.skipped else "")
+        + "."
+    )
+
+
+async def _supersede(
+    session: AsyncSession,
+    card: CurationCard,
+    *,
+    actor: str,
+    store: str,
+    reason: str | None,
+    revision: BeliefRevision | None,
+) -> str:
+    """Replace a card's belief with the operator's corrected one.
+
+    Dispatches onto the operator ``supersede_belief`` path, the call
+    ``POST /particles/{id}/supersede`` makes. Subjects are inherited by id
+    unless the revision names its own; provenance defaults to the reason.
+    """
+    if len(card.particle_ids) != 1:
+        raise ValueError("supersede resolves a single-belief card.")
+    if revision is None or not revision.content.strip():
+        raise ValueError("supersede requires the replacement belief via --content.")
+    reason = reason.strip() if reason else None
+    if not reason:
+        raise ValueError("supersede requires a reason via --reason.")
+    pid = card.particle_ids[0]
+    target = await get_particle(session, pid)
+    if target is None:
+        raise ValueError(f"Particle {pid!r} not found.")
+
+    ids: list[str] = []
+    names: list[str] = []
+    if revision.subjects:
+        for value in (v.strip() for v in revision.subjects):
+            if not value:
+                continue
+            if await get_subject(session, value) is not None:
+                ids.append(value)
+            else:
+                names.append(value)
+    else:
+        ids = list(target.subject_ids)
+    if not ids and not names:
+        raise ValueError(
+            "The belief has no subject to inherit. Name one with --subject, or use "
+            "the assign-subject gesture to keep the content and fix only the subject."
+        )
+
+    source_excerpt = revision.source_excerpt
+    if source_excerpt is None and revision.corpus_entry_id is None:
+        source_excerpt = reason
+
+    # Deferred import: the operator-supersede primitive lives in agent_write,
+    # which pulls the ingest reconciliation stack — load it only on dispatch.
+    from particles.operations.agent_write import supersede_belief
+
+    result = await supersede_belief(
+        session,
+        store=store,
+        supersedes_id=pid,
+        content=revision.content.strip(),
+        subject_names=names,
+        subject_ids=ids,
+        confidence=revision.confidence,
+        source_excerpt=source_excerpt,
+        corpus_entry_id=revision.corpus_entry_id,
+        operator=True,
+        actor=actor,
+        reason=reason,
+        card_key=card.key,
+    )
+    successor = (result.asserted_particle_id or "?")[:8]
+    line = f"Superseded {pid[:8]}… → successor {successor}… ({result.verdict})"
+    if result.inconsistency_id is not None:
+        line += (
+            f". It conflicts with another belief: INCONSISTENCY "
+            f"{result.inconsistency_id[:8]}… holds it until `particles review` resolves it"
+        )
+    return line + "."
 
 
 async def _merge(session: AsyncSession, card: CurationCard) -> str:

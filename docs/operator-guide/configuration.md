@@ -89,7 +89,12 @@ requires editing `particles/secrets.py`.
 Every chat/completion call routes through a `CompletionProvider` port.
 The `llm` section picks the `(provider, model)` pairing per
 **purpose**: a `default` plus optional overrides for `extraction`,
-`semantic_lint`, `query_response`, `synthesis`, and `benchmark`:
+`semantic_lint`, `query_response`, `synthesis`, `benchmark`,
+`benchmark_answer`, `abstraction`, `verification` (the memory audit's
+second reading of each contradiction the `semantic_lint` probe flags; routing
+`semantic_lint` to a small model for cost leaves that reading on the
+default), and `subject_resolution` (the judge that picks among an ambiguous
+name's Wikidata candidates during extraction):
 
 ```yaml
 llm:
@@ -168,11 +173,21 @@ endpoints like Ollama.
 
 #### Reasoning models need a bigger token budget
 
-A reasoning model (DeepSeek-V4, Kimi K3, the GPT-5.6 family) spends its
-thinking tokens from the **same completion budget as the answer**, so a
-prompt that fit comfortably in the default `extraction.max_tokens: 8192`
-on a non-reasoning model can exhaust it before the answer is finished, or
-before it starts. The endpoint returns HTTP 200 with `finish_reason:
+A reasoning model (claude-sonnet-5, DeepSeek-V4, Kimi K3, the GPT-5.6
+family) spends its thinking tokens from the **same completion budget as the
+answer**, so a prompt that fits comfortably in 8192 tokens on a
+non-reasoning model can exhaust that budget before the answer is finished,
+or before it starts. The answer grows with the source as well, at 2 to 3.5
+tokens per source character, so a long Claude Code memory file needs more
+than 16384 tokens of reply on its own. The default `extraction.max_tokens` is
+32000 for these reasons, and a reply that still comes back empty, cut short,
+or unparseable is retried once at `extraction.retry_max_tokens` (default
+64000). The Anthropic adapter streams any call whose budget is above the
+Anthropic SDK's non-streaming ceiling of about 21333 tokens, which is what
+lets the budgets go that high. An OpenAI-compatible provider has no such
+ceiling, but its vendor may cap output below these defaults and reject the
+request, and a long reply still has to finish within the entry's
+`timeout_seconds`. Lower `extraction.max_tokens` for such a provider. The endpoint returns HTTP 200 with `finish_reason:
 length` and text that stops mid-token, which the extractor's JSON parser
 then reports as `Failed to parse extraction response: Unterminated string`.
 The adapter logs a WARNING naming the pairing and the budget whenever a
@@ -192,7 +207,7 @@ llm:
       base_url: https://api.fireworks.ai/inference/v1
       timeout_seconds: 300     # reasoning passes are slow as well as long
 extraction:
-  max_tokens: 16384            # thinking + answer share this budget
+  max_tokens: 16384            # thinking + answer share this budget; at or under the vendor's output cap
 ```
 
 Confidence calibration is **per `(extractor, model)` pairing**:
@@ -202,8 +217,10 @@ configured model. A *newly* pointed model, including any
 `<provider>:<model>`, is therefore uncalibrated until you benchmark it (queries fall
 back to the `EXTRACTOR_DIRECT` disclosure meanwhile), but switching **back**
 to a model you calibrated before restores its calibration with no re-fit.
-List the stored pairings with `particles extractor calibrations
-<extractor-id>`.
+A record also applies only under the extractor version it was fitted under:
+an extractor upgrade leaves it stored but not applied until you
+re-fit. List the stored pairings, and which of them apply, with `particles
+extractor calibrations <extractor-id>`.
 
 > **Pick provider names before you benchmark.** The calibration key is
 > `<name>:<model>` (the *operator-chosen entry name*, not the vendor),
@@ -229,6 +246,17 @@ A few config fields you'll likely want to set early:
 - `llm.default.model` (and per-purpose `llm.<purpose>.model`): the
   completion model each purpose uses. See *LLM provider
   selection* above.
+- `subjects.wikidata_candidate_selection`: how an extracted name with
+  several Wikidata candidates is linked. The default, `llm_judge`, sends an
+  ambiguous name to the `llm.subject_resolution` model once, with the claim
+  and each candidate's description, and links the candidate it names or none
+  of them; the answer is recorded and reused for the same name, claim and
+  candidates. A name with one well-matched candidate, or none, never reaches
+  the model. Measured on two gold sets it linked more names correctly and lost
+  no correct link, at about US$0.20 per 100 names on prose about well-known
+  entities ([the measurement](../benchmarks/subject-resolution-judge-2026-10-01.md)).
+  `top_hit` takes Wikidata's first search result with no model call, which is
+  also what `llm_judge` falls back to when no LLM is reachable.
 - `exporter_common.min_particle_confidence`: the cross-exporter
   quality threshold. Particles below this `effective_confidence` are
   dropped from every export. Per-run override and the
@@ -255,6 +283,30 @@ A few config fields you'll likely want to set early:
   (both claims stay ACTIVE, ranked per-viewer at query time) rather than
   one claim auto-superseding the other on trust; a contributor's claim is
   never dropped by another contributor's trust.
+
+- `extraction.append_only_delta`: whether a snapshot of an `APPEND_ONLY`
+  source (a session transcript, an append-only archive) is read as a delta,
+  only the text it adds to the last snapshot the store extracted. Default
+  `true`. With `false`, every snapshot is read whole, and the earlier text
+  is read again each time. Two knobs size the delta:
+  `extraction.append_context_chars` (default 4000) is how much of the
+  already-extracted text is shown before it, as context the model extracts
+  nothing from, and `extraction.append_chunk_chars` (default 7500, minimum
+  1000) is the largest delta chunk sent in one call. When a new snapshot
+  does not extend the previous one, the extraction reads it whole and says
+  why in its quality notes.
+
+  With the delta on, a read of such a snapshot that fails partway keeps what
+  it already paid for. The chunks before the first failed call are
+  written, and so are later answered chunks the retry is certain to skip. The
+  snapshot stays pending, and its retry reads only the rest: from where the
+  kept chunks stop, or, for a snapshot read whole, the whole read again with
+  the written chunks skipped. While a whole read is held that way, the
+  entry's later snapshots wait for it, and `particles extract` and the
+  consolidation log name the wait. `particles reindex <entry>` releases it.
+  Changing `append_chunk_chars`, `append_context_chars` or
+  `html_chunk_size` while a snapshot is held partway makes its retry read
+  some kept chunks again, and the extraction log says so.
 
 See [Tuning](tuning.md) for the trust / calibration / age-decay
 knobs that drive `effective_confidence`.

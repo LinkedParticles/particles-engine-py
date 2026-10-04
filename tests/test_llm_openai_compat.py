@@ -356,7 +356,12 @@ def test_truncated_reply_returns_its_text_and_warns(caplog: pytest.LogCaptureFix
     reply; without this warning the operator sees only "Unterminated string"
     and never learns the budget was the cause.
     """
-    with caplog.at_level("WARNING", logger="particles.llm.adapters.openai_compat"):
+    from particles.llm.usage import purpose_scope
+
+    with (
+        caplog.at_level("WARNING", logger="particles.llm.adapters.openai_compat"),
+        purpose_scope("extraction"),
+    ):
         out = _extract_text(
             _payload('[{"claim": "half a jso', finish_reason="length"),
             provider_model="fireworks:kimi-k3",
@@ -378,7 +383,9 @@ def test_truncated_empty_reply_raises_a_budget_error() -> None:
     answer at all; the old message ("carried no text content") read as a
     broken endpoint.
     """
-    with pytest.raises(CompletionError) as exc_info:
+    from particles.llm.usage import purpose_scope
+
+    with pytest.raises(CompletionError) as exc_info, purpose_scope("extraction"):
         _extract_text(
             _payload("", finish_reason="length"),
             provider_model="fireworks:deepseek-v4-pro",

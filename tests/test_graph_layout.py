@@ -200,8 +200,8 @@ def test_unrendered_particles_drop_unless_foreground() -> None:
     graph = _layout(_inputs(particles, hit_ids=frozenset({"hit"}), hit_rank={"hit": 0}))
     assert set(graph.particles) == {"p1", "hit"}
     assert graph.disclosures == [
-        "1 foreground particle(s) have no linked subject — they appear in the "
-        "detail panel, not on the canvas"
+        "1 foreground particle(s) have no linked subject, so no subject node "
+        "carries them — they are listed in the detail panel"
     ]
 
 

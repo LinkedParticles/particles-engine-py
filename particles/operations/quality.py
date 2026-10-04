@@ -4,9 +4,10 @@
 
 """Extraction quality dashboard (Appendix B §8).
 
-Five aggregate queries delegated to the store layer; no LLM calls, no
+Aggregate queries delegated to the store layer; no LLM calls, no
 mutations. Returns a QualityReport with particle calibration distribution,
-corpus snapshot status counts, and subject coverage metrics.
+corpus snapshot status counts, subject coverage metrics, the store's
+recorded LLM spend, and the curation queue's precision over the default window.
 
 For full structural and semantic diagnostics use the Lint operation.
 """
@@ -21,6 +22,8 @@ from particles.core.schema import CalibrationBucket, QualityReport
 from particles.core.status import Status
 from particles.corpus.store import count_entries, count_snapshots_by_extraction_status
 from particles.observability import traced
+from particles.operations.curation.precision import curation_precision
+from particles.operations.llm_spend import store_llm_spend
 from particles.store.particle_store import (
     count_active_particles_by_calibration_source,
     count_particles_by_status,
@@ -67,6 +70,11 @@ async def get_quality_report(session: AsyncSession) -> QualityReport:
     # exporters and reports surface structured-claim coverage;
     # nothing generates the annotation outside extraction and `particles structure`.
     coverage = await count_structured_claim_coverage(session)
+    # summed from the recorded run events, never a stored counter.
+    llm_spend = await store_llm_spend(session)
+    # queue precision over the default window, read from the gesture
+    # log and the retained collections; ``None`` when there is nothing to measure.
+    precision = await curation_precision(session)
 
     return QualityReport(
         active_particles=active_particles,
@@ -82,4 +90,6 @@ async def get_quality_report(session: AsyncSession) -> QualityReport:
         subjects_without_particles=subjects_without_particles,
         structured_claims=int(coverage["annotated"]),
         structured_claims_by_structurizer=dict(coverage["by_structurizer"]),
+        llm_spend=llm_spend,
+        curation_precision=precision,
     )

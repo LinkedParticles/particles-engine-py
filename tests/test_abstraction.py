@@ -122,6 +122,47 @@ class TestParseJsonObject:
         assert ab._parse_json_object(None) is None
         assert ab._parse_json_object("[1, 2]") is None
 
+    def test_prose_preamble_with_a_brace(self) -> None:
+        # A reason-first judge reply seen live: prose naming a set in braces,
+        # then the object. The outermost-brace slice starts at the prose brace.
+        raw = (
+            "The claim ranges over the set {dana, kofi, mei}, all observed.\n\n"
+            '{"reason": "scoped to {dana, kofi, mei}", "entailed": true}'
+        )
+        assert ab._parse_json_object(raw) == {
+            "reason": "scoped to {dana, kofi, mei}",
+            "entailed": True,
+        }
+
+    def test_unterminated_object_is_none(self) -> None:
+        # A reason-first reply cut off by max_tokens carries no verdict.
+        assert ab._parse_json_object('{"reason": "the general claim says') is None
+
+
+class TestEntailmentJudge:
+    def test_schema_orders_reason_before_verdict(self) -> None:
+        # The verdict is decoded after the reasoning, never before it.
+        assert list(ab._ENTAILMENT_SCHEMA["properties"]) == ["reason", "entailed"]
+        assert ab._ENTAILMENT_SCHEMA["required"] == ["reason", "entailed"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_and_budget_ask_reason_first(self) -> None:
+        reply = json.dumps({"reason": "scoped to the observed set", "entailed": True})
+        call = AsyncMock(return_value=reply)
+        with patch.object(ab, "_llm_call", new=call):
+            assert await ab._check_entailment("claim", ["premise"]) is True
+        kwargs = call.await_args.kwargs
+        assert kwargs["max_tokens"] == ab._ENTAILMENT_MAX_TOKENS
+        assert kwargs["response_schema"] is ab._ENTAILMENT_SCHEMA
+        system = kwargs["system"]
+        assert system.index('"reason"') < system.index('"entailed"')
+
+    @pytest.mark.asyncio
+    async def test_truncated_reply_is_llm_failure(self) -> None:
+        call = AsyncMock(return_value='{"reason": "Wait, the general claim')
+        with patch.object(ab, "_llm_call", new=call):
+            assert await ab._check_entailment("claim", ["premise"]) is None
+
 
 class TestDerivedParticleContract:
     """the lineage + confidence contract of a minted particle."""

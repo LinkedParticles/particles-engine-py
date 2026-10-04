@@ -53,9 +53,14 @@ from particles.core.schema import (
     QueryRequest,
     Subject,
 )
-from particles.core.status import Status, StatusReason
-from particles.corpus.store import get_entry_uri_map
-from particles.operations.query.as_of import AsOfView, ensure_utc, load_as_of_view
+from particles.core.status import Status
+from particles.corpus.store import get_particle_source_uris
+from particles.operations.query.as_of import (
+    AsOfView,
+    ensure_utc,
+    is_never_believed,
+    load_as_of_view,
+)
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.effective_confidence import score_effective_confidence
 from particles.operations.query.main import retrieve_ranked
@@ -68,6 +73,7 @@ from particles.store.particle_store import (
     get_particles_by_ids,
     get_retired_at,
     get_superseding_particle,
+    is_born_retired,
 )
 from particles.store.subject_store import (
     find_by_name,
@@ -262,7 +268,7 @@ async def build_graph_data(
             session, list(particles), utility_cfg.default.half_life_uses_days
         )
 
-    source_uris = await _load_source_uris(session, list(particles.values()))
+    source_uris = await get_particle_source_uris(session, list(particles.values()))
 
     subjects_by_id = {s.id: s for s in await list_all_subjects(session)}
     owner_policy = await load_owner_policy(session)
@@ -454,8 +460,9 @@ def layout_graph(
             # payload — real stores hold pre-subject-binding records (e.g. an
             # old INCONSISTENCY whose disputants resolved no subjects), and
             # dropping the very particles the scope exists to show would be a
-            # silent lie. They render in the detail panel, not on the canvas,
-            # and the gap is disclosed below. Incidental cargo still drops.
+            # silent lie. No subject node carries them, so they render in the
+            # detail panel (the web conflict view also draws them as belief
+            # nodes), and the gap is disclosed below. Incidental cargo still drops.
             if pid in hit_ids:
                 rendered_particles[pid] = p
                 unanchored_foreground += 1
@@ -568,7 +575,8 @@ def layout_graph(
     if unanchored_foreground:
         disclosures.append(
             f"{unanchored_foreground} foreground particle(s) have no linked "
-            f"subject — they appear in the detail panel, not on the canvas"
+            f"subject, so no subject node carries them — they are listed in the "
+            f"detail panel"
         )
 
     return GraphData(
@@ -613,17 +621,15 @@ def _currently_visible(
     return evaluation.visible, evaluation.excluded_undatable
 
 
-def _history_eligible(p: Particle) -> bool:
+def _history_eligible(p: Particle, *, born_retired: bool) -> bool:
     """A retired particle a --history render may show as a ghost.
 
     Once-believed retirements only: INCONSISTENCY records and born-retired
-    quarantine losers (``CONFLICT_PENDING``) were never believed and never
-    render (the exclusion-set rule).
+    quarantine losers were never believed and never render (the
+    exclusion-set rule). Both are recognised by the ``born_retired`` column,
+    which outlives the status and reason a resolution changes.
     """
-    return (
-        p.status is not Status.INCONSISTENCY
-        and p.status_reason is not StatusReason.CONFLICT_PENDING
-    )
+    return not is_never_believed(p.status, p.status_reason, born_retired=born_retired)
 
 
 async def _load_retired_at(
@@ -641,19 +647,6 @@ async def _load_retired_at(
         for pid, retired_at in result.all():
             out[pid] = retired_at
     return out
-
-
-async def _load_source_uris(session: AsyncSession, particles: list[Particle]) -> dict[str, str]:
-    """Map particle id → source URI via each particle's SOURCE provenance ref."""
-    entry_by_pid: dict[str, str] = {}
-    for p in particles:
-        src = next((r for r in p.provenance if r.type == ProvenanceRefType.SOURCE), None)
-        if src is not None and src.corpus_entry_id:
-            entry_by_pid[p.id] = src.corpus_entry_id
-    if not entry_by_pid:
-        return {}
-    uri_map = await get_entry_uri_map(session, set(entry_by_pid.values()))
-    return {pid: uri for pid, eid in entry_by_pid.items() if (uri := uri_map.get(eid)) is not None}
 
 
 async def _fetch_subject_particles(
@@ -999,7 +992,9 @@ async def _extend_history(
                 particles[related.id] = related
                 queue.append(related)
                 continue
-            if not _history_eligible(related):
+            if not _history_eligible(
+                related, born_retired=await is_born_retired(session, related.id)
+            ):
                 continue
             particles[related.id] = related
             ghosts.add(related.id)

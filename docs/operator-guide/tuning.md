@@ -46,6 +46,28 @@ Three things to know before you run it:
   clear them. An extractor that states `1.0` on most of its output has almost
   nothing temperature scaling can act on; those values are exact fixed points,
   so they are dropped from the fit and the run reports how many.
+* **A fit must also hold up out of sample, and needs recorded benchmark runs
+  to show it**. Before persisting, the verb applies the fitted
+  temperature to every recorded `extractor benchmark` run under
+  `benchmark.runs_dir` for the same extractor, extractor version and extraction
+  `provider:model`, and refuses the fit when calibration error over those
+  claims rises. With no such run it refuses as well. Run the benchmark first,
+  under the same configuration:
+
+  ```bash
+  uv run particles extractor benchmark <extractor-id> --runs 3
+  uv run particles extractor calibrate <extractor-id> --runs 13
+  ```
+
+  The check reads files, so it costs nothing. It exists because the in-sample
+  check cannot see the failure it catches: a temperature fitted on the hedged
+  prose of the calibration suite passed every in-sample condition and still
+  raised calibration error on flatly stated articles, for every model measured
+  ([provider survey 2026-10](../benchmarks/provider-survey-2026-10.md#the-production-calibration-held-out)).
+  `particles extractor calibrations <extractor-id>` prints each record's
+  held-out figures, or marks a record persisted before v1.168.10 as never
+  checked out of sample. Retire such a record with `particles extractor
+  calibration-forget` if its held-out figures would not pass.
 * **Any calibration fitted before v1.115.0 is inert.** Those fits were built
   on a labelling bug that forced every one of them to the bound; they are
   reported as `NOT APPLIED` by `particles extractor calibrations
@@ -53,6 +75,19 @@ Three things to know before you run it:
   until re-fitted. Particles already stored keep the confidence they were
   minted with; `particles reindex --extractor-id <id>` re-mints
   them.
+* **A calibration applies only under the extractor version it was fitted
+  under** (v1.169.2). A prompt change can reverse what a temperature
+  does: measured on recorded general-extractor runs, a temperature fitted
+  under 0.16.0 improves held-out 0.16.0 runs and raises 0.15.0's calibration
+  error from 0.021 to 0.096. After an extractor upgrade the record stays
+  stored, the pairing mints `EXTRACTOR_DIRECT` particles, and `particles
+  extractor calibrations <extractor-id>` lists it as `NOT APPLIED (fitted
+  under 0.15.0, running 0.16.0)`. A record persisted before v1.169.2 carries
+  no version and is listed as fitted under an unknown version, also not
+  applied. Re-fit under the running extractor with `particles extractor
+  calibrate <extractor-id> --regenerate`, which needs recorded benchmark runs
+  of the new version for its held-out check, or retire the record with
+  `particles extractor calibration-forget`.
 
 The scalar is stored in the `extractor` table. If an extractor
 systematically overconfidences, calibration pulls it back. If it
@@ -176,6 +211,41 @@ it explicitly names; adopting one never penalises sources it is silent
 about, and unadopting (`trust lens unadopt`) restores the prior policy
 exactly. Both operations are recorded in the operator event log.
 
+### Modality rules: reading what is arguable differently
+
+Whether two claims may be weighed against each other is a judgment, and the
+store records only a default for it: `assertion_modality`, set at extraction.
+Only `FALSIFIABLE` claims are compared, superseded, or filed as an
+`INCONSISTENCY`. A lens can read that default differently for its viewers with
+a `modality_rules` layer:
+
+```jsonc
+"modality_rules": [
+  // Inside our grading standard, a grade is settleable.
+  { "scope": "url_pattern", "pattern": "pcgs\\.com", "modality": "FALSIFIABLE",
+    "when": "EVALUATIVE" },
+  // We do not argue with a specification's own rules.
+  { "scope": "source_type", "pattern": "LOCAL_MARKDOWN", "modality": "CONSTITUTIVE" }
+]
+```
+
+`scope` is `particle`, `subject`, `url_pattern` or `source_type`; `when`
+limits a rule to claims whose stored default is that modality. Within one lens
+the most specific matching rule decides, so a lens can carve an exception out
+of its own broader rule. Across adopted lenses, a reading that withholds
+adjudication wins at any scope, so adopting a second lens can only make fewer
+claims arguable. An operator verdict (`particles particle reclassify`) always
+wins over every lens. Particle and subject ids are local to one store, so
+those rules match nothing after an interchange import.
+
+A lens reading changes only what renders: an open `INCONSISTENCY` stops
+marking a claim contested once the lens, or with no lens the stored value,
+reads either side as not adjudicable,
+and `particles lint` lists each claim the lens reads differently as
+`MODALITY_LENS_DIVERGENCE`. It never changes what the store arbitrates, never
+moves a rank or a confidence, and is never stored. To make the store itself
+abstain or arbitrate, reclassify the claim.
+
 ### Contestedness: measuring how much a lens changes the picture
 
 Once you have **two or more policies** (your local policy plus at least
@@ -285,8 +355,10 @@ utility:
     half_life_uses_days: 30   # unreinforced utility fades over ~a month
     rank_lift: 0.015          # lambda: how far usefulness may reorder the head
   mining:
-    behavioural_matching: true   # LLM-judge soft guidelines (literal match is always on)
-    max_behavioural_calls: 50    # per-run cap on those LLM calls
+    behavioural_matching: true   # the use judge; off records nothing
+    max_behavioural_calls: 150   # per-run cap on judge calls, both routes
+# The judge's model is its own LLM purpose, llm.use_judge (default
+# claude-sonnet-5-5), separate from llm.semantic_lint.
 ```
 
 **Upgrading from a pre-ADR-0204 config:** `weight`, `floor` and `cap` are

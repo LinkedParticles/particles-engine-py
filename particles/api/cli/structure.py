@@ -14,6 +14,8 @@ from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._progress import progress_line
 from particles.db import session_scope
+from particles.llm.usage import render_usage_line
+from particles.operations.llm_spend import MeteredExtractRun
 
 
 @app.command("structure")
@@ -94,13 +96,28 @@ async def _structure(
     from particles.operations.structure import backfill_structured_claims
 
     progress = progress_line if verbose else None
-    async with session_scope() as session:
-        summary = await backfill_structured_claims(
-            session,
-            limit=limit,
-            rate_limit_per_minute=rate_limit_per_minute,
-            structurizer_version=structurizer_version,
-            dry_run=dry_run,
-            progress=progress,
-        )
+
+    async def _run() -> dict[str, object]:
+        async with session_scope() as session:
+            return await backfill_structured_claims(
+                session,
+                limit=limit,
+                rate_limit_per_minute=rate_limit_per_minute,
+                structurizer_version=structurizer_version,
+                dry_run=dry_run,
+                progress=progress,
+            )
+
+    if dry_run:
+        typer.echo(json.dumps(await _run(), indent=2))
+        return
+    # the backfill pays one structurizer call per particle; meter it
+    # as extract is metered (one EXTRACT_RUN with ``route: structure``).
+    meter = MeteredExtractRun(actor="cli:structure", route="structure")
+    try:
+        async with meter:
+            summary = await _run()
+    finally:
+        if meter.llm_usage is not None:
+            typer.echo(render_usage_line(meter.llm_usage), err=True)
     typer.echo(json.dumps(summary, indent=2))

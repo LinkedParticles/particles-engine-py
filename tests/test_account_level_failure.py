@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 
 from particles.core.schema import ExtractionStatus, WarcRecordType
 from particles.llm.errors import AccountLevelLLMError, is_account_level_failure
+from tests._client_fixtures import stream_via_create
 
 
 class _ApiError(Exception):
@@ -197,6 +198,7 @@ class TestExtractAllPendingAborts:
         client = MagicMock()
         client.messages = MagicMock()
         client.messages.create = MagicMock(side_effect=create)
+        stream_via_create(client)
         set_client(client)
         try:
             result = CliRunner().invoke(app, ["extract", "--all-pending"])
@@ -226,6 +228,7 @@ class TestExtractAllPendingAborts:
         client = MagicMock()
         client.messages = MagicMock()
         client.messages.create = MagicMock(side_effect=_ApiError(400, _CREDIT))
+        stream_via_create(client)
         set_client(client)
         try:
             result = CliRunner().invoke(app, ["extract", "--all-pending"])
@@ -261,7 +264,7 @@ class TestConsolidationPassStops:
 
         monkeypatch.setattr("particles.operations.extract.extract_snapshot", boom)
         monkeypatch.setattr(
-            "particles.corpus.store.list_pending_snapshots_oldest_first",
+            "particles.corpus.store.list_pending_snapshots_for_catchup",
             _fake_pending(6),
         )
 
@@ -297,7 +300,7 @@ class TestConsolidationPassStops:
 
         monkeypatch.setattr("particles.operations.extract.extract_snapshot", boom)
         monkeypatch.setattr(
-            "particles.corpus.store.list_pending_snapshots_oldest_first",
+            "particles.corpus.store.list_pending_snapshots_for_catchup",
             _fake_pending(6),
         )
 
@@ -310,7 +313,12 @@ class TestConsolidationPassStops:
 
 
 def _fake_pending(count: int) -> Any:
-    async def _listed(_session: Any) -> list[tuple[str, str]]:
-        return [(f"entry-{i}", f"snap-{i}") for i in range(count)]
+    from particles.corpus.store import PendingSnapshot
+
+    async def _listed(_session: Any) -> list[PendingSnapshot]:
+        return [
+            PendingSnapshot(f"entry-{i}", f"snap-{i}", datetime(2026, 9, 1, tzinfo=UTC), 0)
+            for i in range(count)
+        ]
 
     return _listed

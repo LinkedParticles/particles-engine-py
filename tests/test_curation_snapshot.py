@@ -47,13 +47,20 @@ from particles.operations.curation import (
 from particles.operations.curation.cards import CurationCard, gestures_for
 from particles.operations.curation.snapshot import (
     DELTA_SCOPED_KINDS,
+    SEMANTIC_KINDS,
+    CarryEvidence,
+    PriorCollection,
+    Resolved,
+    _merge_with_prior,
     collect_and_persist,
     per_kind_scope_for,
+    stale_after_hours,
 )
 from particles.store.curation_snapshot_store import (
     CollectionScope,
     clear_snapshots,
     latest_snapshot,
+    list_snapshots,
 )
 from particles.store.particle_store import (
     insert_particle,
@@ -212,6 +219,9 @@ class TestSnapshotRoundTrip:
         self, db_session: AsyncSession
     ) -> None:
         get_config().curation.snapshot_max_age_hours = 36.0
+        # A census on every cycle, so the configured age is the threshold
+        # (a weekly census widens it; see the test below).
+        get_config().consolidation.census.interval_hours = 0
         await _seed(db_session, "expired belief")
 
         old = datetime.now(UTC) - timedelta(hours=40)
@@ -223,6 +233,27 @@ class TestSnapshotRoundTrip:
         assert result.age_seconds is not None and result.age_seconds > 36 * 3600
         # Stale is disclosed, never hidden — the cards still come back.
         assert result.cards
+
+    @pytest.mark.asyncio
+    async def test_a_collection_between_weekly_censuses_is_not_stale(
+        self, db_session: AsyncSession
+    ) -> None:
+        # the cycle rebuilds only when its weekly census runs, so a
+        # four-day-old collection is the expected state, not a stale one.
+        get_config().curation.snapshot_max_age_hours = 36.0
+        await _seed(db_session, "expired belief")
+        old = datetime.now(UTC) - timedelta(days=4)
+        await collect_and_persist(db_session, semantic=False, built_at=old)
+        await db_session.flush()
+
+        assert (await build_curation_queue(db_session, semantic=False)).stale is False
+        get_config().consolidation.census.enabled = False
+        assert (await build_curation_queue(db_session, semantic=False)).stale is True
+
+    def test_stale_threshold_follows_the_census_cadence(self) -> None:
+        assert stale_after_hours(36.0, census_enabled=True, census_interval_hours=168) == 192.0
+        assert stale_after_hours(36.0, census_enabled=True, census_interval_hours=0) == 36.0
+        assert stale_after_hours(36.0, census_enabled=False, census_interval_hours=168) == 36.0
 
     @pytest.mark.asyncio
     async def test_corrupt_blob_is_a_cache_miss_not_a_crash(self, db_session: AsyncSession) -> None:
@@ -246,12 +277,22 @@ class TestSnapshotRoundTrip:
 
 class TestScopeSemantics:
     def test_store_scope_marks_every_kind_store_wide(self) -> None:
-        per_kind = per_kind_scope_for(CollectionScope.STORE)
+        per_kind = per_kind_scope_for(CollectionScope.STORE, semantic=True)
         assert set(per_kind) == {k.value for k in CardKind}
         assert all(v is CollectionScope.STORE for v in per_kind.values())
 
+    @pytest.mark.parametrize("scope", [CollectionScope.STORE, CollectionScope.DELTA])
+    def test_without_semantic_the_probe_kind_is_carried(self, scope: CollectionScope) -> None:
+        """a finder that did not run declares its kind carried, not store-wide."""
+        per_kind = per_kind_scope_for(scope, semantic=False)
+        carried = {k for k, v in per_kind.items() if v is CollectionScope.CARRIED}
+        assert carried == {k.value for k in SEMANTIC_KINDS} == {CardKind.CONTRADICTION.value}
+        # Every structural kind still replaces: its finder walked the store.
+        assert per_kind[CardKind.STALE.value] is CollectionScope.STORE
+        assert per_kind[CardKind.DUPLICATE_PAIR.value] is CollectionScope.STORE
+
     def test_delta_scope_marks_only_the_probe_bounded_kinds(self) -> None:
-        per_kind = per_kind_scope_for(CollectionScope.DELTA)
+        per_kind = per_kind_scope_for(CollectionScope.DELTA, semantic=True)
         delta = {k for k, v in per_kind.items() if v is CollectionScope.DELTA}
         assert delta == {k.value for k in DELTA_SCOPED_KINDS}
         # Duplicates enumerate store-wide even under a delta run, so
@@ -264,9 +305,9 @@ class TestScopeSemantics:
     ) -> None:
         """A contradiction found last night survives tonight's delta run.
 
-        The probe is delta-scoped and contradiction findings never persist as
-        INCONSISTENCY particles, so without carry-forward the queue would
-        forget every contradiction it ever found, one night later.
+        The probe is delta-scoped, and only a confirmed cross-source pair
+        becomes an INCONSISTENCY record, so without carry-forward the
+        queue would forget every other contradiction it found, one night later.
         """
         yesterday = _card(CardKind.CONTRADICTION, "p-old")
         await collect_and_persist(
@@ -279,6 +320,32 @@ class TestScopeSemantics:
             db_session, semantic=True, scope=CollectionScope.DELTA, cards=[tonight]
         )
         assert {c.particle_ids[0] for c in merged} == {"p-old", "p-new"}
+
+    @pytest.mark.asyncio
+    async def test_a_disclosed_pairs_card_is_not_carried_forward(
+        self, db_session: AsyncSession
+    ) -> None:
+        """once a census record discloses a pair, its card gives way."""
+        disclosed = CurationCard(
+            kind=CardKind.CONTRADICTION,
+            particle_ids=["p-a"],
+            diagnostic="Semantic contradiction with particle p-b: exists vs not found",
+            suggested_gestures=gestures_for(CardKind.CONTRADICTION),
+        )
+        other = _card(CardKind.CONTRADICTION, "p-old")
+        await collect_and_persist(
+            db_session, semantic=True, scope=CollectionScope.STORE, cards=[disclosed, other]
+        )
+        await db_session.flush()
+
+        merged, _ = await collect_and_persist(
+            db_session,
+            semantic=True,
+            scope=CollectionScope.DELTA,
+            cards=[],
+            covered_pairs=frozenset({frozenset(("p-a", "p-b"))}),
+        )
+        assert [c.particle_ids[0] for c in merged] == ["p-old"]
 
     @pytest.mark.asyncio
     async def test_store_wide_kinds_replace_rather_than_accumulate(
@@ -489,3 +556,295 @@ class TestRebuild:
         assert served.source == "live"
         assert served.snapshot_id is None
         assert len(served.cards) == 1
+
+
+# --------------------------------------------------------------------------- #
+# a collection written before conflict cards is upgraded on read     #
+# --------------------------------------------------------------------------- #
+
+
+class TestFormatOneCollection:
+    @pytest.mark.asyncio
+    async def test_is_served_with_conflict_cards_and_without_comment(
+        self, db_session: AsyncSession
+    ) -> None:
+        import json
+
+        from particles.store.curation_snapshot_store import write_snapshot
+
+        a = _active("claim A", valid_until=None)
+        b = _active("claim B", valid_until=None)
+        await insert_particle(db_session, a)
+        await insert_particle(db_session, b)
+        record = Particle(
+            content="INCONSISTENCY between A and B",
+            confidence=Confidence(value=0.5, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            provenance=[
+                ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=a.id),
+                ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=b.id),
+            ],
+            asserted_by="extract-pipeline",
+            status=Status.INCONSISTENCY,
+        )
+        await insert_particle(db_session, record)
+        old_contested = CurationCard(
+            kind=CardKind.CONTESTED,
+            particle_ids=[a.id],
+            diagnostic="Contested (inconsistency)",
+            suggested_gestures=["comment", "affirm", "snooze"],
+            contested_bases=["inconsistency"],
+            inconsistency_id=record.id,
+        )
+        old_contradiction = CurationCard(
+            kind=CardKind.CONTRADICTION,
+            particle_ids=[b.id],
+            diagnostic="Semantic contradiction",
+            suggested_gestures=["comment", "supersede", "retract", "snooze"],
+        )
+        blob = json.dumps(
+            {
+                "format": 1,
+                "cards": [c.model_dump(mode="json") for c in (old_contested, old_contradiction)],
+                "first_seen": {},
+            }
+        )
+        await write_snapshot(
+            db_session,
+            cards_json=blob,
+            card_count=2,
+            scope=CollectionScope.STORE,
+            per_kind_scope={},
+        )
+        await db_session.flush()
+
+        cards = (await build_curation_queue(db_session, semantic=False)).cards
+        kinds = {c.kind: c for c in cards}
+        assert CardKind.CONTESTED not in kinds
+        assert "comment" not in kinds[CardKind.CONTRADICTION].suggested_gestures
+        conflict = kinds[CardKind.INCONSISTENCY]
+        assert conflict.key == f"inconsistency:{record.id}"
+        assert conflict.leverage > 0
+
+
+class TestListSnapshots:
+    """``list_snapshots``: the retained ring, newest first."""
+
+    @pytest.mark.asyncio
+    async def test_newest_first_and_pruned_to_the_ring(self, db_session: AsyncSession) -> None:
+        assert await list_snapshots(db_session) == []
+        base = datetime(2026, 9, 1, tzinfo=UTC)
+        retain = get_config().curation.snapshot_retain
+        for day in range(retain + 2):
+            await collect_and_persist(
+                db_session, semantic=False, built_at=base + timedelta(days=day)
+            )
+        rows = await list_snapshots(db_session)
+        assert len(rows) == retain
+        stamps = [r.built_at.replace(tzinfo=UTC) for r in rows]
+        assert stamps == sorted(stamps, reverse=True)
+        newest = await latest_snapshot(db_session)
+        assert newest is not None and rows[0].snapshot_id == newest.snapshot_id
+
+
+# --------------------------------------------------------------------------- #
+# a build that skipped the contradiction probe carries its cards     #
+# --------------------------------------------------------------------------- #
+
+_NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
+_CENSUS = _NOW - timedelta(days=3)
+
+
+def _contradiction(pid: str, partner: str = "p-partner") -> CurationCard:
+    return CurationCard(
+        kind=CardKind.CONTRADICTION,
+        particle_ids=[pid],
+        diagnostic=f"Semantic contradiction with particle {partner}: a vs b",
+        suggested_gestures=gestures_for(CardKind.CONTRADICTION),
+    )
+
+
+def _prior(*cards: CurationCard) -> PriorCollection:
+    """A census collection built three days ago, every card found then."""
+    return PriorCollection(
+        cards=list(cards),
+        first_seen={c.key: _CENSUS.isoformat() for c in cards},
+        kind_as_of={k.value: _CENSUS for k in CardKind},
+        built_at=_CENSUS,
+    )
+
+
+def _merge(
+    prior: PriorCollection,
+    fresh: list[CurationCard],
+    *,
+    semantic: bool,
+    evidence: CarryEvidence | None = None,
+) -> list[str]:
+    result = _merge_with_prior(
+        fresh,
+        prior,
+        per_kind=per_kind_scope_for(CollectionScope.STORE, semantic=semantic),
+        now=_NOW,
+        horizon=timedelta(days=30),
+        evidence=evidence,
+    )
+    return sorted(c.key for c in result.cards)
+
+
+class TestCarriedKinds:
+    """The pure merge decision over plain values."""
+
+    def test_a_structural_refresh_keeps_every_census_contradiction(self) -> None:
+        census = [_contradiction(f"p-{i}") for i in range(4)]
+        stale = _card(CardKind.STALE, "p-stale")
+        kept = _merge(_prior(*census, stale), [], semantic=False)
+        # The structural kind replaced (its finder saw nothing); the probe kind carried.
+        assert kept == sorted(c.key for c in census)
+
+    def test_a_semantic_refresh_re_finds_rather_than_carries(self) -> None:
+        census = [_contradiction(f"p-{i}") for i in range(4)]
+        refound = census[:2]
+        kept = _merge(_prior(*census), refound, semantic=True)
+        assert kept == sorted(c.key for c in refound)
+
+    def test_suppressed_resolved_and_retired_cards_are_not_carried(self) -> None:
+        keep, snoozed, resolved, retired, partner_retired, before = (
+            _contradiction("p-keep"),
+            _contradiction("p-snoozed"),
+            _contradiction("p-resolved"),
+            _contradiction("p-retired"),
+            _contradiction("p-live", partner="p-gone"),
+            _contradiction("p-touched-before"),
+        )
+        evidence = CarryEvidence(
+            suppressed=frozenset({snoozed.key}),
+            resolutions=(
+                (_CENSUS + timedelta(hours=1), Resolved(particle_ids=frozenset({"p-resolved"}))),
+                # Before the card was found: already reflected in the census.
+                (
+                    _CENSUS - timedelta(hours=1),
+                    Resolved(particle_ids=frozenset({"p-touched-before"})),
+                ),
+            ),
+            retired=frozenset({"p-retired", "p-gone"}),
+        )
+        prior = _prior(keep, snoozed, resolved, retired, partner_retired, before)
+        kept = _merge(prior, [], semantic=False, evidence=evidence)
+        assert kept == sorted([keep.key, before.key])
+
+    def test_the_carried_kind_keeps_the_census_date(self) -> None:
+        result = _merge_with_prior(
+            [],
+            _prior(_contradiction("p-a")),
+            per_kind=per_kind_scope_for(CollectionScope.STORE, semantic=False),
+            now=_NOW,
+            horizon=timedelta(days=30),
+        )
+        assert result.kind_as_of[CardKind.CONTRADICTION.value] == _CENSUS
+        assert result.kind_as_of[CardKind.STALE.value] == _NOW
+
+    def test_a_carried_kind_with_no_probe_on_record_has_no_date(self) -> None:
+        result = _merge_with_prior(
+            [],
+            None,
+            per_kind=per_kind_scope_for(CollectionScope.STORE, semantic=False),
+            now=_NOW,
+            horizon=timedelta(days=30),
+        )
+        assert CardKind.CONTRADICTION.value not in result.kind_as_of
+
+
+class TestRefreshKeepsCensusContradictions:
+    """The store-backed path `particles curate --refresh` takes."""
+
+    @pytest.mark.asyncio
+    async def test_structural_refresh_keeps_them_and_the_census_date(
+        self, db_session: AsyncSession
+    ) -> None:
+        census_at = datetime.now(UTC) - timedelta(days=3)
+        census = [_contradiction(f"p-{i}") for i in range(3)]
+        await collect_and_persist(
+            db_session,
+            semantic=True,
+            scope=CollectionScope.DELTA,
+            cards=census,
+            built_at=census_at,
+        )
+        await db_session.flush()
+
+        with patch("particles.operations.curation.snapshot.llm_circuit_open", return_value=False):
+            stamp = await rebuild_curation_snapshot(db_session, semantic=False)
+
+        assert stamp.per_kind_scope[CardKind.CONTRADICTION.value] == "carried"
+        assert stamp.kind_as_of[CardKind.CONTRADICTION.value] == census_at
+        served = await build_curation_queue(db_session, kind=CardKind.CONTRADICTION)
+        assert served.open_count == 3
+        assert served.kind_as_of[CardKind.CONTRADICTION.value] == census_at
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_probe_carries_too(self, db_session: AsyncSession) -> None:
+        """The breaker cut the probe short, so its silence is not a resolution."""
+        await collect_and_persist(
+            db_session, semantic=True, scope=CollectionScope.STORE, cards=[_contradiction("p-a")]
+        )
+        await db_session.flush()
+        with patch("particles.operations.curation.snapshot.llm_circuit_open", return_value=True):
+            merged, _ = await collect_and_persist(
+                db_session, semantic=True, scope=CollectionScope.STORE, cards=[]
+            )
+        assert [c.particle_ids[0] for c in merged] == ["p-a"]
+
+    @pytest.mark.asyncio
+    async def test_a_dismissed_or_retracted_card_is_not_carried(
+        self, db_session: AsyncSession
+    ) -> None:
+        dismissed = await _seed(db_session, "dismissed claim")
+        retracted = await _seed(db_session, "retracted claim")
+        kept = await _seed(db_session, "kept claim")
+        cards = [_contradiction(p.id) for p in (dismissed, retracted, kept)]
+        await collect_and_persist(
+            db_session, semantic=True, scope=CollectionScope.STORE, cards=cards
+        )
+        await db_session.flush()
+
+        await apply_gesture(db_session, cards[0], "dismiss")
+        await update_particle_status(
+            db_session, retracted.id, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
+        )
+        await db_session.flush()
+
+        merged, _ = await collect_and_persist(
+            db_session, semantic=False, scope=CollectionScope.STORE, cards=[]
+        )
+        assert [c.particle_ids[0] for c in merged] == [kept.id]
+
+    @pytest.mark.asyncio
+    async def test_a_row_written_before_the_as_of_envelope_reads_its_date(
+        self, db_session: AsyncSession
+    ) -> None:
+        import json
+
+        from particles.store.curation_snapshot_store import write_snapshot
+
+        built = datetime.now(UTC) - timedelta(days=2)
+        blob = json.dumps(
+            {
+                "format": 2,
+                "cards": [_contradiction("p-a").model_dump(mode="json")],
+                "first_seen": {},
+            }
+        )
+        await write_snapshot(
+            db_session,
+            cards_json=blob,
+            card_count=1,
+            scope=CollectionScope.DELTA,
+            per_kind_scope={},
+            semantic=True,
+            built_at=built,
+        )
+        await db_session.flush()
+
+        served = await build_curation_queue(db_session)
+        assert served.kind_as_of[CardKind.CONTRADICTION.value] == built

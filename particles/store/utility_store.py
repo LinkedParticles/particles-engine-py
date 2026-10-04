@@ -50,6 +50,12 @@ from particles.config import get_config
 from particles.core.scoring.utility import reinforcement_score
 from particles.db import Base
 
+_IN_CHUNK = 10_000
+"""Ids per ``IN (...)`` query, well under SQLite's 32766-variable ceiling.
+
+A digest scores every ACTIVE belief at once, which on a large store exceeds
+the limit in one statement (``too many SQL variables``)."""
+
 SOURCE_MINED = "mined"
 """Channel for events produced by the transcript action-miner."""
 
@@ -235,8 +241,9 @@ async def get_reinforcement_scores(
     (``core.scoring.utility.reinforcement_score``) under the resolved
     reinforcement half-life. A belief with no utility events is absent from the
     result (the caller treats absence as ``0.0`` → ``+0`` bonus, the cold-start
-    posture). One query over the id set, so projection / digest
-    scoring stays free of per-particle round trips.
+    posture). One query per :data:`_IN_CHUNK` ids, so projection
+    / digest scoring stays free of per-particle round trips and a whole-store id
+    set stays under SQLite's bound-variable limit.
 
     Args:
         session: Active store session.
@@ -251,18 +258,19 @@ async def get_reinforcement_scores(
     weight = (
         explicit_weight if explicit_weight is not None else get_config().utility.explicit_weight
     )
-    rows = (
-        await session.execute(
-            select(
-                UtilityEventRow.particle_id,
-                UtilityEventRow.observed_at,
-                UtilityEventRow.source,
-            ).where(UtilityEventRow.particle_id.in_(particle_ids))
-        )
-    ).all()
     by_particle: dict[str, list[tuple[datetime, float]]] = {}
-    for pid, observed, source in rows:
-        by_particle.setdefault(pid, []).append((observed, channel_weight(source, weight)))
+    for start in range(0, len(particle_ids), _IN_CHUNK):
+        rows = (
+            await session.execute(
+                select(
+                    UtilityEventRow.particle_id,
+                    UtilityEventRow.observed_at,
+                    UtilityEventRow.source,
+                ).where(UtilityEventRow.particle_id.in_(particle_ids[start : start + _IN_CHUNK]))
+            )
+        ).all()
+        for pid, observed, source in rows:
+            by_particle.setdefault(pid, []).append((observed, channel_weight(source, weight)))
     return {
         pid: reinforcement_score(events, half_life_uses_days, now)
         for pid, events in by_particle.items()

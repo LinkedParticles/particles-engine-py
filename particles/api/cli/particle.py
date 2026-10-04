@@ -4,10 +4,11 @@
 
 """particle sub-Typer — inspect individual extracted particles by ID.
 
-Read/tag-only except for ``retract``, the one narrow *operator*
-mutation: it retires a single belief under operator authority, which is the
+Read/tag-only except for two narrow *operator* mutations. ``retract``
+retires a single belief under operator authority, which is the
 escape hatch the cross-asserter guardrail deliberately withholds
-from agents.
+from agents. ``reclassify`` sets one claim's adjudicability default
+by operator verdict, with a reason, and pins it against regeneration.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from particles.core.schema import Particle
+    from particles.core.schema import AssertionModality, Particle
 
 particle_app = typer.Typer(help="Inspect individual extracted particles.", no_args_is_help=True)
 app.add_typer(particle_app, name="particle")
@@ -124,11 +125,20 @@ async def _render_particle_detail(session: AsyncSession, particle: Particle) -> 
     """Render subjects / provenance / narrative blocks (local-only enrichment)."""
     from particles.core.schema import ParticleType
     from particles.corpus.store import CorpusEntryRow
+    from particles.operations.modality import particle_stamp
     from particles.operations.narrative import (
         get_narrative_sequence,
         get_narratives_containing,
     )
     from particles.store.subject_store import SubjectRow
+
+    stamped = await particle_stamp(session, particle.id)
+    if stamped is not None:
+        stamp, state = stamped
+        model = f", {stamp.model}" if stamp.model else ""
+        when = f", {stamp.classified_at.date().isoformat()}" if stamp.classified_at else ""
+        typer.echo(f"Classifier:   {stamp.classifier} ({state.value}{model}{when})")
+        typer.echo("")
 
     if particle.subject_ids:
         typer.echo("Subjects:")
@@ -434,9 +444,10 @@ def particle_retract_cmd(
     ACTIVE → RETRACTED with reason ``EXPLICIT_RETRACTION``, routed through
     ``update_particle_status`` so the ``retired_at`` stamp and the
     ``PARTICLE_RETRACTED`` event (carrying ``--reason``) are both
-    written. An operator-asserted (HUMAN_REVIEW) belief is still not retractable
-    this way; revising one is Review's job. Run ``particles lint`` afterwards to
-    cascade ``PROVENANCE_STALE`` to anything that depended on it.
+    written. An operator-asserted (HUMAN_REVIEW) claim is retractable too;
+    a HUMAN_REVIEW REVIEW record is not, since revising one is
+    Review's job. Run ``particles lint`` afterwards to cascade
+    ``PROVENANCE_STALE`` to anything that depended on it.
     """
     if not reason.strip():
         typer.echo("--reason must be non-empty.", err=True)
@@ -496,7 +507,7 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
                 actor=RETRACT_ACTOR,
             )
         except ValueError as exc:
-            # The §6 guards (HUMAN_REVIEW, ACTIVE-only) and the §6.6 transition
+            # The §6 guards (HUMAN_REVIEW non-claims, ACTIVE-only) and the §6.6 transition
             # table surface here. Idempotence is theirs, not a special case: a
             # second run reports "is RETRACTED, not ACTIVE".
             typer.echo(f"Error: {exc}", err=True)
@@ -505,6 +516,96 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
 
     typer.echo(f"\nRetracted {particle_id[:8]}… (EXPLICIT_RETRACTION); reason recorded.")
     typer.echo("Run `particles lint` to cascade PROVENANCE_STALE to dependents.")
+
+
+@particle_app.command("reclassify")
+def particle_reclassify_cmd(
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, first 8 chars)"),
+    modality: str = typer.Option(
+        ...,
+        "--modality",
+        help="The new default: FALSIFIABLE, EVALUATIVE, EXPERIENTIAL, or CONSTITUTIVE",
+    ),
+    reason: str = typer.Option(
+        ..., "--reason", help="Why the default is wrong; recorded in the event log"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the plan without writing"),
+) -> None:
+    """Set one claim's adjudicability default by operator verdict.
+
+    The default (`assertion_modality`) decides whether the write path may
+    arbitrate the claim against another: only FALSIFIABLE claims are compared,
+    superseded, or filed as an INCONSISTENCY. The extractor sets it once; this
+    verb corrects it for one claim. The verdict is pinned: `particles modality`
+    never overwrites it. The event log records a MODALITY_RECLASSIFIED event
+    with the reason and the prior and new values.
+
+    Content, confidence, provenance and status do not change. A claim an
+    earlier arbitration retired stays retired. The next `particles memory
+    consolidate` run re-pairs the claim under its new default.
+    """
+    from particles.core.schema import AssertionModality
+
+    try:
+        target = AssertionModality(modality.strip().upper())
+    except ValueError:
+        valid = ", ".join(m.value for m in AssertionModality)
+        typer.echo(f"Unknown modality {modality!r}. Valid: {valid}.", err=True)
+        raise typer.Exit(1) from None
+    if not reason.strip():
+        typer.echo("--reason must be non-empty.", err=True)
+        raise typer.Exit(1)
+    run(_particle_reclassify(particle_id, target, reason, dry_run=dry_run))
+
+
+#: Event actor for an operator verdict on a claim's adjudicability default.
+RECLASSIFY_ACTOR = "cli:particle-reclassify"
+
+
+async def _particle_reclassify(
+    id_prefix: str, modality: AssertionModality, reason: str, *, dry_run: bool
+) -> None:
+    """Resolve, show, then write the operator verdict."""
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.modality import particle_stamp, reclassify_particle
+    from particles.store.particle_store import get_particle
+
+    ensure_local("particle reclassify")
+
+    async with session_scope() as session:
+        particle_id = await _resolve_particle_id(session, id_prefix)
+        target = await get_particle(session, particle_id)
+        stamped = await particle_stamp(session, particle_id)
+    if target is None:  # pragma: no cover — the resolver already exits on a miss
+        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        raise typer.Exit(1)
+
+    classifier = stamped[0].classifier if stamped is not None else "unknown"
+    typer.echo(f"  {particle_id}")
+    typer.echo(f"  status      {target.status.value}")
+    typer.echo(f"  content     {target.content}")
+    typer.echo(f"  modality    {target.assertion_modality.value} (set by {classifier})")
+    typer.echo(f"  new         {modality.value}")
+    typer.echo(f"  reason      {reason}")
+
+    if dry_run:
+        typer.echo("\n--dry-run: nothing written.")
+        return
+
+    async with session_scope(write=True) as session:  # writer lock
+        result = await reclassify_particle(
+            session, particle_id, modality, reason=reason, actor=RECLASSIFY_ACTOR
+        )
+        await session.commit()
+
+    if result.prior == result.modality:
+        typer.echo(f"\nPinned {particle_id[:8]}… at {modality.value} by operator verdict.")
+    else:
+        typer.echo(
+            f"\nReclassified {particle_id[:8]}… {result.prior.value} → {modality.value}; "
+            "reason recorded."
+        )
+    typer.echo("The next `particles memory consolidate` run re-pairs it under the new default.")
 
 
 @particle_app.command("search")

@@ -22,6 +22,8 @@ from __future__ import annotations
 from particles.render.markdown import (
     DigestEntry,
     DisambiguationGroup,
+    ExportTargetNotOwnedError,
+    MarkdownExportLedger,
     SubjectNaming,
     atomic_write_text,
     build_narrative_naming,
@@ -44,6 +46,8 @@ from particles.render.markdown import (
 __all__ = [
     "DigestEntry",
     "DisambiguationGroup",
+    "ExportTargetNotOwnedError",
+    "MarkdownExportLedger",
     "SubjectNaming",
     "atomic_write_text",
     "build_narrative_naming",

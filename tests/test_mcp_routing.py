@@ -265,7 +265,11 @@ class TestMcpWriteRouting:
         import particles.llm as llm
         from particles.mcp.tools.write import particle_assert
 
-        monkeypatch.setattr(llm, "complete", AsyncMock(return_value="YES: they disagree"))
+        monkeypatch.setattr(
+            llm,
+            "complete",
+            AsyncMock(return_value="REASON: they disagree\nSLOT: CHANGES\nVERDICT: YES"),
+        )
 
         a = asyncio.run(
             particle_assert(

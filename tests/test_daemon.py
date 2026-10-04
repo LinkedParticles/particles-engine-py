@@ -394,6 +394,7 @@ class _Report:
     ) -> None:
         self.outcome = outcome
         self.skip_reason = skip_reason
+        self.lock_warning: str | None = None
         self._failed = failed or []
 
     def failed_passes(self) -> list[str]:

@@ -19,7 +19,7 @@ cost; using the adapter without the extra raises an actionable `ImportError`.
 ```python
 from particles.integrations import get_langchain_tools
 
-tools = get_langchain_tools()   # [particles_query, particles_deposit]
+tools = get_langchain_tools()  # [particles_query, particles_deposit]
 agent = create_agent(llm, tools)
 ```
 

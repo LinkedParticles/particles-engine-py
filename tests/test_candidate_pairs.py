@@ -222,3 +222,79 @@ class TestEnumerateCandidatePairs:
         cands = [(_p("a"), _emb(0.0)), (_p("b"), _emb(0.1)), (_p("c"), _emb(0.2))]
         pairs = enumerate_candidate_pairs(cands, threshold=0.9, linked={})
         assert pairs and all(c.tier == 0 for c in pairs)
+
+
+# ---------------------------------------------------------------------------
+# Cross-source ordering
+# ---------------------------------------------------------------------------
+
+
+def _from(pid: str, *entries: str) -> Particle:
+    """A synthetic particle cut from the named corpus entries."""
+    return _p(pid).model_copy(
+        update={
+            "provenance": [
+                ProvenanceRef(type=ProvenanceRefType.SOURCE, corpus_entry_id=e) for e in entries
+            ]
+        }
+    )
+
+
+class TestCrossSourceFirst:
+    def test_same_source_flag(self) -> None:
+        cands = [
+            (_from("a", "note-1"), _emb(0.0)),
+            (_from("b", "note-1"), _emb(0.0)),
+            (_from("c", "note-2"), _emb(0.0)),
+        ]
+        by_ids = {
+            (c.a.id, c.b.id): c.same_source
+            for c in enumerate_candidate_pairs(cands, threshold=0.5, linked={})
+        }
+        assert by_ids == {("a", "b"): True, ("a", "c"): False, ("b", "c"): False}
+
+    def test_one_shared_entry_is_enough(self) -> None:
+        cands = [(_from("a", "note-1", "note-2"), _emb(0.0)), (_from("b", "note-2"), _emb(0.0))]
+        [pair] = enumerate_candidate_pairs(cands, threshold=0.5, linked={})
+        assert pair.same_source is True
+
+    def test_particles_without_a_source_are_not_same_source(self) -> None:
+        cands = [(_from("a"), _emb(0.0)), (_from("b"), _emb(0.0))]
+        [pair] = enumerate_candidate_pairs(cands, threshold=0.5, linked={})
+        assert pair.same_source is False
+
+    def test_cross_source_pairs_precede_closer_same_source_pairs(self) -> None:
+        # (a, b) is identical and from one note; (a, c) is less similar and
+        # crosses notes. The cross-note pair is probed first.
+        cands = [
+            (_from("a", "note-1"), _emb(0.0)),
+            (_from("b", "note-1"), _emb(0.0)),
+            (_from("c", "note-2"), _emb(0.4)),
+        ]
+        pairs = enumerate_candidate_pairs(cands, threshold=0.5, linked={}, cross_source_first=True)
+        assert _ids(pairs) == [("a", "c"), ("b", "c"), ("a", "b")]
+
+    def test_default_order_is_unchanged(self) -> None:
+        cands = [
+            (_from("a", "note-1"), _emb(0.0)),
+            (_from("b", "note-1"), _emb(0.0)),
+            (_from("c", "note-2"), _emb(0.4)),
+        ]
+        assert _ids(enumerate_candidate_pairs(cands, threshold=0.5, linked={}))[0] == ("a", "b")
+
+    def test_scope_tier_still_leads(self) -> None:
+        # Both-in-scope same-source pair (a, b) stays ahead of the mixed
+        # cross-source pair (a, c): the harvest's own pairs come first.
+        cands = [
+            (_from("a", "note-1"), _emb(0.0)),
+            (_from("b", "note-1"), _emb(0.0)),
+            (_from("c", "note-2"), _emb(0.4)),
+        ]
+        pairs = enumerate_candidate_pairs(
+            cands,
+            threshold=0.5,
+            linked={},
+            scope=frozenset({"a", "b"}),
+            cross_source_first=True,
+        )
+        assert _ids(pairs) == [("a", "b"), ("a", "c"), ("b", "c")]

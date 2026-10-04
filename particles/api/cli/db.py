@@ -11,11 +11,15 @@ import typer
 from particles.api.cli import app, run
 from particles.db import create_tables, session_scope
 from particles.ingest.importers.registry import ensure_extractor_records
+from particles.store.session_exposure_store import PRESERVED_TABLES
 
 # Tables the SCHEMA_VERSION 0.3.x → 1.0.0 scrap-and-re-extract upgrade
 # must NOT touch. The blob store on disk is preserved likewise —
 # it's content-addressed by SHA-256 so re-extraction picks it up by hash.
 _CORPUS_TABLES: frozenset[str] = frozenset({"corpus_entries", "snapshots"})
+# Primary records that cannot be re-derived from the corpus survive the rebuild
+# too: what each session was shown at session start.
+_KEPT_TABLES: frozenset[str] = _CORPUS_TABLES | PRESERVED_TABLES
 
 
 @app.command("db")
@@ -25,9 +29,10 @@ def db_cmd(
         False,
         "--force",
         help=(
-            "init: drop every particle-store table (preserving the corpus + blob "
-            "store) and rebuild from scratch. this is the upgrade "
-            "path across a SCHEMA_VERSION major bump. Confirms before dropping."
+            "init: drop every particle-store table (preserving the corpus, the blob "
+            "store and the session-exposure record) and rebuild from scratch. "
+            " this is the upgrade path across a SCHEMA_VERSION major "
+            "bump. Confirms before dropping."
         ),
     ),
 ) -> None:
@@ -64,7 +69,8 @@ async def _db_init() -> None:
 async def _db_init_force() -> None:
     """Scrap-and-re-extract reset.
 
-    Clears every non-corpus table and resets ``snapshots.extraction_status``
+    Clears every table but the corpus and the session-exposure record,
+    and resets ``snapshots.extraction_status``
     to PENDING so the operator's next ``particles extract --all-pending`` run
     rebuilds the particle store from the preserved corpus. The corpus rows
     themselves (and the content-addressed blob files on disk) are untouched.
@@ -89,7 +95,7 @@ async def _db_init_force() -> None:
         # Iterate in reverse dependency order so FK constraints (where they
         # exist) don't reject a child-after-parent delete.
         for table in reversed(Base.metadata.sorted_tables):
-            if table.name in _CORPUS_TABLES:
+            if table.name in _KEPT_TABLES:
                 continue
             await session.execute(delete(table))
         # Snapshots survive but their extraction_status was COMPLETE / FAILED /

@@ -212,4 +212,4 @@ particles benchmark relevance-floor --judge --replay-from ~/private/replay.json
 ```
 
 Knobs live under `benchmark_relevance_floor` in `config.yaml`; prices come from
-`benchmark_memory.price_per_mtok`.
+`llm.price_per_mtok`.

@@ -1,0 +1,207 @@
+{
+  "about": "acceptance fixture: co-extracted (retired claim, candidate) cases for the re-anchor probe and its second reading. Each case is one passage, the state claim an update retired, and the claims extracted beside it. 'expected' is DEPENDS when the claim, read as a statement about now, relied on the retired circumstance being current, else HOLDS. Who labelled the cases, and the owner's review of the live runs, are recorded in 'labelled_by' and 'owner_review'. Run with: uv run python scripts/reanchor_fixture.py",
+  "labelled_by": "proposed by the implementing session. The owner confirmed every HOLDS / DEPENDS label of the first ten cases (delhi-flat to staying-here) on 2026-09-27; the eight cases from gp-surgery on were added the same day to reach the thirty-restatement bar and await the owner's confirmation.",
+  "owner_review": "2026-09-27, first live run (claude-sonnet-4-6 on extraction and verification): the 13 restatements written were all labelled faithful and needed by the owner. The car and phone candidates were proposed by the probe but rejected by the second reading, so they were not written and were not labelled. Third live run, after the second reading was calibrated, the probe was held to the past tense and both calls ran at temperature 0: the 15 restatements written (car and phone included) were all labelled faithful and needed by the owner.",
+  "cases": [
+    {
+      "id": "delhi-flat",
+      "date": "2026-09-04",
+      "passage": "Session 4 (2026-09-04): dinner plans\n\nUser: I live in Delhi, in Lajpat Nagar. My favourite place to eat is Sandeep's Curry House, it's a ten-minute walk from my flat. Their paneer tikka is the best I've had.\n\nUser: I'm vegetarian, so keep that in mind when you suggest food.",
+      "retired": "The user lives in Delhi, in Lajpat Nagar.",
+      "candidates": [
+        {"claim": "Sandeep's Curry House is a ten-minute walk from the user's flat.", "expected": "DEPENDS"},
+        {"claim": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.", "expected": "DEPENDS"},
+        {"claim": "The user considers Sandeep's Curry House's paneer tikka the best they have had.", "expected": "HOLDS"},
+        {"claim": "The user is vegetarian.", "expected": "HOLDS"},
+        {"claim": "Sandeep's Curry House is in Lajpat Nagar, Delhi.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "office-gym",
+      "date": "2026-03-02",
+      "passage": "Notes, 2 March 2026\n\nUser: I work at Hooli now, our office is in Shoreditch. There's a gym right next to the office with a decent squat rack, and the commute is about forty minutes each way. I still like working from cafés on Fridays.",
+      "retired": "The user works at Hooli, in an office in Shoreditch.",
+      "candidates": [
+        {"claim": "The gym next to the user's office has a decent squat rack.", "expected": "DEPENDS"},
+        {"claim": "The user's commute to the office takes about forty minutes each way.", "expected": "DEPENDS"},
+        {"claim": "The user likes working from cafés on Fridays.", "expected": "HOLDS"},
+        {"claim": "Hooli has an office in Shoreditch.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "manager",
+      "date": "2026-05-11",
+      "passage": "Session, 2026-05-11\n\nUser: My manager is Priya. She approves expenses within a day, which is great, and we have a one-to-one every Tuesday. She used to work at Globex. I like direct feedback, and she gives it.",
+      "retired": "The user's manager is Priya.",
+      "candidates": [
+        {"claim": "The user's manager approves expenses within a day.", "expected": "DEPENDS"},
+        {"claim": "The user has a one-to-one with their manager every Tuesday.", "expected": "DEPENDS"},
+        {"claim": "Priya previously worked at Globex.", "expected": "HOLDS"},
+        {"claim": "The user likes direct feedback.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "berlin-local",
+      "date": "2025-11-20",
+      "passage": "Journal, 20 November 2025\n\nI live in Berlin, in Kreuzberg. The nearest climbing gym is Boulderklub, five minutes away, and my local bakery sells the best pretzels. I speak German fairly well by now. Kreuzberg has so much street art.",
+      "retired": "The user lives in Berlin, in Kreuzberg.",
+      "candidates": [
+        {"claim": "The nearest climbing gym to the user is Boulderklub, five minutes away.", "expected": "DEPENDS"},
+        {"claim": "The user's local bakery sells the best pretzels.", "expected": "DEPENDS"},
+        {"claim": "The user speaks German fairly well.", "expected": "HOLDS"},
+        {"claim": "Kreuzberg has a lot of street art.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "team",
+      "date": "2026-01-15",
+      "passage": "Session, 15 January 2026\n\nUser: I'm on the payments team. We deploy on Thursdays and everyone on the team writes Go. I know Go pretty well myself.",
+      "retired": "The user works on the payments team.",
+      "candidates": [
+        {"claim": "The user's team deploys on Thursdays.", "expected": "DEPENDS"},
+        {"claim": "Everyone on the user's team writes Go.", "expected": "DEPENDS"},
+        {"claim": "The user knows Go well.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "car",
+      "date": "2026-04-08",
+      "passage": "Session, 8 April 2026\n\nUser: I drive a Skoda Octavia. My car needs a service in October. I prefer manual gearboxes anyway.",
+      "retired": "The user drives a Skoda Octavia.",
+      "candidates": [
+        {"claim": "The user's car needs a service in October.", "expected": "DEPENDS"},
+        {"claim": "The user prefers manual gearboxes.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "phone",
+      "date": "2026-02-19",
+      "passage": "Session, 19 February 2026\n\nUser: I'm on an iPhone 13 and my phone's battery lasts about a day. I don't like big phones.",
+      "retired": "The user uses an iPhone 13.",
+      "candidates": [
+        {"claim": "The user's phone battery lasts about a day.", "expected": "DEPENDS"},
+        {"claim": "The user dislikes large phones.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "school",
+      "date": "2025-09-10",
+      "passage": "Session, 10 September 2025\n\nUser: My daughter goes to Park Lane Primary. The school run takes ten minutes on foot. She loves drawing.",
+      "retired": "The user's daughter attends Park Lane Primary.",
+      "candidates": [
+        {"claim": "The user's school run takes ten minutes on foot.", "expected": "DEPENDS"},
+        {"claim": "The user's daughter loves drawing.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "course",
+      "date": "2025-10-01",
+      "passage": "Session, 1 October 2025\n\nUser: I'm studying chemistry at Leeds. My lectures start at 9am every day, which is brutal. I have always found organic chemistry hard.",
+      "retired": "The user is studying chemistry at Leeds.",
+      "candidates": [
+        {"claim": "The user's lectures start at 9am every day.", "expected": "DEPENDS"},
+        {"claim": "The user has always found organic chemistry hard.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "staying-here",
+      "date": "2026-06-03",
+      "passage": "Session, 3 June 2026\n\nUser: I'm staying in Lisbon this month. It rains here most afternoons, annoyingly. One day I want to visit Porto.",
+      "retired": "The user is staying in Lisbon this month.",
+      "candidates": [
+        {"claim": "It rains most afternoons where the user is staying.", "expected": "DEPENDS"},
+        {"claim": "The user wants to visit Porto one day.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "gp-surgery",
+      "date": "2026-02-03",
+      "passage": "Session, 3 February 2026\n\nUser: I'm registered with the Brook Lane GP surgery. My GP surgery does same-day appointments if you ring before 9am, and my doctor there is Dr Okafor. I've got mild asthma, nothing serious.",
+      "retired": "The user is registered with the Brook Lane GP surgery.",
+      "candidates": [
+        {"claim": "The user's GP surgery offers same-day appointments if you ring before 9am.", "expected": "DEPENDS"},
+        {"claim": "The user's doctor is Dr Okafor.", "expected": "DEPENDS"},
+        {"claim": "The user has mild asthma.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "landlord",
+      "date": "2025-12-01",
+      "passage": "Journal, 1 December 2025\n\nI rent my flat in Camden from Mr Hale. My landlord takes about a week to answer any message, and the rent is £1,450 a month. One day I'd like to own a place.",
+      "retired": "The user rents a flat in Camden from Mr Hale.",
+      "candidates": [
+        {"claim": "The user's landlord takes about a week to answer messages.", "expected": "DEPENDS"},
+        {"claim": "The user's rent is £1,450 a month.", "expected": "DEPENDS"},
+        {"claim": "The user would like to own a home one day.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "employer-tools",
+      "date": "2026-04-21",
+      "passage": "Session, 21 April 2026\n\nUser: I work at Acme Analytics. We use Slack and Linear for everything, payday is the 25th, and most of my colleagues are on Pacific time. I prefer async communication anyway.",
+      "retired": "The user works at Acme Analytics.",
+      "candidates": [
+        {"claim": "The user's company uses Slack and Linear.", "expected": "DEPENDS"},
+        {"claim": "The user's employer pays on the 25th of each month.", "expected": "DEPENDS"},
+        {"claim": "Most of the user's colleagues work on Pacific time.", "expected": "DEPENDS"},
+        {"claim": "The user prefers asynchronous communication.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "gym-membership",
+      "date": "2026-01-06",
+      "passage": "Session, 6 January 2026\n\nUser: I'm a member at FitWorks on Elm Street. My gym opens at 5am, which suits me, and my trainer there is Marco. I can deadlift 140 kg now.",
+      "retired": "The user is a member of FitWorks on Elm Street.",
+      "candidates": [
+        {"claim": "The user's gym opens at 5am.", "expected": "DEPENDS"},
+        {"claim": "The user's personal trainer is Marco.", "expected": "DEPENDS"},
+        {"claim": "The user can deadlift 140 kg.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "laptop",
+      "date": "2026-03-17",
+      "passage": "Session, 17 March 2026\n\nUser: I'm still on a 2019 Intel MacBook Pro. My laptop takes about four minutes to run the test suite and the fan gets loud under load. I prefer macOS to Windows.",
+      "retired": "The user works on a 2019 Intel MacBook Pro.",
+      "candidates": [
+        {"claim": "The user's laptop takes about four minutes to run the test suite.", "expected": "DEPENDS"},
+        {"claim": "The user's laptop fan gets loud under load.", "expected": "DEPENDS"},
+        {"claim": "The user prefers macOS to Windows.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "singapore",
+      "date": "2025-08-12",
+      "passage": "Journal, 12 August 2025\n\nI live in Singapore now. It is humid here all year, and the team's standup falls at 9pm my time. I've started learning Mandarin. The hawker centres in Singapore are excellent.",
+      "retired": "The user lives in Singapore.",
+      "candidates": [
+        {"claim": "It is humid all year where the user lives.", "expected": "DEPENDS"},
+        {"claim": "The user's team standup is at 9pm the user's local time.", "expected": "DEPENDS"},
+        {"claim": "The user is learning Mandarin.", "expected": "HOLDS"},
+        {"claim": "Singapore has excellent hawker centres.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "hotel",
+      "date": "2026-07-14",
+      "passage": "Session, 14 July 2026\n\nUser: I'm staying at the Hotel Astoria in Vienna this week. My hotel is a short tram ride from the opera house, and breakfast ends at 10am. I love classical music, so the location is perfect.",
+      "retired": "The user is staying at the Hotel Astoria in Vienna this week.",
+      "candidates": [
+        {"claim": "The user's hotel is a short tram ride from the opera house.", "expected": "DEPENDS"},
+        {"claim": "Breakfast at the user's hotel ends at 10am.", "expected": "DEPENDS"},
+        {"claim": "The user loves classical music.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "son-class",
+      "date": "2025-10-20",
+      "passage": "Session, 20 October 2025\n\nUser: My son is in Mrs Patel's Year 3 class. His teacher sends homework home on Mondays and there are 28 kids in the class. He's learning the violin too.",
+      "retired": "The user's son is in Mrs Patel's Year 3 class.",
+      "candidates": [
+        {"claim": "The user's son's teacher sends homework home on Mondays.", "expected": "DEPENDS"},
+        {"claim": "The user's son's class has 28 pupils.", "expected": "DEPENDS"},
+        {"claim": "The user's son is learning the violin.", "expected": "HOLDS"}
+      ]
+    }
+  ]
+}

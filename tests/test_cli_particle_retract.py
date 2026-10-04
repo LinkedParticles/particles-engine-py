@@ -13,7 +13,9 @@ the *verb* decides:
   verb must not take its authorization from an agent-facing policy knob;
 * that it retires an *extractor-asserted* belief, the motivating class the
   cross-asserter guardrail correctly blocks agents from touching;
-* that the guards it must **not** relax still fire (HUMAN_REVIEW, ACTIVE-only);
+* that the guards it must **not** relax still fire (ACTIVE-only, and HUMAN_REVIEW
+  for a non-claim record); since an operator-asserted *claim* is
+  retractable by the operator;
 * and the write-path effects the row demanded: ``retired_at`` stamped and a
   reason-carrying ``PARTICLE_RETRACTED`` event under a CLI-specific actor.
 """
@@ -31,7 +33,7 @@ from typer.testing import CliRunner
 
 from particles.api.cli import app
 from particles.api.cli.particle import RETRACT_ACTOR
-from particles.core.schema import Confidence, Particle, UncertaintyNature
+from particles.core.schema import Confidence, Particle, ParticleType, UncertaintyNature
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 
@@ -48,6 +50,7 @@ async def _insert(
     calibration: CalibrationSource = CalibrationSource.EXTRACTOR_DIRECT,
     status: Status = Status.ACTIVE,
     particle_id: str | None = None,
+    particle_type: ParticleType = ParticleType.CLAIM,
 ) -> str:
     from particles.db import session_scope
     from particles.store.particle_store import insert_particle
@@ -60,6 +63,7 @@ async def _insert(
         asserted_by=asserted_by,
         asserted_at=datetime.now(UTC),
         status=status,
+        particle_type=particle_type,
     )
     async with session_scope() as session:
         await insert_particle(session, p)
@@ -158,9 +162,23 @@ class TestOperatorRetract:
 
 
 class TestGuardsStillApply:
-    def test_human_review_belief_is_refused(self, cli_db: Path, runner: CliRunner) -> None:
-        """Deliberately not widened: revising an operator-asserted belief is Review's job."""
-        pid = asyncio.run(_insert(calibration=CalibrationSource.HUMAN_REVIEW))
+    def test_an_operator_claim_is_retractable(self, cli_db: Path, runner: CliRunner) -> None:
+        """the HUMAN_REVIEW guard binds agents; the operator may revise a claim."""
+        pid = asyncio.run(
+            _insert(asserted_by="operator:local", calibration=CalibrationSource.HUMAN_REVIEW)
+        )
+
+        result = runner.invoke(
+            app, ["particle", "retract", pid, "--reason", "changed my mind", "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert asyncio.run(_load(pid)).status is Status.RETRACTED
+
+    def test_a_human_review_record_is_refused(self, cli_db: Path, runner: CliRunner) -> None:
+        """A REVIEW annotation record stays Review's to revise."""
+        pid = asyncio.run(
+            _insert(calibration=CalibrationSource.HUMAN_REVIEW, particle_type=ParticleType.REVIEW)
+        )
 
         result = runner.invoke(
             app, ["particle", "retract", pid, "--reason", "changed my mind", "--yes"]
