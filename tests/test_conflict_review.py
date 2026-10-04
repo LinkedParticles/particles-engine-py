@@ -19,12 +19,14 @@ from particles.core.conflict_resolution import RETIRED_VALUE_KEY
 from particles.core.conflict_review import (
     AleatoryMark,
     Demotion,
+    Retirement,
     TrustJudgment,
     cascade_pair,
     conflict_pair_ids,
     decide_cascade,
     decide_demotion,
     decide_resolution,
+    decide_retirement,
     trust_statement_source,
 )
 from particles.core.schema import (
@@ -281,6 +283,75 @@ def test_defer_writes_nothing_and_leaves_the_wrapper_open() -> None:
     assert plan.close_wrapper is False
 
 
+# -- DISCARD ------------------------------------------------------
+
+
+def test_retirement_of_a_live_claim_is_a_believed_retraction() -> None:
+    a = _claim()
+    assert decide_retirement(a) == Retirement(a, was_believed=True)
+
+
+def test_retirement_of_a_quarantined_claim_was_never_believed() -> None:
+    b = _quarantined()
+    assert decide_retirement(b) == Retirement(b, was_believed=False)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [StatusReason.CORPUS_ENTRY_MISSING, StatusReason.LOWER_TRUST_SOURCE, None],
+)
+def test_retirement_of_a_stale_claim_retracts_it(reason: StatusReason | None) -> None:
+    """A stale side is not terminal, so DISCARD closes it with the rest."""
+    stale = _claim(Status.PROVENANCE_STALE, reason)
+    assert decide_retirement(stale) == Retirement(stale, was_believed=True)
+
+
+@pytest.mark.parametrize("status", [Status.RETRACTED, Status.SUPERSEDED])
+def test_retirement_of_a_terminal_claim_writes_nothing(status: Status) -> None:
+    assert decide_retirement(_claim(status)) is None
+
+
+def test_retirement_of_a_dangling_ref_writes_nothing() -> None:
+    assert decide_retirement(None) is None
+
+
+def test_discard_retires_both_sides_with_no_verdict() -> None:
+    a, b = _claim(), _quarantined()
+    plan = decide_resolution(ResolutionAction.DISCARD, _wrapper(a.id, b.id), a, b)
+    assert plan.retire == (Retirement(a, was_believed=True), Retirement(b, was_believed=False))
+    assert plan.demote is None
+    assert plan.promote is None
+    assert plan.aleatory == ()
+    assert plan.trust is None
+    assert plan.close_wrapper is True
+
+
+def test_discard_over_a_dangling_b_retires_a_alone() -> None:
+    a = _claim()
+    plan = decide_resolution(ResolutionAction.DISCARD, _wrapper(a.id, "gone"), a, None)
+    assert plan.retire == (Retirement(a, was_believed=True),)
+    assert plan.close_wrapper is True
+
+
+def test_discard_of_a_retired_value_record_leaves_the_judged_original() -> None:
+    """the terminal original keeps its judgment reason; only the
+    held re-assertion goes."""
+    a, b = _claim(Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION), _quarantined()
+    plan = decide_resolution(
+        ResolutionAction.DISCARD, _wrapper(a.id, b.id, retired_value=True), a, b
+    )
+    assert plan.retire == (Retirement(b, was_believed=False),)
+    assert plan.trust is None
+
+
+@pytest.mark.parametrize(
+    "action", [a for a in ResolutionAction if a is not ResolutionAction.DISCARD]
+)
+def test_only_discard_retires(action: ResolutionAction) -> None:
+    a, b = _claim(), _quarantined()
+    assert decide_resolution(action, _wrapper(a.id, b.id), a, b).retire == ()
+
+
 # -- cascade_pair / decide_cascade -------------------------------------------
 
 
@@ -367,3 +438,50 @@ def test_cascade_uses_the_shared_demotion_rule_for_a_terminal_loser() -> None:
     verdict = decide_cascade(_wrapper(a.id, b.id), a, b, 0.9, 0.1, differential_threshold=0.3)
     assert verdict is not None
     assert verdict.loser_demotion is Demotion.NONE
+
+
+def _census(a: Particle, b: Particle, *extra_a: Particle) -> Particle:
+    """A census record with ``a`` and any ``extra_a`` on side a, ``b`` on side b."""
+    from particles.core.contradiction_disclosure import (
+        ConfirmedPair,
+        NoteLabel,
+        Sides,
+        build_census_record,
+    )
+
+    members = {p.id: p for p in (a, b, *extra_a)}
+    return build_census_record(
+        sides=Sides(a=(a.id, *(p.id for p in extra_a)), b=(b.id,)),
+        pairs=[ConfirmedPair(a=p.id, b=b.id, same_source=False, reason="r") for p in (a, *extra_a)],
+        members=members,
+        labels={pid: NoteLabel("n", "d") for pid in members},
+        sources={pid: ["e"] for pid in members},
+        trigger_entry_id="e",
+        trigger_snapshot_id=None,
+    )
+
+
+def test_cascade_leaves_a_census_record_of_more_than_two_claims_for_a_person() -> None:
+    """a side drawn from several notes has no one trust rank to compare."""
+    a, a2, b = _claim(entry="entry-a"), _claim(entry="entry-c"), _claim(entry="entry-b")
+    assert cascade_pair(_census(a, b), a, b) == (a, b)
+    assert cascade_pair(_census(a, b, a2), a, b) is None
+
+
+def test_prefer_a_on_a_census_record_demotes_the_whole_other_side() -> None:
+    from particles.core.conflict_review import FurtherMembers
+
+    a, a2, b, b2 = (
+        _claim(entry="entry-a"),
+        _claim(entry="entry-c"),
+        _claim(entry="entry-b"),
+        _claim(entry="entry-d"),
+    )
+    record = _census(a, b, a2)
+    plan = decide_resolution(
+        ResolutionAction.PREFER_A, record, a, b, FurtherMembers(a=(a2,), b=(b2,))
+    )
+    assert plan.demote == (b, Demotion.TRANSITION)
+    assert plan.also_demote == ((b2, Demotion.TRANSITION),)
+    # A two-claim plan is unchanged: no further demotion.
+    assert decide_resolution(ResolutionAction.PREFER_A, record, a, b).also_demote == ()

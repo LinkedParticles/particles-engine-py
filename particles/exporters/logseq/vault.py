@@ -40,7 +40,7 @@ from particles.exporters.summaries import LogseqSummary
 from particles.extraction.polarity import is_non_asserted
 from particles.render.article_synthesis import compute_input_hash
 from particles.render.markdown import (
-    atomic_write_text,
+    MarkdownExportLedger,
     build_narrative_naming,
     build_subject_naming,
     disambiguation_name,
@@ -66,6 +66,7 @@ async def export_vault(
     invalidate_stale_links: bool = False,
     min_particle_confidence: float = 0.0,
     include_non_asserted: bool = False,
+    force: bool = False,
 ) -> LogseqSummary:
     """Export the particle store as a Logseq graph.
 
@@ -85,6 +86,15 @@ async def export_vault(
     DB cache for those subjects so the next render genuinely
     re-synthesises.
 
+    Ownership: ``pages/`` is also where a Logseq user's own pages
+    live, so the export keeps a manifest of the pages it wrote at the graph
+    root (:class:`~particles.render.markdown.MarkdownExportLedger`) and
+    prunes or overwrites only those. The first export into a graph whose
+    ``pages/`` holds pages it did not write raises
+    :class:`~particles.render.markdown.ExportTargetNotOwnedError` before
+    writing anything, unless ``force``; ``force`` also lets a page overwrite
+    a foreign file at its path, which is otherwise skipped.
+
     Returns a :class:`LogseqSummary`.
     """
     from particles.corpus.store import get_entry_uri_map
@@ -95,6 +105,12 @@ async def export_vault(
     )
 
     pages_dir = output_dir / "pages"
+    # claim the target before writing anything. A pre-manifest
+    # export's pages carry no marker to adopt them by, so a graph exported by
+    # an earlier release needs ``force`` once.
+    ledger = MarkdownExportLedger.claim(
+        output_dir, exporter="logseq", scope=pages_dir, recursive=False, force=force
+    )
     pages_dir.mkdir(parents=True, exist_ok=True)
 
     # compute the disambiguation map from the FULL subject set
@@ -160,6 +176,7 @@ async def export_vault(
             known_names,
             hash_field="article_input_hash",
             recursive=False,
+            only=ledger.owned,
         )
         stale_link_articles_invalidated = len(invalidated_paths)
         slug_to_subject_id = {_slug_for(s): s.id for s in subjects}
@@ -198,12 +215,6 @@ async def export_vault(
             cached = fm.get("article_input_hash")
             if isinstance(cached, str):
                 prior_synthesis_hashes[existing.name] = cached
-
-    # Track every .md file this run writes so the post-write prune pass
-    # can remove only files that won't be regenerated. Replaces the
-    # pre-0.42.4 blanket wipe that emptied pages_dir before writing —
-    # an interrupted export now leaves the graph in a consistent state.
-    written_paths: set[Path] = set()
 
     # --- Load particles -------------------------------------------------
     # (``all_particles`` was loaded above so the stale-link block could see the
@@ -427,8 +438,8 @@ async def export_vault(
                 page_path,
             )
             continue
-        atomic_write_text(page_path, page)
-        written_paths.add(page_path.resolve())
+        if not ledger.write(page_path, page):
+            continue
         files_written += 1
 
     # --- Top-level page index (Logseq's "Contents" convention) ----------
@@ -440,10 +451,8 @@ async def export_vault(
         if s.id not in rendered_ids:
             continue
         index_lines.append(f"- [[{naming.display_name(s)}]]\n")
-    contents_path = pages_dir / "Contents.md"
-    atomic_write_text(contents_path, "".join(index_lines))
-    written_paths.add(contents_path.resolve())
-    files_written += 1
+    if ledger.write(pages_dir / "Contents.md", "".join(index_lines)):
+        files_written += 1
 
     # one Wikipedia-style ``(disambiguation)`` page per collision
     # group whose members actually rendered. ``alias:: <bare name>`` lets a
@@ -466,9 +475,8 @@ async def export_vault(
                 disamb_path,
             )
             continue
-        atomic_write_text(disamb_path, "\n".join(disamb_lines) + "\n")
-        written_paths.add(disamb_path.resolve())
-        files_written += 1
+        if ledger.write(disamb_path, "\n".join(disamb_lines) + "\n"):
+            files_written += 1
 
     # one page per ACTIVE NARRATIVE in the `Narratives/` page
     # namespace, rendered as cited prose via the path (the
@@ -515,19 +523,25 @@ async def export_vault(
                     page_path,
                 )
                 continue
-            atomic_write_text(page_path, page)
-            written_paths.add(page_path.resolve())
+            if not ledger.write(page_path, page):
+                continue
             narrative_notes_written += 1
             files_written += 1
 
-    # Post-write prune (0.42.4): remove .md files this run did not write
-    # so suppressed / renamed subjects don't linger. Logseq pages are
-    # flat (no subdirs), so non-recursive.
-    from particles.render.markdown import prune_obsolete_markdown
-
-    files_pruned = prune_obsolete_markdown(pages_dir, written_paths, recursive=False)
+    # Post-write prune (0.42.4, narrowed): remove the pages a
+    # previous run wrote that this run did not, so suppressed / renamed
+    # subjects don't linger; the user's own pages are never candidates.
+    # Logseq pages are flat (no subdirs), so non-recursive.
+    files_pruned = ledger.finish()
     if files_pruned:
         log.info("Pruned %d obsolete page(s) from previous export", files_pruned)
+    if ledger.skipped:
+        log.warning(
+            "Skipped %d page(s) whose path holds a file this export did not write "
+            "(e.g. %s); pass --force to overwrite them",
+            len(ledger.skipped),
+            ledger.skipped[0].name,
+        )
 
     phantoms = sum(1 for c in particle_counts.values() if c == 0)
 

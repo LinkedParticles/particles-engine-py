@@ -105,6 +105,17 @@ def export_cmd(
             "Bypasses the synthesis cache so existing LLM articles are replaced."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Obsidian/Logseq: export into a directory that holds Markdown files "
+            "this export did not write, such as an existing vault, and overwrite "
+            "any such file whose path a note takes. Without it the first export "
+            "into a populated directory is refused, and a later one skips those "
+            "paths. Files the export did not write are never deleted."
+        ),
+    ),
     include_non_asserted: bool = typer.Option(
         False,
         "--include-non-asserted",
@@ -213,6 +224,8 @@ def export_cmd(
     \b
         particles export obsidian ./my-vault
         particles export obsidian ./my-vault --min-particles=1 --min-links=2
+        particles export obsidian ~/Vault/Particles        # a folder of its own
+        particles export obsidian ~/Vault --force          # beside your own notes
         particles export anki ./deck.txt --deck-name="Numismatics" --min-particle-confidence=0.7
         particles export wiki ./my-wiki                    # incremental
         particles export wiki ./my-wiki --dry-run          # cost estimate
@@ -343,6 +356,8 @@ def export_cmd(
         "with_synthesis": with_synthesis,
         "without_synthesis": without_synthesis,
         "include_non_asserted": include_non_asserted,
+        # Obsidian / Logseq ownership guard.
+        "force": force,
         # Notion. None database_id falls back to config.notion at
         # call time; no_update_blocks opts into create-only re-sync.
         "database_id": database_id,

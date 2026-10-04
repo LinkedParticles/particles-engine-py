@@ -47,6 +47,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
+from tests._claude_projects import bind_hooks_to_store
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,6 +109,9 @@ def runner() -> CliRunner:
 @pytest.fixture
 def hook_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
+    # The hooks this fake home "installed" name the ``cli_db`` store, which is
+    # what lets the projection render into its fake ``~/.claude/projects``.
+    bind_hooks_to_store(tmp_path, f"sqlite+aiosqlite:///{tmp_path / 'cli.db'}")
     return tmp_path
 
 
@@ -1020,3 +1024,179 @@ class TestProjectObserver:
         ]
 
         assert "Project B deploys on Mondays." in context and "Observer" not in context
+
+
+# ---------------------------------------------------------------------------
+# Store binding — a memory directory is served by the store its hooks name
+# ---------------------------------------------------------------------------
+
+#: A store the fake hooks name that is not the ``cli_db`` store under test: the
+#: owner's real store, from the point of view of a scratch run.
+_OTHER_STORE = "sqlite+aiosqlite:////nonexistent/owner/particles.db"
+_REAL_LINE = "- The owner's real memory line."
+
+
+def _memory_file(memory_dir: Path) -> Path:
+    from particles.render.markdown import insert_projected_region_at_top
+
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    path = memory_dir / "MEMORY.md"
+    path.write_text(insert_projected_region_at_top(_REAL_LINE + "\n", MEMORY_REGION, "memory.yaml"))
+    return path
+
+
+class TestStoreBinding:
+    def test_session_end_leaves_a_directory_it_does_not_serve_alone(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from tests._claude_projects import bind_hooks_to_store
+
+        bind_hooks_to_store(tmp_path, _OTHER_STORE)
+        _seed(("A synthetic scenario belief.", 0.9))
+        transcript, memory_dir = _project_dir(tmp_path, "-proj")
+        memory_md = _memory_file(memory_dir)
+        before = memory_md.read_text()
+
+        result = _session_end(runner, transcript)
+
+        assert result.exit_code == 0
+        assert memory_md.read_text() == before
+        log = _last_log(tmp_path)
+        assert "not the store the installed Claude Code hooks name" in log["memory_skipped"]
+        assert "projection" not in log
+        # Neither half ran: nothing from the memory directory entered the store.
+        assert not [uri for uri, _ in _corpus_state() if "/memory/" in uri]
+
+    def test_consolidate_against_a_scratch_store_reads_and_writes_nothing(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        """The incident: a scratch store's cycle rewrote every real MEMORY.md."""
+        from tests._claude_projects import bind_hooks_to_store
+
+        bind_hooks_to_store(tmp_path, _OTHER_STORE)
+        _seed(("A synthetic scenario belief.", 0.9))
+        files = [_memory_file(_project_dir(tmp_path, name)[1]) for name in ("-proj-a", "-proj-b")]
+        before = [f.read_text() for f in files]
+
+        result = runner.invoke(
+            app,
+            ["memory", "consolidate", "--structural-only", "--scope", "store", "--format", "json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert [f.read_text() for f in files] == before
+        projection = next(
+            p for p in json.loads(result.output)["passes"] if p["name"] == "projection"
+        )
+        assert projection["status"] == "skipped"
+        assert "serves none of the 2 memory directories" in projection["detail"]
+        assert not [uri for uri, _ in _corpus_state() if "/memory/" in uri]
+
+    def test_consolidate_serves_only_the_directory_bound_to_its_store(
+        self, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        """A project-scope install binds its own repository's memory directory."""
+        from particles.api.cli._claude_code import claude_project_slug
+        from particles.api.cli.memory import build_projection_runner
+        from tests._claude_projects import bind_hooks_to_store, make_repo, write_transcript
+
+        bind_hooks_to_store(tmp_path, _OTHER_STORE)  # the user-level install: another store
+        repo = make_repo(tmp_path / "work" / "repo")
+        bind_hooks_to_store(repo, f"sqlite+aiosqlite:///{cli_db}")
+        (repo / ".claude" / "settings.json").rename(repo / ".claude" / "settings.local.json")
+        slug = claude_project_slug(repo)
+        write_transcript(tmp_path / ".claude" / "projects" / slug / "s.jsonl", str(repo))
+        served = _memory_file(tmp_path / ".claude" / "projects" / slug / "memory")
+        _transcript, other_dir = _project_dir(tmp_path, "-other")
+        other = _memory_file(other_dir)
+        other_before = other.read_text()
+        _seed(("DCO is enforced.", 0.9))
+
+        run, reason = build_projection_runner("default")
+        assert run is not None, reason
+        telemetry = asyncio.run(run())
+
+        assert telemetry["dirs"] == 1
+        assert telemetry["unbound_dirs_skipped"] == 1
+        assert "- DCO is enforced." in served.read_text()
+        assert other.read_text() == other_before
+
+    def test_the_cycle_refuses_on_its_own_when_called_directly(
+        self, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.api.cli._memory_projection import run_projection_cycle
+        from tests._claude_projects import bind_hooks_to_store
+
+        bind_hooks_to_store(tmp_path, _OTHER_STORE)
+        _seed(("A synthetic scenario belief.", 0.9))
+        memory_md = _memory_file(_project_dir(tmp_path, "-proj")[1])
+        before = memory_md.read_text()
+
+        outcome = asyncio.run(run_projection_cycle("default", memory_md.parent, before))
+
+        assert outcome["skipped"] == "store-not-bound"
+        assert memory_md.read_text() == before
+        assert not (projection_state / "projects" / "-proj").exists()
+
+    def test_a_directory_outside_any_claude_projects_tree_is_not_gated(
+        self, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.api.cli._memory_projection import run_projection_cycle
+        from tests._claude_projects import bind_hooks_to_store
+
+        bind_hooks_to_store(tmp_path, _OTHER_STORE)
+        _seed(("DCO is enforced.", 0.9))
+        memory_md = _memory_file(tmp_path / "notes" / "memory")
+
+        outcome = asyncio.run(
+            run_projection_cycle("default", memory_md.parent, memory_md.read_text())
+        )
+
+        assert outcome["outcome"] == "rendered"
+
+
+class TestIndexEntries:
+    """a MEMORY.md index entry summarises a sibling file; it is not a claim."""
+
+    def _dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "memory"
+        d.mkdir()
+        (d / "deploy.md").write_text("The deploy runs nightly.\n")
+        (d / "ops.md").write_text("Ops notes.\n")
+        return d
+
+    def test_entries_for_existing_siblings_are_dropped(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import drop_index_entries
+
+        d = self._dir(tmp_path)
+        text = (
+            "# Memory index\n"
+            "- [Deploy](deploy.md) — status, schedule, open work\n"
+            "* [Ops](ops.md): runbooks\n"
+            "- [Plain](deploy.md)\n"
+            "- [Gone](missing.md) — the only record of this note\n"
+            "- See [Deploy](deploy.md) for the full schedule.\n"
+            "- The team's primary timezone is UTC.\n"
+        )
+        out = drop_index_entries(text, d)
+        assert out == (
+            "# Memory index\n"
+            "- [Gone](missing.md) — the only record of this note\n"
+            "- See [Deploy](deploy.md) for the full schedule.\n"
+            "- The team's primary timezone is UTC.\n"
+        )
+
+    def test_links_that_leave_the_folder_are_kept(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import drop_index_entries
+
+        d = self._dir(tmp_path)
+        text = "- [Sub](sub/deploy.md) — nested\n- [Web](https://example.com/deploy.md) — web\n"
+        assert drop_index_entries(text, d) == text
+
+    def test_the_filter_drops_entries_only_when_given_the_files_folder(
+        self, tmp_path: Path
+    ) -> None:
+        d = self._dir(tmp_path)
+        text = "- [Deploy](deploy.md) — status, schedule, open work\n- Authored fact.\n"
+        assert filter_memory_file_for_deposit(text) == text
+        assert filter_memory_file_for_deposit(text, source_dir=d) == "- Authored fact.\n"

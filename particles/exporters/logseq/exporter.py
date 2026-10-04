@@ -63,6 +63,7 @@ class LogseqExporter:
             )
         )
         include_non_asserted = bool(options.get("include_non_asserted", False))
+        force = bool(options.get("force", False))
         return await export_vault(
             session,
             output,
@@ -72,4 +73,5 @@ class LogseqExporter:
             invalidate_stale_links=invalidate_stale_links,
             min_particle_confidence=min_particle_confidence,
             include_non_asserted=include_non_asserted,
+            force=force,
         )

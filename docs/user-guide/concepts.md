@@ -47,7 +47,9 @@ subjects; subjects are the nodes of the knowledge graph. Examples:
 Subjects are resolved at extraction time against Wikidata and other
 ontologies (Numista, Nomisma). A subject may have multiple
 `external_ids` (wikidata:Q1234, numista:8562, …) and a list of
-aliases.
+aliases. When a name has several Wikidata candidates ("Shell" the company,
+the seashell, the artillery round), a model reads the claim and picks one, or
+decides that none is meant and keeps the name as a local subject.
 
 The resolver is fast and usually right; when it folds two real-world
 entities into one, the fix is

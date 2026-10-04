@@ -65,6 +65,56 @@ Three settings under `source_passage` in `config.yaml` tune the display:
 to be offered, default `0.5`), `max_passage_chars` (default `6000`), and
 `query_show_limit` (how many top hits `--show-source` covers, default `5`).
 
+## Grounded answers
+
+The answer is composed by a model from the retrieved beliefs, and a model
+adds things of its own: a motive, a status, a conclusion, now and then a fact
+it learned elsewhere. In the default answer that addition reads exactly like
+the recalled beliefs around it. A grounded answer makes it visible instead:
+
+```bash
+uv run particles query "Why was the answer token budget raised?" --grounded
+```
+
+Every sentence ends with a tag saying where it came from:
+
+| Tag | Meaning |
+|---|---|
+| `[p-1a2b3c4d]` | The retrieved beliefs the sentence rests on, by ID. `particles particle show p-1a2b3c4d` opens one. |
+| `[inference]` | No belief states it. The model drew it over the cited beliefs: a motive, a status, a conclusion, or a remark about what the store holds. |
+| `[background]` | It comes from the model's own general knowledge and from no belief at all. |
+| `[unattributed]` | The model gave no tag, or cited only IDs it was never given. |
+
+The model declares the labels and the query checks the citations. Every cited
+ID is matched against the beliefs actually retrieved for this answer; an ID
+outside that set is never trusted, a warning on stderr reports it, and a
+sentence left with no valid citation is labelled `[unattributed]`. Nothing is
+dropped: a labelled sentence is still in the answer, so you can weigh it
+yourself. Nothing the model adds is ever stored as a belief either. The
+labels exist on this one response and nowhere else.
+
+Below the answer, an attribution line counts the sentences of each kind and
+lists each cited belief once under the ID the answer uses:
+
+```text
+Attribution: 3 cited · 2 inference · 0 background · 0 unattributed
+  [p-10cdc518] The token caps have been changed to 4096 for answer and 1024 for judge.
+  [p-f548e2f1] On models with adaptive thinking by default, thinking spend counts …
+```
+
+A refusal is unchanged: when nothing retrieved bears on the question, the
+answer says so and carries no tags.
+
+Grounded mode is off by default. Set `query.grounded_answers: true` in
+`config.yaml` to make it the default for every surface, and use
+`--grounded` or `--ungrounded` to choose per query. Over HTTP the request field
+is `grounded` and the response carries the per-sentence labels and full cited
+IDs in `answer_attribution`; the MCP `query` tool takes the same `grounded`
+argument. On the owner's store it lowered the
+share of silently unsupported sentences only from about 25% to about 22%
+(see [the leakage benchmark](../benchmarks/leakage.md#grounded-answers-and-the-reason-first-judge-2026-10-03)),
+which is why it is not on by default.
+
 ## Creating a taxonomy
 
 Before you can filter by tag, a taxonomy has to exist and particles

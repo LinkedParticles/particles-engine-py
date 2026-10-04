@@ -36,13 +36,16 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
-from particles.corpus.store import CorpusEntryRow, SnapshotRow
+from particles.corpus.store import CorpusEntryRow, SnapshotRow, update_extraction_status
+from particles.extraction.components import ComponentRecord
 from particles.operations.reindex import (
     _collapse_for_auto_discovery,
     _identify_scope,
     _reindex_snapshot,
+    current_component_tables,
     reindex,
 )
+from particles.operations.reindex_scope import ONLY_CHANGED_COMPONENTS_REFUSAL
 from particles.store.particle_store import get_particle, insert_particle
 
 # ---------------------------------------------------------------------------
@@ -873,7 +876,7 @@ class TestReindexPlanAndDryRun:
         assert plan["missing_blobs"] == 1
         assert plan["snapshot_plans"][0]["blob_missing"] is True
 
-        monkeypatch.setattr("particles.operations.reindex.blob_exists", lambda _h: True)
+        monkeypatch.setattr("particles.operations.reindex.blob_size", lambda _h: 1234)
         result = await reindex(
             db_session, entry_ids=[entry.entry_id], run_post_lint=False, dry_run=True
         )
@@ -881,6 +884,8 @@ class TestReindexPlanAndDryRun:
         assert isinstance(plan, dict)
         assert plan["missing_blobs"] == 0
         assert plan["snapshot_plans"][0]["blob_missing"] is False
+        # the plan carries each snapshot's size, what --estimate prices.
+        assert plan["snapshot_plans"][0]["source_bytes"] == 1234
 
     @pytest.mark.asyncio
     async def test_on_plan_fires_before_extraction(
@@ -1007,3 +1012,90 @@ class TestReindexPlanAndDryRun:
         )
 
         assert statuses == [f"snapshot 1/1 (entry {entry.entry_id[:8]}…) — 1 failed"]
+
+
+# ---------------------------------------------------------------------------
+# --only-changed-components
+# ---------------------------------------------------------------------------
+
+
+def _current_record(extractor: str = "general-extractor") -> ComponentRecord:
+    """A record whose every exercised component matches today's table."""
+    table = current_component_tables()[extractor]
+    return ComponentRecord(
+        extractor=extractor,
+        exercised={name: table.digests[name] for name in table.always},
+        available=sorted(table.digests),
+    )
+
+
+class TestOnlyChangedComponents:
+    @pytest.mark.asyncio
+    async def test_refused_while_not_enabled(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock = _patch_extract(monkeypatch)
+        with pytest.raises(ValueError) as excinfo:
+            await reindex(
+                db_session,
+                extractor_version="0.3.0",
+                only_changed_components=True,
+                run_post_lint=False,
+            )
+        assert str(excinfo.value) == ONLY_CHANGED_COMPONENTS_REFUSAL
+        mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_when_enabled_it_skips_unchanged_snapshots_and_keeps_their_stamp(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The design the trigger flips on, exercised end to end.
+
+        The unchanged snapshot is skipped and its particle keeps ACTIVE with its
+        old version stamp, so the next scope over that version reads it again;
+        the snapshot with no record is re-extracted.
+        """
+        monkeypatch.setattr("particles.operations.reindex.ONLY_CHANGED_COMPONENTS_ENABLED", True)
+        entry_same = await _add_entry(db_session)
+        snap_same = await _add_snapshot(db_session, entry_same)
+        kept_particle = await _add_particle(db_session, entry_same, snap_same)
+        await update_extraction_status(
+            db_session,
+            snap_same.snapshot_id,
+            ExtractionStatus.COMPLETE,
+            components=_current_record(),
+        )
+        entry_legacy = await _add_entry(db_session, uri_r="https://example.com/y")
+        snap_legacy = await _add_snapshot(db_session, entry_legacy)
+        await _add_particle(db_session, entry_legacy, snap_legacy)
+        await db_session.commit()
+
+        mock = _patch_extract(monkeypatch)
+        result = await reindex(
+            db_session,
+            extractor_version="0.3.0",
+            only_changed_components=True,
+            include_failed=False,
+            run_post_lint=False,
+        )
+        reindexed = {call.args[2] for call in mock.await_args_list}
+        assert reindexed == {snap_legacy.snapshot_id}
+        plan = result["plan"]
+        assert isinstance(plan, dict)
+        assert "1 snapshot(s) skipped, components unchanged" in plan["scope_description"]
+        survivor = await get_particle(db_session, kept_particle.id)
+        assert survivor is not None
+        assert survivor.status is Status.ACTIVE
+        assert survivor.extractor_ref is not None
+        assert survivor.extractor_ref.version == "0.3.0"
+
+    @pytest.mark.asyncio
+    async def test_needs_a_version_scope(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("particles.operations.reindex.ONLY_CHANGED_COMPONENTS_ENABLED", True)
+        _patch_extract(monkeypatch)
+        with pytest.raises(ValueError, match="--extractor-version scope only"):
+            await reindex(
+                db_session, extractor_id="general-extractor", only_changed_components=True
+            )

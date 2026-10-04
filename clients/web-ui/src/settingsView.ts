@@ -64,7 +64,7 @@ export function renderSettings(root: HTMLElement, deps: SettingsViewDeps): void 
   const reviewerInput = field(
     panel,
     "Reviewer id",
-    "Recorded on review resolutions (POST /review reviewer_id). Required before the Comment gesture.",
+    "Recorded on review resolutions (POST /review reviewer_id). Required before the Resolve gesture.",
     reviewer,
     "text",
   );

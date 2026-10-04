@@ -506,3 +506,36 @@ async def test_single_subject_scan_keeps_the_targeted_query(db_session: AsyncSes
 
     assert calls == [subj.id]
     assert report.total_candidates == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_claim_pairs_batches_and_keeps_order() -> None:
+    """The judge over bare content pairs (``reindex --estimate``).
+
+    Pairs go ``batch_size`` to a call, verdicts come back in input order, and a
+    pair the model leaves out is UNSURE.
+    """
+    import json as _json
+
+    from particles.operations.links_suggest import judge_claim_pairs
+
+    prompts: list[str] = []
+
+    async def fake_call(prompt: str, **_: object) -> str:
+        prompts.append(prompt)
+        keys = [line[1:-1] for line in prompt.splitlines() if line.startswith("[")]
+        # Answer every pair but the last of each call.
+        return _json.dumps({key: "PARAPHRASE" for key in keys[:-1]})
+
+    pairs = [(f"old {i}", f"new {i}") for i in range(5)]
+    with patch("particles.operations._llm._llm_call", side_effect=fake_call):
+        verdicts = await judge_claim_pairs(pairs, batch_size=2)
+    assert len(prompts) == 3
+    assert "A: old 4\nB: new 4" in prompts[2]
+    assert verdicts == [
+        JudgeVerdictKind.PARAPHRASE,
+        JudgeVerdictKind.UNSURE,
+        JudgeVerdictKind.PARAPHRASE,
+        JudgeVerdictKind.UNSURE,
+        JudgeVerdictKind.UNSURE,
+    ]

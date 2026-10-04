@@ -30,11 +30,14 @@ import particles.store.extractor_store  # noqa: F401
 import particles.store.lens_store  # noqa: F401
 import particles.store.observer_scope_store  # noqa: F401
 import particles.store.particle_store  # noqa: F401
+import particles.store.probe_verdict_store  # noqa: F401
 import particles.store.relation_store  # noqa: F401
+import particles.store.session_exposure_store  # noqa: F401
 import particles.store.subject_store  # noqa: F401
 import particles.store.synthesis_cache_store  # noqa: F401
 import particles.store.taxonomy_store  # noqa: F401
 import particles.store.trust_store  # noqa: F401
 import particles.store.url_mention_store  # noqa: F401
 import particles.store.utility_store  # noqa: F401
+import particles.store.vocabulary_store  # noqa: F401
 import particles.store.wikidata_cache  # noqa: F401

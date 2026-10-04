@@ -46,6 +46,7 @@ from particles.extraction.polarity import (
     POLARITY_KEY,
     is_non_asserted,
 )
+from tests._client_fixtures import stream_via_create
 
 # --------------------------------------------------------------------------
 # The shared exclusion predicate
@@ -251,6 +252,7 @@ async def test_query_excludes_non_asserted_by_default(db_session: object) -> Non
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     original_model = ep._embedding_model
     ep.set_embedding_model(mock_model)
@@ -298,6 +300,7 @@ async def test_lint_excludes_non_asserted_from_contradictions(db_session: object
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock()
+    stream_via_create(mock_client)
     set_client(mock_client)
     try:
         findings = await _check_contradictions(session, fix=False)  # type: ignore[arg-type]
@@ -344,6 +347,7 @@ async def test_pipeline_writes_non_asserted_active_with_tag(
     mock_client = MagicMock(spec=anthropic.Anthropic)
     mock_client.messages = MagicMock()
     mock_client.messages.create = MagicMock(return_value=mock_resp)
+    stream_via_create(mock_client)
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[[0.1, 0.2, 0.3, 0.4]])

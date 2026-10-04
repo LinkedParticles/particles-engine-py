@@ -40,6 +40,7 @@ from particles.benchmark.rot.schema import (
 from particles.benchmark.rot.scoring import STRONG_HISTORY_MARKERS
 from particles.core.schema import Snapshot, UncertaintyNature
 from particles.extraction.general import CandidateParticle, ExtractionResult
+from particles.ingest.pipeline import UPDATE_SLOT_REQUEST
 from particles.llm import CompletionError, VisionImage
 
 #: The subject every scripted claim is about — the persona.
@@ -141,7 +142,15 @@ def oracle_contradiction(world: RotWorld, claim_a: str, claim_b: str) -> bool:
 
 
 class OracleProbeProvider:
-    """Answer the §6.6 contradiction-probe prompt from the world."""
+    """Answer the §6.6 contradiction and update probes from the world.
+
+    Both prompts end in the same ``Claim A`` / ``Claim B`` pair, and in a rot
+    world the two questions have one answer: every scripted contradiction is
+    one slot given two values, which is what the rung 2.5 update probe asks
+    about. Every slot of the persona (home, employer, diet, car…)
+    holds one value at a time and changes over time, so the update probe's
+    reply names that kind.
+    """
 
     def __init__(self, world: RotWorld) -> None:
         self._world = world
@@ -164,14 +173,20 @@ class OracleProbeProvider:
         cache_prefix: str | None = None,
         **opts: object,
     ) -> str:
-        """``"YES: …"`` or ``"NO"`` in the probe's own reply format."""
+        """A reason line then a ``VERDICT`` line, the probe's own reply format.
+
+        The update probe's reply also carries its ``SLOT`` line before the
+        verdict, recognised by the prompt asking for one.
+        """
         self.calls += 1
         match = _CLAIMS.search(prompt)
         if match is None:
             raise CompletionError("rot-oracle: not a contradiction-probe prompt")
+        slot = "SLOT: CHANGES\n" if UPDATE_SLOT_REQUEST in prompt else ""
         if oracle_contradiction(self._world, match["a"].strip(), match["b"].strip()):
-            return "YES: the claims give one attribute different values"
-        return "NO"
+            return f"REASON: the claims give one attribute different values\n{slot}VERDICT: YES"
+        none = "SLOT: NONE\n" if slot else ""
+        return f"REASON: the claims do not disagree\n{none}VERDICT: NO"
 
 
 class RefusingProvider:

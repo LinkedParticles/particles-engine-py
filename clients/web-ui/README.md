@@ -23,7 +23,7 @@ so the engine serves one static bundle and the fragment never hits the server:
 
 | Route | Surface |
 |---|---|
-| `/app#/curate` | The swipeable, leverage-ranked "today's N" curation feed (`GET /curation`) with the full gesture set (0161) |
+| `/app#/curate` | The swipeable, leverage-ranked curation feed, served in short batches (`GET /curation`) with the full gesture set (0161) |
 | `/app#/query?q=…` | Non-streaming query over `POST /query`: staged progress, the cited answer, subject chips, and an inline lazy **knowledge-consulted graph** |
 | `/app#/browse?scope=subject&subject_id=…` `/app#/browse?scope=query&q=…` | The scoped epistemic graph over `GET /graph`, with census + disclosures, history ghosts, and the per-instant **as-of scrubber** (`&as_of=…`, `&hops=…`, `&history=true`) |
 

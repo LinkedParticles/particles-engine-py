@@ -22,20 +22,51 @@ here; the terse one-line-per-belief formatting is
 
 from __future__ import annotations
 
+from pydantic import BaseModel, Field
+
 from particles.config import get_config
 from particles.core.schema import ContestedBadge, ObserverScopeNote
 from particles.core.status import Status
 from particles.db import session_scope
+from particles.llm.usage import render_store_spend_line
+from particles.operations.llm_spend import store_llm_spend
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.effective_confidence import score_confidence_and_rank
 from particles.operations.query.observer_scope import filter_visible
-from particles.render.markdown import DigestEntry, render_digest
+from particles.render.markdown import DigestEntry, render_digest_located
 from particles.store.particle_store import get_inconsistency_backrefs, get_particles_by_status
 from particles.store.subject_store import list_all_subjects
 
 
+class DigestLine(BaseModel):
+    """Which belief one digest line shows, and where the line starts."""
+
+    particle_id: str
+    offset: int = Field(description="Character offset in the digest text where the line starts.")
+    contested_bases: list[str] = Field(
+        default_factory=list, description="The contested bases the line displays."
+    )
+
+
+class RenderedDigest(BaseModel):
+    """The digest text, with the belief behind each of its lines in order."""
+
+    markdown: str
+    lines: list[DigestLine] = Field(default_factory=list)
+
+
 async def build_digest(store: str, observer_project: str | None = None) -> str:
+    """The digest text alone; :func:`build_digest_located` documents the build."""
+    return (await build_digest_located(store, observer_project)).markdown
+
+
+async def build_digest_located(store: str, observer_project: str | None = None) -> RenderedDigest:
     """Render the session-start memory digest for one store.
+
+    Returns the text with, for each belief line in order, the belief's id, the
+    line's character offset and the contested bases it shows. A caller that
+    cuts the text to a byte budget keeps the lines whose offset fell inside the
+    cut (the SessionStart hook's record).
 
     Gathers the store's ACTIVE beliefs, scores each with the query-path effective
     confidence (full formula — trust × source-trust × recency; never an LLM or
@@ -76,6 +107,8 @@ async def build_digest(store: str, observer_project: str | None = None) -> str:
             session, actives, populate_cache=True
         )
         backrefs = await get_inconsistency_backrefs(session)
+        # the store's recorded LLM spend, one closing line.
+        spend = await store_llm_spend(session)
         subject_names = {s.id: s.canonical_name for s in await list_all_subjects(session)}
 
         # Order by rank score desc; id as a stable tiebreaker so the
@@ -101,4 +134,12 @@ async def build_digest(store: str, observer_project: str | None = None) -> str:
         )
         for p, badge in zip(ordered, badges, strict=True)
     ]
-    return render_digest(store, entries, total, observer)
+    spend_line = render_store_spend_line(spend) if spend is not None else None
+    markdown, offsets = render_digest_located(store, entries, total, observer, spend_line)
+    return RenderedDigest(
+        markdown=markdown,
+        lines=[
+            DigestLine(particle_id=p.id, offset=offset, contested_bases=list(entry.contested_bases))
+            for p, entry, offset in zip(ordered, entries, offsets, strict=True)
+        ],
+    )

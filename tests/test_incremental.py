@@ -413,6 +413,7 @@ class TestTransientErrorPropagation:
         # pipeline's reset-to-PENDING. The note prefixing (chunk_id) no longer
         # matters because detection is structural.
         assert result.transient_error_count == 3
+        assert result.answered_calls == 0
 
     @pytest.mark.asyncio
     async def test_partial_chunk_failure_counts_only_failures(self) -> None:
@@ -438,6 +439,8 @@ class TestTransientErrorPropagation:
 
         assert len(result.candidates) == 1
         assert result.transient_error_count == 2
+        # The one answered chunk is what a retry of the snapshot sends again.
+        assert result.answered_calls == 1
 
     @pytest.mark.asyncio
     async def test_success_leaves_transient_count_zero(self) -> None:
@@ -541,7 +544,7 @@ class TestExtractChunksPooled:
 
         pooled = AsyncMock(return_value=([_RAW_CLAIM], "anthropic:test-model"))
         with (
-            patch("particles.extraction.incremental._pooled_group_complete", pooled),
+            patch("particles.extraction.general._pooled_group_complete", pooled),
             patch(
                 "particles.extraction.incremental._call_llm",
                 AsyncMock(side_effect=AssertionError("sequential loop must not run")),
@@ -577,7 +580,7 @@ class TestExtractChunksPooled:
         from particles.llm import CompletionPool
 
         pooled = AsyncMock(return_value=([_RAW_CLAIM, None], "anthropic:test-model"))
-        with patch("particles.extraction.incremental._pooled_group_complete", pooled):
+        with patch("particles.extraction.general._pooled_group_complete", pooled):
             result = await extract_with_carry_forward(
                 session=None,
                 chunks=[
@@ -594,6 +597,7 @@ class TestExtractChunksPooled:
         # a per-chunk transient exactly as a sequential API error would.
         assert len(result.candidates) == 1
         assert result.transient_error_count == 1
+        assert result.answered_calls == 1
         assert any(
             "chunk_2: API error: batch result unavailable" in n for n in result.quality_notes
         )
@@ -607,7 +611,7 @@ class TestExtractChunksPooled:
 
         injected = AsyncMock(return_value=([_candidate("via injected")], [], False))
         pooled = AsyncMock(side_effect=AssertionError("pooled path must not run"))
-        with patch("particles.extraction.incremental._pooled_group_complete", pooled):
+        with patch("particles.extraction.general._pooled_group_complete", pooled):
             result = await extract_with_carry_forward(
                 session=None,
                 chunks=[ChunkUnit(chunk_id="chunk_1", chunk_text="Journal text.")],
@@ -639,7 +643,7 @@ class TestExtractChunksPooled:
         )
 
         pooled = AsyncMock(return_value=([_RAW_CLAIM], "anthropic:test-model"))
-        with patch("particles.extraction.incremental._pooled_group_complete", pooled):
+        with patch("particles.extraction.general._pooled_group_complete", pooled):
             result = await extract_with_carry_forward(
                 session=db_session,
                 chunks=[chunk],
@@ -655,3 +659,78 @@ class TestExtractChunksPooled:
         assert len(result.candidates) == 1
         assert result.candidates[0].chunk_hash == _hash_chunk(chunk.chunk_text)
         assert result.carry_forward_ids == []
+
+
+class TestChunkOutcomes:
+    """Each chunk's outcome, and the own-snapshot skip on a partial read's retry."""
+
+    @pytest.mark.asyncio
+    async def test_the_sequential_loop_records_each_chunk_in_order(self) -> None:
+        chunks = [ChunkUnit(chunk_id=f"c{i}", chunk_text=f"text {i}") for i in range(4)]
+
+        async def flaky(text: str, **_: Any) -> tuple[list[CandidateParticle], list[str], bool]:
+            if text.endswith("1"):
+                return [], ["API error: unavailable"], True
+            return [_candidate(text)], [], False
+
+        with patch("particles.extraction.incremental._call_llm", AsyncMock(side_effect=flaky)):
+            result = await extract_with_carry_forward(
+                session=None,
+                chunks=chunks,
+                corpus_entry_id=None,
+                extractor_id="test-extractor",
+                extractor_version="1.0.0",
+                max_llm_calls=3,
+                resume_carried={_hash_chunk("text 2"): ["p-own"]},
+            )
+
+        assert [(o.chunk_id, o.status) for o in result.chunk_outcomes] == [
+            ("c0", "answered"),
+            ("c1", "failed"),
+            ("c2", "carried"),
+            ("c3", "answered"),
+        ]
+        assert [o.prompt_hash for o in result.chunk_outcomes] == [c.prompt_hash for c in chunks]
+        assert result.carry_forward_ids == ["p-own"]
+
+    @pytest.mark.asyncio
+    async def test_an_own_claim_in_the_supersede_set_does_not_carry(self) -> None:
+        chunk = ChunkUnit(chunk_id="c0", chunk_text="text 0")
+        with patch(
+            "particles.extraction.incremental._call_llm",
+            AsyncMock(return_value=([_candidate()], [], False)),
+        ):
+            result = await extract_with_carry_forward(
+                session=None,
+                chunks=[chunk],
+                corpus_entry_id=None,
+                extractor_id="test-extractor",
+                extractor_version="1.0.0",
+                supersede_ids=frozenset({"p-own"}),
+                resume_carried={chunk.prompt_hash: ["p-own"]},
+            )
+        assert [o.status for o in result.chunk_outcomes] == ["answered"]
+        assert result.carry_forward_ids == []
+
+    @pytest.mark.asyncio
+    async def test_the_pooled_path_records_failures_and_own_carries(self) -> None:
+        from particles.llm import CompletionPool
+
+        pooled = AsyncMock(return_value=([None, _RAW_CLAIM], "anthropic:test-model"))
+        chunks = [
+            ChunkUnit(chunk_id="chunk_1", chunk_text="Text A."),
+            ChunkUnit(chunk_id="chunk_2", chunk_text="Text B."),
+            ChunkUnit(chunk_id="chunk_3", chunk_text="Text C."),
+        ]
+        with patch("particles.extraction.general._pooled_group_complete", pooled):
+            result = await extract_with_carry_forward(
+                session=None,
+                chunks=chunks,
+                corpus_entry_id=None,
+                extractor_id="test-extractor",
+                extractor_version="1.0.0",
+                completion_pool=CompletionPool("extraction"),
+                resume_carried={chunks[1].prompt_hash: ["p-own"]},
+            )
+        assert [o.status for o in result.chunk_outcomes] == ["failed", "carried", "answered"]
+        assert result.carry_forward_ids == ["p-own"]

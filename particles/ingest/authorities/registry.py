@@ -37,9 +37,16 @@ class AuthorityResolution:
     fields (``external_ref`` + ``canonical_name`` + ``aliases`` +
     ``description``) describe a Subject the resolver builds and inserts. Keeping
     this authority-agnostic is what lets Wikidata stop being special-cased.
+
+    ``abstained`` is the third answer: the authority found candidates and
+    judged that none of them is the entity this claim names. The
+    resolver treats it as the abstention: no ref is attached, the
+    next authority is tried, and no negative cache is recorded, because the
+    judgement depends on the claim.
     """
 
     existing: Subject | None = None
+    abstained: bool = False
     external_ref: ExternalRef | None = None
     canonical_name: str | None = None
     aliases: list[str] = field(default_factory=list)
@@ -80,6 +87,41 @@ class SubjectAuthority(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class RecognizeContext:
+    """What the pipeline knows about a qualified subject name.
+
+    ``token_class`` is the non-entity gate's class for the name, and
+    ``namespace_key`` the opaque key that scopes its identity, today a project
+    key named by the Surface adapter. Both are set: a name the gate
+    could not qualify never reaches resolution with a context.
+    """
+
+    token_class: str
+    namespace_key: str
+    source_type: str | None = None
+
+
+@runtime_checkable
+class ContextualRecognizer(Protocol):
+    """An authority that recognizes a name only with its context.
+
+    Additive to :class:`SubjectAuthority` (an amendment). The
+    resolver's recognize pass for a *qualified* name calls ``recognize_in`` on
+    every authority implementing it, in priority order. A plain authority is never
+    offered a qualified name, and a contextual one is never offered a plain
+    name through ``recognize``, so neither kind changes the other's results.
+    """
+
+    def recognize_in(self, name: str, context: RecognizeContext) -> ExternalRef | None:
+        """Recognise ``name`` given its gate class and namespace, or None."""
+        ...
+
+    def subject_class_for(self, context: RecognizeContext) -> str | None:
+        """The ``subject_class`` a Subject minted from this recognition carries."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Lazy singleton — mirrors particles.extraction.registry.get_extractors
 # ---------------------------------------------------------------------------
@@ -111,11 +153,14 @@ def _make_authorities() -> list[SubjectAuthority]:
     import re
 
     from particles.ingest.authorities._shared import PatternAuthority
+    from particles.ingest.authorities.artifact import ArtifactAuthority
     from particles.ingest.authorities.wikidata import WikidataAuthority
 
     # Built in the historical _NAMESPACE_PATTERNS order; PRIORITY encodes that
     # order so recognize() arbitration is deterministic.
     raw: list[SubjectAuthority] = [
+        # contextual only, so it sees qualified names and nothing else.
+        ArtifactAuthority(),  # PRIORITY = 5
         PatternAuthority(
             namespace="numista",
             pattern=re.compile(r"\bN#\s*(\d+)\b", re.I),

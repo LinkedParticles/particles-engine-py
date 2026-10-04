@@ -258,7 +258,10 @@ async def consolidation_tick() -> str:
         )
     if report.outcome == "skipped":
         reason = report.skip_reason or "skipped"
-        log.info("daemon consolidation tick: %s", reason)
+        if report.lock_warning:
+            log.warning("daemon consolidation tick: %s", reason)
+        else:
+            log.info("daemon consolidation tick: %s", reason)
         return f"skipped: {reason}"
     failed = report.failed_passes()
     if failed:

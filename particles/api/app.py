@@ -53,6 +53,7 @@ from particles.core.schema import (
     SuggestMode,
     SuggestReport,
     TaxonomyDefinition,
+    VocabularyReport,
 )
 from particles.core.status import Status
 from particles.db import (
@@ -77,6 +78,7 @@ from particles.operations.curation import (
     QueueSource,
     build_curation_queue,
     rebuild_curation_snapshot,
+    record_demotion_ruling,
 )
 from particles.operations.curation.cards import CardKind
 from particles.operations.deposit import (
@@ -86,16 +88,25 @@ from particles.operations.deposit import (
     deposit_url,
 )
 from particles.operations.deposit_suggest import DepositSuggestReport
+from particles.operations.digest import DigestLine
 from particles.operations.extract import extract_snapshot
 from particles.operations.graph_view import build_graph_data
 from particles.operations.lint import run_lint
+from particles.operations.llm_spend import MeteredExtractRun, reindexed_snapshots
 from particles.operations.quality import get_quality_report
 from particles.operations.query import query
 from particles.operations.reconcile import reconcile_supersession
 from particles.operations.reindex import ReindexPlan, reindex
 from particles.operations.review import list_inconsistencies, resolve
 from particles.operations.source_passage import SourcePassage, hydrate_source_passage
+from particles.operations.subject_relink import (
+    RelinkReport,
+    apply_gated_relink,
+    build_report,
+    plan_gated_relink,
+)
 from particles.store.event_store import OperatorEvent
+from particles.store.session_exposure_store import SessionExposure
 
 log = logging.getLogger(__name__)
 
@@ -366,8 +377,42 @@ async def quality_dashboard(session: SessionDep, _auth: ReadAuthDep) -> QualityR
     return await get_quality_report(session)
 
 
+@app.get("/vocabulary", response_model=VocabularyReport)
+async def vocabulary_report_route(
+    session: SessionDep,
+    _auth: ReadAuthDep,
+    observer_project: Annotated[str | None, Query(min_length=1)] = None,
+    include_document_meta: bool = False,
+    include_non_asserted: bool = False,
+) -> VocabularyReport:
+    """The read-time vocabulary report: the evidence an ontology is built from.
+
+    Each canonical predicate with its surface forms, claim count, object value
+    shapes, the subject classes it attaches to, and its alignment, under a
+    store header of subject alignment by namespace and link-confidence band,
+    class counts, and the confirmed modelling decisions in the
+    operator log.
+    Computed per request and never stored; deterministic, with no embedding
+    and no LLM call. ``observer_project`` reads the claims through a project
+    observer; the subject header and the decision counts are
+    store-wide. The same report rides ``POST /query`` with ``list_vocabulary``.
+    """
+    response = await query(
+        session,
+        QueryRequest(
+            list_vocabulary=True,
+            observer_project=observer_project,
+            include_document_meta=include_document_meta,
+            include_non_asserted=include_non_asserted,
+        ),
+    )
+    if response.vocabulary_report is None:  # set on every list_vocabulary path
+        raise RuntimeError("list_vocabulary returned no vocabulary report")
+    return response.vocabulary_report
+
+
 # ---------------------------------------------------------------------------
-# Curation — the bus-stop-editing queue over HTTP. Exposes the
+# Curation — the curation queue over HTTP. Exposes the
 # existing `build_curation_queue` Engine operation so the deferred mobile / web
 # client can render the leverage-ranked "today's N" feed.
 # ---------------------------------------------------------------------------
@@ -376,9 +421,10 @@ async def quality_dashboard(session: SessionDep, _auth: ReadAuthDep) -> QualityR
 class CurationQueueResponse(BaseModel):
     """The leverage-ranked, finite, snooze-filtered curation queue.
 
-    ``cards`` is the ranked "today's N" worklist (highest leverage first), each a
-    normalized projection of an existing read diagnostic. ``count`` is
-    ``len(cards)`` for convenience. The HTTP mirror of `particles curate`.
+    ``cards`` is the ranked batch (highest leverage first), each a normalized
+    projection of an existing read diagnostic. ``count`` is ``len(cards)`` for
+    convenience; ``open_count`` is the backlog the batch was cut from. The HTTP
+    mirror of `particles curate`.
 
     The cards come from a persisted collection, so the response
     also carries the §5 staleness stamp: ``built_at`` / ``age_seconds`` /
@@ -402,6 +448,14 @@ class CurationQueueResponse(BaseModel):
     scope: str = "store"
     per_kind_scope: dict[str, str] = Field(default_factory=dict)
     collection_size: int = 0
+    # How many cards are open in all (after the kind filter and suppression),
+    # of which ``cards`` is the leverage-ranked head. Lets a client say
+    # "7 of 154" instead of implying the capped slice is the whole backlog.
+    open_count: int = 0
+    # When each kind's finder last ran for the cards served. A ``carried`` kind
+    # in ``per_kind_scope`` keeps the date of the build that last ran its
+    # finder, so a client can say "contradictions as of the census of …".
+    kind_as_of: dict[str, datetime] = Field(default_factory=dict)
 
 
 @app.get("/curation", response_model=CurationQueueResponse)
@@ -413,7 +467,7 @@ async def get_curation_queue(
     semantic: bool | None = None,
     no_snapshot: bool = False,
 ) -> CurationQueueResponse:
-    """Return the bus-stop-editing curation queue (HTTP mirror of `curate`).
+    """Return the curation queue (HTTP mirror of `curate`).
 
     Composes the existing read diagnostics (lint, links/corpus-links suggest, the
     contested digest, quality) into one leverage-ranked, snooze-filtered worklist;
@@ -465,6 +519,8 @@ async def get_curation_queue(
         scope=result.scope,
         per_kind_scope=result.per_kind_scope,
         collection_size=result.collection_size,
+        open_count=result.open_count,
+        kind_as_of=result.kind_as_of,
     )
 
 
@@ -539,6 +595,9 @@ class CurationEventResponse(BaseModel):
     event_id: str
     card_key: str | None = None
     snoozed_until: datetime | None = None
+    #: Set when the gesture ruled on a ``demotion`` card and the ruling was
+    #: kept as a labelled benchmark pair: the disclosure line.
+    benchmark_fixture: str | None = None
 
 
 @app.post("/curation/affirm", response_model=CurationEventResponse, responses=_ERR400)
@@ -560,8 +619,26 @@ async def curation_affirm_endpoint(
         refs=[(EventRefKind.PARTICLE, req.particle_id)],
         payload={"card_key": card_key, "particle_id": req.particle_id},
     )
+    fixture = await _record_demotion_ruling(session, card_key, "affirm", "http:/curation/affirm")
     await session.commit()
-    return CurationEventResponse(event_id=event.event_id, card_key=card_key)
+    return CurationEventResponse(
+        event_id=event.event_id, card_key=card_key, benchmark_fixture=fixture
+    )
+
+
+async def _record_demotion_ruling(
+    session: AsyncSession, card_key: str, gesture: str, actor: str
+) -> str | None:
+    """Keep a ruling on a ``demotion`` card as a labelled benchmark pair.
+
+    The HTTP gestures write their events directly rather than through
+    ``apply_gesture``, so they make the same side-effect call here. ``None``
+    for every other card.
+    """
+    if not card_key.startswith(f"{CardKind.DEMOTION.value}:"):
+        return None
+    card = CurationCard.from_key(card_key)
+    return await record_demotion_ruling(session, card, gesture, actor=actor, store="default")
 
 
 class MemoryUsefulRequest(BaseModel):
@@ -642,9 +719,17 @@ async def curation_snooze_endpoint(
             "snooze_days": snooze_days,
         },
     )
+    fixture = (
+        await _record_demotion_ruling(session, req.card_key, "dismiss", "http:/curation/snooze")
+        if snooze_days is None
+        else None
+    )
     await session.commit()
     return CurationEventResponse(
-        event_id=event.event_id, card_key=req.card_key, snoozed_until=until
+        event_id=event.event_id,
+        card_key=req.card_key,
+        snoozed_until=until,
+        benchmark_fixture=fixture,
     )
 
 
@@ -981,12 +1066,18 @@ async def extract(
 ) -> list[Particle]:
     """Run the extractor pipeline against a corpus snapshot. Returns
     the ACTIVE particles produced by the run (excludes any that
-    immediately transitioned to SUPERSEDED / INCONSISTENCY)."""
+    immediately transitioned to SUPERSEDED / INCONSISTENCY).
+
+    The run's measured LLM usage is recorded as an ``EXTRACT_RUN`` event, so a
+    remote caller's extraction counts toward the store's recorded spend."""
     try:
-        particles = await extract_snapshot(
-            session, req.entry_id, req.snapshot_id, agent_id=req.agent_id
-        )
-        await session.commit()
+        meter = MeteredExtractRun(actor="http:/extract", route="http")
+        async with meter:
+            meter.snapshots = 1
+            particles = await extract_snapshot(
+                session, req.entry_id, req.snapshot_id, agent_id=req.agent_id
+            )
+            await session.commit()
     except ValueError as exc:
         log.info(
             "extract: entry %r / snapshot %r not found: %s",
@@ -1432,8 +1523,8 @@ async def list_review_queue(session: SessionDep, _auth: AuthDep) -> list[Particl
 
 
 class ReviewRequest(BaseModel):
-    """Resolve an INCONSISTENCY: pick a ``ResolutionAction`` (trust A,
-    trust B, both wrong, both right) and optionally annotate."""
+    """Resolve an INCONSISTENCY: pick a ``ResolutionAction`` (prefer A,
+    prefer B, both valid, defer, or discard both) and optionally annotate."""
 
     action: ResolutionAction
     reviewer_id: str
@@ -1449,9 +1540,12 @@ class ReviewRequest(BaseModel):
 async def review_particle(
     particle_id: str, req: ReviewRequest, session: SessionDep, _auth: AuthDep
 ) -> ReviewParticle:
-    """Resolve an INCONSISTENCY particle. The resolution is annotation-
-    only by default; the originals keep their status. A new
-    SourceTrustStatement may be created depending on the action."""
+    """Resolve an INCONSISTENCY particle (§9.6).
+
+    Every action except DEFER closes the record. PREFER_A and PREFER_B demote
+    the other claim and may write a SourceTrustStatement. BOTH_VALID keeps
+    both claims as ALEATORY. DISCARD retracts both claims and writes no trust
+    statement."""
     try:
         return await resolve(
             session,
@@ -1500,17 +1594,32 @@ async def run_reindex(
 ) -> ReindexResponse:
     """Re-extract stale / failed snapshots. Honours chunk-hash
     carry-forward so unchanged source chunks skip
-    the LLM call."""
-    result = await reindex(
-        session,
-        entry_ids=req.entry_ids,
-        extractor_version=req.extractor_version,
-        extractor_id=req.extractor_id,
-        include_failed=req.include_failed,
-        provider_model=req.provider_model,
-        rate_limit_per_minute=req.rate_limit_per_minute,
-        dry_run=req.dry_run,
-    )
+    the LLM call.
+
+    A run that is not a dry run records its measured LLM usage, the
+    re-extraction and the post-reindex lint pass together, as an
+    ``EXTRACT_RUN`` event with ``route: reindex``, so it counts toward the
+    store's recorded spend."""
+
+    async def _run() -> dict[str, object]:
+        return await reindex(
+            session,
+            entry_ids=req.entry_ids,
+            extractor_version=req.extractor_version,
+            extractor_id=req.extractor_id,
+            include_failed=req.include_failed,
+            provider_model=req.provider_model,
+            rate_limit_per_minute=req.rate_limit_per_minute,
+            dry_run=req.dry_run,
+        )
+
+    if req.dry_run:
+        result = await _run()
+    else:
+        meter = MeteredExtractRun(actor="http:/reindex", route="reindex")
+        async with meter:
+            result = await _run()
+            meter.snapshots = reindexed_snapshots(result)
     return ReindexResponse.model_validate(result)
 
 
@@ -1958,6 +2067,14 @@ class DigestResponse(BaseModel):
     """The compiled session-start memory digest as one Markdown document."""
 
     markdown: str
+    lines: list[DigestLine] = Field(
+        default_factory=list,
+        description=(
+            "The belief behind each digest line, in order, with the line's character "
+            "offset in `markdown`. A caller that cuts the text keeps the lines whose "
+            "offset fell inside the cut."
+        ),
+    )
 
 
 @app.get("/digest/{store}", response_model=DigestResponse, responses=_ERR404)
@@ -1978,14 +2095,43 @@ async def get_digest_endpoint(
     is the provenance-ranked roll-up of the full belief store, including
     contested beliefs, which is confidential operator context. The dev-key loopback
     skip keeps it open for local development."""
-    from particles.operations.digest import build_digest
+    from particles.operations.digest import build_digest_located
 
     try:
-        markdown = await build_digest(store, project)
+        rendered = await build_digest_located(store, project)
     except (KeyError, ValueError) as exc:
         # db.py raises KeyError for an unknown store handle.
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
-    return DigestResponse(markdown=markdown)
+    return DigestResponse(markdown=rendered.markdown, lines=rendered.lines)
+
+
+# ---------------------------------------------------------------------------
+# Session-start exposure: the SessionStart hook records what each
+# session was shown. Write-only here: no route reads the rows back (§5).
+# ---------------------------------------------------------------------------
+
+
+class SessionExposureResponse(BaseModel):
+    """The id of the appended session-start row."""
+
+    id: int
+
+
+@app.post("/session-exposures", response_model=SessionExposureResponse)
+async def record_session_exposure_endpoint(
+    req: SessionExposure, session: WriteSessionDep, _auth: AuthDep
+) -> SessionExposureResponse:
+    """Append the beliefs one session was shown at session start.
+
+    The SessionStart hook calls this after it has cut what it injects to its
+    byte budget. Short ``p-`` ids are resolved to full ids here. Rows are only
+    appended, and no route reads them back.
+    """
+    from particles.store.session_exposure_store import record_session_exposure
+
+    row_id = await record_session_exposure(session, req)
+    await session.commit()
+    return SessionExposureResponse(id=row_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2419,7 +2565,7 @@ async def particle_retract_endpoint(
 # ---------------------------------------------------------------------------
 # Operator-scoped belief mutation — supersede / retract a belief
 # the operator does NOT own (incl. extracted beliefs), recorded as operator
-# events. This is the curation write surface a bus-stop queue actually needs: a
+# events. This is the curation write surface a curation queue actually needs: a
 # queue is overwhelmingly extracted beliefs, which the own-beliefs-only agent
 # path (above) cannot touch.
 #
@@ -2531,7 +2677,7 @@ async def operator_retract_endpoint(
 
 
 class ParticleSubjectAssignRequest(BaseModel):
-    """Assign a subject to an orphan particle. Resolution accepts an
+    """Assign a subject to an orphan particle, in place. Resolution accepts an
     explicit ``subject_id`` (link a Subject the operator picked) OR a
     ``subject_name`` run through the standard resolver (local → Wikidata →
     bare-local). Provide exactly one."""
@@ -2544,13 +2690,12 @@ class ParticleSubjectAssignRequest(BaseModel):
 async def assign_subject_endpoint(
     particle_id: str, req: ParticleSubjectAssignRequest, session: SessionDep, _auth: AuthDep
 ) -> AgentWriteResult:
-    """Attach a subject to a NO_SUBJECT orphan (provenance-preserving).
+    """Attach a subject to a belief that has none (in place since).
 
-    Supersedes the orphan with a successor that has the same content + the
-    resolved subject(s), carrying over the predecessor's confidence record,
-    extractor_ref, and source; it is the same extracted claim with a corrected
-    linkage. 400 on a bad resolution / guard violation; 403 when writes are
-    disabled."""
+    Writes the subject link on the same belief, which keeps its id, confidence,
+    provenance and utility evidence; the response names that same id. 400 on a
+    bad resolution, a guard violation, or a belief that already has a subject;
+    403 when writes are disabled."""
     store = _require_belief_writes_enabled()
     try:
         result = await assign_subject_belief(
@@ -2565,6 +2710,39 @@ async def assign_subject_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await session.commit()
     return result
+
+
+class RelinkGatedRequest(BaseModel):
+    """Relink the subjectless beliefs whose gated names a relink recovers.
+
+    ``dry_run`` (the default) plans and reports without writing. ``tiers``
+    defaults to ``subject_gate.relink_tiers``. ``sample`` returns that many
+    planned relinks, chosen reproducibly by ``seed``, for a precision check."""
+
+    dry_run: bool = True
+    tiers: list[Literal[1, 2, 3]] | None = None
+    sample: int = Field(default=0, ge=0, le=1000)
+    seed: int = 0
+
+
+@app.post("/subjects/relink-gated", response_model=RelinkReport, responses=_ERR400)
+async def relink_gated_endpoint(
+    req: RelinkGatedRequest, session: SessionDep, _auth: AuthDep
+) -> RelinkReport:
+    """Link subjectless beliefs to the project-scoped subjects they name.
+
+    Recovers each belief's names from its own gated-subjects record, its
+    structured claim's subject term, or its backtick spans, and links them in
+    place, one event per run. The `relink` gesture of the `gated_subjects`
+    curation card. 403 when writes are disabled and `dry_run` is false."""
+    if not req.dry_run:
+        _require_belief_writes_enabled()
+    plan = await plan_gated_relink(session, tiers=req.tiers)
+    if req.dry_run:
+        return build_report(plan, sample=req.sample, seed=req.seed)
+    result = await apply_gated_relink(session, plan, actor="http:/subjects/relink-gated")
+    await session.commit()
+    return build_report(plan, sample=req.sample, seed=req.seed, result=result)
 
 
 # ---------------------------------------------------------------------------

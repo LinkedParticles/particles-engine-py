@@ -202,29 +202,76 @@ jobs:
           set -euo pipefail
           gh release upload "${{ github.event.release.tag_name }}" \
             "${{ steps.sbom.outputs.path }}" --clobber
+
       # Post-publish confirmation on the real index: install the just-published
       # engine into a clean venv and assert the exact pin actually pulled the
-      # matching core — the one thing the private co-installability gate cannot
-      # observe, because it installs from local wheels rather than an index.
-      # (Skipped for the TestPyPI rehearsal, whose third-party closure is not on
-      # that index.)
+      # matching core. This is the one thing the private co-installability gate
+      # cannot observe, because it installs from local wheels rather than an
+      # index. (Skipped for the TestPyPI rehearsal, whose third-party closure
+      # is not on that index.)
+      #
+      # Two properties keep this step honest. The 1.151.18 run went red on a
+      # release that installs and imports cleanly, because it lacked both.
+      #
+      # 1. Index lag is waited out, then separated from real failures. The
+      #    upload returns before the index lists the new files: in that run
+      #    1.151.18 was still unlisted 109 seconds after the upload finished,
+      #    and the old 90-second loop fell through without failing. The wait
+      #    below has the same shape as this file's core gate (probe with a
+      #    no-deps download, bounded, fail closed with its own message). Once
+      #    the version is listed, the install runs exactly once, so a failure
+      #    from that point on belongs to the release and not to the index.
+      # 2. The import cannot see this checkout. This tree carries the engine
+      #    half of the `particles` package without its `__init__.py`, so a
+      #    Python started in the repository root resolves `particles` from
+      #    the checkout as a namespace package, with nothing installed. In
+      #    that run this turned a failed install into a misleading
+      #    AttributeError on `__version__`. Isolated mode (`-I`) keeps the
+      #    working directory off `sys.path`, and each module is asserted to
+      #    load from the smoke venv.
+      #
+      # A failure here fails the run, and that holds the container image
+      # back: publish-image.yml builds only after a successful Publish. The
+      # coupling is deliberate. The image is this same release installed from
+      # PyPI, so a release that does not install or import from the index
+      # would bake into an image that does not start. A lag failure can now
+      # only reach this point through an index outage longer than the wait,
+      # which the image workflow's own index gate would also hit. If the
+      # image is held back anyway, dispatching publish-image.yml by hand
+      # builds it once the cause is understood.
       - name: Post-publish smoke — install from PyPI and import
         if: ${{ github.event_name == 'release' || inputs.repository == 'pypi' }}
         run: |
           set -euo pipefail
           python -m venv /tmp/smoke
           /tmp/smoke/bin/python -m pip install --upgrade pip
-          # The just-uploaded files can lag the index by a few seconds; retry.
-          for _ in 1 2 3 4 5 6; do
-            if /tmp/smoke/bin/pip install "linkedparticles==${{ steps.ver.outputs.version }}"; then
+          # Backoff totals 525s of sleep across 11 probes, about 10 minutes
+          # with probe time: the budget of the other index gates.
+          listed=""
+          for delay in 15 30 60 60 60 60 60 60 60 60 0; do
+            if /tmp/smoke/bin/pip download --no-deps --dest /tmp/smoke-probe \
+              "linkedparticles==$VERSION"; then
+              listed=1
               break
             fi
-            sleep 15
+            if [ "$delay" -gt 0 ]; then
+              echo "linkedparticles==$VERSION not listed on PyPI yet; retrying in ${delay}s"
+              sleep "$delay"
+            fi
           done
-          /tmp/smoke/bin/python - <<'PY'
+          if [ -z "$listed" ]; then
+            echo "linkedparticles==$VERSION still not listed on PyPI after about 10 minutes" >&2
+            exit 1
+          fi
+          /tmp/smoke/bin/pip install "linkedparticles==$VERSION"
+          /tmp/smoke/bin/python -I - <<'PY'
+          import os
           import particles
           import particles.store  # engine module resolves through the pinned core
-          import os
+          venv = os.path.realpath("/tmp/smoke") + os.sep
+          for mod in (particles, particles.store):
+              where = os.path.realpath(mod.__file__ or "<namespace package>")
+              assert where.startswith(venv), f"{mod.__name__} loaded from {where}, not the smoke venv"
           want = os.environ["VERSION"]
           got = particles.__version__
           assert got == want, f"version mismatch: {got!r} != {want!r}"

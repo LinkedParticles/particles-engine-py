@@ -18,12 +18,17 @@ from particles.core.conflict_resolution import (
     ConflictVerdict,
     LadderOutcome,
     RungInputs,
+    SlotVerdict,
+    SweepAction,
     UpdateOrderSource,
+    admits_update,
     decide_ladder,
     effective_single_trust_order,
     forces_inconsistent,
     ladder_signal,
     needs_rung_inputs,
+    offers_subject_pair,
+    sweep_action,
     update_order_source,
 )
 from particles.core.observer_scope import PairPrecondition
@@ -233,29 +238,86 @@ class TestForcesInconsistent:
 
 class TestUpdateOrderSource:
     def test_forced_consults_neither(self) -> None:
-        assert update_order_source(allow_update=True, allow_own_assertion=True, forced=True) is None
+        assert (
+            update_order_source(
+                allow_update=True, allow_own_assertion=True, forced=True, slot=SlotVerdict.CHANGES
+            )
+            is None
+        )
 
     def test_extraction_door(self) -> None:
         assert (
-            update_order_source(allow_update=True, allow_own_assertion=False, forced=False)
+            update_order_source(
+                allow_update=True, allow_own_assertion=False, forced=False, slot=SlotVerdict.CHANGES
+            )
             is UpdateOrderSource.UPDATE
         )
 
     def test_update_door_wins_when_both_open(self) -> None:
         assert (
-            update_order_source(allow_update=True, allow_own_assertion=True, forced=False)
+            update_order_source(
+                allow_update=True, allow_own_assertion=True, forced=False, slot=SlotVerdict.CHANGES
+            )
             is UpdateOrderSource.UPDATE
         )
 
     def test_assertion_door(self) -> None:
         assert (
-            update_order_source(allow_update=False, allow_own_assertion=True, forced=False)
+            update_order_source(
+                allow_update=False, allow_own_assertion=True, forced=False, slot=SlotVerdict.CHANGES
+            )
             is UpdateOrderSource.OWN_ASSERTION
         )
 
+    @pytest.mark.parametrize("slot", [None, SlotVerdict.DIFFERENT, SlotVerdict.FIXED])
+    def test_only_a_changing_slot_opens_a_door(self, slot: SlotVerdict | None) -> None:
+        # A confirmed contradiction is not an update unless both claims fill
+        # one slot, and only when that slot changes over time.
+        # A fixed slot given two values (an author, a page count)
+        # falls through to rung 3, as does a pair the probe gave no verdict on.
+        assert (
+            update_order_source(
+                allow_update=True, allow_own_assertion=True, forced=False, slot=slot
+            )
+            is None
+        )
+
+
+class TestSlotVerdictRules:
+    """The pure routing of the update probe's three-way verdict."""
+
+    @pytest.mark.parametrize(
+        ("slot", "admits", "offered", "action"),
+        [
+            (SlotVerdict.CHANGES, True, True, SweepAction.DEMOTE),
+            (SlotVerdict.FIXED, False, True, SweepAction.REVIEW),
+            (SlotVerdict.DIFFERENT, False, False, SweepAction.KEEP),
+            # No verdict (the probe did not complete): rung 2.5 stays off, the
+            # pool pair is offered as before the probe existed, and the sweep
+            # keeps both claims.
+            (None, False, True, SweepAction.KEEP),
+        ],
+    )
+    def test_routing(
+        self,
+        slot: SlotVerdict | None,
+        admits: bool,
+        offered: bool,
+        action: SweepAction,
+    ) -> None:
+        assert admits_update(slot) is admits
+        assert offers_subject_pair(slot) is offered
+        assert sweep_action(slot) is action
+
     def test_no_door(self) -> None:
         assert (
-            update_order_source(allow_update=False, allow_own_assertion=False, forced=False) is None
+            update_order_source(
+                allow_update=False,
+                allow_own_assertion=False,
+                forced=False,
+                slot=SlotVerdict.CHANGES,
+            )
+            is None
         )
 
 

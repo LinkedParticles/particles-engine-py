@@ -111,6 +111,7 @@ class TestUriFor:
 class TestRegistryOrder:
     def test_default_priority_order(self) -> None:
         assert [a.NAMESPACE for a in get_authorities()] == [
+            "artifact",  # contextual only, first in the recognize pass
             "numista",
             "km_catalog",
             "wikidata",
@@ -197,4 +198,4 @@ class TestAuthorityConfig:
 
     def test_default_config_is_full_set(self) -> None:
         built = self._build_with_config({})
-        assert len(built) == 5
+        assert len(built) == 6

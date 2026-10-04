@@ -7,30 +7,106 @@ verbs an operator has to remember to run.
 
 The pass list, in order:
 
-1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, oldest first,
-   capped at `consolidation.max_pending_entries` per run. A capped run
-   discloses the remainder (`12 remain — next run continues`).
+1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, least-tried
+   first and then oldest first, capped at `consolidation.max_pending_entries`
+   per run. A capped run discloses the remainder and how long it has waited
+   (`12 remain, oldest waiting since 2026-07-19; the next run continues`).
+   See [When the backlog outgrows the cap](#when-the-backlog-outgrows-the-cap).
 2. **Reconcile** *(LLM, capped)*: the cross-entry document-supersession
    sweep. Each candidate pair costs one
    replacement-signal probe, spent highest-similarity-first under
    `consolidation.max_reconcile_probes`; a truncated run discloses
    "probed X of Y candidate pairs". Skipped (disclosed) on degraded runs.
-3. **Census** *(LLM, capped + scoped)*: the audit's contradiction probe +
-   duplicate scan, capped at `audit.max_contradiction_probes` and scoped to
-   what changed since the previous run (see [Delta scope](#delta-scope)).
+
+   **Pass 2c, re-anchor** *(LLM, capped)*: when an update retires a claim
+   about the user's circumstances ("the user lives in Delhi, in Lajpat
+   Nagar"), a claim from the same passage may have relied on it ("Sandeep's
+   Curry House is a ten-minute walk from the user's flat"). After the move
+   that claim still reads as current and is false. The pass asks one probe
+   per retirement which such claims depended on the old state, has a second
+   reading on `llm.verification` confirm each verdict and the restatement it
+   wrote, and replaces the claim with a dated restatement ("… was a ten-minute
+   walk from the flat in Lajpat Nagar, Delhi, where the user lived, as of
+   2026-09-04"). The
+   original is kept, `SUPERSEDED` with reason `SUPERSEDED_BY_REANCHOR`.
+   A restatement never changes another belief: one that would
+   contradict a standing claim, or whose checks could not run, is not written,
+   and the claim becomes a `stale_basis` card in the curation queue instead
+   (affirm keeps it, supersede or retract replaces it). The pass resumes from
+   where the last run stopped, at most
+   `consolidation.reanchor.max_retirements_per_run` retirements a night
+   (default 20); `particles reconcile --dependents` runs it by hand. The
+   report's line reads, for example,
+   `re-anchor        2 update(s) examined, 1 dependent claim(s) restated`.
+   Skipped (disclosed) on degraded runs.
+3. **Census** *(LLM, capped + scoped, weekly)*: the audit's contradiction
+   probe + duplicate scan, capped at `audit.max_contradiction_probes` and
+   scoped to what changed since the previous census (see
+   [Delta scope](#delta-scope)). It runs on its own cadence, not every night
+   (see [The census cadence](#the-census-cadence)).
+   As in `particles audit`, a flagged pair counts only once a second reading
+   on `llm.verification` confirms it (`audit.verify_contradictions`, at most
+   `audit.max_contradiction_verifications` readings). The probes go out as
+   one batch; the second readings follow one at a time, at full price. The
+   report's contradictions line shows both counts, for example
+   `contradictions   3  [first pass flagged 22 claim pairs, a second reading confirmed 4]`.
+   The headline counts disagreements: confirmed pairs that share a claim
+   count once.
+
+   Every answer the probe and the second reading give is kept in the
+   probe-verdict ledger, keyed by both claims' wording and the prompt's
+   version. A pair already answered *no* is not asked again while neither
+   claim nor the prompt has changed, and it does not count against the cap.
+   The report discloses the saving, for example
+   `contradiction probe: 812 pair(s) skipped as previously cleared`. The
+   same ledger serves the update sweep (`particles reconcile --updates`), whose
+   report gains a `previously_cleared` count.
+
+   **Pass 3b, disclosure** *(zero-LLM)*: a contradiction the second reading
+   confirmed between claims from two different sources becomes one open
+   `INCONSISTENCY` record per disagreement. The session-start
+   digest then flags every claim in it, so the agent's next session is warned
+   before it repeats either one. Nothing else changes: no claim's status or
+   confidence moves, and the record is resolved in `particles review` like
+   any other. The pass also closes a record by itself when a side is no
+   longer stated by any current source (for example, the note that was wrong
+   is corrected), and replaces one whose group of claims changed; each close
+   writes an `INCONSISTENCY_CLOSED` event. At most
+   `consolidation.contradiction_disclosure.max_per_run` new records open per
+   run (default 10), and the rest wait for the next run. The report's line
+   reads, for example,
+   `contradiction disclosure: opened 1 inconsistency (2 claims) for the agent (cap 10); 0 waiting`.
+   Claims from one note are never opened this way, and neither is a pair whose
+   claims no single project sees. `particles audit` reports what is already
+   disclosed and opens nothing.
 4. **Curation-queue refresh**: the queue, computed from the *same*
    card collection the census already paid for; the report ends with the
-   morning's worklist.
+   morning's worklist. On a night without a census it ranks the last
+   census's stored collection instead, with every card snoozed, resolved or
+   retired since then removed.
 5. **Utility mining** *(LLM, bounded)*: the pass over harvested
-   session transcripts. The literal tier is LLM-free and always runs; the
-   behavioural tier spends **one shared per-run budget**
-   (`utility.mining.max_behavioural_calls`) across all sessions, and
-   exhaustion is disclosed ("behavioural budget exhausted after N of M
-   sessions").
+   session transcripts. Only beliefs a session was shown are candidates, and
+   one is credited only when an LLM judge rules that the session's actions
+   applied it. A literal token match nominates a candidate; it no
+   longer credits one by itself, so a structural-only run credits nothing.
+   The judge spends **one shared per-run budget**
+   (`utility.mining.max_behavioural_calls`, 150 by default) across all
+   sessions, and exhaustion is disclosed ("use-judge budget exhausted after N
+   of M sessions"). The budget is spent in session order, and every session's
+   judge requests go out together as one batch, so the pass waits on one
+   batch turnaround however many sessions it mines.
 6. **Projection re-render** *(zero-LLM)*: the `MEMORY.md` render-splice
    cycle, via the same harvest-then-render tail the SessionEnd
-   hook uses.
-7. **Record + report**: one `CONSOLIDATION_RUN` operator event per run,
+   hook uses. It covers only the memory directories whose installed Claude
+   Code hooks name the store being consolidated. A run against any other
+   store (a scratch database, a test) harvests and renders none of them, and
+   the run record says why.
+7. **Closure measure** *(zero-LLM, read-only)*: the share of ACTIVE
+   beliefs that carry the contested badge, counted over the whole
+   store on every run, and the lifecycle transitions since the previous run
+   split into autonomous and gesture. See
+   [The closure measure](#the-closure-measure).
+8. **Record + report**: one `CONSOLIDATION_RUN` operator event per run,
    readable afterwards through [Auditing](auditing.md).
 
 Each pass has a page of its own if you want to run it by hand first, or to
@@ -388,12 +464,50 @@ particles memory consolidate
   --scope delta|store     # semantic-pass scope (default delta)
   --output FILE           # also write the run report as Markdown
   --format markdown|json  # terminal format (default markdown)
+  --history               # print each past run's closure measure; runs nothing
   --verbose / --debug
 ```
 
 There is no confirmation prompt and no `--yes`: an autonomous verb cannot
 prompt, so cost is bounded *by construction* (the existing caps plus delta
 scope) and confirmation is replaced with disclosure.
+
+## The closure measure
+
+A store nobody curates still works: ingest runs the trust ladder, query
+returns both sides of a disagreement under the contested badge, and the
+curation queue stays bounded. A contradiction is only disclosed until
+something closes it, though, so the share of the store under a badge can
+creep upward until the badge stops meaning anything. Every run measures two
+numbers so that drift is visible:
+
+- **Contested fraction**: ACTIVE beliefs carrying the contested badge, over
+  all ACTIVE beliefs. The count is store-wide on every run, whatever the
+  census cadence or delta scope.
+- **Autonomous share**: of the lifecycle transitions since the previous run,
+  the share no explicit write caused. Three kinds count. A belief leaving
+  ACTIVE is a gesture when a supersede, retract, source retract or review
+  event names it, and autonomous otherwise (the trust ladder, update
+  supersession, duplicate merge, re-anchor, staleness). An INCONSISTENCY
+  record closed by a review is a gesture, and one the disclosure pass closed
+  is autonomous. An abstraction is a gesture when the accept gesture asserted
+  it, and autonomous when the abstraction pass promoted it on its own.
+  Gestures include an agent's own supersede and retract writes, and the run
+  record's `gesture_by_actor` keeps them apart from the operator's.
+
+The report prints both after the headline counts:
+
+```
+  contested        37 of 1204 active beliefs (3.1%) [inconsistency 35, stance 2]; previous run 3.0%
+  transitions      12 since the previous run: 12 autonomous, 0 by gesture (100.0% autonomous)
+```
+
+Each run's window opens where the previous run's closed, so consecutive runs
+tile the event log. The run record carries the counts behind both numbers
+under its `closure` key, including the autonomous retirements by status
+reason. `particles memory consolidate --history` prints the series, one row
+per run, oldest first, and `--format json` gives the full records. The
+measure changes nothing in the store and moves no closure default.
 
 ## Delta scope
 
@@ -409,8 +523,51 @@ never advances the watermark. Nightly cost therefore scales with the day's
 delta, not the store. The first run (no prior eligible record) and
 `--scope store` run store-wide, still capped, with the "probed X of Y
 candidate pairs" disclosure. The below-cap tail of *pre-existing* pairs is
-never reached by scheduled runs; a deliberate `--scope store` run or
-`particles lint` remains the exhaustive instrument.
+never reached by delta-scoped runs. Repeated `--scope store` runs do reach it,
+because a pair already cleared is skipped without spending the cap, so each
+run probes further down the similarity order. `particles lint` remains the
+exhaustive instrument in one run.
+
+The census's own window opens at the last census's `started_at`, not the
+last run's, so a belief written on a night the census skipped is probed by
+the next one.
+
+## The census cadence
+
+The census is the cycle's largest LLM cost and the only report-only pass: its
+findings become curation cards, and nothing it finds changes what retrieval
+returns. On the measured LongMemEval cycle (2026-09-20) it made 30,000 of the
+cycle's 36,627 calls. It therefore runs every
+`consolidation.census.interval_hours` (default 168, weekly) while every other
+pass runs nightly. A run up to an hour early still counts as due, so a
+scheduler's drift does not slip it a night.
+
+A night that skips it says so in the report, in place of the counts:
+
+```
+  census skipped: last ran 2026-09-28 03:30 UTC, next due 2026-10-05 03:30 UTC (consolidation.census.interval_hours = 168)
+  as of that census: 4 contradictions, 16 duplicate pairs, 7 stale
+```
+
+The counts are the last census's, not that night's, and the run reports no
+deltas. The next census reports its deltas against the last census. Between
+censuses the curation queue is served from the last census's stored
+collection, and `particles curate` does not mark it stale until it is a day
+older than the interval.
+
+- **The first run on a store runs the census**, as does any run when no census
+  is on record.
+- **`--scope store` runs it whatever the interval**: it is the deliberate
+  whole-store census.
+- **Only a full census counts.** A structural-only or key-less night that runs
+  the census probes nothing, so it does not reset the interval, and an
+  interactive `particles audit` does not either.
+- **`consolidation.census.enabled: false`** never runs it from the cycle; the
+  queue keeps serving whatever collection is stored.
+- **`interval_hours: 0`** runs it on every cycle, the behaviour before the
+  setting existed.
+
+`particles audit` is unaffected: it runs its own census on first contact.
 
 ## Degradation: structural-only is disclosed, never silent
 
@@ -440,17 +597,30 @@ particles events list --type CONSOLIDATION_RUN
 ```
 
 `particles audit` records the same event shape (`actor: audit`) and the
-report's headline lines carry "+2 since last run" deltas against the most
-recent prior run of either kind, but an audit event neither advances the
+report's headline lines carry "+2 since the last census" deltas against the
+most recent prior run of either kind that ran a census, but an audit event
+neither advances the
 consolidation watermark nor satisfies `--if-due` (the audit runs none of the
 cross-session passes, so it cannot stand in for a consolidation run).
 
 ## Concurrency and failure
 
 - **One cycle at a time.** A `consolidate.lock` file in the integration state
-  directory (`claude_code.state_dir`) serializes cycles; a held lock exits 0
-  with `already running — skipped`. A lock whose pid is dead or older than
-  `consolidation.lock_timeout_minutes` (default 120) is stale and reclaimed.
+  directory (`claude_code.state_dir`) serializes cycles. The running cycle
+  holds a kernel advisory lock on it, so a cycle that is still
+  running is never reclaimed, however long it takes, and a crashed cycle frees
+  the lock the moment its process exits. A second caller starts nothing and
+  exits 0 with a message naming the holder, for example
+  `consolidation already running (pid 4242 on mbp.local, started 2026-09-29 10:30 UTC, pass extract since 10:31 UTC) — skipped`.
+  Once the holder has run longer than `consolidation.lock_timeout_minutes`
+  (default 120), the caller also writes
+  `warning: consolidation lock held for 8h 19m; if it is hung, stop pid 4242`
+  to stderr, still with exit 0. A hung cycle is never stopped for you: check
+  the pid and stop it if it is not making progress. On a filesystem without
+  advisory locks, and against a lock left by a pre-change version, the lock
+  falls back to the old rule (a dead pid, or older than
+  `lock_timeout_minutes`, is reclaimed). Upgrade every venv or image that runs
+  cycles against one state directory at the same time.
 - **Interactive sessions interleave safely.** The lockfile serializes
   *cycles*, not writes: each pass takes the cross-process write lock
   per transaction exactly as its verb always has, and every pass is
@@ -470,7 +640,23 @@ consolidation:
   extract_batching: true    # pass 1 pooled half-price batching
   semantic: true            # LLM passes on scheduled runs
   max_reconcile_probes: 50  # pass 2 per-run probe cap (highest-similarity-first)
-  lock_timeout_minutes: 120 # stale cycle-lock reclaim
+  lock_timeout_minutes: 120 # warn that a holder may be hung
+  lock_heartbeat_seconds: 60        # holder heartbeat interval
+  lock_heartbeat_stale_minutes: 10  # another host's holder is stopped after this
+  contradiction_disclosure:
+    enabled: true           # pass 3b on/off
+    max_per_run: 10         # new records opened per run; the rest wait
+  reanchor:
+    enabled: true                     # pass 2c on/off
+    max_retirements_per_run: 20       # update retirements examined per run
+    max_candidates_per_retirement: 8  # claims sent in one probe call
+    max_restatements_per_run: 20      # second readings, and so writes, per run
+  batch_wait:
+    budget_seconds: 3600        # total batch waiting per run
+    min_remaining_seconds: 300  # below this, remaining sets run sequentially
+  census:
+    enabled: true               # pass 3 on/off from the cycle
+    interval_hours: 168         # weekly; 0 = every run
 ```
 
 Detection thresholds deliberately stay where they live (`audit.*`, `lint.*`,
@@ -481,9 +667,10 @@ it does not re-tune them.
 
 Nobody is waiting for a 03:30 run, so its two largest probe populations, the
 contradiction probe (capped at `audit.max_contradiction_probes`) and the
-behavioural utility matcher (`utility.mining.max_behavioural_calls`), are
-submitted to the Anthropic **Message Batches API** as one job each instead of
-one call each. All token usage in a batch is billed at **50%**. At today's caps
+utility use judge (`utility.mining.max_behavioural_calls`), are
+submitted to the Anthropic **Message Batches API** instead of one call each:
+the contradiction probe as one job, and the matcher's requests for every
+session the pass mines pooled into one more. All token usage in a batch is billed at **50%**. At today's caps
 that is roughly 1200 of the cycle's ~1250 nightly probe calls.
 
 The trade is latency for price: a batch usually completes within an hour and
@@ -539,6 +726,91 @@ image sources are multimodal and still run sequentially at full price.
 `consolidation.extract_batching: false` restores the serial per-snapshot loop
 exactly; `llm.batch.enabled: false` keeps the pooling but degrades dispatch to
 sequential full-price calls.
+
+### A budget for the whole run's batch waiting
+
+`llm.batch.max_wait_seconds` bounds one batch. A run submits several, one pass
+after another (the extract batch, the census probes, then the utility matcher's batch),
+and on a slow-batch night each can wait out its full ceiling.
+On 2026-09-29 nine batches did, and the scheduled run was still going ten
+hours after it started.
+
+`consolidation.batch_wait.budget_seconds` bounds the sum. Each batch waits at
+most the balance left, and once less than `min_remaining_seconds` remains, the
+rest of the night's sets run as ordinary sequential calls at full price. The
+extract batch comes first, so it always has the whole budget and keeps the
+half-price path; what moves to full price on a slow night is the tail of the
+census and utility work: short probes that, on the store this was measured on, bill under half a dollar a night at full price.
+Nothing is skipped, and the results are the same either way.
+
+A spent budget is disclosed in three places: a clause on each affected pass in
+the run record, a `batch_wait` object in the `CONSOLIDATION_RUN` payload that
+names the pass during which the budget ran out, and one line in the report:
+
+```text
+  batch-wait budget: waited 3512s of 3600s, spent during extract; 1 batch(es) cut short (12 request(s) unavailable), 2 set(s) sequential at full price (31 request(s)) (consolidation.batch_wait.budget_seconds)
+```
+
+A batch cut short by the budget reports its requests unavailable, as an
+expiry at `max_wait_seconds` does: its snapshots return to PENDING and its
+probes go unanswered this night. Such a night is not marked degraded. The
+budget covers waiting only; sequential work and the zero-LLM passes are not
+charged to it.
+
+### When the backlog outgrows the cap
+
+Pass 1 extracts at most `consolidation.max_pending_entries` corpus entries a
+night. Every Claude Code session end deposits a new transcript snapshot and
+every edited memory file a new generation, so on a busy week the backlog can
+grow faster than the cap drains it. Nothing fails when that happens; new
+material simply waits. The report line and the run record are where it shows:
+
+```text
+  pending          extracted 13, 2 left for retry (296 remain, oldest waiting since 2026-07-19; the next run continues)
+```
+
+Four behaviours keep one bad snapshot from holding the queue:
+
+- **Least-tried first.** Each snapshot counts how many times extraction has
+  claimed it. A snapshot whose every LLM call failed (a reply cut at the
+  output budget, a batch still running at `llm.batch.max_wait_seconds`) is
+  handed back PENDING and waits behind every snapshot not yet tried, where
+  before it was first in line again the next night.
+- **The cap counts entries.** One snapshot per corpus entry runs per pooled
+  night, and the cap is filled with distinct entries, so a transcript with six
+  pending snapshots takes one slot rather than six.
+- **Stranded claims are released.** A snapshot left IN_PROGRESS by a killed
+  run for longer than `extraction.stale_in_progress_minutes` is returned to
+  PENDING at the start of the pass.
+- **Nothing is counted twice.** `extracted` counts only snapshots that reached
+  COMPLETE. A snapshot handed back PENDING is reported as `left for retry`, and
+  one that completed with no belief written, carried forward or matched is
+  reported as `with no beliefs` (and listed by `particles lint` as
+  `EMPTY_COMPLETE_SNAPSHOT`). The run record carries the same counts as
+  `pending_extracted`, `pending_retry`, `pending_empty`, `pending_failed`,
+  `pending_reset_stale` and `pending_oldest_at`.
+
+A COMPLETE snapshot is not always an extracted one. The refresh pass records
+an unchanged local file as a `REVISIT` snapshot with status COMPLETE, which
+means "no fetch work is owed", even when the `RESPONSE` snapshot it points to
+is still PENDING. To ask whether a source's content was extracted, read the
+status of its `RESPONSE` snapshots.
+
+**Catching up by hand.** When the backlog you care about is small and the rest
+can wait, extract it directly. `--tag` scopes `--all-pending` to the corpus
+entries that carry a tag, and the Claude Code harness tags every memory file
+it harvests `memory-file`:
+
+```bash
+particles extract --all-pending --tag memory-file
+```
+
+This runs sequentially at full price (no batch discount), releases stranded
+claims first, extracts only the newest generation of each edited file, and
+exits 1 if any snapshot failed or was left PENDING. Price it before you run
+it. `particles audit ~/.claude/projects/<key>/memory --estimate` prices every
+file in the memory directory at the same per-call rates without depositing or
+calling anything, which bounds this backfill from above.
 
 ### Local-model structured output
 

@@ -449,7 +449,10 @@ def test_prune_skips_symlink_escaping_md(tmp_path: Path) -> None:
         pytest.skip("platform does not support symlinks")
 
     # Nothing was written this run.
-    pruned = prune_obsolete_markdown(output_dir, written=set(), recursive=True)
+    # Even a manifest naming both cannot reach outside the root.
+    pruned = prune_obsolete_markdown(
+        output_dir, written=set(), owned={unmanaged, escaping}, recursive=True
+    )
 
     # The in-tree unmanaged note is gone.
     assert not unmanaged.exists()

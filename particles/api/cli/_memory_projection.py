@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from particles.api.cli._claude_code import (
     ARCHIVE_POINTER_PREFIX,
@@ -37,6 +37,7 @@ from particles.api.cli._claude_code import (
     memory_snapshot_path,
     observer_project_for,
     projection_enabled,
+    projection_refusal,
     resolve_session_project,
 )
 from particles.config import get_config
@@ -45,8 +46,12 @@ from particles.render.markdown import (
     PROJECTED_END_TMPL,
     atomic_write_text,
     find_projected_regions,
+    parse_memory_bullet,
     parse_sources_trailers,
 )
+
+if TYPE_CHECKING:
+    from particles.store.session_exposure_store import ShownBelief
 
 log = logging.getLogger(__name__)
 
@@ -147,7 +152,11 @@ async def _render_region_body(store: str, observer_project: str | None = None) -
 
 
 async def run_projection_cycle(
-    store: str, memory_dir: Path, harvested_text: str | None
+    store: str,
+    memory_dir: Path,
+    harvested_text: str | None,
+    *,
+    project_roots: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     """Render → splice the memory-index region after a successful harvest.
 
@@ -161,12 +170,23 @@ async def run_projection_cycle(
     Steps, in the §7 crash-safe order: render (from the store) → fold
     (compute, pure) → splice (compute; ``SpliceError`` refuses loudly) →
     backup (one-deep) → archive-append → atomic write → snapshot.
+
+    Before any of it, a Claude Code memory directory is rendered only from the
+    store the installed hooks name (:func:`projection_refusal`): a scratch
+    store must never write its beliefs into a file every session in that
+    project loads as facts about the user. ``project_roots`` names
+    repositories whose project-scope install may also bind the directory.
     """
     from particles.api.cli._projection_git import new_run_id
     from particles.operations.projection import SpliceError, splice_region
 
     run_id = new_run_id()
     try:
+        # Inside the try: a failure here fails closed, with nothing written.
+        refusal = projection_refusal(store, memory_dir, project_roots)
+        if refusal is not None:
+            log.info("memory projection refused for %s: %s", memory_dir, refusal)
+            return {"skipped": "store-not-bound", "reason": refusal}
         body = await _render_region_body(store, observer_project_for(memory_dir.parent.name))
         manifest_ref = str(memory_manifest_path())
         memory_md = memory_dir / "MEMORY.md"
@@ -299,6 +319,46 @@ class DigestDecision:
 
     action: Literal["full", "skip", "diff"]
     content: str | None = None
+    #: The beliefs of the projected region the harness loaded, in the region's
+    #: order: the sources-trailer ids. Empty when no region with
+    #: a trailer was read.
+    loaded: tuple[ShownBelief, ...] = ()
+
+
+def bullet_beliefs(text: str) -> list[ShownBelief]:
+    """The beliefs of every memory bullet in ``text``, in order, as shown projection lines."""
+    from particles.store.session_exposure_store import ShownBelief
+
+    shown: list[ShownBelief] = []
+    for line in text.splitlines():
+        parsed = parse_memory_bullet(line)
+        if parsed is not None:
+            short_id, bases = parsed
+            shown.append(
+                ShownBelief(particle_id=short_id, shown_as="projection", contested_bases=bases)
+            )
+    return shown
+
+
+def loaded_beliefs(region_body: str, trailer_ids: set[str]) -> tuple[ShownBelief, ...]:
+    """The loaded region's trailer ids, in the order its bullets show them.
+
+    The trailer is the set the region cites, and it is sorted, so the order
+    comes from the bullets. A trailer id with no bullet of its own is appended
+    after them, in trailer order.
+    """
+    from particles.store.session_exposure_store import ShownBelief
+
+    shown: list[ShownBelief] = []
+    seen: set[str] = set()
+    for belief in bullet_beliefs(region_body):
+        if belief.particle_id in trailer_ids and belief.particle_id not in seen:
+            seen.add(belief.particle_id)
+            shown.append(belief)
+    shown += [
+        ShownBelief(particle_id=sid, shown_as="projection") for sid in sorted(trailer_ids - seen)
+    ]
+    return tuple(shown)
 
 
 async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision:
@@ -340,18 +400,21 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     if loaded_ids is None:
         return DigestDecision("full")
 
+    # The harness loaded this region whatever is decided below, so every
+    # decision from here on carries it.
+    loaded = loaded_beliefs(region.body, loaded_ids)
     observer = observer_project_for(memory_dir.parent.name)
     fresh = await _render_region_body(store, observer)
     if observer is not None and _observer_line(fresh) != _observer_line(region.body):
         # The loaded region was rendered through another observer, or none: what
         # it shows is not this session's view, so a top-up over it would be
         # wrong. Push the whole scoped digest.
-        return DigestDecision("full")
+        return DigestDecision("full", loaded=loaded)
     fresh_ids = parse_sources_trailers(fresh)
     if fresh_ids is None:
-        return DigestDecision("full")
+        return DigestDecision("full", loaded=loaded)
     if fresh_ids == loaded_ids:
-        return DigestDecision("skip")
+        return DigestDecision("skip", loaded=loaded)
 
     loaded_lines = set(region.body.splitlines())
     diff = [
@@ -360,10 +423,10 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     if not diff:
         # Selection only shrank (or reordered): nothing new to top up — the
         # loaded region over-covers the current view.
-        return DigestDecision("skip")
+        return DigestDecision("skip", loaded=loaded)
     header = (
         f"# Memory digest update — {store}\n\n"
         "_The loaded MEMORY.md projection is stale; beliefs new or changed since "
         "its last render:_\n\n"
     )
-    return DigestDecision("diff", content=header + "\n".join(diff) + "\n")
+    return DigestDecision("diff", content=header + "\n".join(diff) + "\n", loaded=loaded)

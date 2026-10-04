@@ -9,10 +9,10 @@ Covers the operator path of ``particles.operations.agent_write``:
 * ``operator=True`` supersede / retract may target a belief the agent does NOT
   own (incl. extracted beliefs) — the curation-queue case — while still
   rejecting HUMAN_REVIEW targets and recording the act under the operator actor;
-* ``assign_subject_belief`` (the provenance-preserving supersede):
-  resolve-by-id and resolve-by-name, and the carry-over invariant — the
-  successor keeps the predecessor's full confidence record + extractor_ref +
-  source provenance, only the subject linkage is corrected.
+* ``assign_subject_belief`` (in place since):
+  resolve-by-id and resolve-by-name, and the in-place invariant — the belief
+  keeps its id, confidence record, extractor_ref and provenance, and only its
+  subject link changes; an already-linked belief is refused.
 
 Subject resolution is stubbed so the tests stay offline.
 """
@@ -28,6 +28,7 @@ from particles.config import get_config
 from particles.core.schema import (
     Confidence,
     Particle,
+    ParticleType,
     ProvenanceRef,
     ProvenanceRefType,
     Subject,
@@ -61,7 +62,12 @@ def stub_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
 
     resolved = Subject(canonical_name="Resolved Subject", asserted_by="resolver")
 
-    async def _fake_resolve(*_a: Any, **_k: Any) -> Subject:
+    async def _fake_resolve(session: Any, *_a: Any, **_k: Any) -> Subject:
+        # The in-place assign links a Subject row that exists.
+        from particles.store.subject_store import get_subject
+
+        if await get_subject(session, resolved.id) is None:
+            await insert_subject(session, resolved)
         return resolved
 
     monkeypatch.setattr(sr, "resolve_subject", AsyncMock(side_effect=_fake_resolve))
@@ -95,6 +101,7 @@ async def _insert_extracted(
     subject_ids: list[str] | None = None,
     calib: CalibrationSource = CalibrationSource.EXTRACTOR_DIRECT,
     asserted_by: str = "general-extractor",
+    particle_type: ParticleType = ParticleType.CLAIM,
 ) -> Particle:
     p = Particle(
         content=content,
@@ -113,6 +120,7 @@ async def _insert_extracted(
         ],
         extractor_ref={"name": "general", "version": "1.0"},
         subject_ids=subject_ids or [],
+        particle_type=particle_type,
     )
     await insert_particle(session, p)
     await session.flush()
@@ -148,12 +156,31 @@ class TestOperatorRetract:
         assert events[0].payload is not None and events[0].payload.get("operator") is True
 
     @pytest.mark.asyncio
-    async def test_operator_still_rejects_human_review(self, db_session: Any) -> None:
+    async def test_operator_may_retract_an_operator_claim(self, db_session: Any) -> None:
+        """the HUMAN_REVIEW guard is agent policy; the operator is exempt."""
+        _enable_writes(allow_cross_asserter=True)
+        target = await _insert_extracted(
+            db_session, asserted_by="operator:local", calib=CalibrationSource.HUMAN_REVIEW
+        )
+        # An agent is refused even with the cross-asserter grant: the guard fires first.
+        with pytest.raises(ValueError, match="HUMAN_REVIEW"):
+            await retract_belief(db_session, store=DEFAULT_STORE, particle_id=target.id, reason="x")
+        await retract_belief(
+            db_session, store=DEFAULT_STORE, particle_id=target.id, reason="mine", operator=True
+        )
+        p = await get_particle(db_session, target.id)
+        assert p is not None and p.status is Status.RETRACTED
+
+    @pytest.mark.asyncio
+    async def test_operator_still_rejects_a_human_review_non_claim(self, db_session: Any) -> None:
         _enable_writes()
         target = await _insert_extracted(
-            db_session, asserted_by="operator", calib=CalibrationSource.HUMAN_REVIEW
+            db_session,
+            asserted_by="cli-user",
+            calib=CalibrationSource.HUMAN_REVIEW,
+            particle_type=ParticleType.REVIEW,
         )
-        with pytest.raises(ValueError, match="HUMAN_REVIEW"):
+        with pytest.raises(ValueError, match="REVIEW record"):
             await retract_belief(
                 db_session,
                 store=DEFAULT_STORE,
@@ -187,10 +214,11 @@ class TestOperatorSupersede:
         new = await get_particle(db_session, result.asserted_particle_id or "")
         assert old is not None and old.status is Status.SUPERSEDED
         assert new is not None and new.supersedes == target.id
-        # Standard operator supersede is operator-attributed with the confidence
-        # the operator set (NOT carried over).
-        assert new.asserted_by == "mcp:test-agent"
-        assert new.confidence.calibration_source is CalibrationSource.AGENT_ASSERTED
+        # the successor is the operator's belief, with the confidence
+        # the operator set (NOT carried over, NOT the agent's).
+        assert new.asserted_by == "operator:local"
+        assert new.confidence.calibration_source is CalibrationSource.HUMAN_REVIEW
+        assert new.confidence.value == pytest.approx(0.6)
         # the why of the revision is on the audit event, as for a
         # retraction.
         from particles.store.event_store import OperatorEventType, list_events
@@ -198,6 +226,119 @@ class TestOperatorSupersede:
         events = await list_events(db_session, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
         assert len(events) == 1
         assert events[0].reason == "the source misread the figure"
+
+    @pytest.mark.asyncio
+    async def test_operator_successor_is_attributed_to_the_operator(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        """principal, excerpt author, no agent ceiling, no trust seeded."""
+        from particles.corpus.store import get_entry
+        from particles.store.trust_store import get_trust_statements_for_domain
+
+        _enable_writes(max_asserted_confidence=0.9)
+        get_config().curation.operator_identity = "operator:jeff"
+        target = await _insert_extracted(db_session)
+        result = await supersede_belief(
+            db_session,
+            store=DEFAULT_STORE,
+            supersedes_id=target.id,
+            content="A claim the operator is sure of.",
+            subject_names=["X"],
+            confidence=0.97,
+            source_excerpt="checked against the release notes",
+            operator=True,
+            actor="curate",
+            reason="verified",
+        )
+        new = await get_particle(db_session, result.asserted_particle_id or "")
+        assert new is not None
+        assert new.asserted_by == "operator:jeff"
+        assert new.confidence.value == pytest.approx(0.97)  # not clamped to 0.9
+        entry = await get_entry(db_session, new.provenance[0].corpus_entry_id or "")
+        assert entry is not None and entry.deposited_by == "operator:jeff"
+        assert entry.snapshots[-1].author_id == "operator:jeff"
+        statements = await get_trust_statements_for_domain(db_session, "agent-memory")
+        assert not any(s.source_ref.value == "operator:jeff" for s in statements)
+        events = await list_events(db_session, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
+        assert events[0].actor == "curate"  # the surface, beside the principal
+
+    @pytest.mark.asyncio
+    async def test_operator_can_correct_their_own_correction(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        _enable_writes(allow_cross_asserter=True)
+        target = await _insert_extracted(db_session)
+        kwargs: dict[str, Any] = {
+            "store": DEFAULT_STORE,
+            "subject_names": ["X"],
+            "source_excerpt": "e",
+            "operator": True,
+            "actor": "curate",
+            "reason": "r",
+        }
+        first = await supersede_belief(
+            db_session, supersedes_id=target.id, content="First fix.", confidence=0.7, **kwargs
+        )
+        first_id = first.asserted_particle_id or ""
+        # An agent may not revise the operator's belief...
+        with pytest.raises(ValueError, match="HUMAN_REVIEW"):
+            await supersede_belief(
+                db_session,
+                store=DEFAULT_STORE,
+                supersedes_id=first_id,
+                content="Agent rewrite.",
+                subject_names=["X"],
+                confidence=0.5,
+                source_excerpt="e",
+            )
+        # ...but the operator may.
+        second = await supersede_belief(
+            db_session, supersedes_id=first_id, content="Second fix.", confidence=0.8, **kwargs
+        )
+        prior = await get_particle(db_session, first_id)
+        assert prior is not None and prior.status is Status.SUPERSEDED
+        latest = await get_particle(db_session, second.asserted_particle_id or "")
+        assert latest is not None and latest.supersedes == first_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [-0.1, 1.5])
+    async def test_operator_confidence_must_be_a_probability(
+        self, db_session: Any, stub_resolver: Any, bad: float
+    ) -> None:
+        _enable_writes()
+        target = await _insert_extracted(db_session)
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            await supersede_belief(
+                db_session,
+                store=DEFAULT_STORE,
+                supersedes_id=target.id,
+                content="c",
+                subject_names=["X"],
+                confidence=bad,
+                source_excerpt="e",
+                operator=True,
+                actor="curate",
+                reason="r",
+            )
+
+    @pytest.mark.asyncio
+    async def test_agent_supersede_is_unchanged(self, db_session: Any, stub_resolver: Any) -> None:
+        _enable_writes(max_asserted_confidence=0.9)
+        own = await _insert_extracted(db_session, asserted_by="mcp:test-agent")
+        result = await supersede_belief(
+            db_session,
+            store=DEFAULT_STORE,
+            supersedes_id=own.id,
+            content="c",
+            subject_names=["X"],
+            confidence=0.97,
+            source_excerpt="e",
+        )
+        new = await get_particle(db_session, result.asserted_particle_id or "")
+        assert new is not None
+        assert new.asserted_by == "mcp:test-agent"
+        assert new.confidence.calibration_source is CalibrationSource.AGENT_ASSERTED
+        assert new.confidence.value == pytest.approx(0.9)
 
     @pytest.mark.asyncio
     async def test_operator_supersede_requires_a_reason(
@@ -226,7 +367,8 @@ class TestOperatorSupersede:
 
 class TestAssignSubject:
     @pytest.mark.asyncio
-    async def test_assign_by_id_carries_over_provenance(self, db_session: Any) -> None:
+    async def test_assign_by_id_links_in_place(self, db_session: Any) -> None:
+        """the orphan keeps its id; no successor is minted."""
         _enable_writes()
         subject = Subject(canonical_name="Picked Subject", asserted_by="operator")
         await insert_subject(db_session, subject)
@@ -240,26 +382,40 @@ class TestAssignSubject:
             subject_id=subject.id,
             actor="http:/particles/{id}/subjects",
         )
-        old = await get_particle(db_session, target.id)
-        new = await get_particle(db_session, result.asserted_particle_id or "")
-        assert old is not None and old.status is Status.SUPERSEDED
-        assert new is not None
-        assert new.supersedes == target.id
-        assert subject.id in new.subject_ids
-        # Provenance carry-over: same content, same confidence record,
-        # same extractor_ref, same source — only the subject linkage changed.
-        assert new.content == target.content
-        assert new.confidence.value == target.confidence.value
-        assert new.confidence.calibration_source is CalibrationSource.EXTRACTOR_DIRECT
-        assert new.confidence.calibration_method == "temperature_scaling"
-        assert new.confidence.calibration_ref == "calib-ref-123"
-        assert new.extractor_ref == target.extractor_ref
-        assert new.asserted_by == target.asserted_by  # the extractor, not the operator
-        assert [pr.corpus_entry_id for pr in new.provenance] == ["entry-1"]
+        assert result.asserted_particle_id == target.id
+        assert result.verdict == "SUBJECT_ASSIGNED"
+        same = await get_particle(db_session, target.id)
+        assert same is not None and same.status is Status.ACTIVE
+        assert same.subject_ids == [subject.id]
+        # Nothing about the claim changed but the link.
+        assert same.content == target.content
+        assert same.confidence.value == target.confidence.value
+        assert same.confidence.calibration_ref == "calib-ref-123"
+        assert same.extractor_ref == target.extractor_ref
+        assert same.supersedes is None
 
-        events = await list_events(db_session, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
-        assert events and events[0].payload is not None
-        assert events[0].payload.get("subject_assign") == subject.id
+        relinked = await list_events(db_session, event_type=OperatorEventType.SUBJECTS_RELINKED)
+        assert len(relinked) == 1
+        assert relinked[0].actor == "http:/particles/{id}/subjects"
+        assert {r.ref_id for r in relinked[0].refs} == {target.id, subject.id}
+        assert not await list_events(db_session, event_type=OperatorEventType.PARTICLE_SUPERSEDED)
+
+    @pytest.mark.asyncio
+    async def test_assign_refuses_an_already_linked_belief(self, db_session: Any) -> None:
+        _enable_writes()
+        first = Subject(canonical_name="First", asserted_by="operator")
+        second = Subject(canonical_name="Second", asserted_by="operator")
+        await insert_subject(db_session, first)
+        await insert_subject(db_session, second)
+        target = await _insert_extracted(db_session)
+        await db_session.flush()
+        await assign_subject_belief(
+            db_session, store=DEFAULT_STORE, particle_id=target.id, subject_id=first.id
+        )
+        with pytest.raises(ValueError, match="already has a subject"):
+            await assign_subject_belief(
+                db_session, store=DEFAULT_STORE, particle_id=target.id, subject_id=second.id
+            )
 
     @pytest.mark.asyncio
     async def test_assign_by_name_uses_resolver(self, db_session: Any, stub_resolver: Any) -> None:
@@ -271,10 +427,11 @@ class TestAssignSubject:
             particle_id=target.id,
             subject_name="Some Entity",
         )
-        new = await get_particle(db_session, result.asserted_particle_id or "")
-        assert new is not None
-        # The resolver-returned subject id is attached.
-        assert stub_resolver in new.subject_ids
+        assert result.asserted_particle_id == target.id
+        same = await get_particle(db_session, target.id)
+        assert same is not None
+        # The resolver-returned subject id is attached, in place.
+        assert stub_resolver in same.subject_ids
 
     @pytest.mark.asyncio
     async def test_assign_requires_exactly_one_of_id_or_name(self, db_session: Any) -> None:
@@ -292,12 +449,15 @@ class TestAssignSubject:
             )
 
     @pytest.mark.asyncio
-    async def test_assign_rejects_human_review(self, db_session: Any) -> None:
+    async def test_assign_rejects_a_human_review_non_claim(self, db_session: Any) -> None:
         _enable_writes()
         subject = Subject(canonical_name="S", asserted_by="operator")
         await insert_subject(db_session, subject)
         target = await _insert_extracted(
-            db_session, asserted_by="operator", calib=CalibrationSource.HUMAN_REVIEW
+            db_session,
+            asserted_by="operator",
+            calib=CalibrationSource.HUMAN_REVIEW,
+            particle_type=ParticleType.REVIEW,
         )
         await db_session.flush()
         with pytest.raises(ValueError, match="HUMAN_REVIEW"):

@@ -6,7 +6,8 @@
 
 The deterministic modes of the one query surface (§2.1): the flags-only
 listing, the ``count`` / ``group_by`` aggregates, and the predicate-vocabulary
-listing. No embedding, no LLM call, on any path in this module — ordering is
+listing, and the vocabulary report built over the same candidate
+set. No embedding, no LLM call, on any path in this module — ordering is
 ``effective_confidence`` alone (tie: ``asserted_at`` descending), computed
 through the same scoring kernel as every other read surface
 (:mod:`.effective_confidence` — no new formula).
@@ -40,6 +41,7 @@ from particles.core.schema import (
     StructuralGroupBy,
     StructuredClaim,
     TermKind,
+    VocabularyReport,
 )
 from particles.core.stance import has_stance_marker
 from particles.db import DEFAULT_STORE, StoreHandle, session_scope
@@ -58,6 +60,7 @@ from .decay_policy import DecayPolicy, load_decay_policy
 from .effective_confidence import score_effective_confidence
 from .observer_scope import filter_visible, merged_scope_note
 from .source_trust import TrustPolicy, load_trust_policy
+from .vocabulary_report import VocabularyInputs, gather_vocabulary_inputs, vocabulary_report
 
 log = logging.getLogger(__name__)
 
@@ -427,6 +430,60 @@ async def _predicates_listing(
     )
 
 
+def _vocabulary_response(
+    report: VocabularyReport,
+    request: QueryRequest,
+    *,
+    active_total: int,
+    with_claims: int,
+    excluded_undatable: int = 0,
+) -> QueryResponse:
+    return QueryResponse(
+        answer=(
+            f"{report.predicates_canonical} canonical predicate(s) from "
+            f"{report.predicates_distinct} distinct term(s) across "
+            f"{report.claims_in_view} structured claims."
+        ),
+        particles=[],
+        effective_confidences=[],
+        vocabulary_report=report,
+        claim_coverage=ClaimCoverage(
+            active_total=active_total, with_claims=with_claims, matched=report.claims_in_view
+        ),
+        as_of=request.as_of,
+        as_of_excluded_undatable=excluded_undatable,
+    )
+
+
+async def _vocabulary_listing(
+    session: AsyncSession,
+    request: QueryRequest,
+    *,
+    scope_notes: list[ObserverScopeNote] | None = None,
+) -> QueryResponse:
+    """``--vocabulary``: the read-time vocabulary report.
+
+    Built over the candidate set ``--predicates`` lists (same default
+    exclusions, same observer), so its distinct-term count is that listing's
+    length.
+    """
+    pairs, _notes, excluded_undatable = await _candidate_claims(
+        session, request, scope_notes=scope_notes
+    )
+    inputs = await gather_vocabulary_inputs(
+        session, [claim for _, claim in pairs], as_of=request.as_of
+    )
+    report = await vocabulary_report(session, inputs, as_of=request.as_of)
+    counts = await count_structured_claim_coverage(session)
+    return _vocabulary_response(
+        report,
+        request,
+        active_total=counts["active"],
+        with_claims=counts["annotated"],
+        excluded_undatable=excluded_undatable,
+    )
+
+
 async def structural_query(session: AsyncSession, request: QueryRequest) -> QueryResponse:
     """Run one store's deterministic structural mode.
 
@@ -438,6 +495,8 @@ async def structural_query(session: AsyncSession, request: QueryRequest) -> Quer
     scope_notes: list[ObserverScopeNote] = []
     if request.list_predicates:
         response = await _predicates_listing(session, request, scope_notes=scope_notes)
+    elif request.list_vocabulary:
+        response = await _vocabulary_listing(session, request, scope_notes=scope_notes)
     else:
         gathered = await _gather_store(session, request, scope_notes=scope_notes)
         response = await _assemble(request, gathered, session)
@@ -446,7 +505,14 @@ async def structural_query(session: AsyncSession, request: QueryRequest) -> Quer
 
 def _with_scope_note(response: QueryResponse, notes: list[ObserverScopeNote]) -> QueryResponse:
     note = merged_scope_note(notes)
-    return response if note is None else response.model_copy(update={"observer_scope": note})
+    if note is None:
+        return response
+    update: dict[str, object] = {"observer_scope": note}
+    if response.vocabulary_report is not None:
+        update["vocabulary_report"] = response.vocabulary_report.model_copy(
+            update={"observer_scope": note}
+        )
+    return response.model_copy(update=update)
 
 
 async def structural_query_federated(
@@ -501,6 +567,32 @@ async def structural_query_federated(
                     active_total=active_total, with_claims=with_claims, matched=len(merged_pairs)
                 ),
                 as_of=request.as_of,
+            ),
+            scope_notes,
+        )
+
+    if request.list_vocabulary:
+        inputs = VocabularyInputs()
+        active_total = with_claims = 0
+        for store in stores:
+            async with session_scope(store) as s:
+                await assert_store_schema_current(s)
+                pairs, _notes, _undatable = await _candidate_claims(
+                    s, request, scope_notes=scope_notes
+                )
+                inputs.extend(
+                    await gather_vocabulary_inputs(
+                        s, [claim for _, claim in pairs], as_of=request.as_of
+                    )
+                )
+                counts = await count_structured_claim_coverage(s)
+                active_total += counts["active"]
+                with_claims += counts["annotated"]
+        async with session_scope(viewer) as viewer_session:
+            report = await vocabulary_report(viewer_session, inputs, as_of=request.as_of)
+        return _with_scope_note(
+            _vocabulary_response(
+                report, request, active_total=active_total, with_claims=with_claims
             ),
             scope_notes,
         )

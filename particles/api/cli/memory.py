@@ -39,20 +39,29 @@ backed by the store — and ``tools`` dumps its surface for the parity golden.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import typer
 
-from particles.api.cli import app, run
-from particles.api.cli._logging import configure_logging
+from particles.api.cli import app, require_store_directory, run
 from particles.api.cli._output import (
     DEBUG_OPTION,
     PROGRESS_OPTION,
     QUIET_OPTION,
     VERBOSE_OPTION,
     configure_output,
+    current_output,
 )
+from particles.api.cli._progress import (
+    format_elapsed,
+    heartbeat_paused,
+    progress_line,
+    set_heartbeat_status,
+)
+from particles.core.progress import ProgressEvent
 from particles.db import DEFAULT_STORE, session_scope
 from particles.operations.utility_feedback import CLI_ACTOR
 from particles.operations.utility_sweep import (
@@ -65,7 +74,7 @@ from particles.operations.utility_sweep import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from particles.operations.consolidation import ProjectionRunner
+    from particles.operations.consolidation import PassEnded, ProjectionRunner
 
 memory_app = typer.Typer(help="Agent-memory maintenance.", no_args_is_help=True)
 app.add_typer(memory_app, name="memory")
@@ -79,25 +88,64 @@ def rebuild_utility_cmd(
     store: str = typer.Option(
         DEFAULT_STORE, "--store", help="Store handle to rebuild utility evidence for."
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the cost confirmation and start the re-mine."
+    ),
+    batch: bool = typer.Option(
+        True,
+        "--batch/--no-batch",
+        help="Send the judge calls as one half-price batch (the default), or one at a time.",
+    ),
     verbose: bool = VERBOSE_OPTION,
     debug: bool = DEBUG_OPTION,
     quiet: bool = QUIET_OPTION,
     progress: bool | None = PROGRESS_OPTION,
 ) -> None:
-    """Re-mine harvested session transcripts into fresh utility evidence."""
+    """Re-mine harvested session transcripts into fresh utility evidence.
+
+    A belief is credited only when the session was shown it and an LLM judge
+    rules that the session's actions applied it. A literal token match only
+    nominates a candidate for the judge. The command plans every session
+    first and prints the judge calls and their list-price cost before it
+    clears anything. With `utility.mining.behavioural_matching` off the judge
+    never runs, so a literal-only rebuild now records no mined events. The
+    explicit channel (`memory useful`) is rebuilt from its event log either way.
+    """
     configure_output(verbose, debug, quiet, progress)
-    run(_rebuild_utility(store))
+    run(_rebuild_utility(store, yes=yes, batch=batch))
 
 
-async def _rebuild_utility(store: str) -> None:
-    from particles.operations.utility_mining import rebuild_store_utility
+async def _rebuild_utility(store: str, *, yes: bool, batch: bool) -> None:
+    from particles.config import get_config
+    from particles.llm.usage import format_usd
+    from particles.operations.utility_mining import plan_store_utility, rebuild_store_utility
 
-    result = await rebuild_store_utility(store)
+    plan = await plan_store_utility(store)
+    estimate = plan.estimate()
+    if estimate.usd is None:
+        cost = "the judge model has no configured price"
+    else:
+        discount = get_config().llm.batch_discount if batch else 0.0
+        cost = f"≈ US{format_usd(estimate.usd)} at list price"
+        if batch:
+            cost += f", ≈ US{format_usd(estimate.usd * (1.0 - discount))} batched"
+    typer.echo(
+        f"Re-mining {len(plan.mines)} harvested session(s) for store {store!r}: "
+        f"{plan.calls} judge call(s), {cost}. Clears every utility event first."
+    )
+    if not get_config().utility.mining.behavioural_matching:
+        typer.echo(
+            "utility.mining.behavioural_matching is off: the judge will not run, so the "
+            "mined channel will be rebuilt empty."
+        )
+    if not yes and not typer.confirm("Proceed?"):
+        raise typer.Exit(1)
+    result = await rebuild_store_utility(store, plan, latency_tolerant=batch)
     line = (
         f"Rebuilt utility evidence for store {store!r}: "
         f"{result.literal} literal + {result.behavioural} behavioural events "
-        f"across {result.candidates} active beliefs "
-        f"({result.behavioural_calls} LLM match call(s))."
+        f"from {result.literal_nominated} literal nomination(s) "
+        f"({result.behavioural_calls} judge call(s))."
     )
     if result.skipped_missing_blob:
         noun = "entry" if result.skipped_missing_blob == 1 else "entries"
@@ -697,22 +745,80 @@ def consolidate_cmd(
     format_: str = typer.Option(
         "markdown", "--format", help="Terminal format: markdown (default) or json."
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-    debug: bool = typer.Option(False, "--debug"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Run each pass's gather only and report the snapshots and pairs it would "
+            "extract or probe, with a list-price estimate per pass. Writes nothing and "
+            "makes no LLM call."
+        ),
+    ),
+    history: bool = typer.Option(
+        False,
+        "--history",
+        help=(
+            "Print the contested fraction and the autonomous share of lifecycle "
+            "transitions that each past run recorded, oldest first. Runs nothing."
+        ),
+    ),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
 ) -> None:
     """Run the scheduled consolidation cycle: the memory dream cycle.
+
+    With consolidation.budget_usd set, a pass whose estimate would carry the
+    run past the budget is skipped and disclosed. --dry-run prints each pass's
+    estimate without running it; compare it with the "LLM usage" line a
+    metered run prints.
+
+    On a terminal the status line names the running pass (pass 2/12 extract),
+    its own counter, and any Message Batches wait with the batch-wait budget
+    left; each pass prints one line as it ends. Off a terminal, and under
+    --quiet, none of this is printed.
+
+    Every run ends with a read-only measure: the share of ACTIVE beliefs under
+    the contested badge, and how many lifecycle transitions since the previous
+    run were autonomous rather than caused by a gesture. Both are written to
+    the run record; --history prints the series.
 
     Exit codes (cron observability): 0 means success, including disclosed
     structural-only runs and --if-due / lock skips; 1 means one or more passes
     failed (run record written); 2 means the cycle could not start.
     """
-    configure_logging(verbose, debug)
+    configure_output(verbose, debug, quiet, progress)
     if format_ not in _FORMATS:
         typer.echo(f"Error: --format must be one of: {', '.join(_FORMATS)}.", err=True)
         raise typer.Exit(2)
     if scope not in _SCOPES:
         typer.echo(f"Error: --scope must be one of: {', '.join(_SCOPES)}.", err=True)
         raise typer.Exit(2)
+    if history:
+        if dry_run or if_due or structural_only:
+            typer.echo(
+                "Error: --history reads past runs and cannot be combined with "
+                "--dry-run, --if-due or --structural-only.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        run(_consolidate_history_impl(store=store, output=output, fmt=format_))
+        return
+    if dry_run:
+        if if_due:
+            typer.echo("Error: --dry-run and --if-due cannot be combined.", err=True)
+            raise typer.Exit(2)
+        run(
+            _consolidate_plan_impl(
+                store=store,
+                structural_only=structural_only,
+                scope=scope,
+                output=output,
+                fmt=format_,
+            )
+        )
+        return
     run(
         _consolidate_impl(
             store=store,
@@ -764,6 +870,7 @@ async def _consolidate_impl(
                 if_due=if_due,
                 projection_runner=projection_runner,
                 projection_skip_reason=projection_skip,
+                on_progress=consolidation_progress_renderer(),
             )
     except typer.Exit:
         raise
@@ -771,14 +878,73 @@ async def _consolidate_impl(
         typer.echo(f"Error: consolidation could not start: {exc}", err=True)
         raise typer.Exit(2) from exc
 
-    if report.outcome == "skipped":
-        # Cron-friendly: contention / not-due is normal, not an alarm (§8).
-        typer.echo(report.skip_reason or "consolidation skipped")
-        return
+    # The report starts on a fresh line, not on the heartbeat's open one.
+    with heartbeat_paused():
+        if report.outcome == "skipped":
+            # Cron-friendly: contention / not-due is normal, not an alarm (§8).
+            typer.echo(report.skip_reason or "consolidation skipped")
+            if report.lock_warning:
+                # Still exit 0 (§8), but where launchd / cron put failures.
+                typer.echo(f"warning: {report.lock_warning}", err=True)
+            return
 
-    rendered = render_consolidation_report(report)
+        rendered = render_consolidation_report(report)
+        if fmt == "json":
+            typer.echo(report.model_dump_json(indent=2))
+        else:
+            typer.echo(rendered)
+        if output is not None:
+            from particles.render.markdown import atomic_write_text
+
+            atomic_write_text(output, rendered)
+            typer.echo(f"Report written to {output}.")
+
+    failed = report.failed_passes()
+    if failed:
+        typer.echo(f"consolidation: pass(es) failed: {', '.join(failed)}", err=True)
+        raise typer.Exit(1)
+
+
+async def _consolidate_plan_impl(
+    *,
+    store: str,
+    structural_only: bool,
+    scope: str,
+    output: Path | None,
+    fmt: str,
+) -> None:
+    """``--dry-run``: each pass's gather and estimate; no write, no LLM call."""
+    from particles.api.client import get_backend
+
+    if get_backend().remote:
+        typer.echo(
+            "Error: `particles memory consolidate` consolidates one local store per "
+            "invocation; run it on the machine that holds the store.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    # Deferred import: the plan pulls the same reconcile/curation/lint stack as
+    # the run (AGENTS.md § Deferred imports, case 2).
+    from particles.operations.consolidation_plan import (
+        plan_consolidation,
+        render_consolidation_plan,
+    )
+
+    _runner, projection_skip = build_projection_runner(store)
+    async with session_scope(store) as session:
+        plan = await plan_consolidation(
+            session,
+            store=store,
+            scope="store" if scope == "store" else "delta",
+            structural_only=structural_only,
+            projection_skip_reason=projection_skip,
+        )
+        # Reads only; end the transaction without committing anything.
+        await session.rollback()
+    rendered = render_consolidation_plan(plan)
     if fmt == "json":
-        typer.echo(report.model_dump_json(indent=2))
+        typer.echo(plan.model_dump_json(indent=2))
     else:
         typer.echo(rendered)
     if output is not None:
@@ -787,10 +953,101 @@ async def _consolidate_impl(
         atomic_write_text(output, rendered)
         typer.echo(f"Report written to {output}.")
 
-    failed = report.failed_passes()
-    if failed:
-        typer.echo(f"consolidation: pass(es) failed: {', '.join(failed)}", err=True)
-        raise typer.Exit(1)
+
+async def _consolidate_history_impl(*, store: str, output: Path | None, fmt: str) -> None:
+    """``--history``: the closure measure each past run recorded."""
+    from particles.api.client import get_backend
+
+    if get_backend().remote:
+        typer.echo(
+            "Error: `particles memory consolidate --history` reads one local store's run "
+            "records; run it on the machine that holds the store.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    from particles.operations.closure_measure import closure_history, render_closure_history
+    from particles.operations.consolidation import CONSOLIDATION_ACTOR
+
+    async with session_scope(store) as session:
+        history = await closure_history(session, store=store, actor=CONSOLIDATION_ACTOR)
+        # Reads only; end the transaction without committing anything.
+        await session.rollback()
+    rendered = render_closure_history(history)
+    if fmt == "json":
+        typer.echo(json.dumps(history.payload(), indent=2))
+    else:
+        typer.echo(rendered, nl=False)
+    if output is not None:
+        from particles.render.markdown import atomic_write_text
+
+        atomic_write_text(output, rendered)
+        typer.echo(f"Report written to {output}.")
+
+
+#: The mark each pass-end line leads with, so a degraded or failed pass stands out.
+_PASS_MARKS = {"ok": "✓", "degraded": "!", "failed": "✗", "skipped": "-"}
+
+
+def _minutes(seconds: float) -> str:
+    """A wait rounded down to whole minutes (``23m``), or seconds under a minute."""
+    return f"{int(seconds) // 60}m" if seconds >= 60 else f"{int(seconds)}s"
+
+
+def render_pass_end(event: PassEnded) -> str:
+    """The stderr line for a finished pass: mark, name, duration, tally."""
+    mark = _PASS_MARKS[event.outcome]
+    if event.outcome == "skipped":
+        return f"  {mark} {event.label} skipped: {event.summary}"
+    qualifier = f" ({event.outcome})" if event.outcome in ("degraded", "failed") else ""
+    elapsed = format_elapsed(event.duration_seconds)
+    return f"  {mark} {event.label} {elapsed}{qualifier}: {event.summary}"
+
+
+def consolidation_progress_renderer() -> Callable[[ProgressEvent], None] | None:
+    """Render the cycle's progress events on a terminal, or ``None``.
+
+    The heartbeat status becomes ``pass 2/12 extract · snapshots 3/20``, and
+    while a Message Batches job is pending ``… · batch waiting 23m of 60m ·
+    budget 37m left``. The budget is the only honest bound on the wait left,
+    so no percentage or ETA is invented. Each pass's end prints one
+    line so the tally builds up during the run.
+
+    ``None`` when progress is off (not a terminal, ``--quiet``,
+    ``--no-progress``): nothing is rendered and stderr keeps its old content.
+    """
+    from particles.operations.consolidation import BatchWaiting, PassEnded
+
+    if not current_output().show_progress():
+        return None
+    current_pass: str | None = None
+    counter: str | None = None
+    waiting: str | None = None
+
+    def _publish() -> None:
+        parts = [p for p in (current_pass, counter, waiting) if p]
+        set_heartbeat_status(" · ".join(parts) if parts else None)
+
+    def _render(event: ProgressEvent) -> None:
+        nonlocal current_pass, counter, waiting
+        if isinstance(event, PassEnded):
+            progress_line(render_pass_end(event))
+            current_pass = counter = waiting = None
+        elif isinstance(event, BatchWaiting):
+            waiting = (
+                f"batch waiting {_minutes(event.done)} of {_minutes(event.total)} · "
+                f"budget {_minutes(event.budget_left_seconds)} left"
+                if event.total
+                else None
+            )
+        elif event.phase == "pass":
+            current_pass = f"pass {event.done}/{event.total} {event.label}"
+            counter = waiting = None
+        else:
+            counter = f"{event.label} {event.done}/{event.total}"
+        _publish()
+
+    return _render
 
 
 def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | None]:
@@ -799,13 +1056,24 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
     The Engine operation cannot import the CLI-side projection helpers (that
     would invert the Surface > Engine layer contract), so the Surface builds
     the callback and injects it. Returns ``(None, <disclosed reason>)`` when
-    the projection is disabled or no Claude Code memory directory exists.
+    the projection is disabled, no Claude Code memory directory exists, or
+    none of them is served by ``store``.
+
+    A memory directory is served by the store the installed Claude Code hooks
+    name (``_claude_code.projection_refusal``). Every other directory is left
+    out of both halves: ``store`` does not harvest it and does not render into
+    it. A consolidation run against a scratch store therefore reads and writes
+    nothing under ``~/.claude/projects``.
 
     Public because ``engine serve --daemon`` registers it as the daemon's
     projection-runner factory, so a resident daemon renders
     ``MEMORY.md`` exactly as the launchd recipe does.
     """
-    from particles.api.cli._claude_code import projection_enabled, stray_memory_dirs
+    from particles.api.cli._claude_code import (
+        projection_enabled,
+        projection_refusal,
+        stray_memory_dirs,
+    )
 
     if not projection_enabled():
         return None, "agent_memory.projection.enabled is false"
@@ -821,6 +1089,15 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
     )
     if not memory_dirs:
         return None, f"no memory directories under {root}"
+    refusals = {d: projection_refusal(store, d) for d in memory_dirs}
+    unbound = [d for d, reason in refusals.items() if reason is not None]
+    memory_dirs = [d for d, reason in refusals.items() if reason is None]
+    if not memory_dirs:
+        first = refusals[unbound[0]]
+        return None, (
+            f"store {store!r} serves none of the {len(unbound)} memory directories "
+            f"under {root} ({first})"
+        )
 
     async def _run() -> dict[str, Any]:
         # The same tail the SessionEnd hook runs (§6/§7): read +
@@ -834,6 +1111,7 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
         telemetry: dict[str, Any] = {
             "dirs": len(memory_dirs),
             "stray_dirs_skipped": len(strays),
+            "unbound_dirs_skipped": len(unbound),
             "harvested": 0,
             "rendered": 0,
         }
@@ -876,6 +1154,7 @@ def memory_serve_cmd(
     """
     from particles.mcp.memory_compat import main as serve_main
 
+    require_store_directory(store or DEFAULT_STORE)
     serve_main(store)
 
 

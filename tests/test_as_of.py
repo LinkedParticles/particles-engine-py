@@ -18,6 +18,8 @@ Covers:
   - the CLI / MCP parameter surfaces.
 
 The ``UNDATED_RETIREMENT`` lint finding is tested in tests/test_lint.py.
+Born-retired rows stay hidden after a resolution changes their status or
+reason: ``TestResolvedBornRetired``.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from particles.core.schema import (
     ProvenanceRef,
     ProvenanceRefType,
     QueryRequest,
+    ResolutionAction,
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
@@ -424,6 +427,27 @@ class TestVisibilityPredicate:
         ev = _view(T2000).evaluate(p, None)
         assert not ev.visible and not ev.excluded_undatable
 
+    def test_resolved_born_retired_id_never_visible(self) -> None:
+        """a loser whose reason has moved off CONFLICT_PENDING is still
+        hidden when its id is in the index's never-believed set, even with a
+        REVIEW_RESOLVED event that would otherwise date it at rung 2."""
+        p = _particle(
+            "resolved loser",
+            asserted_at=T1996,
+            status=Status.PROVENANCE_STALE,
+            status_reason=StatusReason.CONFLICT_RESOLVED,
+        )
+        view = AsOfView(
+            as_of=T2000,
+            index=RetirementIndex(
+                successor_by_predecessor={},
+                event_retired_at={p.id: T2006},
+                never_believed=frozenset({p.id}),
+            ),
+        )
+        ev = view.evaluate(p, None)
+        assert not ev.visible and not ev.excluded_undatable
+
     def test_born_retired_never_visible_and_not_counted(self) -> None:
         p = _particle(
             "quarantined loser",
@@ -444,12 +468,21 @@ class TestVisibilityPredicate:
         assert not _view(datetime(2008, 1, 1, tzinfo=UTC)).evaluate(p, None).visible
 
     def test_is_once_believed_retirement_helper(self) -> None:
-        assert is_once_believed_retirement(Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION)
-        assert is_once_believed_retirement(Status.PROVENANCE_STALE, None)
-        assert not is_once_believed_retirement(Status.ACTIVE, None)
-        assert not is_once_believed_retirement(Status.INCONSISTENCY, None)
+        assert is_once_believed_retirement(
+            Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION, born_retired=False
+        )
+        assert is_once_believed_retirement(Status.PROVENANCE_STALE, None, born_retired=False)
+        assert not is_once_believed_retirement(Status.ACTIVE, None, born_retired=False)
+        assert not is_once_believed_retirement(Status.INCONSISTENCY, None, born_retired=False)
         assert not is_once_believed_retirement(
-            Status.PROVENANCE_STALE, StatusReason.CONFLICT_PENDING
+            Status.PROVENANCE_STALE, StatusReason.CONFLICT_PENDING, born_retired=False
+        )
+        # a resolved born-retired row is still never believed.
+        assert not is_once_believed_retirement(
+            Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED, born_retired=True
+        )
+        assert not is_once_believed_retirement(
+            Status.RETRACTED, StatusReason.CONFLICT_RESOLVED, born_retired=True
         )
 
 
@@ -485,6 +518,164 @@ async def test_load_retirement_index_maps(db_session: Any) -> None:
     assert index.successor_by_predecessor[pred.id].content == "new"
     assert index.event_retired_at[retracted.id] == event.occurred_at
     assert pred.id not in index.event_retired_at
+
+
+# ---------------------------------------------------------------------------
+# born-retired rows stay never-believed after a resolution.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_conflict(session: Any) -> tuple[Particle, Particle, Particle]:
+    """ACTIVE A, quarantined B and the INCONSISTENCY record, all born in 1996.
+
+    The record and B are built the way the §6.6 quarantine plan builds them.
+    """
+    from particles.core.conflict_resolution import build_inconsistency_particle
+    from particles.store.particle_store import insert_particle
+
+    a = _particle("Pluto is a planet", asserted_at=T1996)
+    b = _particle(
+        "Pluto is a dwarf planet",
+        asserted_at=T1996,
+        status=Status.PROVENANCE_STALE,
+        status_reason=StatusReason.CONFLICT_PENDING,
+    )
+    record = build_inconsistency_particle(
+        a, b, corpus_entry_id="entry-1", snapshot_id="snap-1"
+    ).model_copy(update={"asserted_at": T1996})
+    for p in (a, b, record):
+        await insert_particle(session, p, EMB)
+    await session.commit()
+    return a, b, record
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+async def _evaluate_at(session: Any, particle_id: str, as_of: datetime) -> Any:
+    """Run the as-of lens over one stored row exactly as the query path does."""
+    from particles.operations.query.as_of import load_as_of_view
+    from particles.store.particle_store import get_particle, get_retired_at
+
+    particle = await get_particle(session, particle_id)
+    assert particle is not None
+    view = await load_as_of_view(session, as_of)
+    return view.evaluate(particle, await get_retired_at(session, particle_id))
+
+
+@pytest.mark.asyncio
+class TestResolvedBornRetired:
+    """each resolution moves the quarantined loser off
+    CONFLICT_PENDING and the record off INCONSISTENCY. Neither was ever
+    believed, so an as-of query between their 1996 birth and the review must
+    not return them, and neither counts as an undatable retirement."""
+
+    async def _assert_never_believed(self, session: Any, *ids: str) -> None:
+        for pid in ids:
+            ev = await _evaluate_at(session, pid, T2000)
+            assert not ev.visible, pid
+            assert not ev.excluded_undatable, pid
+
+    async def test_insert_stamps_born_retired(self, db_session: Any) -> None:
+        from particles.store.particle_store import is_born_retired
+
+        a, b, record = await _seed_conflict(db_session)
+        assert not await is_born_retired(db_session, a.id)
+        assert await is_born_retired(db_session, b.id)
+        assert await is_born_retired(db_session, record.id)
+
+    @pytest.mark.parametrize(
+        ("action", "loser_status"),
+        [
+            # The reason-only flip: B stays PROVENANCE_STALE, reason CONFLICT_RESOLVED.
+            (ResolutionAction.PREFER_A, Status.PROVENANCE_STALE),
+            # promote_quarantined: B → SUPERSEDED, a new ACTIVE row supersedes it.
+            (ResolutionAction.PREFER_B, Status.SUPERSEDED),
+            (ResolutionAction.BOTH_VALID, Status.SUPERSEDED),
+            # B → RETRACTED.
+            (ResolutionAction.DISCARD, Status.RETRACTED),
+        ],
+    )
+    async def test_review_resolution(
+        self, db_session: Any, action: ResolutionAction, loser_status: Status
+    ) -> None:
+        from particles.operations.review import resolve
+        from particles.store.particle_store import get_particle
+
+        a, b, record = await _seed_conflict(db_session)
+        await resolve(db_session, record.id, action, "reviewer-1")
+        await db_session.commit()
+
+        loser = await get_particle(db_session, b.id)
+        assert loser is not None
+        assert loser.status is loser_status
+        assert loser.status_reason is StatusReason.CONFLICT_RESOLVED
+
+        await self._assert_never_believed(db_session, b.id, record.id)
+        # A was believed from 1996; the lens still shows it at T2000.
+        assert (await _evaluate_at(db_session, a.id, T2000)).visible
+
+    @pytest.mark.parametrize("action", [ResolutionAction.PREFER_B, ResolutionAction.BOTH_VALID])
+    async def test_promoted_successor_believed_from_review(
+        self, db_session: Any, action: ResolutionAction
+    ) -> None:
+        """the particle promotion mints is asserted at the review, not
+        at the quarantined candidate's 1996 extraction, so it is absent from an
+        as-of view dated before the review and present in one after it."""
+        from particles.operations.review import resolve
+        from particles.store.particle_store import get_superseding_particle
+
+        _a, b, record = await _seed_conflict(db_session)
+        before = datetime.now(UTC)
+        await resolve(db_session, record.id, action, "reviewer-1")
+        await db_session.commit()
+
+        successor = await get_superseding_particle(db_session, b.id)
+        assert successor is not None
+        assert successor.status is Status.ACTIVE
+        assert _aware(successor.asserted_at) >= before
+
+        assert not (await _evaluate_at(db_session, successor.id, T2000)).visible
+        assert (await _evaluate_at(db_session, successor.id, datetime.now(UTC))).visible
+
+    async def test_trust_cascade_resolution(self, db_session: Any) -> None:
+        """The cascade's writes (operations/cascade.py): the loser's reason flip
+        and the record demoted to PROVENANCE_STALE, with no event to date either."""
+        from particles.core.conflict_review import Demotion
+        from particles.operations._quarantine import apply_demotion
+        from particles.store.particle_store import update_particle_status
+
+        _a, b, record = await _seed_conflict(db_session)
+        await apply_demotion(db_session, b.id, Demotion.REASON_FLIP)
+        await update_particle_status(
+            db_session, record.id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
+        )
+        await db_session.commit()
+
+        await self._assert_never_believed(db_session, b.id, record.id)
+
+    async def test_undated_retirement_lint_excludes_resolved(self, db_session: Any) -> None:
+        from particles.operations.lint.retirement import _check_undated_retirements
+        from particles.operations.review import resolve
+
+        _a, _b, record = await _seed_conflict(db_session)
+        await resolve(db_session, record.id, ResolutionAction.PREFER_A, "reviewer-1")
+        await db_session.commit()
+
+        assert await _check_undated_retirements(db_session) == []
+
+    async def test_graph_history_skips_resolved_loser(self) -> None:
+        from particles.operations.graph_view import _history_eligible
+
+        loser = _particle(
+            "resolved loser",
+            asserted_at=T1996,
+            status=Status.RETRACTED,
+            status_reason=StatusReason.CONFLICT_RESOLVED,
+        )
+        assert not _history_eligible(loser, born_retired=True)
+        assert _history_eligible(loser, born_retired=False)
 
 
 # ---------------------------------------------------------------------------

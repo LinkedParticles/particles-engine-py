@@ -16,6 +16,7 @@
  *     POST /particles/{id}/retract; edit-as-supersede on an extracted belief →
  *     operator POST /particles/{id}/supersede.
  *   - assign-subject (NO_SUBJECT card) → POST /particles/{id}/subjects.
+ *   - relink (GATED_SUBJECTS batch card) → POST /subjects/relink-gated.
  * Still deferred:
  *   - vouch — proposed, not active — not offered at all.
  */
@@ -38,6 +39,7 @@ export function gestureAvailability(
 ): GestureAvailability {
   switch (gesture) {
     case "comment":
+    case "resolve": // POST /review/{inconsistency_id}
     case "merge":
     case "deposit":
     case "supersede":
@@ -50,6 +52,8 @@ export function gestureAvailability(
       return { kind: "v1" };
     case "assign-subject":
       return { kind: "v1" }; // POST /particles/{id}/subjects
+    case "relink":
+      return { kind: "v1" }; // POST /subjects/relink-gated
     case "dismiss":
       // v1 both ways now: uncited_url via POST /corpus/links/dismiss, belief
       // cards via POST /curation/snooze (permanent dismiss).
@@ -82,11 +86,16 @@ export function primaryGesture(kind: string, offered: string[]): string | null {
   const preference: Record<string, string[]> = {
     stale: ["affirm", "supersede", "retract"],
     confidence_decay: ["affirm", "supersede"],
-    contested: ["affirm", "comment"],
-    contradiction: ["comment"],
+    // an open conflict is its own card, cleared by resolving it.
+    inconsistency: ["resolve"],
+    // A contested card now fires only on an observer signal; an older engine
+    // may still send `comment` for its conflict.
+    contested: ["comment", "affirm"],
+    contradiction: ["supersede", "retract"],
     retraction_cascade: ["supersede", "retract"],
     broken_provenance: ["supersede", "retract"],
     no_subject: ["assign-subject", "supersede", "retract"],
+    gated_subjects: ["relink"],
     duplicate_pair: ["merge"],
     uncited_url: ["deposit", "dismiss"],
     failed_snapshots: ["reindex"],
@@ -103,22 +112,64 @@ export function primaryGesture(kind: string, offered: string[]): string | null {
   return null;
 }
 
-/** Human label + the CSS class for a gesture button. */
-export function gestureLabel(gesture: string): string {
+/**
+ * Human label for a gesture button. `comment` is the engine's name for the
+ * gesture that resolves an INCONSISTENCY (`POST /review/{id}`), so it is
+ * labelled for what it does, not what it was once imagined to be.
+ */
+export function gestureLabel(gesture: string, kind = ""): string {
+  if (kind === "contested" && gesture === "affirm") return "Stands anyway";
   const labels: Record<string, string> = {
     affirm: "Still true",
     snooze: "Snooze",
     dismiss: "Dismiss",
-    comment: "Comment",
+    comment: "Resolve…",
+    resolve: "Resolve…",
     merge: "Merge",
     deposit: "Deposit",
     supersede: "Edit",
     retract: "Retract",
     reindex: "Reindex",
     "assign-subject": "Assign subject",
+    relink: "Link subjects",
     vouch: "Vouch",
   };
   return labels[gesture] ?? gesture;
+}
+
+/**
+ * One line saying what a gesture does, in the curator's terms. The web twin
+ * of the CLI's per-gesture help (`describe_gesture` in the engine), phrased
+ * for buttons rather than flags. Empty for a gesture with nothing to add.
+ */
+export function gestureHint(gesture: string, kind = ""): string {
+  const byKind: Record<string, string> = {
+    "inconsistency:resolve":
+      "Settle the conflict: keep one side, keep both, or discard both.",
+    "inconsistency:snooze": "Decide later. Hides the card for a while; the conflict stays open.",
+    "contested:comment":
+      "Settle the conflict: keep one side, keep both, discard both, or defer.",
+    "contested:affirm":
+      "This belief stands despite the disagreement. Hides the card for good; a conflict it is in keeps its own card.",
+    "duplicate_pair:dismiss": "They are different claims. Hides the card for good.",
+    "uncited_url:dismiss": "Not worth depositing. Stops suggesting this URL.",
+  };
+  const generic: Record<string, string> = {
+    affirm: "The belief is still correct. Records that and hides the card for good.",
+    snooze: "Decide later. Hides the card for a while.",
+    dismiss: "Not a real problem. Hides the card for good.",
+    comment: "Resolve the underlying conflict.",
+    resolve: "Resolve the conflict.",
+    merge: "Same claim stated twice. Links the two; both stay active.",
+    deposit: "Fetch the URL into the corpus for extraction.",
+    supersede: "Replace the belief with a corrected one.",
+    retract: "The belief is wrong. Retracts it.",
+    reindex: "Re-extract the failed snapshots.",
+    "assign-subject": "Attach the belief to a subject.",
+    relink:
+      "Link every belief on this card to the files, records or commands it names, scoped by project.",
+  };
+  return byKind[`${kind}:${gesture}`] ?? generic[gesture] ?? "";
 }
 
 /** Gestures whose CSS should mark them destructive. */

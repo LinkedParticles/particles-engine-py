@@ -4,9 +4,10 @@
 
 """Pure tests for the §6.6 pair selection (``ingest/pair_selection.py``).
 
-``plan_probes`` and ``select_pairs`` decide, with no DB and no model, which
-existing claims a candidate is paired with; ``plan_update_extras`` decides
-which rung 2.5 extras are demoted. The DB-level behaviour stays covered by
+``plan_probes``, ``plan_update_probes`` and ``select_pairs`` decide, with no DB
+and no model, which existing claims a candidate is paired with and which the
+update probe is asked about; ``plan_update_extras`` decides which
+rung 2.5 extras are demoted. The DB-level behaviour stays covered by
 ``tests/test_extract.py``, ``tests/test_update_supersession.py`` and
 ``tests/test_observer_gate.py``.
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from particles.core.conflict_resolution import SlotVerdict
 from particles.core.observer_scope import PairPrecondition
 from particles.core.schema import (
     Confidence,
@@ -33,6 +35,7 @@ from particles.ingest.pair_selection import (
     PairSelection,
     plan_probes,
     plan_update_extras,
+    plan_update_probes,
     select_pairs,
 )
 
@@ -226,6 +229,85 @@ class TestSelectPairs:
 
 
 # ---------------------------------------------------------------------------
+# The slot rule: plan_update_probes, and select_pairs with slot verdicts
+# ---------------------------------------------------------------------------
+
+
+CHANGES, FIXED, DIFFERENT = SlotVerdict.CHANGES, SlotVerdict.FIXED, SlotVerdict.DIFFERENT
+
+
+class TestSlotRule:
+    def test_only_confirmed_actionable_pairs_are_asked(self) -> None:
+        pairs = CandidatePairs(
+            nearest=NEAREST,
+            subject_pool=(A, B, C),
+            precondition={B.id: DECLINE},
+        )
+        probes = {NEAREST.id: True, A.id: False, B.id: True, C.id: True}
+        # A is unconfirmed, B is declined (recorded, never retired): neither is asked.
+        assert plan_update_probes(pairs, probes) == [NEAREST, C]
+
+    def test_declined_nearest_is_not_asked(self) -> None:
+        pairs = CandidatePairs(nearest=NEAREST, precondition={NEAREST.id: DECLINE})
+        assert plan_update_probes(pairs, {NEAREST.id: True}) == []
+
+    def test_multi_regime_unupdatable_member_is_not_asked(self) -> None:
+        pairs = CandidatePairs(subject_pool=(A, B), can_update={A.id: False, B.id: True})
+        assert plan_update_probes(pairs, {A.id: True, B.id: True}) == [B]
+
+    def test_a_different_slot_pool_member_is_not_offered(self) -> None:
+        # The Delhi scenario: the contradiction probe confirmed the pair, the
+        # update probe says the claims fill different slots. Both stay ACTIVE.
+        pairs = CandidatePairs(subject_pool=(A,))
+        sel = select_pairs(pairs, {A.id: True}, {A.id: DIFFERENT})
+        assert sel.primary is None and not sel.signal and sel.extras == ()
+
+    def test_the_next_same_slot_member_is_promoted(self) -> None:
+        pairs = CandidatePairs(subject_pool=(A, B, C))
+        sel = select_pairs(
+            pairs,
+            {A.id: True, B.id: True, C.id: True},
+            {A.id: DIFFERENT, B.id: CHANGES, C.id: CHANGES},
+        )
+        assert sel.primary is B and sel.signal
+        assert _ids(sel.extras) == ["c"]
+        assert sel.updatable == frozenset({B.id, C.id})
+
+    def test_a_different_slot_nearest_stays_primary_without_the_rung(self) -> None:
+        # The same-entry pair reached the ladder before; the verdict
+        # only keeps rung 2.5 off it, so it falls through to rung 3.
+        pairs = CandidatePairs(nearest=NEAREST)
+        sel = select_pairs(pairs, {NEAREST.id: True}, {NEAREST.id: DIFFERENT})
+        assert sel.primary is NEAREST and sel.signal
+        assert NEAREST.id not in sel.updatable
+
+    def test_an_unasked_member_is_offered_as_before(self) -> None:
+        # No verdict means rung 2.5 could not order the pair, so the ladder
+        # treats it as it always has.
+        pairs = CandidatePairs(subject_pool=(A,))
+        sel = select_pairs(pairs, {A.id: True}, {})
+        assert sel.primary is A and sel.signal and sel.updatable == frozenset()
+        assert sel.slot_of(A.id) is None
+
+    def test_a_fixed_slot_pool_member_is_offered_for_review(self) -> None:
+        # "The Poison Tree was written by Erin Kelly" against "…by
+        # Barbara Hambly". The pair fills one slot, so unlike a different-slot
+        # pair it reaches the ladder, but the slot is fixed, so it is not
+        # updatable: the ladder falls through to rung 3 (review).
+        pairs = CandidatePairs(subject_pool=(A,))
+        sel = select_pairs(pairs, {A.id: True}, {A.id: FIXED})
+        assert sel.primary is A and sel.signal
+        assert sel.slot_of(A.id) is FIXED
+        assert sel.updatable == frozenset()
+
+    def test_a_fixed_slot_extra_is_not_updatable(self) -> None:
+        pairs = CandidatePairs(subject_pool=(A, B))
+        sel = select_pairs(pairs, {A.id: True, B.id: True}, {A.id: CHANGES, B.id: FIXED})
+        assert sel.primary is A and _ids(sel.extras) == ["b"]
+        assert sel.updatable == frozenset({A.id})
+
+
+# ---------------------------------------------------------------------------
 # plan_update_extras
 # ---------------------------------------------------------------------------
 
@@ -251,6 +333,7 @@ def _plan(
     others: list[Particle],
     entries: list[CorpusEntry],
     precondition: dict[str, PairPrecondition] | None = None,
+    updatable: set[str] | None = None,
 ) -> list[str]:
     return plan_update_extras(
         winner,
@@ -259,10 +342,16 @@ def _plan(
         others,
         {e.entry_id: e for e in entries},
         precondition or {},
+        {o.id for o in others} if updatable is None else updatable,
     )
 
 
 class TestPlanUpdateExtras:
+    def test_an_extra_without_a_same_slot_verdict_is_left_alone(self) -> None:
+        e1, e2 = _entry(T0), _entry(T0 + timedelta(days=1))
+        winner, o1, o2 = _winner(), _p("o1", entry=e1), _p("o2", entry=e2)
+        assert _plan(winner, [o1, o2], [e1, e2], updatable={o2.id}) == [o2.id]
+
     def test_older_extras_are_demoted_in_order(self) -> None:
         e1, e2 = _entry(T0), _entry(T0 + timedelta(days=1))
         winner, o1, o2 = _winner(), _p("o1", entry=e1), _p("o2", entry=e2)

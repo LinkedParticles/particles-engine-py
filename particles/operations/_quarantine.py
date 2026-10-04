@@ -17,12 +17,15 @@ verdict, persisted at extract time born ``PROVENANCE_STALE`` with
   ``PROVENANCE_STALE → SUPERSEDED`` and the minted particle records
   ``supersedes``. There is deliberately no ``PROVENANCE_STALE → ACTIVE`` edge
   (see ``core/status.py``) — promotion never reactivates a stale particle.
+  The minted particle is asserted at promotion time, as every successor is:
+  the store did not hold the claim before.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +33,7 @@ from particles.core.conflict_review import Demotion, is_quarantined
 from particles.core.schema import Particle, UncertaintyNature
 from particles.core.status import Status, StatusReason, validate_transition
 from particles.store.particle_store import (
+    copy_modality_stamp,
     copy_particle_embedding,
     insert_particle,
     update_particle_status,
@@ -68,8 +72,14 @@ async def promote_quarantined(
 ) -> Particle:
     """Mint a new ACTIVE particle from a quarantined conflict loser.
 
-    Fresh id, ``supersedes`` → the quarantined row; content, confidence,
-    provenance, subjects, and embedding carried over verbatim. The quarantined
+    Fresh id, ``supersedes`` → the quarantined row, ``asserted_at`` now;
+    content, confidence, provenance, subjects, and embedding carried over
+    verbatim. The fresh ``asserted_at`` is what the as-of lens reads as the
+    start of the belief, and the successor's ``asserted_at`` is its
+    predecessor's retirement instant (rung 1); a copied value
+    would date the belief from the quarantined candidate's extraction, before
+    any review had accepted it. Decay is unaffected: it reads the
+    source's ``content_published_at``, which the provenance carries over. The quarantined
     row transitions ``PROVENANCE_STALE → SUPERSEDED`` (CONFLICT_RESOLVED).
 
     Args:
@@ -95,6 +105,7 @@ async def promote_quarantined(
         "status": Status.ACTIVE,
         "status_reason": None,
         "supersedes": quarantined.id,
+        "asserted_at": datetime.now(UTC),
     }
     if uncertainty_nature is not None:
         update["uncertainty_nature"] = uncertainty_nature
@@ -103,6 +114,8 @@ async def promote_quarantined(
     await insert_particle(session, minted)
     # The vector is copied, not recomputed — its model marker travels with it.
     await copy_particle_embedding(session, quarantined.id, minted.id)
+    # So does the modality stamp: the value is copied, not reclassified.
+    await copy_modality_stamp(session, quarantined.id, minted.id)
     await update_particle_status(
         session, quarantined.id, Status.SUPERSEDED, StatusReason.CONFLICT_RESOLVED
     )

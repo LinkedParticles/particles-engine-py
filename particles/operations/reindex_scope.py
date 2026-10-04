@@ -14,9 +14,11 @@ testable without a database.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
+
+from particles.extraction.components import ComponentRecord, ComponentTable
 
 #: Length of a full corpus entry id (a UUID string). Anything shorter is a
 #: display prefix the shell must resolve against the store.
@@ -122,3 +124,128 @@ def decide_reindex_scope(
         scope.extend(selected)
     scope.extend(stale_schema)
     return ReindexScope(list(set(scope)))
+
+
+# ---------------------------------------------------------------------------
+# select only the snapshots whose exercised components changed.
+# ---------------------------------------------------------------------------
+
+#: Whether ``reindex --only-changed-components`` may narrow a scope. Off until
+#: the first ``EXTRACTOR_VERSION`` bump after the component record shipped
+#: (1.168.14) has run over a store: every snapshot extracted before that has no
+#: record, reads as "every component exercised", and would be selected anyway,
+#: so the flag could only mislead an operator into thinking it narrowed
+#: something. Turning it on is the action trigger names.
+ONLY_CHANGED_COMPONENTS_ENABLED = False
+
+#: What a refused ``--only-changed-components`` says, on every surface.
+ONLY_CHANGED_COMPONENTS_REFUSAL = (
+    "--only-changed-components is not enabled yet. Snapshots record "
+    "the extraction components they exercised from 1.168.14 on, and a snapshot "
+    "extracted earlier has no record, so it counts as having exercised every "
+    "component and would be re-extracted regardless. The flag is turned on "
+    "once an extractor version bump has run over a stamped store. Until then, "
+    "run the full version scope, or `particles reindex --estimate` to measure "
+    "how much of it a bump changes."
+)
+
+
+def component_change_reasons(
+    tables: Mapping[str, ComponentTable], record: ComponentRecord | None
+) -> tuple[str, ...]:
+    """Why a snapshot's extraction could differ under the current components.
+
+    Empty means it could not: every component the snapshot's extraction
+    exercised still has the digest it had, and no component the current code
+    would add to its extraction is new to it. Pure, and conservative in every
+    branch: anything the record cannot vouch for is a reason.
+
+    Args:
+        tables: each extractor's current :class:`ComponentTable`, by
+            registered id, with any pipeline-level component (the subject
+            gate) merged in.
+        record: the snapshot's stored record, or ``None`` when it has none.
+
+    Reasons, in order:
+
+    1. **No record**, or an incomplete one (a carried-forward claim from a
+       snapshot with none): nothing is known, so every component counts as
+       exercised.
+    2. **No table** for the record's extractor: nothing to compare against.
+    3. An exercised component whose **digest changed**, or that the current
+       table **no longer has** (removed, renamed, or disabled in config).
+    4. A component the current table puts on **every** extraction that this
+       one did not exercise (a new rule, or one newly enabled in config).
+    5. A source-dependent component that is **new since the record** (absent
+       from its ``available``): the record cannot say whether this source
+       would reach it.
+
+    The comparison is against the snapshot's own record, not against the
+    previous version's table, so it is cumulative: a snapshot skipped by one
+    bump is compared against everything that changed since it was extracted,
+    the next time any bump asks.
+    """
+    if record is None:
+        return ("no component record",)
+    if not record.complete:
+        return ("incomplete component record",)
+    table = tables.get(record.extractor or "")
+    if table is None:
+        return (f"no component table for extractor {record.extractor!r}",)
+    reasons: list[str] = []
+    for name, digest in sorted(record.exercised.items()):
+        current = table.digests.get(name)
+        if current is None:
+            reasons.append(f"{name}: no longer in the extractor's components")
+        elif current != digest:
+            reasons.append(f"{name}: changed")
+    reasons.extend(
+        f"{name}: now on every extraction"
+        for name in sorted(table.always - record.exercised.keys())
+    )
+    known = set(record.available) | set(record.exercised)
+    reasons.extend(
+        f"{name}: new since the record"
+        for name in sorted(set(table.digests) - table.always - known)
+    )
+    return tuple(reasons)
+
+
+@dataclass(frozen=True)
+class ComponentSelection:
+    """A scope split by :func:`select_changed_components`."""
+
+    #: Pairs whose extraction could differ, with the reasons for each.
+    kept: dict[Pair, tuple[str, ...]]
+    #: Pairs whose every exercised component is unchanged.
+    skipped: list[Pair]
+
+
+def select_changed_components(
+    pairs: Sequence[Pair],
+    records: Mapping[str, ComponentRecord | None],
+    tables: Mapping[str, ComponentTable],
+) -> ComponentSelection:
+    """Split a version scope into the snapshots a bump could change and the rest.
+
+    ``records`` is keyed by snapshot id; a snapshot missing from it has no
+    record. A pair is kept when :func:`component_change_reasons` gives any
+    reason, and skipped otherwise.
+
+    **A skip is never silently permanent.** Skipping removes the pair from
+    this run's scope and writes nothing: the snapshot's particles keep the
+    ``extractor_version`` they were stamped with, so a later
+    ``--extractor-version`` scope over that version selects them again, and
+    the comparison then runs against everything that changed since their
+    record (see :func:`component_change_reasons`). The caller must report the
+    skipped count, never drop it from the plan line.
+    """
+    kept: dict[Pair, tuple[str, ...]] = {}
+    skipped: list[Pair] = []
+    for pair in pairs:
+        reasons = component_change_reasons(tables, records.get(pair[1]))
+        if reasons:
+            kept[pair] = reasons
+        else:
+            skipped.append(pair)
+    return ComponentSelection(kept=kept, skipped=skipped)

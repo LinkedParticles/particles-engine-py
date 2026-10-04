@@ -6,10 +6,13 @@
 
 These functions consume the equivalence result (which emitted particles
 matched which expected ones) and emit the three required metrics from
-techspec §13.3. Pure functions; no I/O, no SDK seams.
+techspec §13.3, plus the semantic-match calibration error the reference
+runner reports beside them. Pure functions; no I/O, no SDK seams.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
 
 from particles.core.schema import Particle
 from particles.extraction.calibration import expected_calibration_error
@@ -81,3 +84,47 @@ def compute_calibration_error(
     confidences = [p.confidence.value for p in emitted]
     correctness = [p.id in matched_ids for p in emitted]
     return expected_calibration_error(confidences, correctness, bins=bins)
+
+
+#: The one judged outcome that is not a semantic match. Spelled as the string
+#: ``ClaimOutcome.SPURIOUS`` renders to, so the label reads a persisted run
+#: file's ``emitted_claims[].outcome`` as readily as a live ``ClaimOutcome``
+#: (a :class:`~enum.StrEnum` compares equal to its value).
+_NOT_A_SEMANTIC_MATCH = "spurious"
+
+
+def semantic_match_labels(outcomes: Iterable[str]) -> list[bool]:
+    """Label each judged outcome correct when it is a semantic match.
+
+    Every outcome other than ``spurious`` counts: a full match, and an
+    under-confidence partial match, which matched a gold claim but was stated
+    below that claim's ``confidence_min``. This is the calibration label,
+    the population ``extractor calibrate`` fits on and its
+    held-out check scores. :func:`compute_calibration_error` labels on full
+    match instead, so an under-confidence claim counts as wrong there, which
+    reads a correct claim stated timidly as an extraction error.
+    """
+    return [outcome != _NOT_A_SEMANTIC_MATCH for outcome in outcomes]
+
+
+def compute_semantic_calibration_error(
+    scored: Sequence[tuple[float, str]],
+    *,
+    bins: int = 10,
+) -> float:
+    """Expected Calibration Error under the semantic-match label.
+
+    ``scored`` is one ``(stated confidence, judged outcome)`` pair per emitted
+    claim, which is exactly what a report's ``emitted_claims`` records, so the
+    figure recomputes from a saved run file without re-running the suite.
+    Binning is :func:`compute_calibration_error`'s (``bins=10``, the
+    techspec §13.3 convention); only the label differs, via
+    :func:`semantic_match_labels`. An empty population is ``0.0``, as there.
+
+    Reported beside ``calibration_error``, never instead of it: that figure's
+    full-match meaning is the §13.3 normative metric and every archived run
+    file and survey page reads it that way.
+    """
+    confidences = [confidence for confidence, _ in scored]
+    labels = semantic_match_labels(outcome for _, outcome in scored)
+    return expected_calibration_error(confidences, labels, bins=bins)

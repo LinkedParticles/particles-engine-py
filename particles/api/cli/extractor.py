@@ -621,7 +621,7 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
     yes: bool,
 ) -> None:
     from particles.benchmark.equivalence import EquivalenceJudge
-    from particles.benchmark.loader import discover_suites
+    from particles.benchmark.loader import discover_gold_subjects, discover_suites
     from particles.benchmark.runner import run_benchmark, run_benchmark_repeated
 
     # Locate extractor
@@ -639,6 +639,8 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
     judge_enum = EquivalenceJudge(judge.value)
 
     suites = list(discover_suites(suites_dir))
+    # a suite's gold subjects add the subject-resolution column.
+    gold_by_suite = discover_gold_subjects(suites_dir)
     if suite_filter is not None:
         suites = [s for s in suites if s.suite_id == suite_filter]
         if not suites:
@@ -686,6 +688,7 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
                 fixture_dir=fixtures_dir,
                 judge=judge_enum,
                 threshold=threshold,
+                gold_subjects=gold_by_suite.get(suite.suite_id, []),
             )
             if output_format is _BenchmarkFormat.json:
                 typer.echo(json.dumps(_benchmark_report_to_dict(report), indent=2, default=str))
@@ -707,6 +710,7 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
                 judge=judge_enum,
                 threshold=threshold,
                 on_report=_on_report,
+                gold_subjects=gold_by_suite.get(suite.suite_id, []),
             )
             if output_format is _BenchmarkFormat.json:
                 typer.echo(json.dumps(_aggregate_report_to_dict(aggregate), indent=2, default=str))
@@ -830,6 +834,94 @@ def _persist_benchmark_run(report: Any) -> Path | None:
         typer.echo(f"Warning: could not persist run report under {runs_dir}: {exc}", err=True)
         return None
     return path
+
+
+def _heldout_pairs_from_envelope(
+    envelope: Any,
+    *,
+    extractor_id: str,
+    extractor_version: str,
+    provider_model: str,
+    exclude_suite_ids: set[str],
+) -> tuple[str, list[float], list[bool]] | None:
+    """The held-out ``(suite_id, raws, labels)`` a run file contributes, or None.
+
+    A run qualifies only when it measured the same extractor at the same
+    version under the same extraction pairing as the fit being judged, and
+    ran a suite the fit did not consume. A different version or pairing
+    states confidences differently (measured: a fit on one general-extractor
+    version raised ECE on the next), and a suite the fit consumed is not
+    held out. The label is semantic match, every outcome other than
+    ``spurious``, which is the calibration label; the one
+    definition is ``semantic_match_labels``, shared with the benchmark's
+    ``calibration_error_semantic``. The harness never applies a
+    stored calibration, so the recorded confidences are raw.
+    """
+    from particles.benchmark.metrics import semantic_match_labels
+
+    if not isinstance(envelope, dict) or envelope.get("format") != _RUN_FILE_FORMAT:
+        return None
+    report = envelope.get("report")
+    if not isinstance(report, dict):
+        return None
+    if (
+        envelope.get("extraction_provider_model") != provider_model
+        or report.get("extractor_id") != extractor_id
+        or report.get("extractor_version") != extractor_version
+        or report.get("suite_id") in exclude_suite_ids
+    ):
+        return None
+    raws: list[float] = []
+    outcomes: list[str] = []
+    for case in report.get("per_case") or []:
+        for claim in case.get("emitted_claims") or []:
+            raws.append(float(claim["confidence"]))
+            outcomes.append(str(claim["outcome"]))
+    return str(report.get("suite_id")), raws, semantic_match_labels(outcomes)
+
+
+def _load_heldout_pairs(
+    *,
+    extractor_id: str,
+    extractor_version: str,
+    provider_model: str,
+    exclude_suite_ids: set[str],
+) -> tuple[list[str], int, list[float], list[bool]]:
+    """Pool every qualifying recorded run under ``benchmark.runs_dir``.
+
+    Returns ``(suite_ids, run_count, raws, labels)``. An unreadable file is
+    skipped rather than fatal: a missing check is refused downstream, so a
+    skipped file can only make the guard stricter, never let a fit through.
+    """
+    from particles.config import get_config
+
+    runs_dir = Path(get_config().benchmark.runs_dir).expanduser()
+    suite_ids: set[str] = set()
+    raws: list[float] = []
+    labels: list[bool] = []
+    run_count = 0
+    if not runs_dir.is_dir():
+        return [], 0, raws, labels
+    for path in sorted(runs_dir.glob(f"*-benchmark-{extractor_id}-*.json")):
+        try:
+            envelope = json.loads(path.read_text())
+            got = _heldout_pairs_from_envelope(
+                envelope,
+                extractor_id=extractor_id,
+                extractor_version=extractor_version,
+                provider_model=provider_model,
+                exclude_suite_ids=exclude_suite_ids,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            typer.echo(f"warning: skipping unreadable benchmark run {path}: {exc}", err=True)
+            continue
+        if got is None or not got[1]:
+            continue
+        suite_ids.add(got[0])
+        raws.extend(got[1])
+        labels.extend(got[2])
+        run_count += 1
+    return sorted(suite_ids), run_count, raws, labels
 
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +1677,35 @@ def _unapplied_note(calibration: Any) -> str | None:
     )
 
 
+def _version_note(calibration: Any, running_version: str) -> str | None:
+    """One-line note for a record fitted under another extractor version, or None."""
+    from particles.extraction.calibration import version_mismatch_reason
+
+    reason = version_mismatch_reason(calibration, running_version)
+    if reason is None:
+        return None
+    return (
+        f"NOT APPLIED ({reason}): a prompt change can reverse what a temperature "
+        "does, so this pairing mints EXTRACTOR_DIRECT particles until it is "
+        "re-fitted under the running extractor."
+    )
+
+
+def _heldout_note(calibration: Any) -> str:
+    """One-line account of a stored record's out-of-sample check."""
+    if calibration.heldout_sample_size is None:
+        return (
+            "NOT CHECKED OUT OF SAMPLE: persisted before the held-out guard existed. "
+            "Particles it calibrated keep their stored confidence; "
+            "re-fitting with --regenerate scores it against recorded benchmark runs."
+        )
+    return (
+        f"held-out ECE {calibration.heldout_error_before:.4f}→"
+        f"{calibration.heldout_error_after:.4f}  N={calibration.heldout_sample_size}  "
+        f"suites={calibration.heldout_suite_id}"
+    )
+
+
 def _staleness_note(calibration: Any, selected: set[str]) -> str | None:
     """One-line staleness annotation for a stored calibration, or None if clean."""
     from particles.extraction.calibration import fitted_suite_ids, is_suite_stale
@@ -1667,6 +1788,14 @@ def extractor_calibrate_cmd(
     optimizer bound, fewer than two distinct movable confidences, or a
     calibration that does not reduce calibration error.
 
+    It is also refused when it does not hold up out of sample. The
+    fitted temperature is scored on every recorded `extractor benchmark` run
+    under `benchmark.runs_dir` for the same extractor, extractor version and
+    extraction provider:model, and a fit that raises their calibration error
+    is not persisted. With no such run the fit is refused as well, so run
+    `particles extractor benchmark <id> --runs 3` first under the same
+    configuration. Reading those runs makes no LLM call.
+
     Unlike `extractor benchmark`, this verb defaults to the **LLM** equivalence
     judge; see `_extractor_calibrate` for why the calibration label
     cannot afford the embedding judge's paraphrase misses.
@@ -1708,6 +1837,8 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         TRANSFORM_LOGIT,
         TemperatureScaler,
         calibration_error,
+        heldout_check,
+        version_mismatch_reason,
     )
     from particles.store.extractor_store import (
         LEGACY_PROVIDER_MODEL,
@@ -1792,10 +1923,16 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
                 )
 
     if existing_cal is not None and not regenerate:
+        # say when the record in the way is already inert, since
+        # that is the case where overwriting it is the obvious next step.
+        mismatch = version_mismatch_reason(
+            existing_cal, str(getattr(extractor, "EXTRACTOR_VERSION", ""))
+        )
+        inert = f" It is NOT APPLIED ({mismatch})." if mismatch else ""
         typer.echo(
             f"Extractor {extractor_id!r} already has a calibration for "
-            f"{provider_model_guard} fitted on {existing_cal.fitted_at.isoformat()}. "
-            "Use --regenerate to overwrite.",
+            f"{provider_model_guard} fitted on {existing_cal.fitted_at.isoformat()}."
+            f"{inert} Use --regenerate to overwrite.",
             err=True,
         )
         raise typer.Exit(1)
@@ -1909,6 +2046,30 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     if diagnostics is not None:
         diagnostics = diagnostics.with_ece(ece_before, ece_after)
 
+    # the in-sample guard above is one-sided. A fit on the hedged
+    # calibration suite cleared it for every model measured on 2026-10-01 and
+    # still raised ECE on the flatly stated benchmark suite, the production
+    # calibration included (T=2.17: held-out ECE 0.091 -> 0.106 at extractor
+    # 0.16.0, and 0.028 -> 0.168 at 0.15.0, the version it was fitted on). So
+    # every fit is also scored on recorded benchmark runs of this same
+    # extractor, version and pairing, and a fit with no such runs is refused
+    # rather than trusted. Reading recorded runs costs nothing: the harness
+    # never applies a stored calibration, so their confidences are raw.
+    sel_fit = get_config().llm.for_purpose("extraction")
+    # one value for both halves. The held-out guard scores the fit
+    # on runs of this version, and the record is stamped with it, so the
+    # version the guard checked is the only one the pipeline will apply it to.
+    fitted_version = str(getattr(extractor, "EXTRACTOR_VERSION", ""))
+    heldout_suites, heldout_runs, heldout_raws, heldout_labels = _load_heldout_pairs(
+        extractor_id=extractor_id,
+        extractor_version=fitted_version,
+        provider_model=f"{sel_fit.provider}:{sel_fit.model}",
+        exclude_suite_ids=set(suite_ids),
+    )
+    heldout = heldout_check(scaler.temperature, heldout_raws, heldout_labels)
+    if diagnostics is not None:
+        diagnostics = diagnostics.with_heldout(heldout)
+
     suite_id_label = "+".join(suite_ids)
     n_correct = sum(1 for c in labels if c)
     typer.echo(
@@ -1944,6 +2105,14 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     # matches. Printed beside the labels it produced, not buried.
     typer.echo(f"  judge:  {judge_enum.value}")
     typer.echo(f"  labels: {n_correct} matched / {sample_size - n_correct} unmatched")
+    if heldout.n:
+        typer.echo(
+            f"  held-out: ECE {heldout.ece_before:.4f} → {heldout.ece_after:.4f} over "
+            f"{heldout.n} recorded claim(s) from {heldout_runs} run(s) of "
+            f"{'+'.join(heldout_suites)}"
+        )
+    else:
+        typer.echo("  held-out: no recorded benchmark run for this extractor, version and pairing")
     if diagnostics is not None:
         typer.echo(
             f"  fittable: {diagnostics.n_fitted} of {diagnostics.n} pair(s), "
@@ -1992,6 +2161,11 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         calibration_error_before=ece_before,
         calibration_error_after=ece_after,
         provider_model=f"{sel.provider}:{sel.model}",
+        heldout_suite_id="+".join(heldout_suites),
+        heldout_sample_size=heldout.n,
+        heldout_error_before=heldout.ece_before,
+        heldout_error_after=heldout.ece_after,
+        extractor_version=fitted_version,
     )
 
     # persist the calibration keyed by its provider_model in the
@@ -2008,7 +2182,10 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
             raise typer.Exit(1)
         await upsert_calibration(session, extractor_id, calibration)
         await session.commit()
-    typer.echo(f"Calibration persisted for {extractor_id!r} ({calibration.provider_model}).")
+    typer.echo(
+        f"Calibration persisted for {extractor_id!r} {fitted_version} "
+        f"({calibration.provider_model})."
+    )
 
 
 @extractor_app.command("calibrations")
@@ -2026,6 +2203,10 @@ def extractor_calibrations_cmd(
     Each `extractor calibrate` run stores one record keyed by the extraction
     model it ran under, so several models' calibrations coexist; the one matching
     the configured extraction model is applied at extraction time.
+
+    A record applies only under the extractor version it was fitted under.
+    One fitted under another version, or persisted before the
+    version was recorded, is listed as NOT APPLIED with both versions named.
 
     Each record is checked for **suite-set staleness**: a fit whose
     contributing suites differ from the ones the extractor auto-matches today
@@ -2065,13 +2246,21 @@ async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path |
             f"  {c.provider_model or 'LEGACY':<34} T={c.temperature:.4f}  "
             f"ECE {c.calibration_error_before:.4f}→{c.calibration_error_after:.4f}  "
             f"N={c.sample_size}  fitted {c.fitted_at.isoformat()}  "
+            f"under {c.extractor_version or 'unknown version'}  "
             f"suites={c.benchmark_suite_id}"
         )
         # reported before staleness because it is the stronger fact —
         # a record that is never applied cannot be stale *at* anything.
-        if (unapplied := _unapplied_note(c)) is not None:
+        # then the version gate, which only a registered extractor
+        # can answer; a record left behind by a removed one is applied by
+        # nothing, and the transform check above still speaks for it.
+        if (unapplied := _unapplied_note(c)) is None and extractor is not None:
+            unapplied = _version_note(c, str(getattr(extractor, "EXTRACTOR_VERSION", "")))
+        if unapplied is not None:
             typer.echo(f"  {'':<34} {unapplied}")
             unapplied_keys.append(c.provider_model or LEGACY_PROVIDER_MODEL)
+        else:
+            typer.echo(f"  {'':<34} {_heldout_note(c)}")
         if selected is None:
             continue
         note = _staleness_note(c, selected)
@@ -2171,6 +2360,68 @@ async def _extractor_calibration_forget(extractor_id: str, provider_model: str, 
     typer.echo(f"Retired calibration for {extractor_id!r} / {provider_model}.")
 
 
+#: Metric rows of the benchmark tables, in print order. The three §13.3
+#: metrics, the semantic-match calibration error beside the full-match one
+#:, then the subject-resolution fractions a suite with gold subjects
+#: adds; a name absent from a report is skipped, so a report saved
+#: before a row existed still renders.
+_BENCHMARK_TABLE_METRICS = (
+    "recall",
+    "precision",
+    "calibration_error",
+    "calibration_error_semantic",
+    "resolution_accuracy",
+    "resolution_wrong_ref",
+    "resolution_bare_local",
+)
+
+
+#: Width of the metric-name column in both benchmark tables. Sized to the
+#: longest row name so the value columns stay aligned.
+_METRIC_NAME_WIDTH = max(len(name) for name in _BENCHMARK_TABLE_METRICS)
+
+
+def _print_calibration_label_legend(names: Any) -> None:
+    """Say which label each calibration row uses.
+
+    Printed only when the semantic row is present. Two ECE figures that differ
+    only in their label are otherwise easy to read as two measurements of one
+    thing, and the full-match figure, read alone, charges an extractor for
+    every correct claim it stated below the gold floor.
+    """
+    if "calibration_error_semantic" not in names:
+        return
+    typer.echo("")
+    typer.echo("calibration_error counts only full matches as correct.")
+    typer.echo(
+        "calibration_error_semantic also counts under-confidence matches "
+        "(the label extractor calibrate uses)."
+    )
+
+
+def _print_subject_resolution(rows: list[Any]) -> None:
+    """List the gold subjects the resolver did not get right.
+
+    A wrong ref is printed before a bare local one because it is the costlier
+    failure: every later particle about the name joins the wrong entity.
+    Correct rows are counted, not listed; the saved report carries all of them.
+    """
+    if not rows:
+        return
+    wrong = [r for r in rows if r.outcome == "wrong_ref"]
+    bare = [r for r in rows if r.outcome == "bare_local"]
+    typer.echo("")
+    typer.echo(
+        f"Subject resolution: {len(rows) - len(wrong) - len(bare)}/{len(rows)} correct, "
+        f"{len(wrong)} wrong ref, {len(bare)} bare local"
+    )
+    for r in wrong:
+        got = ", ".join(r.refs) or "no ref"
+        typer.echo(f"  ✗ WRONG REF  {r.name!r} → {got}  (gold {r.gold_ref or 'none'})")
+    for r in bare:
+        typer.echo(f"  ~ BARE LOCAL {r.name!r}  (gold {r.gold_ref})")
+
+
 def _print_benchmark_table(report: Any) -> None:
     """Render the table view documented."""
     typer.echo(
@@ -2184,11 +2435,14 @@ def _print_benchmark_table(report: Any) -> None:
     )
     typer.echo(f"Judge: {report.judge} @ ≥{report.equivalence_threshold:.2f}")
     typer.echo("")
-    typer.echo(f"{'METRIC':<22}  VALUE")
-    typer.echo("-" * 50)
-    for name in ("recall", "precision", "calibration_error"):
+    w = _METRIC_NAME_WIDTH
+    typer.echo(f"{'METRIC':<{w + 2}}  VALUE")
+    typer.echo("-" * (w + 30))
+    for name in _BENCHMARK_TABLE_METRICS:
         if name in report.metrics:
-            typer.echo(f"  {name:<20}  {report.metrics[name]:.2f}")
+            typer.echo(f"  {name:<{w}}  {report.metrics[name]:.2f}")
+    _print_calibration_label_legend(report.metrics)
+    _print_subject_resolution(report.subject_resolution)
     typer.echo("")
     typer.echo("Per-case detail")
     for c in report.per_case:
@@ -2254,23 +2508,27 @@ def _print_benchmark_aggregate_table(aggregate: Any) -> None:
     )
     typer.echo(f"Judge: {aggregate.judge} @ ≥{aggregate.equivalence_threshold:.2f}")
     typer.echo("")
-    typer.echo(f"{'METRIC':<22}  {'MEAN':>6}  {'SPREAD':>7}  {'MIN':>6}  {'MAX':>6}  {'STDEV':>6}")
-    typer.echo("-" * 66)
-    for name in ("recall", "precision", "calibration_error"):
+    w = _METRIC_NAME_WIDTH
+    typer.echo(
+        f"{'METRIC':<{w + 2}}  {'MEAN':>6}  {'SPREAD':>7}  {'MIN':>6}  {'MAX':>6}  {'STDEV':>6}"
+    )
+    typer.echo("-" * (w + 46))
+    for name in _BENCHMARK_TABLE_METRICS:
         stat = aggregate.metric_stats.get(name)
         if stat is None:
             continue
         typer.echo(
-            f"  {name:<20}  {stat.mean:>6.2f}  {stat.spread:>7.2f}  "
+            f"  {name:<{w}}  {stat.mean:>6.2f}  {stat.spread:>7.2f}  "
             f"{stat.minimum:>6.2f}  {stat.maximum:>6.2f}  {stat.stdev:>6.2f}"
         )
+    _print_calibration_label_legend(aggregate.metric_stats)
     typer.echo("")
     typer.echo("Per-run values")
-    for name in ("recall", "precision", "calibration_error"):
+    for name in _BENCHMARK_TABLE_METRICS:
         stat = aggregate.metric_stats.get(name)
         if stat is None:
             continue
-        typer.echo(f"  {name:<20}  {'  '.join(f'{v:.2f}' for v in stat.values)}")
+        typer.echo(f"  {name:<{w}}  {'  '.join(f'{v:.2f}' for v in stat.values)}")
     typer.echo("")
     typer.echo("--fail-on is evaluated against the MEAN across runs.")
     notes = [n for r in aggregate.reports for n in r.quality_notes]

@@ -165,6 +165,74 @@ async def test_live_contradiction_gate_round_trip(caplog: pytest.LogCaptureFixtu
     assert compatible is False, "compatible pair was confirmed as contradictory"
 
 
+# the rung 2.5 update probe. Unlike the contract checks above, these
+# assert the verdict: the rule is the point, and the prompt was measured at 57
+# of 57 over three samples of each pair before it shipped. The first case is
+# the 2026-09-27 Delhi scenario, a contradiction the probe must not read as an
+# update; the next four are updates it must keep. The slot's kind came later:
+# the two fixed facts are wrong-value retirements from the
+# kept-store re-measurement, which must read as one slot that does
+# not change. The history pair must not read as a new value. Eight
+# cheap Haiku-tier calls.
+_UPDATE_PROBE_CASES = [
+    pytest.param(
+        "Sandeep's Curry House is the user's favourite place to eat.",
+        "The user has not yet found a regular place to eat.",
+        "different",
+        id="preference-vs-situation",
+    ),
+    pytest.param(
+        "The user lives in Delhi, in Lajpat Nagar.",
+        "The user moved to Mumbai last month.",
+        "changes",
+        id="moved",
+    ),
+    pytest.param(
+        "The user lives in Delhi.", "The user lives in Mumbai.", "changes", id="home-city"
+    ),
+    pytest.param(
+        "The user's favourite restaurant is Sandeep's Curry House.",
+        "The user's favourite restaurant is now Bombay Canteen.",
+        "changes",
+        id="new-favourite",
+    ),
+    pytest.param("The user is vegetarian.", "The user eats fish now.", "changes", id="diet"),
+    pytest.param(
+        "The Kawai ES110 digital piano costs $699 to $799.",
+        "The Kawai ES110 digital piano costs $299.",
+        "fixed",
+        id="product-price",
+    ),
+    pytest.param(
+        "The Poison Tree was written by Erin Kelly.",
+        "The Poison Tree was written by Barbara Hambly.",
+        "fixed",
+        id="author",
+    ),
+    pytest.param(
+        "The user's diet is vegetarian.",
+        "The user's diet was previously paleo.",
+        "different",
+        id="history-is-not-a-new-value",
+    ),
+]
+
+
+@pytest.mark.parametrize(("earlier", "later", "expected"), _UPDATE_PROBE_CASES)
+async def test_live_update_probe(
+    earlier: str, later: str, expected: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The update probe separates a new value for one slot from a scoped or fixed one."""
+    from particles.ingest.pipeline import _llm_slot_verdict
+
+    with caplog.at_level(logging.WARNING, logger="particles.ingest.pipeline"):
+        verdict = await _llm_slot_verdict(earlier, later)
+
+    failures = [r for r in caplog.records if "Update probe" in r.getMessage()]
+    assert not failures, f"update probe failed instead of answering: {failures!r}"
+    assert verdict is not None and verdict.value == expected
+
+
 # a / M4 — held-out stance-emission precision gate.
 #
 # A small labeled set: each case is a short source that either *should* yield a

@@ -352,7 +352,7 @@ def render_estimate(est: JudgedStageEstimate) -> str:
     dollars = (
         f"~US${est.cost_usd:,.2f}"
         if est.cost_usd is not None
-        else "no price configured (benchmark_memory.price_per_mtok)"
+        else "no price configured (llm.price_per_mtok)"
     )
     lines = [
         f"Judged stage — projected {est.llm_calls} LLM calls over {est.questions} questions:",

@@ -24,6 +24,7 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | `subjects confirm` | `SUBJECT_LINK_CONFIRMED` |
 | `subjects unlink` | `SUBJECT_LINK_REMOVED` |
 | `subjects set-class` | `SUBJECT_RECLASSIFIED` |
+| `subjects relink-gated --apply`, the curation `relink` and `assign-subject` gestures | `SUBJECTS_RELINKED` (one per batch run, `batch: true`, or one per assigned belief) |
 | `trust set`, `trust statement-set`, `trust lens adopt` / `unadopt` | `TRUST_CHANGED` |
 | `review` (§9.6 resolution) | `REVIEW_RESOLVED` |
 | `links add` | `RELATION_ADDED` |

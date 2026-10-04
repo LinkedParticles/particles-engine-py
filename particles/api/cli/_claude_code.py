@@ -19,19 +19,21 @@ The leading underscore marks the module as internal to the ``cli`` package
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import logging
 import os
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from particles.config import get_config
+from particles.config import StorageConfig, get_config, sqlite_file_path
 from particles.render.markdown import find_projected_regions
 
 log = logging.getLogger(__name__)
@@ -308,9 +310,69 @@ def entry_project_key(uri_r: str | None, tags: list[str], projects_root: Path) -
     return None
 
 
+def artifact_namespace_key(
+    tags: Sequence[str], uri: str | None = None, projects_root: Path | None = None
+) -> str | None:
+    """The project a qualified subject name from this entry is scoped by.
+
+    Entry tags are additive, so an entry deposited before
+    worktree folding carries its per-worktree tag beside the canonical one.
+    Both fold to one repository, and that repository's key is the namespace.
+    An entry whose tags fold to more than one project, or that carries none,
+    gets ``None``, and the gate suppresses the name.
+    """
+    from particles.core.observer_scope import project_keys
+
+    root = projects_root if projects_root is not None else Path.home() / ".claude" / "projects"
+    folded = {_canonical_key_cached(key, str(root)) for key in project_keys(tags)}
+    return next(iter(folded)) if len(folded) == 1 else None
+
+
+@functools.lru_cache(maxsize=1024)
+def _canonical_key_cached(slug: str, projects_root: str) -> str:
+    # canonical_project_key reads a directory's transcripts, and one extraction
+    # pass asks about the same few projects once per candidate.
+    return canonical_project_key(slug, Path(projects_root))
+
+
+def register_artifact_namespace_hook() -> None:
+    """Make this adapter's project fold the Engine's artifact namespace.
+
+    Called from the CLI's root callback, which every Surface process passes
+    through (`engine serve`, `mcp serve` and the hooks are CLI verbs). A raw
+    ``uvicorn particles.api.app:app`` launch skips it and gets the Engine's
+    fail-closed default. Idempotent.
+    """
+    from particles.ingest.artifact_namespace import register_artifact_namespace
+
+    register_artifact_namespace(artifact_namespace_key)
+
+
 def is_live_project_key(key: str, projects_root: Path) -> bool:
     """Whether a session could ever observe as ``key``: its directory exists and is canonical."""
     return (projects_root / key).is_dir() and canonical_project_key(key, projects_root) == key
+
+
+def is_claude_code_memory_dir(path: Path, projects_root: Path | None = None) -> bool:
+    """Whether ``path`` is a memory directory Claude Code itself reads.
+
+    That is ``<projects_root>/<key>/memory`` for a project directory Claude
+    Code created, and not one of the stray directories this SDK's own
+    projection left behind (:func:`stray_memory_dirs`). ``projects_root``
+    defaults to ``~/.claude/projects``. Symlinks resolve first, so a link to a
+    real memory directory counts and a copy of one elsewhere does not.
+    """
+    root = projects_root if projects_root is not None else Path.home() / ".claude" / "projects"
+    try:
+        resolved = path.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return False
+    if resolved.name != "memory" or resolved.parent.parent != root_resolved:
+        return False
+    if not resolved.is_dir():
+        return False
+    return resolved not in {p.resolve() for p in stray_memory_dirs(root_resolved)}
 
 
 def stray_memory_dirs(projects_root: Path) -> list[Path]:
@@ -667,6 +729,29 @@ def distill_transcript(jsonl_text: str, session_id: str | None = None) -> str:
     return ("\n\n".join(out) + "\n") if out else ""
 
 
+def transcript_started_at(jsonl_text: str) -> datetime | None:
+    """The first ``timestamp`` a Claude Code transcript records, or ``None``.
+
+    The session's start, which use mining reads exposure as of.
+    The distilled transcript keeps no timestamps, so this reads the raw JSONL.
+    Malformed lines and unparseable values are skipped.
+    """
+    for raw_line in jsonl_text.splitlines():
+        try:
+            entry = json.loads(raw_line)
+        except ValueError:
+            continue
+        value = entry.get("timestamp") if isinstance(entry, dict) else None
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Redaction — best-effort defence in depth, not a guarantee
 # ---------------------------------------------------------------------------
@@ -785,6 +870,196 @@ def projection_enabled() -> bool:
     return get_config().agent_memory.projection.enabled and memory_manifest_path().is_file()
 
 
+# ---------------------------------------------------------------------------
+# Harness binding — which store may write into a memory directory
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HookBinding:
+    """One installed Particles hook command, reduced to the store it names.
+
+    ``location`` is the comparable identity of the pinned database (see
+    :func:`store_location`), or ``None`` when the command pins nothing that
+    resolves independently of the working directory: a pre-v1.70.2 install, or
+    a pinned config whose DSN is itself relative.
+    """
+
+    settings_path: Path
+    handle: str
+    location: str | None
+
+
+def store_location(dsn: str, base_dir: Path | None = None) -> str | None:
+    """A comparable identity for a database URL, or ``None`` when it has none.
+
+    A file-backed SQLite URL is identified by the real path of its file, so
+    ``sqlite:///./particles.db`` run from the store's directory and the
+    four-slash absolute pin ``init claude-code`` bakes into the hooks compare
+    equal. A relative path is resolved against ``base_dir`` (SQLAlchemy resolves
+    it against the process working directory) and is unidentifiable without
+    one. An in-memory SQLite URL identifies nothing. Any other URL is compared
+    verbatim.
+    """
+    if dsn.startswith("sqlite"):
+        raw = sqlite_file_path(dsn)
+        if raw is None:
+            return None
+        path = Path(raw)
+        if not path.is_absolute():
+            if base_dir is None:
+                return None
+            path = base_dir / path
+        return f"sqlite:{os.path.realpath(path)}"
+    return dsn.strip() or None
+
+
+def _pinned_config_dsn(config_path: Path, handle: str) -> str | None:
+    """The DSN ``handle`` resolves to in the config file a hook command pins."""
+    try:
+        tree = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    storage = tree.get("storage") if isinstance(tree, dict) else None
+    storage = storage if isinstance(storage, dict) else {}
+    if handle == "default":
+        value = storage.get("database_url", StorageConfig().database_url)
+    else:
+        stores = storage.get("stores")
+        value = stores.get(handle) if isinstance(stores, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
+    """Reduce one installed hook command to the store it names.
+
+    The command is ``[env KEY=VALUE …] <particles> hook <verb> --store <handle>``.
+    The ``default`` store is pinned by ``DATABASE_URL``; a named store by the
+    ``storage.stores`` entry of the pinned ``PARTICLES_CONFIG``.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    env: dict[str, str] = {}
+    if tokens and tokens[0] == "env":
+        for token in tokens[1:]:
+            key, sep, value = token.partition("=")
+            if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                break
+            env[key] = value
+    handle = "default"
+    for i, token in enumerate(tokens[:-1]):
+        if token == "--store":
+            handle = tokens[i + 1]
+    dsn: str | None = None
+    if handle == "default" and "DATABASE_URL" in env:
+        dsn = env["DATABASE_URL"]
+    elif "PARTICLES_CONFIG" in env:
+        dsn = _pinned_config_dsn(Path(env["PARTICLES_CONFIG"]), handle)
+    location = store_location(dsn) if dsn is not None else None
+    return HookBinding(settings_path=settings_path, handle=handle, location=location)
+
+
+def _claude_projects_root_of(memory_dir: Path) -> Path | None:
+    """The ``<config>/.claude/projects`` root holding ``memory_dir``, or ``None``.
+
+    Decided by shape, not by ``$HOME``: a test or script that swapped ``HOME``
+    and still reached the real directory is caught the same way.
+    """
+    try:
+        resolved = memory_dir.resolve()
+    except OSError:
+        return None
+    projects = resolved.parent.parent
+    is_harness_dir = resolved.name == "memory" and projects.name == "projects"
+    return projects if is_harness_dir and projects.parent.name == ".claude" else None
+
+
+def _settings_bindings(path: Path) -> list[HookBinding]:
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(settings, dict):
+        return []
+    return [parse_hook_binding(cmd, path) for cmd in particles_hook_commands(settings)]
+
+
+def _project_roots_of(memory_dir: Path) -> list[Path]:
+    """Repositories whose sessions write to ``memory_dir``, from their transcripts."""
+    project_dir = memory_dir.parent
+    roots: list[Path] = []
+    for transcript in sorted(project_dir.glob("*.jsonl")):
+        launch = launch_directory(project_dir.name, _recorded_cwds(transcript))
+        if launch is not None:
+            root = repository_root(launch)
+            if root not in roots:
+                roots.append(root)
+            break
+    return roots
+
+
+def hook_bindings_for(memory_dir: Path, project_roots: tuple[Path, ...] = ()) -> list[HookBinding]:
+    """Every installed Particles hook whose sessions render into ``memory_dir``.
+
+    The user-level ``settings.json`` beside the projects root covers every
+    project; a project-scope install (``.claude/settings.local.json``, or a
+    hand-written ``.claude/settings.json``) covers its own repository.
+    ``project_roots`` adds repositories the caller already knows (the SessionEnd
+    hook knows the session's working directory); otherwise they are recovered
+    from the project's transcripts.
+    """
+    projects_root = _claude_projects_root_of(memory_dir)
+    if projects_root is None:
+        return []
+    bindings = _settings_bindings(projects_root.parent / "settings.json")
+    roots = list(project_roots) or _project_roots_of(memory_dir)
+    for root in roots:
+        for name in ("settings.local.json", "settings.json"):
+            bindings.extend(_settings_bindings(root / ".claude" / name))
+    return bindings
+
+
+def projection_refusal(
+    store: str, memory_dir: Path, project_roots: tuple[Path, ...] = ()
+) -> str | None:
+    """Why ``store`` may not harvest or render ``memory_dir``, or ``None`` when it may.
+
+    A Claude Code memory directory is served by the store the installed
+    Particles hooks name, and only that store: every session in the project
+    loads what is rendered there as facts about the user. A scratch store (a
+    test, a scenario script, a ``DATABASE_URL`` pointed elsewhere) is refused,
+    so it can neither write its beliefs into the file nor ingest the file's
+    content. A directory outside any ``.claude/projects`` tree is not a harness
+    directory and is never refused here.
+    """
+    if _claude_projects_root_of(memory_dir) is None:
+        return None
+    storage = get_config().storage
+    dsn = storage.database_url if store == "default" else storage.stores.get(store)
+    current = store_location(dsn, Path.cwd()) if dsn is not None else None
+    if current is None:
+        return f"store {store!r} has no database location a Claude Code hook could name"
+    bindings = hook_bindings_for(memory_dir, project_roots)
+    if not bindings:
+        return (
+            f"no Particles hook is installed for {memory_dir.parent.name}; "
+            "`particles init claude-code` installs one"
+        )
+    if any(b.location == current for b in bindings):
+        return None
+    if all(b.location is None for b in bindings):
+        return (
+            "the installed Particles hooks do not pin a database; "
+            "re-run `particles init claude-code` to pin one"
+        )
+    return (
+        f"store {store!r} is not the store the installed Claude Code hooks name "
+        f"({', '.join(sorted({str(b.settings_path) for b in bindings}))})"
+    )
+
+
 def default_memory_manifest_text() -> str:
     """The zero-config default ``memory.yaml`` — one ranked list.
 
@@ -846,11 +1121,44 @@ def load_projection_snapshots(memory_dir: Path | None = None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+#: One Claude Code memory-index entry: a list item that is only a link to a
+#: sibling Markdown file, optionally followed by a dash or colon and a short
+#: description of that file (``- [Title](topic.md) — what it covers``).
+_INDEX_ENTRY_RE = re.compile(
+    r"^\s*[-*+]\s+\[[^\]]+\]\((?P<target>[^()\s/\\]+\.md)\)\s*(?:[—–:-].*)?$"
+)
+
+
+def drop_index_entries(text: str, source_dir: Path) -> str:
+    """Remove memory-index lines whose target file sits beside the indexed file.
+
+    A Claude Code ``MEMORY.md`` is an index: one link per topic file with a
+    few words on what the file covers. Those words are a summary of a file the
+    harvest deposits in full, so extracting them only produces a second,
+    vaguer claim ("the project has open work") that can then contradict the
+    topic file it summarises. A line whose target does not exist is
+    kept: its description is then the only record of what it says. Pure apart
+    from the existence check.
+    """
+    kept: list[str] = []
+    dropped = False
+    for line in text.splitlines():
+        m = _INDEX_ENTRY_RE.match(line)
+        if m is not None and (source_dir / m.group("target")).is_file():
+            dropped = True
+            continue
+        kept.append(line)
+    if not dropped:
+        return text
+    return "\n".join(kept) + ("\n" if text.endswith("\n") else "")
+
+
 def filter_memory_file_for_deposit(
     text: str,
     snapshot_bodies: Mapping[str, str] | None = None,
     *,
     memory_dir: Path | None = None,
+    source_dir: Path | None = None,
 ) -> str:
     """Pre-deposit filter for harvested memory files.
 
@@ -865,6 +1173,10 @@ def filter_memory_file_for_deposit(
     The fold-and-archive pointer line is dropped too — it is
     machine-generated, like the sentinels, and the archive file it points at
     is harvested in full anyway.
+
+    ``source_dir`` is the folder the file itself sits in. When given, its
+    memory-index entries are dropped as well (:func:`drop_index_entries`):
+    each summarises a sibling file that is harvested in full.
 
     ``snapshot_bodies`` (region name → body) defaults to the snapshots of the
     project that owns ``memory_dir`` — pass it for every file harvested from a
@@ -883,6 +1195,8 @@ def filter_memory_file_for_deposit(
             line for line in stripped.splitlines() if not line.startswith(ARCHIVE_POINTER_PREFIX)
         ]
         stripped = "\n".join(kept) + ("\n" if stripped.endswith("\n") else "")
+    if source_dir is not None:
+        stripped = drop_index_entries(stripped, source_dir)
     return stripped
 
 
@@ -898,19 +1212,35 @@ def truncate_on_line_boundary(text: str, max_bytes: int) -> str:
     budgeted for, so the result (footer included) never exceeds ``max_bytes``
     unless the budget is too small to hold the footer alone.
     """
-    if max_bytes <= 0 or len(text.encode("utf-8")) <= max_bytes:
+    kept = kept_prefix_length(text, max_bytes)
+    if kept == len(text):
         return text
-    footer = f"\n\n*[digest truncated at {max_bytes} bytes — see `particles query` for the rest]*\n"
-    budget = max_bytes - len(footer.encode("utf-8"))
-    kept: list[str] = []
+    return text[:kept].rstrip("\n") + _truncation_footer(max_bytes)
+
+
+def _truncation_footer(max_bytes: int) -> str:
+    return f"\n\n*[digest truncated at {max_bytes} bytes — see `particles query` for the rest]*\n"
+
+
+def kept_prefix_length(text: str, max_bytes: int) -> int:
+    """How many characters of ``text`` :func:`truncate_on_line_boundary` keeps.
+
+    ``len(text)`` when the text fits the budget. Otherwise the length of the
+    whole lines that fit beside the footer. A line of ``text`` survived the cut
+    exactly when it starts before this offset.
+    """
+    if max_bytes <= 0 or len(text.encode("utf-8")) <= max_bytes:
+        return len(text)
+    budget = max_bytes - len(_truncation_footer(max_bytes).encode("utf-8"))
+    kept = 0
     used = 0
     for line in text.splitlines(keepends=True):
         line_bytes = len(line.encode("utf-8"))
         if used + line_bytes > budget:
             break
-        kept.append(line)
+        kept += len(line)
         used += line_bytes
-    return "".join(kept).rstrip("\n") + footer
+    return kept
 
 
 # ---------------------------------------------------------------------------

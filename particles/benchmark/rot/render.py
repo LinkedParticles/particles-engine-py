@@ -57,6 +57,22 @@ def _short(m: RotMetrics) -> str:
     )
 
 
+def _real_pairs(report: RotBenchmarkReport) -> list[str]:
+    """The operator-ruled pairs, headed apart: never pooled with the worlds."""
+    rp = report.real_pairs
+    assert rp is not None
+    lines = [
+        f"Real pairs: operator demotion rulings ({rp.pairs} pair(s), not pooled above)",
+        f"  source {rp.source}",
+        f"  false positive (↓)  {_rate(rp.false_positive)}   ruled coexist, the checks retire",
+        f"  miss (↓)            {_rate(rp.miss)}   ruled replacement, the checks keep",
+    ]
+    if rp.undecided:
+        lines.append(f"  undecided           {rp.undecided} (a check could not complete)")
+    lines += [f"  - {n}" for n in rp.notes]
+    return lines
+
+
 def render_report(report: RotBenchmarkReport) -> str:
     """The report as a terminal table."""
     s = report.selection
@@ -107,6 +123,8 @@ def render_report(report: RotBenchmarkReport) -> str:
             f"  {row.floor:.2f}   {_rate(row.answerable_refused):<28}  "
             f"{_rate(row.unanswerable_passed)}"
         )
+    if report.real_pairs is not None:
+        lines += ["", *_real_pairs(report)]
     if report.quality_notes:
         lines += ["", "Notes:"]
         lines += [f"  - {n}" for n in report.quality_notes]

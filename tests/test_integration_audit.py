@@ -33,6 +33,7 @@ from typer.testing import CliRunner
 
 from particles.api.cli import app
 from particles.secrets import get_anthropic_api_key_optional
+from tests._claude_projects import isolate_claude_code
 
 pytestmark = [
     pytest.mark.integration,
@@ -52,11 +53,13 @@ def test_fixture_audit_renders_nonzero_headline_classes(
     # fires only for source types with a decay horizon. Defaults carry none for
     # LOCAL_MARKDOWN, so the acceptance run supplies the operator config (an
     # existing knob — content_age_decay.sources — not a new detection default).
-    config = tmp_path / "config.yaml"
-    config.write_text(
-        "content_age_decay:\n  sources:\n    LOCAL_MARKDOWN:\n      half_life_days: 180.0\n"
+    # The harness sandbox (fake HOME, projection off) keeps the scratch store
+    # away from the real ~/.claude/projects.
+    isolate_claude_code(
+        monkeypatch,
+        tmp_path,
+        "content_age_decay:\n  sources:\n    LOCAL_MARKDOWN:\n      half_life_days: 180.0\n",
     )
-    monkeypatch.setenv("PARTICLES_CONFIG", str(config))
     from particles.config import reset_config
 
     reset_config()
@@ -69,12 +72,13 @@ def test_fixture_audit_renders_nonzero_headline_classes(
     # Header: three memory files harvested into a real store.
     assert re.search(r"Audited 3 memory files → \d+ beliefs about \d+ subjects\.", out)
 
-    # Acceptance: nonzero counts for all three headline classes.
-    m = re.search(r"(\d+) potential contradictions", out)
+    # Acceptance: nonzero counts for all three headline classes (a count of
+    # one takes the singular noun).
+    m = re.search(r"(\d+) potential contradictions?\b", out)
     assert m and int(m.group(1)) > 0, out
-    m = re.search(r"(\d+) likely-duplicate belief pairs", out)
+    m = re.search(r"(\d+) likely-duplicate belief pairs?\b", out)
     assert m and int(m.group(1)) > 0, out
-    m = re.search(r"(\d+) probably-stale facts", out)
+    m = re.search(r"(\d+) probably-stale facts?\b", out)
     assert m and int(m.group(1)) > 0, out
 
     # Exemplars carry claim text (a quoted line with a short id) and each

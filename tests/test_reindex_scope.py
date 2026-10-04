@@ -10,13 +10,21 @@ wiring lives in ``tests/test_reindex.py``.
 
 from __future__ import annotations
 
+from particles.extraction.components import (
+    MIXED_DIGEST,
+    ComponentRecord,
+    ComponentTable,
+)
 from particles.operations.reindex_scope import (
     FULL_ENTRY_ID_LENGTH,
+    ONLY_CHANGED_COMPONENTS_ENABLED,
     PrefixResolution,
     ReindexScope,
+    component_change_reasons,
     decide_reindex_scope,
     is_prefix,
     resolve_prefix,
+    select_changed_components,
     union_selectors,
 )
 
@@ -173,3 +181,112 @@ class TestAutoDiscovery:
             collapsed=frozenset(),
             stale_schema=[],
         ) == ReindexScope([], None)
+
+
+# ---------------------------------------------------------------------------
+# select only the snapshots whose exercised components changed
+# ---------------------------------------------------------------------------
+
+
+_GEN = "general-extractor"
+_TABLE = ComponentTable(
+    digests={
+        "prompt.rules": "r1",
+        "prompt.schema": "s1",
+        "prompt.tool_turns": "t1",
+        "path.single_pass": "p1",
+        "path.chunked": "c1",
+    },
+    always=frozenset({"prompt.rules", "prompt.schema"}),
+)
+_TABLES = {_GEN: _TABLE}
+_AVAILABLE = sorted(_TABLE.digests)
+
+
+def _record(exercised: dict[str, str], **kwargs: object) -> ComponentRecord:
+    fields: dict[str, object] = {"extractor": _GEN, "available": _AVAILABLE}
+    fields.update(kwargs)
+    return ComponentRecord(exercised=exercised, **fields)  # type: ignore[arg-type]
+
+
+_UNCHANGED = {"prompt.rules": "r1", "prompt.schema": "s1", "path.single_pass": "p1"}
+
+
+class TestComponentChangeReasons:
+    def test_an_unchanged_extraction_has_no_reason(self) -> None:
+        assert component_change_reasons(_TABLES, _record(_UNCHANGED)) == ()
+
+    def test_no_record_or_an_incomplete_one_is_always_a_reason(self) -> None:
+        assert component_change_reasons(_TABLES, None) == ("no component record",)
+        incomplete = _record(_UNCHANGED, complete=False)
+        assert component_change_reasons(_TABLES, incomplete) == ("incomplete component record",)
+
+    def test_an_unknown_extractor_is_a_reason(self) -> None:
+        reasons = component_change_reasons(_TABLES, _record(_UNCHANGED, extractor="other"))
+        assert reasons == ("no component table for extractor 'other'",)
+
+    def test_a_changed_exercised_component_is_a_reason(self) -> None:
+        reasons = component_change_reasons(_TABLES, _record({**_UNCHANGED, "prompt.rules": "r0"}))
+        assert reasons == ("prompt.rules: changed",)
+
+    def test_a_mixed_digest_never_matches(self) -> None:
+        record = _record({**_UNCHANGED, "path.single_pass": MIXED_DIGEST})
+        assert component_change_reasons(_TABLES, record) == ("path.single_pass: changed",)
+
+    def test_a_changed_component_the_snapshot_never_exercised_is_not_a_reason(self) -> None:
+        """The whole point: a chunked-path change leaves a single-pass snapshot alone."""
+        table = ComponentTable(
+            digests={**_TABLE.digests, "path.chunked": "c2", "prompt.tool_turns": "t2"},
+            always=_TABLE.always,
+        )
+        assert component_change_reasons({_GEN: table}, _record(_UNCHANGED)) == ()
+
+    def test_a_removed_or_disabled_component_is_a_reason(self) -> None:
+        record = _record(
+            {**_UNCHANGED, "prompt.scope": "x"}, available=[*_AVAILABLE, "prompt.scope"]
+        )
+        assert component_change_reasons(_TABLES, record) == (
+            "prompt.scope: no longer in the extractor's components",
+        )
+
+    def test_a_new_rule_on_every_extraction_is_a_reason(self) -> None:
+        table = ComponentTable(
+            digests={**_TABLE.digests, "prompt.reference": "f1"},
+            always=_TABLE.always | {"prompt.reference"},
+        )
+        assert component_change_reasons({_GEN: table}, _record(_UNCHANGED)) == (
+            "prompt.reference: now on every extraction",
+        )
+
+    def test_a_new_source_dependent_component_is_a_reason(self) -> None:
+        """The record cannot say whether this source would reach it."""
+        table = ComponentTable(
+            digests={**_TABLE.digests, "channel.vision": "v1"}, always=_TABLE.always
+        )
+        assert component_change_reasons({_GEN: table}, _record(_UNCHANGED)) == (
+            "channel.vision: new since the record",
+        )
+
+    def test_a_known_but_unexercised_source_component_is_not_a_reason(self) -> None:
+        # path.chunked and prompt.tool_turns were available and not exercised.
+        assert "path.chunked" in _AVAILABLE
+        assert component_change_reasons(_TABLES, _record(_UNCHANGED)) == ()
+
+
+class TestSelectChangedComponents:
+    def test_split_keeps_reasons_and_lists_skips(self) -> None:
+        records = {
+            "s-same": _record(_UNCHANGED),
+            "s-changed": _record({**_UNCHANGED, "prompt.rules": "r0"}),
+        }
+        pairs = [("e1", "s-same"), ("e2", "s-changed"), ("e3", "s-legacy")]
+        selection = select_changed_components(pairs, records, _TABLES)
+        assert selection.skipped == [("e1", "s-same")]
+        assert selection.kept == {
+            ("e2", "s-changed"): ("prompt.rules: changed",),
+            ("e3", "s-legacy"): ("no component record",),
+        }
+
+    def test_the_selection_is_refused_until_a_bump_has_stamped_a_store(self) -> None:
+        """flipping this on is the action the row's trigger names."""
+        assert ONLY_CHANGED_COMPONENTS_ENABLED is False

@@ -292,6 +292,55 @@ class WorldResult(BaseModel):
     quality_notes: list[str] = Field(default_factory=list)
 
 
+class RealPairOutcome(StrEnum):
+    """How the live update checks did on one operator-ruled pair."""
+
+    #: The checks did what the operator ruled.
+    AGREE = "agree"
+    #: Ruled "coexist", but the checks would retire the older claim.
+    FALSE_POSITIVE = "false_positive"
+    #: Ruled "replacement", but the checks would keep both claims.
+    MISS = "miss"
+    #: A check could not complete, so no decision to score.
+    UNDECIDED = "undecided"
+
+
+class RealPairResult(BaseModel):
+    """One operator-ruled demotion, re-asked through the live update checks."""
+
+    retired_hash: str
+    replacement_hash: str
+    reason: str
+    ruling: str
+    #: Claim texts, kept only under ``benchmark.record_claim_text``.
+    retired_text: str | None = None
+    replacement_text: str | None = None
+    contradiction: bool | None = None
+    same_slot: bool | None = None
+    #: True when the checks would retire the older claim; None when undecided.
+    retires: bool | None = None
+    outcome: RealPairOutcome
+
+
+class RealPairsReport(BaseModel):
+    """Operator-ruled demotions scored apart from the synthetic worlds.
+
+    Never pooled into the world metrics: a synthetic world and a real store
+    differ in every respect but the checks under test.
+    """
+
+    #: The rulings file read.
+    source: str
+    pairs: int = 0
+    #: "coexist" pairs the checks would retire, over "coexist" pairs decided.
+    false_positive: Rate = Field(default_factory=Rate)
+    #: "replacement" pairs the checks would keep, over "replacement" pairs decided.
+    miss: Rate = Field(default_factory=Rate)
+    undecided: int = 0
+    results: list[RealPairResult] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class RotRunSelection(BaseModel):
     """The run tuple — results are comparable only against the same tuple."""
 
@@ -327,4 +376,7 @@ class RotBenchmarkReport(BaseModel):
     #: refusing provider). Always disclosed; non-zero means a seam the arm did
     #: not anticipate — the call failed open rather than billing.
     refused_llm_calls: dict[str, int] = Field(default_factory=dict)
+    #: Operator-ruled demotions scored by the live checks. ``None``
+    #: on the oracle arm, with no rulings file, or under ``--no-real-pairs``.
+    real_pairs: RealPairsReport | None = None
     quality_notes: list[str] = Field(default_factory=list)

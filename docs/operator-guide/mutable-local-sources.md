@@ -276,7 +276,10 @@ What to know about it:
 
 - **`MUTABLE` sources only.** An `APPEND_ONLY` source (a session transcript, the
   archive file) and a `STABLE` one are always extracted snapshot by snapshot:
-  their older snapshots are history, not superseded drafts.
+  their older snapshots are history, not superseded drafts. An `APPEND_ONLY`
+  snapshot costs only the text it adds, since extraction reads it as a delta
+  from the one before it (see
+  [Reindex → Append-only sources](lint-and-review.md#append-only-sources)).
 - **A skipped snapshot is marked, not deleted.** It is recorded as `COMPLETE`
   with the id of the snapshot that replaced it, and its content stays in the
   corpus. To extract an intermediate version on purpose, name it: `particles

@@ -12,20 +12,24 @@
  */
 import {
   ApiError,
+  ConflictBrief,
   CurationCard,
   DuplicateVerdict,
   ParticleBrief,
   ParticlesApiClient,
   QueueOptions,
+  ResolutionAction,
 } from "./api";
 import {
   gestureAvailability,
+  gestureHint,
   gestureLabel,
   isDangerGesture,
   primaryGesture,
 } from "./gestures";
 import { routeHash } from "./router";
 import { confirmSheet, openSheet } from "./sheet";
+import { isQuarantined, reasonNote, statusText } from "./status";
 
 export interface FeedDeps {
   client: ParticlesApiClient;
@@ -37,11 +41,13 @@ const KINDS = [
   "",
   "stale",
   "confidence_decay",
+  "inconsistency",
   "contested",
   "contradiction",
   "retraction_cascade",
   "broken_provenance",
   "no_subject",
+  "gated_subjects",
   "duplicate_pair",
   "uncited_url",
   "failed_snapshots",
@@ -51,6 +57,8 @@ export class CurationFeed {
   private deps: FeedDeps;
   private root: HTMLElement;
   private cards: CurationCard[] = [];
+  /** Open cards in all (the server's `open_count`), of which `cards` is the head. */
+  private openCount = 0;
   private options: QueueOptions = {};
   private readOnly = false;
   private semanticSkipped = false;
@@ -95,9 +103,10 @@ export class CurationFeed {
     try {
       const resp = await this.deps.client.curation(this.options);
       this.cards = resp.cards ?? [];
-      // `resp.count` is deliberately not kept: it is len(cards) at fetch time,
-      // so it only ever restated the number the header already shows — and as
-      // gestures resolve cards it becomes a second, wrong count.
+      // `resp.count` is deliberately not kept: it is len(cards) at fetch
+      // time, which the header already shows. `open_count` is the backlog the
+      // batch was cut from; an older engine without it reads as the batch.
+      this.openCount = Math.max(resp.open_count ?? 0, this.cards.length);
       this.semanticSkipped = resp.semantic_skipped ?? false;
       this.loaded = true;
       this.render();
@@ -158,8 +167,16 @@ export class CurationFeed {
     if (this.cards.length === 0) {
       const done = document.createElement("div");
       done.className = "empty";
-      done.innerHTML =
-        '<div class="big">✓</div><div>Queue clear. Nothing to curate right now.</div>';
+      const big = document.createElement("div");
+      big.className = "big";
+      big.textContent = "✓";
+      const line = document.createElement("div");
+      line.textContent =
+        this.openCount > 0
+          ? `Batch done. ${this.openCount} more open, ranked below this batch. ` +
+            "Refresh for the next batch."
+          : "Queue clear. Nothing to curate right now.";
+      done.append(big, line);
       this.root.appendChild(done);
       return;
     }
@@ -172,19 +189,14 @@ export class CurationFeed {
   }
 
   /**
-   * The queue's own line: how much is in front of you, and nothing else.
+   * The queue's own line: this batch, and the backlog it was cut from.
    *
-   * No title — the nav's active tab already says Curate, and the internal name
-   * for the model named nobody's concept but the author's. The count says "in
-   * queue", not "today": the cap is per *fetch* (`curation.session_size`), so
-   * a refresh hands you a fresh worklist and nothing resets at midnight —
-   * "today" claimed a cadence the engine does not implement.
-   *
-   * It counts this worklist, not the store's backlog. Those differ whenever
-   * the finders had more to say than the cap allows, and the queue is capped
-   * on purpose: a finite list is a habit, an infinite one is a
-   * chore. `GET /curation` returns only the slice, so the backlog is a number
-   * this client does not have and will not imply.
+   * The batch is capped on purpose (`curation.session_size`): a
+   * short session does not fatigue. The cap is per *fetch*, so a refresh
+   * hands you the next batch; nothing resets at midnight. Showing only the
+   * batch size read as the whole backlog ("7 left" when 154 were open), so the
+   * header names both ("Top 7 of 154 cards open"): `open_count` comes from the
+   * engine, which is the only party that knows it.
    */
   private renderHeader(): HTMLElement {
     const header = document.createElement("div");
@@ -192,7 +204,13 @@ export class CurationFeed {
     const count = document.createElement("span");
     count.className = "session-count";
     const n = this.cards.length;
-    count.textContent = n === 1 ? "1 left in queue" : `${n} left in queue`;
+    const open = this.openCount;
+    const cards = (k: number): string =>
+      `${k.toLocaleString()} ${k === 1 ? "card" : "cards"}`;
+    count.textContent =
+      open > n
+        ? `Top ${n.toLocaleString()} of ${cards(open)} open, by leverage`
+        : `${cards(n)} open`;
     header.append(count);
     return header;
   }
@@ -240,7 +258,10 @@ export class CurationFeed {
     kind.className = "kind";
     const dot = document.createElement("span");
     dot.className = "dot";
-    kind.append(dot, document.createTextNode((card.kind ?? "").replace(/_/g, " ")));
+    kind.append(
+      dot,
+      document.createTextNode(card.title ?? (card.kind ?? "").replace(/_/g, " ")),
+    );
     if (typeof card.leverage === "number") {
       const lev = document.createElement("span");
       lev.className = "leverage";
@@ -248,6 +269,14 @@ export class CurationFeed {
       kind.appendChild(lev);
     }
     el.appendChild(kind);
+
+    // What the card asks, before the evidence (the engine's KIND_TITLES).
+    if (card.question) {
+      const q = document.createElement("div");
+      q.className = "question";
+      q.textContent = card.question;
+      el.appendChild(q);
+    }
 
     const diag = document.createElement("div");
     diag.className = "diagnostic";
@@ -285,7 +314,14 @@ export class CurationFeed {
   private renderRefs(card: CurationCard): Node[] {
     const nodes: Node[] = [];
     const briefs = card.particles ?? [];
-    if (briefs.length > 0) {
+    if (card.conflict && (card.conflict.a || card.conflict.b)) {
+      // A contested card's belief is one side of a conflict; show both, in
+      // review's A / B order, so "does it stand?" can be judged here.
+      // A contested card is about one of the sides; a conflict card is the
+      // record itself, so none of its sides is singled out.
+      const flagged = card.kind === "contested" ? (card.particle_ids ?? []) : [];
+      nodes.push(...renderConflict(card.conflict, flagged));
+    } else if (briefs.length > 0) {
       // show what each belief actually says (claim + subject +
       // effective confidence + status) so the gesture — e.g. which of a
       // duplicate pair to keep — can be judged from the card alone.
@@ -332,8 +368,10 @@ export class CurationFeed {
       if (isDangerGesture(g)) btn.classList.add("danger");
 
       const label = document.createElement("span");
-      label.textContent = gestureLabel(g);
+      label.textContent = gestureLabel(g, kind);
       btn.appendChild(label);
+      const hint = gestureHint(g, kind);
+      if (hint) btn.title = hint;
 
       if (avail.kind === "deferred") {
         // Read-only-degrade hides write gestures entirely; deferred gestures are
@@ -351,7 +389,38 @@ export class CurationFeed {
       }
       wrap.appendChild(btn);
     }
-    return wrap;
+    const holder = document.createElement("div");
+    holder.appendChild(wrap);
+    const help = this.renderGestureHelp(offered, kind);
+    if (help) holder.appendChild(help);
+    return holder;
+  }
+
+  /**
+   * "What do these do?": one line per offered gesture. A tooltip is invisible
+   * on touch, and "Still true" vs "Snooze" is the choice the curator has to
+   * make, so the meanings are one tap away on every card.
+   */
+  private renderGestureHelp(offered: string[], kind: string): HTMLElement | null {
+    const rows = offered
+      .filter((g) => !this.readOnly && gestureAvailability(g, kind).kind === "v1")
+      .map((g) => [gestureLabel(g, kind), gestureHint(g, kind)] as const)
+      .filter(([, hint]) => hint);
+    if (rows.length === 0) return null;
+    const details = document.createElement("details");
+    details.className = "gesture-help";
+    const summary = document.createElement("summary");
+    summary.textContent = "What do these do?";
+    const dl = document.createElement("dl");
+    for (const [label, hint] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = hint;
+      dl.append(dt, dd);
+    }
+    details.append(summary, dl);
+    return details;
   }
 
   // --- Swipe --------------------------------------------------------------
@@ -423,10 +492,15 @@ export class CurationFeed {
     el.addEventListener("pointerup", onEnd);
   }
 
-  /** Drop the current card and render the next (local advance, no server write). */
-  private advance(el?: HTMLElement): void {
+  /**
+   * Drop the current card and render the next. `resolved` is true when a
+   * gesture wrote to the engine (the card left the backlog too), false for a
+   * local skip in read-only mode (it will be back on the next fetch).
+   */
+  private advance(el?: HTMLElement, resolved = false): void {
     if (el) el.style.opacity = "0";
     this.cards.shift();
+    if (resolved) this.openCount = Math.max(this.openCount - 1, this.cards.length);
     this.render();
   }
 
@@ -440,7 +514,7 @@ export class CurationFeed {
     try {
       const handled = await this.runGesture(gesture, card);
       if (handled) {
-        this.advance(el);
+        this.advance(el, true);
       } else {
         el.style.transform = "";
       }
@@ -461,37 +535,68 @@ export class CurationFeed {
     const client = this.deps.client;
     const ids = card.particle_ids ?? [];
     switch (gesture) {
+      case "resolve":
       case "comment": {
-        if (ids.length === 0) return false;
-        const out = await openSheet({
-          title: "Comment / resolve",
-          message:
-            "Resolve the inconsistency: pick how to treat the two beliefs and add a note.",
-          fields: [
-            {
-              name: "action",
-              label: "Action (PREFER_A / PREFER_B / BOTH_VALID / DEFER)",
-              type: "text",
-              placeholder: "DEFER",
-              value: "DEFER",
-            },
-            { name: "note", label: "Note", type: "textarea" },
-          ],
-          confirmLabel: "Submit",
-        });
-        if (!out) return false;
+        // Resolve the INCONSISTENCY behind the card. The review
+        // route takes the record's id, never a member belief's (which 404s).
+        // `comment` is the name an engine before 1.162 sends for the same thing.
+        const conflict = card.conflict;
+        const inconsistencyId = card.inconsistency_id ?? conflict?.inconsistency_id;
+        if (!inconsistencyId) {
+          this.root.prepend(
+            banner("info", "This card names no INCONSISTENCY to resolve; snooze or affirm it instead."),
+          );
+          return false;
+        }
         if (!this.deps.reviewerId) {
           throw new ApiError(
             "not-configured",
-            "Set a reviewer id in settings before commenting.",
+            "Set a reviewer id in settings before resolving.",
           );
         }
-        const action = (out.action || "DEFER") as
-          | "PREFER_A"
-          | "PREFER_B"
-          | "BOTH_VALID"
-          | "DEFER";
-        await client.review(ids[0], action, this.deps.reviewerId, out.note || undefined);
+        const quote = (b: ParticleBrief | null | undefined): string =>
+          b ? `“${truncate(b.content ?? "", 90)}”` : "(no longer in the store)";
+        // Offer exactly the engine's `resolve_actions` (PARITY rule 3): it
+        // withholds "Keep A" when A is no longer active, for instance, since
+        // that choice would close the conflict with neither claim standing.
+        // An older engine sends none, so every action is offered as before.
+        const offered = card.resolve_actions ?? [
+          "PREFER_A",
+          "PREFER_B",
+          "BOTH_VALID",
+          "DISCARD",
+          "DEFER",
+        ];
+        const options = resolveOptions(conflict).filter((o) => offered.includes(o.value));
+        const withheld = RESOLVE_OPTIONS.filter(
+          (o) => o.value !== "DEFER" && !offered.includes(o.value),
+        );
+        const note = withheld.map((o) => `\n\n${withheldNote(o, conflict)}`).join("");
+        const out = await openSheet({
+          title: "Resolve the conflict",
+          message:
+            `A: ${quote(conflict?.a)}\n` +
+            `B: ${quote(conflict?.b)}` +
+            note +
+            (card.resolve_actions ? "\n\nTo decide later, cancel and snooze the card." : ""),
+          fields: [
+            {
+              name: "action",
+              label: "Resolution",
+              type: "choice",
+              options,
+            },
+            { name: "note", label: "Note (optional)", type: "textarea" },
+          ],
+          confirmLabel: "Resolve",
+        });
+        if (!out || !out.action) return false;
+        await client.review(
+          inconsistencyId,
+          out.action as ResolutionAction,
+          this.deps.reviewerId,
+          out.note || undefined,
+        );
         return true;
       }
       case "merge": {
@@ -559,8 +664,8 @@ export class CurationFeed {
         return true;
       }
       case "assign-subject": {
-        // attach a subject to a NO_SUBJECT orphan via a
-        // provenance-preserving operator-supersede. POST /particles/{id}/subjects.
+        // Attach a subject to a NO_SUBJECT orphan, in place.
+        // POST /particles/{id}/subjects.
         if (ids.length === 0) return false;
         const out = await openSheet({
           title: "Assign subject",
@@ -628,6 +733,19 @@ export class CurationFeed {
       }
       case "reindex": {
         await client.reindex();
+        return true;
+      }
+      case "relink": {
+        // one batch over every recoverable orphan. Preview first,
+        // then confirm, the way whole-source retract shows its blast radius.
+        const plan = await client.relinkGated(true);
+        const ok = await confirmSheet(
+          "Link subjects",
+          `Link ${plan.recoverable} belief(s) to the project-scoped subjects they name? Nothing else about them changes.`,
+          "Link",
+        );
+        if (!ok) return false;
+        await client.relinkGated(false);
         return true;
       }
       case "affirm": {
@@ -717,14 +835,165 @@ function renderBrief(b: ParticleBrief): HTMLElement {
   if (typeof b.effective_confidence === "number") {
     bits.push(`conf ${b.effective_confidence.toFixed(2)}`);
   }
-  if (b.status) bits.push(b.status);
+  if (b.status) bits.push(statusText(b.status, b.status_reason));
+  if (b.asserted_at) bits.push(`asserted ${String(b.asserted_at).slice(0, 10)}`);
   if (bits.length) {
     const meta = document.createElement("div");
     meta.className = "particle-meta";
     meta.textContent = bits.join(" · ");
     item.appendChild(meta);
   }
+  // The raw reason stays above, verbatim; this is its plain reading.
+  const note = reasonNote(b.status_reason);
+  if (note) {
+    const why = document.createElement("div");
+    why.className = "particle-meta";
+    why.textContent = `${note[0].toUpperCase()}${note.slice(1)}.`;
+    item.appendChild(why);
+  }
+  // Where it came from: without a subject, the source is the only context.
+  if (b.source_uri) {
+    const src = document.createElement("div");
+    src.className = "particle-meta";
+    src.appendChild(document.createTextNode("source: "));
+    if (/^https?:\/\//.test(b.source_uri)) {
+      const a = document.createElement("a");
+      a.href = b.source_uri;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = b.source_uri;
+      src.appendChild(a);
+    } else {
+      src.appendChild(document.createTextNode(b.source_uri));
+    }
+    item.appendChild(src);
+  }
   return item;
+}
+
+/**
+ * Both sides of an INCONSISTENCY, labelled A and B in the order the Resolve
+ * sheet's "Keep A" / "Keep B" name them. On a contested card the card's own
+ * belief is outlined so the curator knows which side the card is about. A
+ * census record's further members follow their side.
+ */
+function renderConflict(conflict: ConflictBrief, flaggedIds: string[]): Node[] {
+  const nodes: Node[] = [];
+  const sides: [string, ParticleBrief | null | undefined][] = [
+    ["A", conflict.a],
+    ...(conflict.further_a ?? []).map((b): [string, ParticleBrief] => ["A", b]),
+    ["B", conflict.b],
+    ...(conflict.further_b ?? []).map((b): [string, ParticleBrief] => ["B", b]),
+  ];
+  for (const [side, brief] of sides) {
+    const label = document.createElement("div");
+    label.className = "side-label";
+    const flagged = !!brief && flaggedIds.includes(brief.particle_id);
+    label.textContent = flagged ? `Claim ${side} · this card's belief` : `Claim ${side}`;
+    nodes.push(label);
+    if (brief) {
+      const el = renderBrief(brief);
+      if (flagged) el.classList.add("flagged");
+      nodes.push(el);
+    } else {
+      const gone = document.createElement("div");
+      gone.className = "particle-meta";
+      gone.textContent = "No longer in the store.";
+      nodes.push(gone);
+    }
+  }
+  return nodes;
+}
+
+/** The resolve sheet's choices, in menu order; filtered per card. */
+const RESOLVE_OPTIONS: { value: string; label: string; detail: string }[] = [
+  {
+    value: "PREFER_A",
+    label: "Keep A",
+    detail: "A is right. B is demoted, and A's source may gain trust over B's.",
+  },
+  {
+    value: "PREFER_B",
+    label: "Keep B",
+    detail: "B is right. A is demoted, and B's source may gain trust over A's.",
+  },
+  {
+    value: "BOTH_VALID",
+    label: "Both valid",
+    detail: "They do not really conflict. Both stay, and the conflict closes.",
+  },
+  {
+    value: "DISCARD",
+    label: "Discard both",
+    detail: "Neither is worth keeping. Both are retracted.",
+  },
+  {
+    value: "DEFER",
+    label: "Decide later",
+    detail: "Record a note and leave the conflict open.",
+  },
+];
+
+type SideFate = "active" | "restored" | "inactive";
+
+/** What a resolution that keeps this claim does to it: an ACTIVE claim stays,
+ * a quarantined one becomes ACTIVE, and any other inactive claim stays as it is
+ * (review never re-promotes a demoted claim). */
+function fateOf(b: ParticleBrief | null | undefined): SideFate {
+  if (!b || b.status === "ACTIVE") return "active";
+  return isQuarantined(b.status, b.status_reason) ? "restored" : "inactive";
+}
+
+/** RESOLVE_OPTIONS with "Keep B" and "Both valid" worded for this record's
+ * claims, since what they do depends on whether each side is ACTIVE. */
+function resolveOptions(
+  conflict: ConflictBrief | null | undefined,
+): { value: string; label: string; detail: string }[] {
+  const a = fateOf(conflict?.a);
+  const b = fateOf(conflict?.b);
+  const fate = (side: string, f: SideFate): string =>
+    f === "active"
+      ? `${side} stays active.`
+      : f === "restored"
+        ? `${side} becomes an active belief.`
+        : `${side} stays inactive.`;
+  return RESOLVE_OPTIONS.map((o) => {
+    if (o.value === "PREFER_B" && (a !== "active" || b === "restored")) {
+      const kept = b === "restored" ? "B is right and becomes an active belief." : "B is right.";
+      const lost = a === "active" ? "A is demoted" : "A stays inactive";
+      return { ...o, detail: `${kept} ${lost}, and B's source may gain trust over A's.` };
+    }
+    if (o.value === "BOTH_VALID" && (a !== "active" || b !== "active")) {
+      return {
+        ...o,
+        detail: `They do not really conflict, and the conflict closes. ${fate("A", a)} ${fate("B", b)}`,
+      };
+    }
+    return o;
+  });
+}
+
+/** Why one resolution is withheld, naming the claim's recorded status. */
+function withheldNote(
+  option: { value: string; label: string },
+  conflict: ConflictBrief | null | undefined,
+): string {
+  const side = option.value === "PREFER_A" ? "A" : "B";
+  const brief = side === "A" ? conflict?.a : conflict?.b;
+  if (!brief) {
+    return `Not offered: ${option.label}. Claim ${side} is no longer in the store.`;
+  }
+  const why = reasonNote(brief.status_reason);
+  return (
+    `Not offered: ${option.label}. Claim ${side} is ` +
+    `${statusText(brief.status, brief.status_reason)}` +
+    (why ? ` (${why})` : "") +
+    ", and resolving this conflict cannot make it active again."
+  );
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 /**

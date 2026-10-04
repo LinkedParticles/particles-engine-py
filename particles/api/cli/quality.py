@@ -10,6 +10,8 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.client import get_backend
+from particles.llm.usage import render_store_spend_line
+from particles.operations.curation.precision import render_precision_lines
 
 
 @app.command("quality")
@@ -18,7 +20,9 @@ def quality_cmd() -> None:
 
     \b
     Displays calibration source distribution, corpus snapshot status,
-    and subject coverage metrics. No LLM calls, just an instant read from the DB.
+    subject coverage metrics, recorded LLM spend, and the curation queue's
+    precision over the default window. No LLM calls, just an instant read
+    from the DB.
     For full structural and semantic diagnostics use: particles lint
     """
     report = run(get_backend().quality())
@@ -70,3 +74,17 @@ def quality_cmd() -> None:
         typer.echo(f"    {stamp:<26} {count:>6,}")
     if not annotated:
         typer.echo("    (none yet — run: particles structure)")
+
+    # list price over recorded token counts, since the first
+    # recorded run; absent until a run has recorded usage.
+    if report.llm_spend is not None:
+        typer.echo(f"\n{render_store_spend_line(report.llm_spend)}")
+
+    # how often the curation queue was right over the default window
+    # (curation.precision_window_days); absent until the store has a collection
+    # or a gesture. `particles curate --precision` prints the full report.
+    if report.curation_precision is not None:
+        typer.echo("")
+        for line in render_precision_lines(report.curation_precision, meanings=False):
+            typer.echo(line)
+        typer.echo("  Full report with what each outcome means: particles curate --precision")

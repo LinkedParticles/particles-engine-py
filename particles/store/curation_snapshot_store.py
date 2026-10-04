@@ -47,13 +47,18 @@ log = logging.getLogger(__name__)
 
 
 class CollectionScope(StrEnum):
-    """Whether a build's finders saw the whole store or only the delta.
+    """Whether a build's finders saw the whole store, only the delta, or nothing.
 
-    Mirrors the scope of the run that produced the collection.
+    A build's overall ``scope`` mirrors the scope of the run that
+    produced the collection, and is ``store`` or ``delta``. ``carried`` appears
+    only in the per-kind map: the kind's finder did not run in this build (the
+    contradiction probe with the semantic finders off), so the prior
+    collection's cards of that kind carry forward.
     """
 
     STORE = "store"
     DELTA = "delta"
+    CARRIED = "carried"
 
 
 class CurationSnapshotRow(Base):
@@ -122,6 +127,18 @@ async def latest_snapshot(session: AsyncSession) -> CurationSnapshotRow | None:
         select(CurationSnapshotRow).order_by(CurationSnapshotRow.built_at.desc()).limit(1)
     )
     return result.scalars().first()
+
+
+async def list_snapshots(session: AsyncSession) -> list[CurationSnapshotRow]:
+    """Every retained collection, newest first (the ring ``write_snapshot`` prunes to).
+
+    The queue precision report reads all of them: the newest is the
+    open set, and a card in an older one that is gone from the newest expired.
+    """
+    result = await session.execute(
+        select(CurationSnapshotRow).order_by(CurationSnapshotRow.built_at.desc())
+    )
+    return list(result.scalars().all())
 
 
 async def get_snapshot(session: AsyncSession, snapshot_id: str) -> CurationSnapshotRow | None:

@@ -29,6 +29,12 @@ from typing import Any
 
 import yaml
 
+from particles.benchmark.resolution import (
+    GOLD_SUBJECTS_KEY,
+    GoldSubject,
+    GoldSubjectError,
+    parse_gold_subjects,
+)
 from particles.benchmark.schema import (
     BenchmarkCase,
     BenchmarkSuite,
@@ -54,6 +60,10 @@ _SUITE_KEYS = {
     "published_by",
     "published_at",
 }
+# Non-normative root-level extensions the reference loader reads. Recognised
+# rather than warned about; a runner that predates them ignores them, which
+# is why they live at the root and never inside ``cases[]``.
+_EXTENSION_KEYS = {GOLD_SUBJECTS_KEY}
 _CASE_KEYS = {"case_id", "fixture", "source_snapshot", "inline_content", "expected"}
 _EXPECTED_KEYS = {"content", "confidence_min", "uncertainty_nature", "required"}
 
@@ -153,7 +163,15 @@ def load_suite(suite_path: Path) -> BenchmarkSuite:
     every field validated, every ``fixture`` reference *not yet*
     resolved (the runner does that against a fixture directory it
     knows about). The loader's job is pure structural validation.
+
+    A suite whose ``gold_subjects`` block is malformed fails here too, so
+    discovery skips it rather than running it with its resolution gold
+    silently dropped. :func:`load_suite_and_gold` returns that block.
     """
+    return _load(suite_path)[0]
+
+
+def _load(suite_path: Path) -> tuple[BenchmarkSuite, list[GoldSubject]]:
     if not suite_path.exists():
         raise SuiteLoadError(f"Suite file not found: {suite_path}")
     try:
@@ -163,7 +181,7 @@ def load_suite(suite_path: Path) -> BenchmarkSuite:
     if not isinstance(raw, dict):
         raise SuiteLoadError(f"{suite_path.name}: top-level must be a mapping")
 
-    extra = set(raw) - _SUITE_KEYS
+    extra = set(raw) - _SUITE_KEYS - _EXTENSION_KEYS
     if extra:
         log.warning(
             "Benchmark suite %s carries unrecognised root-level field(s) %s; "
@@ -196,7 +214,7 @@ def load_suite(suite_path: Path) -> BenchmarkSuite:
         else:
             raise SuiteLoadError(f"{suite_path.name}: published_at must be string or datetime")
 
-    return BenchmarkSuite(
+    suite = BenchmarkSuite(
         suite_id=str(_require(raw, "suite_id", suite_path.name)),
         name=str(_require(raw, "name", suite_path.name)),
         version=str(_require(raw, "version", suite_path.name)),
@@ -207,6 +225,54 @@ def load_suite(suite_path: Path) -> BenchmarkSuite:
         published_by=str(raw.get("published_by", "")),
         published_at=published_at,
     )
+    try:
+        gold = parse_gold_subjects(
+            raw.get(GOLD_SUBJECTS_KEY),
+            {c.case_id: [e.content for e in c.expected] for c in cases},
+            suite_path.name,
+        )
+    except GoldSubjectError as exc:
+        raise SuiteLoadError(str(exc)) from exc
+    return suite, gold
+
+
+def load_suite_and_gold(suite_path: Path) -> tuple[BenchmarkSuite, list[GoldSubject]]:
+    """Read one suite YAML and return it with its gold subjects.
+
+    The gold subjects ride a non-normative root-level key, so they come back
+    beside the frozen :class:`BenchmarkSuite` rather than inside it. A suite
+    with no such key returns an empty list.
+    """
+    return _load(suite_path)
+
+
+def discover_gold_subjects(suites_dir: Path) -> dict[str, list[GoldSubject]]:
+    """Gold subjects of every loadable suite under ``suites_dir``, by suite id.
+
+    Mirrors :func:`discover_suites`: a file that fails to load is skipped
+    (that function already logged it), and a suite with no gold subjects is
+    absent from the result.
+    """
+    out: dict[str, list[GoldSubject]] = {}
+    for entry in _suite_files(suites_dir):
+        try:
+            suite, gold = _load(entry)
+        except SuiteLoadError:
+            continue
+        if gold:
+            out[suite.suite_id] = gold
+    return out
+
+
+def _suite_files(suites_dir: Path) -> Iterator[Path]:
+    if not suites_dir.exists():
+        return
+    for entry in sorted(suites_dir.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() not in {".yaml", ".yml"}:
+            continue
+        if entry.name.startswith(".") or entry.name.startswith("__"):
+            continue
+        yield entry
 
 
 def discover_suites(suites_dir: Path) -> Iterator[BenchmarkSuite]:
@@ -217,13 +283,7 @@ def discover_suites(suites_dir: Path) -> Iterator[BenchmarkSuite]:
     not prevent the operator from running the reference suites that do
     parse. Hidden files and the ``__pycache__`` sentinel are skipped.
     """
-    if not suites_dir.exists():
-        return
-    for entry in sorted(suites_dir.iterdir()):
-        if not entry.is_file() or entry.suffix.lower() not in {".yaml", ".yml"}:
-            continue
-        if entry.name.startswith(".") or entry.name.startswith("__"):
-            continue
+    for entry in _suite_files(suites_dir):
         try:
             yield load_suite(entry)
         except SuiteLoadError as exc:

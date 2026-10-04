@@ -17,7 +17,12 @@ A claim renders *contested* iff at least one of three named bases fires (§1):
   threshold).
 - ``inconsistency`` — an open INCONSISTENCY particle references
   the claim (``get_inconsistency_backrefs``). The badge subsumes the existing
-  marker; the INCONSISTENCY id remains the basis's drill-down payload.
+  marker; the INCONSISTENCY id remains the basis's drill-down payload. The
+  basis fires only when the record's pair is adjudicable under the viewer's
+  modality lens: the claim and at least one other member of the record must
+  read as adjudicable. With no adopted modality rule the
+  reading is the stored default, so an operator verdict that withdrew
+  adjudication after the record was filed clears the basis too.
 
 Absence semantics (§3): a basis that *cannot be measured* is absent from the
 composition, not a non-firing vote — divergence is absent below two policies.
@@ -41,10 +46,21 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import ContestedBadge, ContestednessReading, Particle, RelationType
+from particles.core.schema import (
+    ContestedBadge,
+    ContestednessReading,
+    Particle,
+    ProvenanceRefType,
+    RelationType,
+)
 from particles.core.stance import stance_holder
 from particles.core.status import Status
-from particles.store.particle_store import get_inconsistency_backrefs, get_particle
+from particles.operations.modality import ModalityLens, load_modality_lens
+from particles.store.particle_store import (
+    get_inconsistency_backrefs,
+    get_particle,
+    get_particles_by_ids,
+)
 from particles.store.relation_store import get_co_evidential_group, get_incoming
 
 from .stance import AGREEMENT_CAVEAT
@@ -105,12 +121,55 @@ async def _dispute_presence(session: AsyncSession, targets: list[Particle]) -> l
     return [bool(ids & live) for ids in per_target]
 
 
+async def _adjudicable_backrefs(
+    session: AsyncSession,
+    targets: list[Particle],
+    backrefs: dict[str, str],
+    lens: ModalityLens,
+) -> dict[str, str]:
+    """Drop the backrefs whose record's pair the viewer's lens reads as not adjudicable.
+
+    A target keeps its INCONSISTENCY backref when it reads adjudicable and,
+    if the record names other members, at least one of them does too.
+    The readings come from the viewer's lens, or from the stored
+    values when no lens says anything, which is how an operator verdict made
+    after the record was filed reaches the badge. Read-time only: nothing is
+    written, and the record stays open for every other viewer.
+    """
+    inc_ids = {backrefs[t.id] for t in targets if t.id in backrefs}
+    if not inc_ids:
+        return backrefs
+    records = await get_particles_by_ids(session, sorted(inc_ids))
+    members_of = {
+        inc_id: [
+            ref.corpus_entry_id for ref in rec.provenance if ref.type == ProvenanceRefType.PARTICLE
+        ]
+        for inc_id, rec in records.items()
+    }
+    member_ids = {m for members in members_of.values() for m in members}
+    member_particles = await get_particles_by_ids(session, sorted(member_ids))
+    readings = await lens.readings(session, list(member_particles.values()) + targets)
+
+    kept = dict(backrefs)
+    for t in targets:
+        inc_id = backrefs.get(t.id)
+        if inc_id is None:
+            continue
+        others = [m for m in members_of.get(inc_id, []) if m != t.id and m in readings]
+        if not readings[t.id].adjudicable or (
+            others and not any(readings[m].adjudicable for m in others)
+        ):
+            kept.pop(t.id, None)
+    return kept
+
+
 async def compute_contested_badges(
     session: AsyncSession,
     targets: list[Particle],
     *,
     backrefs: dict[str, str] | None = None,
     readings: list[ContestednessReading] | None = None,
+    modality_lens: ModalityLens | None = None,
 ) -> list[ContestedBadge | None]:
     """Compose the per-claim contested badge for each target.
 
@@ -121,12 +180,16 @@ async def compute_contested_badges(
     (``include_contestedness``); an *empty* list means the divergence basis is
     absent (fewer than two policies, §3), while ``None`` means "not computed"
     and the divergence path runs here — skipped for free when the viewer has
-    fewer than two policies.
+    fewer than two policies. ``modality_lens`` may be supplied when the caller
+    already loaded the viewer's lens; ``None`` loads it here, and an empty lens
+    costs nothing further.
     """
     if not targets:
         return []
     if backrefs is None:
         backrefs = await get_inconsistency_backrefs(session)
+    lens = modality_lens if modality_lens is not None else await load_modality_lens(session)
+    backrefs = await _adjudicable_backrefs(session, targets, backrefs, lens)
     disputes = await _dispute_presence(session, targets)
 
     if readings is None:

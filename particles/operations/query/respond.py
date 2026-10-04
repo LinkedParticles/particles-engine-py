@@ -31,6 +31,8 @@ from particles.core.schema import (
     ParticleType,
 )
 
+from .grounding import GROUNDED_RULES
+
 log = logging.getLogger(__name__)
 
 # F9 hardening: the trusted instructions live in the ``system`` turn; the
@@ -99,12 +101,20 @@ _AUDIENCE_INSTRUCTIONS: dict[AudienceHint, str] = {
 }
 
 
-def _particle_line(p: Particle, ec: float, audience: AudienceHint, *, indent: bool = False) -> str:
+def _particle_line(
+    p: Particle,
+    ec: float,
+    audience: AudienceHint,
+    *,
+    indent: bool = False,
+    handle: str | None = None,
+) -> str:
     """One particle bullet: content + modality marker + audience-conditional tags.
 
     The ``<MODALITY>`` marker is always present — it drives the
     responder's rendering voice — while the nature / confidence / provenance tags
     stay audience-conditional. ``indent`` nests the line under a narrative header.
+    ``handle`` leads the line with the id a grounded answer cites.
     """
     nature_tag = f"[{p.uncertainty_nature}]" if audience == AudienceHint.EXPERT else ""
     conf_tag = (
@@ -117,6 +127,8 @@ def _particle_line(p: Particle, ec: float, audience: AudienceHint, *, indent: bo
         pref = p.provenance[0]
         prov_tag = f" [source: {pref.corpus_entry_id}/{pref.snapshot_id}]"
     body = f"{p.content} <{p.assertion_modality.value}>{nature_tag}{conf_tag}{prov_tag}".strip()
+    if handle is not None:
+        body = f"[{handle}] {body}"
     return ("    - " if indent else "- ") + body
 
 
@@ -130,7 +142,15 @@ async def _generate_response(
     *,
     narrative_constituents: dict[str, list[Particle]] | None = None,
     as_of: datetime | None = None,
+    handles: dict[str, str] | None = None,
 ) -> str:
+    """Compose the NL answer; with ``handles`` it is a grounded one.
+
+    ``handles`` maps each particle the composer is shown to the id it cites
+    (:func:`~particles.operations.query.grounding.particle_handles`); the lines
+    carry those handles and the system turn carries the grounded rules. The
+    reply is returned raw, tags included, for the caller to parse.
+    """
     if not particles:
         if as_of is not None:
             # a T before the store's first assertion (or with no
@@ -149,12 +169,22 @@ async def _generate_response(
             # expand a narrative hit — its label as a header, then its
             # constituents in SEQUENCE_IN order, so the answer draws on the
             # memory's actual claims rather than the one-line label.
-            particle_lines.append(f"- Narrative — {p.content}:")
+            label = f"[{handles[p.id]}] " if handles else ""
+            particle_lines.append(f"- {label}Narrative — {p.content}:")
             particle_lines.extend(
-                _particle_line(c, c.confidence.value, audience, indent=True) for c in constituents
+                _particle_line(
+                    c,
+                    c.confidence.value,
+                    audience,
+                    indent=True,
+                    handle=handles.get(c.id) if handles else None,
+                )
+                for c in constituents
             )
         else:
-            particle_lines.append(_particle_line(p, ec, audience))
+            particle_lines.append(
+                _particle_line(p, ec, audience, handle=handles.get(p.id) if handles else None)
+            )
 
     particle_list = "\n".join(particle_lines)
     audience_instructions = _AUDIENCE_INSTRUCTIONS[audience]
@@ -184,6 +214,8 @@ async def _generate_response(
             f"beliefs that held at that instant; some may have been "
             f"superseded or retracted since."
         )
+    if handles:
+        system_body += "\n" + GROUNDED_RULES
     system = system_body + "\n\n" + data_fence_instruction(nonce)
     user = (
         f"Question:\n{fence(question, nonce, label='question')}\n\n"

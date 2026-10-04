@@ -50,8 +50,8 @@ from particles.render.article_synthesis import (
 )
 from particles.render.markdown import (
     DisambiguationGroup,
+    MarkdownExportLedger,
     SubjectNaming,
-    atomic_write_text,
     build_narrative_naming,
     build_subject_naming,
     disambiguation_name,
@@ -534,6 +534,24 @@ def _render_disambiguation_note(
 # ---------------------------------------------------------------------------
 
 
+# A note a pre-manifest export wrote carries a ``particles/<kind>`` tag in its
+# frontmatter: block form (``  - particles/subject``) or the index's flow form
+# (``tags: [particles/index]``).
+_LEGACY_EXPORT_TAG_RE = re.compile(r"^(?:\s*-\s*|tags:\s*\[)particles/[a-z]", re.MULTILINE)
+
+
+def _is_legacy_export_note(text: str) -> bool:
+    """Whether ``text`` is a note an export wrote before the manifest existed.
+
+    Adopts an existing vault export into the ledger on its first
+    run under the new release, so its stale notes are still pruned.
+    """
+    if not text.startswith("---\n"):
+        return False
+    close = text.find("\n---", 4)
+    return close != -1 and bool(_LEGACY_EXPORT_TAG_RE.search(text[4 : close + 1]))
+
+
 async def export_vault(
     session: AsyncSession,
     output_dir: Path,
@@ -543,6 +561,7 @@ async def export_vault(
     min_particle_confidence: float = 0.0,
     invalidate_stale_links: bool = False,
     include_non_asserted: bool = False,
+    force: bool = False,
 ) -> ObsidianSummary:
     """Export the particle store as an Obsidian vault.
 
@@ -568,11 +587,28 @@ async def export_vault(
     runs against the filtered set per the cross-exporter contract, so
     a subject with too few high-confidence particles is suppressed
     rather than rendered as a thin note.
+
+    Ownership: the export keeps a manifest of the notes it wrote
+    (:class:`~particles.render.markdown.MarkdownExportLedger`) and prunes or
+    overwrites only those, so it can share a vault with the user's own
+    notes. The first export into a directory holding Markdown it did not
+    write raises :class:`~particles.render.markdown.ExportTargetNotOwnedError`
+    before writing anything, unless ``force``; ``force`` also lets a note
+    overwrite a foreign file at its path, which is otherwise skipped.
     """
     from particles.corpus.store import get_entry_uri_map
     from particles.store.particle_store import get_particles_by_status
     from particles.store.subject_store import list_all_subjects
 
+    # claim the target before writing anything. Refuses a
+    # never-exported directory that already holds the user's notes.
+    ledger = MarkdownExportLedger.claim(
+        output_dir,
+        exporter="obsidian",
+        recursive=True,
+        force=force,
+        legacy_marker=_is_legacy_export_note,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Fetch the full subject set once and compute the
@@ -658,6 +694,7 @@ async def export_vault(
             known_names,
             hash_field="article_input_hash",
             recursive=True,
+            only=ledger.owned,
         )
         stale_link_articles_invalidated = len(invalidated_paths)
         # also drop the shared DB cache entries for any
@@ -701,14 +738,6 @@ async def export_vault(
             if isinstance(cached, str):
                 # Relative to output_dir so nested github.com/foo.md works.
                 prior_synthesis_bodies[str(existing.relative_to(output_dir))] = (cached, text)
-
-    # Track every .md file this run intends to leave on disk so the
-    # post-write prune pass below can remove only files that won't be
-    # regenerated. Replaces the pre-0.42.4 blanket wipe that deleted
-    # every .md *before* writing — robust against suppressed subjects
-    # but destructive on interrupt and a constant source of Obsidian
-    # file-watcher churn even when nothing changed semantically.
-    written_paths: set[Path] = set()
 
     # entry_id → uri_r — used to render `> **Source:** [...](url)` on each particle
     entry_uri_map = await get_entry_uri_map(session)
@@ -781,14 +810,12 @@ async def export_vault(
     files_written = 0
 
     # Write the synthetic "Coin" meta-node so Instance of: [[Coin]] resolves
-    coin_meta = output_dir / "Coin.md"
-    atomic_write_text(
-        coin_meta,
+    if ledger.write(
+        output_dir / "Coin.md",
         "---\ntags:\n  - particles/meta\n---\n# Coin\n\n"
         "Meta-node: all coin subjects link here via `Instance of`.\n",
-    )
-    written_paths.add(coin_meta.resolve())
-    files_written += 1
+    ):
+        files_written += 1
 
     # Subjects eligible for export (pass min_particles). Used to suppress wikilinks
     # to subjects that will never have a file — prevents Obsidian phantom nodes.
@@ -959,8 +986,8 @@ async def export_vault(
                 path,
             )
             continue
-        atomic_write_text(path, note)
-        written_paths.add(path.resolve())
+        if not ledger.write(path, note):
+            continue
         files_written += 1
         log.debug("Wrote %s (%s)", path.name, subject.subject_class or "generic")
 
@@ -984,9 +1011,8 @@ async def export_vault(
                 disamb_path,
             )
             continue
-        atomic_write_text(disamb_path, disamb_note)
-        written_paths.add(disamb_path.resolve())
-        files_written += 1
+        if ledger.write(disamb_path, disamb_note):
+            files_written += 1
 
     # one note per ACTIVE NARRATIVE under Narratives/, rendered as
     # cited prose via the path. NARRATIVE particles are subject-less,
@@ -1040,28 +1066,29 @@ async def export_vault(
                     path,
                 )
                 continue
-            atomic_write_text(path, note)
-            written_paths.add(path.resolve())
+            if not ledger.write(path, note):
+                continue
             narrative_notes_written += 1
             files_written += 1
 
     index_content = _render_index(subjects, particle_counts, naming)
-    index_path = output_dir / "_index.md"
-    atomic_write_text(index_path, index_content)
-    written_paths.add(index_path.resolve())
-    files_written += 1
+    if ledger.write(output_dir / "_index.md", index_content):
+        files_written += 1
 
-    # Post-write prune (0.42.4): remove only .md files that this run did
-    # NOT write. Replaces the pre-write blanket wipe — an interrupted
-    # export now leaves the vault in a consistent state (every file is
-    # either freshly written or unchanged from before) instead of empty.
-    # Files outside the target set are subjects suppressed by min_links
-    # / min_particles / threshold filters or renamed since the last run.
-    from particles.render.markdown import prune_obsolete_markdown
-
-    files_pruned = prune_obsolete_markdown(output_dir, written_paths, recursive=True)
+    # Post-write prune (0.42.4, narrowed): remove the notes a
+    # previous run wrote that this run did not (subjects suppressed by the
+    # min_links / min_particles / threshold filters, or renamed). Files the
+    # export never wrote are never candidates. Then save the manifest.
+    files_pruned = ledger.finish()
     if files_pruned:
         log.info("Pruned %d obsolete .md file(s) from previous export", files_pruned)
+    if ledger.skipped:
+        log.warning(
+            "Skipped %d note(s) whose path holds a file this export did not write "
+            "(e.g. %s); pass --force to overwrite them",
+            len(ledger.skipped),
+            ledger.skipped[0].name,
+        )
 
     phantoms = sum(1 for c in particle_counts.values() if c == 0)
     return ObsidianSummary(

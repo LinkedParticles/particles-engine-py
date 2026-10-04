@@ -789,9 +789,25 @@ class TestNarrativePageExport:
         await _persist_subject_with_particles("Shared", ps)
         await _persist_narrative("A hard day.", ps)
 
-        async with session_scope() as session:
-            summary = await LogseqExporter().export(
-                session, tmp_path, with_synthesis=True, min_links=0
-            )
+        from unittest.mock import MagicMock
+
+        import anthropic
+
+        from particles.llm import set_client
+
+        # The subject article still synthesises under with_synthesis=True; only
+        # the narrative pages are knob-gated. Without this mock that one call
+        # reached the live API under the fake key above.
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.create = MagicMock(side_effect=RuntimeError("synthesis unavailable"))
+        set_client(client)
+        try:
+            async with session_scope() as session:
+                summary = await LogseqExporter().export(
+                    session, tmp_path, with_synthesis=True, min_links=0
+                )
+        finally:
+            set_client(None)
         assert summary.narrative_notes is None
         assert not (tmp_path / "pages" / "Narratives___A_hard_day.md").exists()

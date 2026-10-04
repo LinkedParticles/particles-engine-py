@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import typer
@@ -15,14 +15,18 @@ from particles.api.cli import app, run
 from particles.api.client import get_backend
 from particles.core.schema import Particle, ResolutionAction
 from particles.db import session_scope
+from particles.operations.review import prior_reviews
 
 
 @app.command("review")
 def review_cmd(
     particle_id: str | None = typer.Argument(None, help="INCONSISTENCY particle ID; omit to list"),
-    action: str | None = typer.Option(None, help="PREFER_A, PREFER_B, BOTH_VALID, DEFER"),
+    action: str | None = typer.Option(None, help="PREFER_A, PREFER_B, BOTH_VALID, DEFER, DISCARD"),
     bulk: str | None = typer.Option(None, "--bulk", help="Apply action to ALL pending conflicts"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview bulk action without committing"),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation a --bulk DISCARD asks for"
+    ),
     reviewer_id: str = typer.Option("cli-user", help="Reviewer identity"),
     domain: str = typer.Option("general", help="Domain for trust statement"),
     note: str | None = typer.Option(None, help="Optional reviewer note"),
@@ -36,10 +40,17 @@ def review_cmd(
         # Resolve a specific conflict
         particles review PARTICLE_ID --action PREFER_A
 
+        # Neither side is worth keeping: retract both, no trust verdict
+        particles review PARTICLE_ID --action DISCARD --note "session state"
+
         # Resolve all pending conflicts with one action
         particles review --bulk BOTH_VALID
         particles review --bulk PREFER_B          # prefer newer/structured source
         particles review --bulk BOTH_VALID --dry-run  # preview without committing
+        particles review --bulk DISCARD --dry-run     # list what would be retracted
+
+    A --bulk DISCARD lists every conflict with both sides and asks before it
+    retracts anything (skip the prompt with --yes). Retraction has no undo.
     """
     # Bulk resolution
     if bulk is not None:
@@ -47,10 +58,28 @@ def review_cmd(
             bulk_action = ResolutionAction(bulk)
         except ValueError:
             typer.echo(
-                f"Unknown action: {bulk!r}. Use PREFER_A, PREFER_B, BOTH_VALID, or DEFER.", err=True
+                f"Unknown action: {bulk!r}. Use PREFER_A, PREFER_B, BOTH_VALID, DEFER, or DISCARD.",
+                err=True,
             )
             raise typer.Exit(1)
-        particles_list = run(get_backend().review_list())
+        if bulk_action is ResolutionAction.DISCARD:
+            # The one bulk action that retracts beliefs, with no undo: show
+            # every conflict it would close, then ask.
+            items = run(_list_review_detail())
+            if not items:
+                typer.echo("No INCONSISTENCY particles pending review.")
+                return
+            _echo_items(items, hint=False)
+            verb = "would retract" if dry_run else "will retract"
+            typer.echo(f"DISCARD {verb} both sides of {len(items)} conflicts.")
+            if dry_run:
+                return
+            if not yes and not typer.confirm("Proceed?", default=False):
+                typer.echo("Aborted; nothing written.")
+                raise typer.Exit(1)
+            particles_list = [item.inconsistency for item in items]
+        else:
+            particles_list = run(get_backend().review_list())
         if not particles_list:
             typer.echo("No INCONSISTENCY particles pending review.")
             return
@@ -75,31 +104,7 @@ def review_cmd(
         if not items:
             typer.echo("No INCONSISTENCY particles pending review.")
             return
-        sep = "─" * 72
-        for i, item in enumerate(items, 1):
-            inc = item.inconsistency
-            pa = item.particle_a
-            pb = item.particle_b
-            typer.echo(sep)
-            typer.echo(f"[{i}/{len(items)}]  {inc.id[:8]}…")
-            if pa:
-                typer.echo(f"  A: {pa.content}")
-                typer.echo(f"     asserted_by: {pa.asserted_by}")
-                author_a = _format_author(item.author_a_id, item.author_a_role)
-                if author_a:
-                    typer.echo(f"     author:      {author_a}")
-            b_text = _parse_particle_b(inc.content)
-            if b_text:
-                b_asserted = pb.asserted_by if pb else "—"
-                typer.echo(f"  B: {b_text}")
-                typer.echo(f"     asserted_by: {b_asserted}")
-                author_b = _format_author(item.author_b_id, item.author_b_role)
-                if author_b:
-                    typer.echo(f"     author:      {author_b}")
-            typer.echo(
-                f"  → particles review {inc.id} --action [PREFER_A|PREFER_B|BOTH_VALID|DEFER]"
-            )
-        typer.echo(sep)
+        _echo_items(items, hint=True)
         typer.echo(f"{len(items)} conflicts pending review.")
         return
 
@@ -110,16 +115,85 @@ def review_cmd(
 
     from particles.api.cli._id_norm import normalise_particle_id
 
-    review = run(
-        get_backend().review_resolve(
-            normalise_particle_id(particle_id),
-            ResolutionAction(action),
-            reviewer_id,
-            domain,
-            note,
+    backend = get_backend()
+    target = normalise_particle_id(particle_id)
+    # Accept the short id the listing, `curate` and `particle show` print. A
+    # remote backend resolves ids server-side, so only a local one expands here.
+    if not backend.remote:
+        target = run(_resolve_local(target))
+    try:
+        review = run(
+            backend.review_resolve(target, ResolutionAction(action), reviewer_id, domain, note)
         )
-    )
+    except ValueError as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"Review {review.review_id} recorded: {action}")
+
+
+async def _resolve_local(id_prefix: str) -> str:
+    """Expand a particle id prefix against the local store, or exit."""
+    from particles.api.cli.particle import _resolve_particle_id
+
+    async with session_scope() as session:
+        return await _resolve_particle_id(session, id_prefix)
+
+
+def _echo_items(items: list[ReviewDetailItem], *, hint: bool) -> None:
+    """Print each conflict's two sides, as the listing and a bulk DISCARD show them."""
+    sep = "─" * 72
+    for i, item in enumerate(items, 1):
+        inc = item.inconsistency
+        pa = item.particle_a
+        pb = item.particle_b
+        typer.echo(sep)
+        typer.echo(f"[{i}/{len(items)}]  {inc.id[:8]}…")
+        census = _census_lines(inc.content)
+        if census:
+            # A census record names its claims by side; review
+            # resolves every member of a side at once.
+            typer.echo("  Two sources disagree (the nightly check; a second reading confirmed it).")
+            for line in census:
+                typer.echo(f"  {line}")
+            for prior in item.history:
+                typer.echo(f"  earlier: {prior}")
+            if hint:
+                typer.echo(
+                    f"  → particles review {inc.id}"
+                    " --action [PREFER_A|PREFER_B|BOTH_VALID|DEFER|DISCARD]"
+                    " (PREFER and DISCARD apply to every claim on a side)"
+                )
+            continue
+        if pa:
+            typer.echo(f"  A: {pa.content}")
+            typer.echo(f"     asserted_by: {pa.asserted_by}")
+            author_a = _format_author(item.author_a_id, item.author_a_role)
+            if author_a:
+                typer.echo(f"     author:      {author_a}")
+        b_text = _parse_particle_b(inc.content)
+        if b_text:
+            b_asserted = pb.asserted_by if pb else "—"
+            typer.echo(f"  B: {b_text}")
+            typer.echo(f"     asserted_by: {b_asserted}")
+            author_b = _format_author(item.author_b_id, item.author_b_role)
+            if author_b:
+                typer.echo(f"     author:      {author_b}")
+        if hint:
+            typer.echo(
+                f"  → particles review {inc.id}"
+                " --action [PREFER_A|PREFER_B|BOTH_VALID|DEFER|DISCARD]"
+            )
+    typer.echo(sep)
+
+
+def _census_lines(inc_content: str) -> list[str]:
+    """The side and reason lines of a census record's content, or ``[]`` for any other record."""
+    lines = inc_content.splitlines()
+    if not lines or "second reading confirmed it" not in lines[0]:
+        return []
+    return [
+        line for line in lines[1:] if line.startswith(("Side A:", "Side B:", "Second reading:"))
+    ]
 
 
 def _parse_particle_b(inc_content: str) -> str:
@@ -147,6 +221,9 @@ class ReviewDetailItem:
     author_a_role: str | None
     author_b_id: str | None
     author_b_role: str | None
+    #: Reviews left on the records this census record replaced,
+    #: one rendered line each.
+    history: list[str] = field(default_factory=list)
 
 
 def _format_author(author_id: str | None, author_role: str | None) -> str:
@@ -214,6 +291,11 @@ async def _list_review_detail() -> list[ReviewDetailItem]:
                 pb = await get_particle(session, particle_refs[1].corpus_entry_id)
             a_id, a_role = await _author_for_particle(session, pa)
             b_id, b_role = await _author_for_particle(session, pb)
+            history = [
+                f"{prior.action} on {prior.record_id[:8]}… ({prior.reviewed_at:%Y-%m-%d})"
+                + (f": {prior.note}" if prior.note else "")
+                for prior in await prior_reviews(session, inc)
+            ]
             result.append(
                 ReviewDetailItem(
                     inconsistency=inc,
@@ -223,6 +305,7 @@ async def _list_review_detail() -> list[ReviewDetailItem]:
                     author_a_role=a_role,
                     author_b_id=b_id,
                     author_b_role=b_role,
+                    history=history,
                 )
             )
         return result

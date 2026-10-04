@@ -18,9 +18,24 @@ sharing one promotion-shaped LLM budget (``max_promotions_per_run``):
 2. **Promotion** (§2) — cluster eligible specifics per subject (pairwise
    cosine ≥ ``cluster_similarity_threshold``, connected components, size ≥
    ``min_cluster_size``), synthesize one candidate claim per cluster, gate
-   it (entailment + dedup), then either assert it through the normal §6.6
+   it (premise scope + entailment + dedup), then either assert it through the normal §6.6
    ingest path (``mode: auto``) or record an ``ABSTRACTION_CANDIDATE``
    operator event for the curation queue (``mode: propose``, the default).
+
+**Premise-scope rule**. A promoted abstraction's text ranges over
+its observed premise set ("every backgrounded commit in this store", "the ten
+operators observed"), never over a kind or a population. Ten particles about
+ten members of a group support a claim about those ten; "most Xs are Y" is an
+induction the engine would be making and asserting, which is where a system
+encodes a bias of its own rather than importing a source's. The entailment
+judge has always rejected that leap by implication, since a population generic
+is not entailed by the conjunction of its premises. The rule is now explicit
+in three places: the synthesis prompt asks for premise-scoped text, the judge
+prompt names the kind-ranging quantifier as not entailed, and
+:func:`population_quantifier` rejects the plain cases deterministically before
+the judge call is spent, leaving the judge as the backstop. The rule binds the
+pass's own inductions only: a generic deposited from a source document is the
+source's claim and is extracted like any other.
 
 Every LLM call routes through the shared semantic seam
 (:func:`particles.operations._llm._llm_call`) with ``purpose="abstraction"``
@@ -33,7 +48,6 @@ verdict.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from collections import deque
@@ -44,6 +58,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.generics import population_quantifier
 from particles.core.schema import (
     Confidence,
     ContributorRef,
@@ -57,9 +72,18 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource, derive_abstraction_confidence
 from particles.core.stance import stance_holder
 from particles.core.status import Status, StatusReason
+from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.polarity import is_non_asserted
+from particles.llm.registry import LLMPurpose
 from particles.operations._llm import _llm_call
+from particles.operations.entailment import (
+    EntailmentRubric,
+    EntailmentVerdict,
+    entailment_prompt,
+    parse_entailment,
+    parse_json_object,
+)
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
     copy_particle_embedding,
@@ -93,15 +117,44 @@ _SYNTHESIS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_ENTAILMENT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "entailed": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": ["entailed"],
-    "additionalProperties": False,
-}
+#: ``reason`` precedes ``entailed`` so the verdict is decoded after the
+#: reasoning, not before it: a verdict-first reply commits to ``true`` and then
+#: argues itself out of it in ``reason`` (observed live on "Most operators use
+#: zsh", 2026-10-03). Strict-dialect providers emit properties in schema order;
+#: the Anthropic adapter ignores the schema, so the prompt names the same order.
+_ENTAILMENT_RUBRIC = EntailmentRubric(
+    instructions=(
+        "You are auditing a knowledge base. Decide whether the GENERAL claim "
+        "in the user message is fully entailed by the SPECIFIC claims taken "
+        "together — i.e. it asserts nothing beyond what they jointly support. "
+        "Over-generalization (a broader scope, a stronger quantifier, an "
+        "added causal link) is NOT entailed.\n"
+        "A claim about a kind or a population ('most Xs', 'Xs are', 'Xs "
+        "generally') is never entailed by claims about particular members, "
+        "however many there are: only a claim ranging over the observed "
+        "instances themselves can be. Citing the observations does not narrow "
+        "a kind: 'Xs do Y, as these four records show' still ranges over every "
+        "X and is NOT entailed, while 'the four Xs recorded do Y' is scoped to "
+        "the observed instances.\n"
+        "Detail loss also fails this gate: if a specific claim carries a date, "
+        "a quantity, or a version identifier and the general claim drops it or "
+        "replaces it with a vaguer stand-in ('recently' for a date, 'several' "
+        "for a count, 'a recent version' for a version), answer false — a "
+        "reader of the general claim alone could no longer recover what the "
+        "specifics said.\n"
+        "Write the reason first, then give the verdict it reaches. Return a "
+        'JSON object: {"reason": "...", "entailed": true|false}.'
+    ),
+    claim_heading="General claim",
+    claim_label="general",
+    premise_heading="Specific claim",
+    premise_label="specific",
+)
+_ENTAILMENT_SCHEMA: dict[str, Any] = _ENTAILMENT_RUBRIC.schema
+
+#: Reply budget for the entailment judge. Reason-first replies run longer than
+#: verdict-first ones, and a reply cut off before ``entailed`` has no verdict.
+_ENTAILMENT_MAX_TOKENS = 600
 
 _PARAPHRASE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -140,6 +193,9 @@ class AbstractionReport(BaseModel):
     promoted_particle_ids: list[str] = Field(default_factory=list)
     proposed_event_ids: list[str] = Field(default_factory=list)
     rejected_entailment: int = 0
+    # Candidates whose quantifier ranged over a kind or a population, caught by
+    # the deterministic pre-check before any judge call.
+    rejected_population_scope: int = 0
     rejected_duplicate: int = 0
     skipped_budget: int = 0  # eligible clusters left for the next cycle
     revalidation: RevalidationCounts = Field(default_factory=RevalidationCounts)
@@ -166,23 +222,8 @@ class _Budget:
 # ---------------------------------------------------------------------------
 
 
-def _parse_json_object(response: str | None) -> dict[str, Any] | None:
-    """Tolerantly isolate and parse one JSON object from an LLM reply."""
-    if not response:
-        return None
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("```", 2)[1] if text.count("```") >= 2 else text
-        text = text.removeprefix("json").strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    try:
-        raw: Any = json.loads(text[start : end + 1])
-    except (ValueError, TypeError):
-        return None
-    return raw if isinstance(raw, dict) else None
+#: Re-exported from the shared judge module, where it now lives.
+_parse_json_object = parse_json_object
 
 
 async def _synthesize_claim(premise_contents: list[str]) -> tuple[str, str] | None:
@@ -201,6 +242,14 @@ async def _synthesize_claim(premise_contents: list[str]) -> tuple[str, str] | No
         "Rules:\n"
         "- The general claim must be fully supported by the specific claims — "
         "never broader than the evidence.\n"
+        "- Scope the claim to the observed specifics, never to a kind or a "
+        "population. The specific claims are a finite set of observations; a "
+        "claim about the group their members belong to ('most Xs are Y', 'Xs "
+        "generally do Y', 'mammals bear live young') is an inductive leap they "
+        "do not support. Restrict the subject itself to the observed set, "
+        "rather than citing the observations in a trailing clause: 'the "
+        "backgrounded commits observed all failed at GPG signing', 'Alice, Bob "
+        "and Carol all prefer vim', 'the ten operators observed use zsh'.\n"
         "- Preserve discriminative detail: a vague summary that loses the "
         "actionable specifics is worse than no summary. Prefer 'X fails at "
         "the signing step; do Y' over 'there are issues with X'.\n"
@@ -235,43 +284,27 @@ async def _synthesize_claim(premise_contents: list[str]) -> tuple[str, str] | No
 
 async def _check_entailment(claim: str, premise_contents: list[str]) -> bool | None:
     """Is ``claim`` entailed by the conjunction of the premises? ``None`` = LLM failure."""
-    from particles.llm import data_fence_instruction, fence, make_nonce
-
-    nonce = make_nonce()
-    system = (
-        "You are auditing a knowledge base. Decide whether the GENERAL claim "
-        "in the user message is fully entailed by the SPECIFIC claims taken "
-        "together — i.e. it asserts nothing beyond what they jointly support. "
-        "Over-generalization (a broader scope, a stronger quantifier, an "
-        "added causal link) is NOT entailed.\n"
-        "Detail loss also fails this gate: if a specific claim carries a date, "
-        "a quantity, or a version identifier and the general claim drops it or "
-        "replaces it with a vaguer stand-in ('recently' for a date, 'several' "
-        "for a count, 'a recent version' for a version), answer false — a "
-        "reader of the general claim alone could no longer recover what the "
-        "specifics said.\n"
-        'Return a JSON object: {"entailed": true|false, "reason": "..."}.\n\n'
-        + data_fence_instruction(nonce)
-    )
-    user = f"General claim:\n{fence(claim, nonce, label='general')}\n\n" + "\n\n".join(
-        f"Specific claim {i + 1}:\n{fence(content, nonce, label=f'specific_{i + 1}')}"
-        for i, content in enumerate(premise_contents)
-    )
+    system, user = entailment_prompt(claim, premise_contents, rubric=_ENTAILMENT_RUBRIC)
     response = await _llm_call(
         user,
-        max_tokens=200,
+        max_tokens=_ENTAILMENT_MAX_TOKENS,
         system=system,
         response_schema=_ENTAILMENT_SCHEMA,
         purpose="abstraction",
     )
-    data = _parse_json_object(response)
-    if data is None or not isinstance(data.get("entailed"), bool):
+    parsed = parse_entailment(response, rubric=_ENTAILMENT_RUBRIC)
+    if parsed is None:
         return None
-    return bool(data["entailed"])
+    return parsed[0] is EntailmentVerdict.ENTAILED
 
 
-async def _paraphrase_verdict(content_a: str, content_b: str) -> JudgeVerdictKind:
-    """Single-pair PARAPHRASE / DISTINCT / UNSURE judge (LLM failure → UNSURE)."""
+async def _paraphrase_verdict(
+    content_a: str, content_b: str, *, purpose: LLMPurpose = "abstraction"
+) -> JudgeVerdictKind:
+    """Single-pair PARAPHRASE / DISTINCT / UNSURE judge (LLM failure → UNSURE).
+
+    ``purpose`` routes the call; the re-anchor pass asks it on ``verification``.
+    """
     from particles.llm import data_fence_instruction, fence, make_nonce
 
     nonce = make_nonce()
@@ -290,7 +323,7 @@ async def _paraphrase_verdict(content_a: str, content_b: str) -> JudgeVerdictKin
         max_tokens=100,
         system=system,
         response_schema=_PARAPHRASE_SCHEMA,
-        purpose="abstraction",
+        purpose=purpose,
     )
     data = _parse_json_object(response)
     if data is None:
@@ -711,10 +744,10 @@ async def _refresh_by_supersession(
     tags carry over as in the subject-assign. ``insert_particle``
     indexes them into the tag edge table, so a tag filter still finds the
     successor.
+
+    Commits under the writer lock, so the refresh is not held open
+    across the ladder's later judge calls.
     """
-    await update_particle_status(
-        session, d.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
-    )
     successor = _build_derived_particle(
         claim=d.content,
         premises=premises,
@@ -722,8 +755,12 @@ async def _refresh_by_supersession(
         supersedes=d.id,
         tags=list(d.tags) if d.tags else None,
     )
-    await insert_particle(session, successor)
-    await copy_particle_embedding(session, d.id, successor.id)
+    async with write_transaction(session):
+        await update_particle_status(
+            session, d.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+        )
+        await insert_particle(session, successor)
+        await copy_particle_embedding(session, d.id, successor.id)
 
 
 async def _revalidate(
@@ -748,9 +785,10 @@ async def _revalidate(
         if len(premises) < cfg.min_cluster_size:
             update = await get_particles_by_ids(session, [d.id])  # re-check still ACTIVE
             if update.get(d.id) is not None:
-                await update_particle_status(
-                    session, d.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
-                )
+                async with write_transaction(session):
+                    await update_particle_status(
+                        session, d.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
+                    )
             counts.retired += 1
             continue
 
@@ -792,6 +830,12 @@ async def _revalidate(
             counts.deferred += 1
             continue
         claim, _rationale = synthesized
+        # A re-synthesis is held to the premise-scope rule like a
+        # first promotion: one ranging over a kind never replaces D. D keeps
+        # its read-time discount and the next cycle synthesizes again.
+        if population_quantifier(claim) is not None:
+            counts.deferred += 1
+            continue
         report.llm_calls += 1
         verdict = await _paraphrase_verdict(claim, d.content)
         if verdict is JudgeVerdictKind.PARAPHRASE:
@@ -819,6 +863,12 @@ async def _revalidate(
             supersedes=d.id,
         )
         await reconcile_and_insert(session, successor, fail_closed=True)
+        # Committed now rather than at the end of the pass. The
+        # §6.6 probes inside ``reconcile_and_insert`` still run with the
+        # status flip above uncommitted, and outside the writer lock, which
+        # must never be held across an LLM call. That residual is
+        # the embed-bearing writers' refactor.
+        await session.commit()
         counts.superseded += 1
 
 
@@ -846,6 +896,19 @@ async def _promote_cluster(
         return
     claim, rationale = synthesized
     report.candidates_synthesized += 1
+
+    # Premise-scope rule, every candidate in both modes and
+    # independent of ``require_entailment``: a claim quantifying over a kind
+    # is discarded here, before the judge call is spent on it.
+    quantifier = population_quantifier(claim)
+    if quantifier is not None:
+        report.rejected_population_scope += 1
+        log.info(
+            "abstraction candidate for subject %s ranges over a kind (%r); discarded",
+            cluster.subject_id,
+            quantifier,
+        )
+        return
 
     if cfg.require_entailment:
         report.llm_calls += 1
@@ -883,25 +946,29 @@ async def _promote_cluster(
             claim=claim, premises=cluster.members, subject_ids=subject_ids
         )
         inserted = await reconcile_and_insert(session, particle, fail_closed=True)
+        # Its write comes after its probes; commit it before the next
+        # cluster's synthesis call.
+        await session.commit()
         if inserted is not None:
             report.promoted_particle_ids.append(inserted.id)
     else:
-        event = await record_event(
-            session,
-            actor=ABSTRACTION_ACTOR,
-            event_type=OperatorEventType.ABSTRACTION_CANDIDATE,
-            reason=rationale or None,
-            refs=[(EventRefKind.PARTICLE, p.id) for p in cluster.members],
-            payload={
-                "claim": claim,
-                "rationale": rationale,
-                "premise_ids": [p.id for p in cluster.members],
-                "subject_ids": subject_ids,
-                "confidence_value": derive_abstraction_confidence(
-                    [p.confidence.value for p in cluster.members]
-                ),
-            },
-        )
+        async with write_transaction(session):
+            event = await record_event(
+                session,
+                actor=ABSTRACTION_ACTOR,
+                event_type=OperatorEventType.ABSTRACTION_CANDIDATE,
+                reason=rationale or None,
+                refs=[(EventRefKind.PARTICLE, p.id) for p in cluster.members],
+                payload={
+                    "claim": claim,
+                    "rationale": rationale,
+                    "premise_ids": [p.id for p in cluster.members],
+                    "subject_ids": subject_ids,
+                    "confidence_value": derive_abstraction_confidence(
+                        [p.confidence.value for p in cluster.members]
+                    ),
+                },
+            )
         report.proposed_event_ids.append(event.event_id)
 
 
@@ -914,9 +981,8 @@ async def run_abstraction_pass(
 
     Revalidation first (repair the DAG before extending it), then promotion
     of new clusters, both under the shared ``max_promotions_per_run`` budget.
-    The caller (the dream cycle's pass wrapper, or a test) owns the session
-    transaction; this function flushes through the store helpers but does not
-    commit.
+    Each derived particle's writes commit as they are made, so none is held
+    open across a later judge or synthesis call.
 
     Args:
         session: Store session.

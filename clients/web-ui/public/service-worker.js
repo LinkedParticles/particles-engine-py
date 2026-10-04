@@ -28,8 +28,17 @@ const SHELL_ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
+  // `cache: "reload"` fetches each asset from the network, bypassing the HTTP
+  // cache. The engine serves the shell with Last-Modified and no
+  // Cache-Control, so a plain addAll can refill the new build's cache with a
+  // heuristically "fresh" asset from the previous build: new app.js markup
+  // styled by the old styles.css.
   event.waitUntil(
-    caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)),
+    caches
+      .open(SHELL_CACHE)
+      .then((cache) =>
+        cache.addAll(SHELL_ASSETS.map((u) => new Request(u, { cache: "reload" }))),
+      ),
   );
   self.skipWaiting();
 });

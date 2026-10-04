@@ -29,7 +29,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, DateTime, Index, String, Text, desc, select
+from sqlalchemy import JSON, DateTime, Index, String, Text, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -69,6 +69,13 @@ class OperatorEventType(StrEnum):
     SUBJECT_RECLASSIFIED = "SUBJECT_RECLASSIFIED"
     SUBJECT_LINK_CONFIRMED = "SUBJECT_LINK_CONFIRMED"
     SUBJECT_LINK_REMOVED = "SUBJECT_LINK_REMOVED"
+    # Subjects attached in place to particles that had none — the
+    # batch `subjects relink-gated` run (``batch: true``, one event per run)
+    # or the per-card assign-subject gesture (one particle). A PARTICLE ref per
+    # relinked particle and a SUBJECT ref per Subject attached; the payload
+    # records each link's recovery tier and gate class. No particle is
+    # superseded, so this event is the only trace of the change.
+    SUBJECTS_RELINKED = "SUBJECTS_RELINKED"
     TRUST_CHANGED = "TRUST_CHANGED"
     REVIEW_RESOLVED = "REVIEW_RESOLVED"
     RELATION_ADDED = "RELATION_ADDED"
@@ -99,6 +106,34 @@ class OperatorEventType(StrEnum):
     # census counts, per-pass LLM call counts, and the ``completed_at`` the next
     # run's delta scope keys off; this folds an earlier plan.
     CONSOLIDATION_RUN = "CONSOLIDATION_RUN"
+    # one event per `particles extract` run (a single snapshot, an
+    # `--all-pending` pass, or a `POST /extract` call) that made at least one
+    # LLM call. System-emitted; the versioned payload (``format: 1``) carries
+    # the measured ``llm_usage`` in the CONSOLIDATION_RUN shape, so a store's
+    # cumulative spend is a sum over the two types. Its own type rather than a
+    # CONSOLIDATION_RUN, whose latest event keys the cycle's delta scope.
+    # `particles reindex` (CLI and `POST /reindex`) and `particles
+    # structure` record here too, under ``route: reindex`` / ``route: structure``.
+    EXTRACT_RUN = "EXTRACT_RUN"
+    # one event per census INCONSISTENCY record the nightly
+    # disclosure pass closes without a review — ``cause`` is ``lapsed`` (a side
+    # has no stated member left) or ``regrouped`` (replaced by a record for the
+    # changed group, whose id the payload names). System-emitted, like
+    # CONFLICT_CANDIDATE_DROPPED and DUPLICATES_MERGED:
+    # the status change alone does not record which member stopped being
+    # stated, or by which snapshot, and the coverage rule reads the cause back
+    # from here. The record rides as a PARTICLE ref, then each dropped member.
+    INCONSISTENCY_CLOSED = "INCONSISTENCY_CLOSED"
+    # one event per claim the nightly re-anchor pass judged
+    # dependent on a state an update retired but did not restate as a new
+    # belief. ``outcome: unrestated`` keeps the claim ACTIVE and backs a
+    # STALE_BASIS curation card (the cursor has moved on, so nothing else
+    # remembers the verdict); ``outcome: matched_existing`` retired it in favour
+    # of an ACTIVE claim that already states the restatement, which the status
+    # change alone does not name. System-emitted, like INCONSISTENCY_CLOSED.
+    # Refs: the claim, the retired state claim, then the other claim when there
+    # is one (the match, or the belief a restatement would have contradicted).
+    DEPENDENT_CLAIM_EXAMINED = "DEPENDENT_CLAIM_EXAMINED"
     # one event per propose-mode abstraction candidate. The
     # payload is the full candidate (claim, rationale, premise ids, subject
     # ids, derived confidence) — the event log is the candidate's persistence,
@@ -150,6 +185,37 @@ class OperatorEventType(StrEnum):
     OBSERVER_SCOPE_KEY_ASSIGNED = "OBSERVER_SCOPE_KEY_ASSIGNED"
     OBSERVER_SCOPE_WIDENED = "OBSERVER_SCOPE_WIDENED"
     OBSERVER_SCOPE_WIDEN_REVOKED = "OBSERVER_SCOPE_WIDEN_REVOKED"
+
+    # the vocabulary document (the profile carrier).
+    # CHANGED is the TRUST_CHANGED analogue: a version materialised, or an
+    # adoption added or removed (payload ``kind`` says which). PROPOSED is one
+    # alias or profile candidate the store's census suggested; like
+    # ABSTRACTION_CANDIDATE, the event log is the proposal's persistence, so no
+    # candidate table exists. RULED is the reviewer's verdict on a proposal, or
+    # a direct ruling such as an alignment (payload ``resolution``:
+    # ``confirmed`` / ``declined`` / ``aligned``), naming the document version
+    # it produced; it is the "who confirmed it, when, on what evidence" the
+    # document's own PROV ruling repeats.
+    VOCABULARY_CHANGED = "VOCABULARY_CHANGED"
+    VOCABULARY_PROPOSED = "VOCABULARY_PROPOSED"
+    VOCABULARY_RULED = "VOCABULARY_RULED"
+
+    # a claim's adjudicability default (``assertion_modality``) was
+    # rewritten after insert. One type for one outcome, two routes told apart
+    # by ``actor``: an operator verdict (``cli:particle-reclassify``; one
+    # PARTICLE ref, the reason, payload ``from`` / ``to`` / ``prior_classifier``)
+    # and a regeneration run (``modality-regenerate``; ``batch: true``, a
+    # PARTICLE ref per changed claim, each change in ``changes``). The record's
+    # stamp columns keep only the latest writer, so this log is the history.
+    MODALITY_RECLASSIFIED = "MODALITY_RECLASSIFIED"
+    # a regeneration verdict that would make claims adjudicable (a
+    # flip to FALSIFIABLE), which regeneration never writes unattended. The
+    # event is the queue's persistence, the ABSTRACTION_CANDIDATE pattern: one
+    # per run (``batch: true``), a PARTICLE ref per claim, ``grants`` listing
+    # each claim's stored value and the verdict, ``classifier`` the rule that
+    # ruled. Lint reads it back as MODALITY_GRANT_PENDING until an operator
+    # verdict, a later value, or a rule change settles it.
+    MODALITY_GRANT_QUEUED = "MODALITY_GRANT_QUEUED"
 
 
 class EventRefKind(StrEnum):
@@ -396,6 +462,21 @@ async def list_events(
     result = await session.execute(stmt)
     rows = result.scalars().unique().all()
     return [_to_model(row, await _refs_for(session, row.event_id)) for row in rows]
+
+
+async def count_events_by_type(
+    session: AsyncSession, *, until: datetime | None = None
+) -> dict[str, int]:
+    """How many events the log holds of each type, one grouped query.
+
+    ``until`` counts only the events that occurred at or before that instant;
+    the log is append-only, so the count as of a past instant is exact.
+    """
+    stmt = select(OperatorEventRow.event_type, func.count())
+    if until is not None:
+        stmt = stmt.where(OperatorEventRow.occurred_at <= until)
+    result = await session.execute(stmt.group_by(OperatorEventRow.event_type))
+    return {event_type: int(n) for event_type, n in result.all()}
 
 
 async def list_events_in_range(

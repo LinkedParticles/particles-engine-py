@@ -315,6 +315,83 @@ class TestQueryAnswerBudgetMigration:
         assert not hasattr(ExtractionConfig(), "query_max_tokens")
 
 
+class TestSharedEstimateKeys:
+    """The price table and the prompt overhead are shared by the audit and the benchmarks."""
+
+    def test_list_prices_ship_for_the_default_model(self) -> None:
+        from particles.config import ParticlesConfig
+
+        llm = ParticlesConfig().llm
+        price = llm.price_for(llm.for_purpose("extraction"))
+        assert price is not None and price.input > 0 and price.output > 0
+
+    def test_operator_entries_merge_over_the_shipped_prices(self) -> None:
+        from particles.config import ParticlesConfig
+
+        cfg = ParticlesConfig.model_validate(
+            {"llm": {"price_per_mtok": {"local:llama3.1": {"input": 0.1, "output": 0.2}}}}
+        )
+        assert cfg.llm.price_per_mtok["local:llama3.1"].output == 0.2
+        assert "claude-sonnet-5" in cfg.llm.price_per_mtok
+
+    def test_current_sonnet_is_priced_out_of_the_box(self) -> None:
+        from particles.config import ParticlesConfig, ProviderSelection
+
+        price = ParticlesConfig().llm.price_for(ProviderSelection(model="claude-sonnet-5-5"))
+        assert price is not None and (price.input, price.output) == (2.00, 10.00)
+
+    def test_price_for_prefers_the_provider_qualified_key(self) -> None:
+        from particles.config import ParticlesConfig, ProviderSelection
+
+        cfg = ParticlesConfig.model_validate(
+            {"llm": {"price_per_mtok": {"anthropic:claude-sonnet-5": {"input": 9, "output": 9}}}}
+        )
+        price = cfg.llm.price_for(ProviderSelection(model="claude-sonnet-5"))
+        assert price is not None and price.input == 9
+        assert cfg.llm.price_for(ProviderSelection(provider="local", model="llama3.1")) is None
+
+    def test_benchmark_price_table_migrates_to_llm(self) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {
+            "benchmark_memory": {"price_per_mtok": {"m-a": {"input": 1, "output": 2}}},
+            "llm": {"price_per_mtok": {"m-b": {"input": 3, "output": 4}}},
+        }
+        _migrate_legacy_keys(raw)
+        assert "price_per_mtok" not in raw["benchmark_memory"]  # type: ignore[operator]
+        cfg = ParticlesConfig.model_validate(raw)
+        assert cfg.llm.price_per_mtok["m-a"].output == 2
+        assert cfg.llm.price_per_mtok["m-b"].output == 4
+
+    def test_benchmark_batch_discount_migrates_to_llm(self) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {"benchmark_memory": {"batch_discount": 0.25}}
+        _migrate_legacy_keys(raw)
+        cfg = ParticlesConfig.model_validate(raw)
+        assert cfg.llm.batch_discount == 0.25
+
+    def test_rot_prompt_overhead_migrates_to_extraction(self) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {
+            "benchmark_rot": {"estimate_extraction_prompt_overhead_tokens": 1234}
+        }
+        _migrate_legacy_keys(raw)
+        cfg = ParticlesConfig.model_validate(raw)
+        assert cfg.extraction.estimate_prompt_overhead_tokens == 1234
+
+    def test_audit_per_model_output_figure_must_be_a_token_count(self) -> None:
+        from pydantic import ValidationError
+
+        from particles.config import AuditConfig
+
+        with pytest.raises(ValidationError):
+            AuditConfig(estimate_output_tokens_per_extraction_call_by_model={"claude-sonnet-5": -1})
+        with pytest.raises(ValidationError):
+            AuditConfig(estimate_output_spread=1.0)
+
+
 class TestSubjectLinkThresholds:
     """the abstain ≤ suppress invariant on SubjectsConfig."""
 

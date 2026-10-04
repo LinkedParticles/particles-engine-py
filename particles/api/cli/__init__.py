@@ -113,6 +113,11 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
        it gets here; this covers everything else. (``anthropic`` is imported
        lazily — only when it is already loaded, i.e. the verb actually made an
        LLM call — so no-LLM verbs like ``quality`` pay nothing for it.)
+
+    8. **Store directory uncreatable.** A file-backed SQLite ``DATABASE_URL``
+       whose directory is missing gets it created on first use; when that fails
+       (permission denied, a file in the way) ``particles.db`` raises
+       ``StoreDirectoryError`` naming the path and reason, echoed as one line.
     """
     import sys
 
@@ -121,7 +126,7 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     from particles.api.client import NotYetRemoteError
     from particles.api.client.http import EngineHttpError
     from particles.core.schema import SchemaVersionMismatchError
-    from particles.db import WriteLockTimeout
+    from particles.db import StoreDirectoryError, WriteLockTimeout
     from particles.llm import AccountLevelLLMError
 
     # Bootstrap observability once per CLI process. A no-op unless
@@ -215,6 +220,11 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
         # time — another particles process is mid-write. Retryable, not corruption.
         typer.echo(f"{exc}", err=True)
         raise typer.Exit(1) from exc
+    except StoreDirectoryError as exc:
+        # A file-backed SQLite store whose directory could not be created
+        # (permission denied, or a file in the way). One line, no traceback.
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     except NotYetRemoteError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -256,6 +266,26 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
             )
             raise typer.Exit(1) from exc
         raise
+
+
+def require_store_directory(store: str) -> None:
+    """Exit with one line unless ``store``'s SQLite directory exists or can be made.
+
+    For the stdio MCP servers, which never pass through :func:`run`: once the
+    transport is up, a store failure can only reach the client as a tool error,
+    so a store path that cannot be created is caught before serving starts. An
+    unknown store handle is reported the same way.
+    """
+    from particles.db import StoreDirectoryError, ensure_store_directory
+
+    try:
+        ensure_store_directory(store)
+    except StoreDirectoryError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    except KeyError as exc:
+        typer.echo(f"Error: {exc.args[0]}", err=True)
+        raise typer.Exit(1) from exc
 
 
 def _version_callback(value: bool) -> None:
@@ -303,6 +333,12 @@ def main(
     ),
 ) -> None:
     """Particles SDK: epistemic knowledge management for AI agents (v0.3 Core)."""
+    # the Claude Code adapter's project fold is the namespace a
+    # qualified subject name is scoped by. Every Surface process (the verbs,
+    # `engine serve`, `mcp serve`, the hooks) starts here.
+    from particles.api.cli._claude_code import register_artifact_namespace_hook
+
+    register_artifact_namespace_hook()
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +370,7 @@ from particles.api.cli import (  # noqa: E402, F401, I001
     audit,
     structure,
     benchmark,
+    modality,
     subjects,
     config,
     conformance,
@@ -355,6 +392,7 @@ from particles.api.cli import (  # noqa: E402, F401, I001
     skills,
     synthesis_cache,
     trust,
+    vocab,
 )
 
 if __name__ == "__main__":

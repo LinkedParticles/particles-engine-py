@@ -1,0 +1,536 @@
+{
+ "prompt": "pipeline._update_prompt as shipped in this change",
+ "model": "anthropic:claude-haiku-4-5",
+ "samples_per_pair": 3,
+ "source": "the 33 SUPERSEDED_BY_UPDATE retirements in the kept s150-update-probe-2026-09-30 stores, plus 16 hand pairs",
+ "rows": [
+  {
+   "id": 3,
+   "label": "user-update",
+   "older": "The user has added 17 new postcards to their collection since they started collecting again.",
+   "newer": "The user has added 25 new postcards to their collection since they started collecting again.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 4,
+   "label": "user-update",
+   "older": "The user has been using a Fitbit Charge 3 for 6 months.",
+   "newer": "The user has been using a Fitbit Charge 3 for nine months.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "different"
+   ]
+  },
+  {
+   "id": 11,
+   "label": "user-update",
+   "older": "The user has tried making the Negroni at home five times since Emma taught them how to make it.",
+   "newer": "The user has tried making a Negroni at home 10 times since their friend Emma showed them how to make it.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 22,
+   "label": "user-update",
+   "older": "The user's daily commute to work by bus takes around 45 minutes.",
+   "newer": "The user's total current commute time is 40 minutes.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 24,
+   "label": "user-update",
+   "older": "The user is based in Tokyo.",
+   "newer": "The user is located in the South Bay area of the San Francisco Bay Area.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 25,
+   "label": "user-update",
+   "older": "The user attended three sessions of the bereavement support group.",
+   "newer": "The user attended five sessions of the bereavement support group.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 27,
+   "label": "user-update",
+   "older": "The user is currently reading \"The Seven Habits\" by Stephen Covey.",
+   "newer": "The user is currently reading \"The Power of Now\" by Eckhart Tolle.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 9,
+   "label": "user-unclear",
+   "older": "The user stayed at the Yarrow Hotel with friends Alex and Rachel during what they believed was the 2022 Sundance Film Festival.",
+   "newer": "The user stayed at the Omni Barton Creek Resort.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 21,
+   "label": "user-unclear",
+   "older": "The user owns a 2018 Ford Mustang GT.",
+   "newer": "The user owns a 2018 Honda Civic.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": 26,
+   "label": "user-unclear",
+   "older": "The user's sister's birthday is in November.",
+   "newer": "The user's sister's birthday is on March 15th.",
+   "verdicts": [
+    "different",
+    "fixed",
+    "fixed"
+   ]
+  },
+  {
+   "id": 33,
+   "label": "user-unclear",
+   "older": "The user has been trying to establish a consistent wake-up time and it has been going well except that they sometimes sleep in later on Wednesdays.",
+   "newer": "The user has been waking up 30 minutes earlier than usual.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 14,
+   "label": "abstention",
+   "older": "The Art Cube and its curator Rachel Lee do not exist in reality.",
+   "newer": "\"The Art Cube\" is a new contemporary art gallery.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 15,
+   "label": "abstention",
+   "older": "The assistant could not find any information on a contemporary artist named James Parker whose work is associated with The Art Cube.",
+   "newer": "James Parker was a featured artist at the exhibition at \"The Art Cube\".",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 17,
+   "label": "abstention",
+   "older": "Whole wheat flour produces a denser, heavier crust due to its coarser texture and higher protein content.",
+   "newer": "Whole wheat flour typically has a lower protein content, around 10-12%.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 5,
+   "label": "world-fact",
+   "older": "Ori and the Blind Forest takes about 4-6 hours to complete.",
+   "newer": "Ori and the Blind Forest has an estimated playtime of 8-12 hours.",
+   "verdicts": [
+    "fixed",
+    "fixed",
+    "different"
+   ]
+  },
+  {
+   "id": 6,
+   "label": "world-fact",
+   "older": "The Pathless takes about 5-8 hours to complete.",
+   "newer": "The Pathless has an estimated playtime of 8-10 hours.",
+   "verdicts": [
+    "different",
+    "fixed",
+    "different"
+   ]
+  },
+  {
+   "id": 7,
+   "label": "world-fact",
+   "older": "Rime takes about 4-6 hours to complete.",
+   "newer": "Rime has an estimated playtime of 6-8 hours.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 8,
+   "label": "world-fact",
+   "older": "Deep Work: Rules for Focused Success in a Distracted World is narrated by Jeff Bottoms.",
+   "newer": "Deep Work is narrated by its author, Cal Newport.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 10,
+   "label": "world-fact",
+   "older": "\"The Song of Achilles\" by Madeline Miller has 336 pages.",
+   "newer": "\"The Song of Achilles\" by Madeline Miller has 384 pages.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 12,
+   "label": "world-fact",
+   "older": "The Logitech M185 wireless mouse costs around $15.",
+   "newer": "The Logitech M185 costs approximately $10.",
+   "verdicts": [
+    "fixed",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 13,
+   "label": "world-fact",
+   "older": "The Razer Viper Mini costs around $50.",
+   "newer": "The Razer Viper Mini costs approximately $40.",
+   "verdicts": [
+    "different",
+    "changes",
+    "fixed"
+   ]
+  },
+  {
+   "id": 18,
+   "label": "world-fact",
+   "older": "The Mophie Powerstation Mini has a capacity of 4000mAh.",
+   "newer": "The Mophie Powerstation Mini has a capacity of 5,000mAh.",
+   "verdicts": [
+    "different",
+    "fixed",
+    "fixed"
+   ]
+  },
+  {
+   "id": 19,
+   "label": "world-fact",
+   "older": "The Mophie Powerstation Mini costs around $20-25.",
+   "newer": "The Mophie Powerstation Mini costs approximately $30.",
+   "verdicts": [
+    "fixed",
+    "different",
+    "fixed"
+   ]
+  },
+  {
+   "id": 20,
+   "label": "world-fact",
+   "older": "The Mophie Powerstation XXL has a capacity of 20,800mAh.",
+   "newer": "The Mophie Powerstation XXL has a 20,000mAh capacity.",
+   "verdicts": [
+    "different",
+    "different",
+    "fixed"
+   ]
+  },
+  {
+   "id": 23,
+   "label": "world-fact",
+   "older": "Gochujang is a fermented Korean chili paste.",
+   "newer": "Gochujang is a fermented soybean paste.",
+   "verdicts": [
+    "different",
+    "fixed",
+    "different"
+   ]
+  },
+  {
+   "id": 28,
+   "label": "world-fact",
+   "older": "The Gaiam Print Yoga Mat is priced around $25.",
+   "newer": "Gaiam Print Yoga Mat costs $20.",
+   "verdicts": [
+    "different",
+    "different",
+    "fixed"
+   ]
+  },
+  {
+   "id": 29,
+   "label": "world-fact",
+   "older": "The Jade Yoga Mat is priced around $40.",
+   "newer": "Jade Yoga Mat costs $60.",
+   "verdicts": [
+    "different",
+    "fixed",
+    "different"
+   ]
+  },
+  {
+   "id": 30,
+   "label": "world-fact",
+   "older": "As a US citizen, one does not need a visa for tourism or business stays up to 6 months in the United Kingdom.",
+   "newer": "US citizens don't need a visa to visit the UK for tourism or visiting relatives as long as their stay doesn't exceed 90 days within any 180-day period.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 31,
+   "label": "world-fact",
+   "older": "The Kawai ES110 costs around $699 - $799 depending on the retailer and bundle.",
+   "newer": "The Kawai ES110 costs $299.",
+   "verdicts": [
+    "fixed",
+    "fixed",
+    "fixed"
+   ]
+  },
+  {
+   "id": 32,
+   "label": "world-fact",
+   "older": "\"The Poison Tree\" was written by Erin Kelly.",
+   "newer": "The Poison Tree was written by Barbara Hambly.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": 34,
+   "label": "world-fact",
+   "older": "United Airlines typically requires 30,000-50,000 miles for a one-way upgrade from economy to business class on a domestic flight.",
+   "newer": "United Airlines domestic flight upgrades typically require 15,000 to 30,000 miles one-way.",
+   "verdicts": [
+    "fixed",
+    "fixed",
+    "fixed"
+   ]
+  },
+  {
+   "id": 35,
+   "label": "world-fact",
+   "older": "The Dell XPS 13 base model comes with a 256GB SSD.",
+   "newer": "The Dell XPS 13 has a 512GB SSD.",
+   "verdicts": [
+    "fixed",
+    "different",
+    "fixed"
+   ]
+  },
+  {
+   "id": "h0",
+   "label": "user-update",
+   "older": "The user lives in Delhi, in Lajpat Nagar.",
+   "newer": "The user moved to Mumbai last month.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h1",
+   "label": "user-update",
+   "older": "The user lives in Delhi.",
+   "newer": "The user lives in Mumbai.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h2",
+   "label": "user-update",
+   "older": "The user's favourite restaurant is Sandeep's Curry House.",
+   "newer": "The user's favourite restaurant is now Bombay Canteen.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h3",
+   "label": "user-update",
+   "older": "The user is vegetarian.",
+   "newer": "The user eats fish now.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h4",
+   "label": "different",
+   "older": "Sandeep's Curry House is the user's favourite place to eat.",
+   "newer": "The user has not yet found a regular place to eat.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": "h5",
+   "label": "user-update",
+   "older": "The user's home city is Bergen.",
+   "newer": "The user's home city is Ljubljana.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h6",
+   "label": "user-update",
+   "older": "The user's car is Volvo.",
+   "newer": "The user's car is Tesla.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h7",
+   "label": "user-update",
+   "older": "The user's phone is Pixel.",
+   "newer": "The user's phone is iPhone.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h8",
+   "label": "user-update",
+   "older": "The user's primary code editor is Neovim.",
+   "newer": "The user's primary code editor is BBEdit.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h9",
+   "label": "user-update",
+   "older": "The user's manager is Tomasz.",
+   "newer": "The user's manager is Ingrid.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h10",
+   "label": "user-update",
+   "older": "The user's diet is kosher.",
+   "newer": "The user's diet is Mediterranean.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h11",
+   "label": "user-update",
+   "older": "The user's current project codename is Kestrel.",
+   "newer": "The user's current project codename is Quasar.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h12",
+   "label": "user-update",
+   "older": "The user's regular coffee shop is Blue Door.",
+   "newer": "The user's regular coffee shop is Lantern.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h13",
+   "label": "user-update",
+   "older": "The user's language of study is Hungarian.",
+   "newer": "The user's language of study is Tagalog.",
+   "verdicts": [
+    "changes",
+    "changes",
+    "changes"
+   ]
+  },
+  {
+   "id": "h14",
+   "label": "history",
+   "older": "The user's manager was previously Tomasz.",
+   "newer": "The user's manager was previously Ingrid.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  },
+  {
+   "id": "h15",
+   "label": "history",
+   "older": "The user's diet is vegetarian.",
+   "newer": "The user's diet was previously paleo.",
+   "verdicts": [
+    "different",
+    "different",
+    "different"
+   ]
+  }
+ ]
+}

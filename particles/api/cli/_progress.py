@@ -29,6 +29,7 @@ guarantees no verb can silently look hung.
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 import time
@@ -45,6 +46,15 @@ _CLEAR_LINE = "\r\x1b[K"
 #: assignment is atomic under the GIL, and the ticker thread is the only
 #: reader, so no lock is needed.
 _status: str | None = None
+
+#: Serialises the ticker's paint against :func:`heartbeat_paused`, so a tick
+#: already in flight cannot repaint the line after the pause has cleared it.
+_paint_lock = threading.Lock()
+#: True while a heartbeat ticker is running; :func:`heartbeat_paused` writes
+#: nothing when none is.
+_active = False
+#: True while :func:`heartbeat_paused` holds the terminal; the ticker skips painting.
+_paused = False
 
 
 def set_heartbeat_status(status: str | None) -> None:
@@ -112,6 +122,72 @@ def progress_line(message: str) -> None:
 
 
 @contextmanager
+def heartbeat_paused() -> Iterator[None]:
+    """Clear the heartbeat's in-place line and hold the ticker off while the body writes.
+
+    A verb's final output (a report on stdout) shares the terminal with the
+    heartbeat on stderr. Printed straight after a tick, the report began on the
+    heartbeat's open line::
+
+        … audit: contradiction probe 185/200 (1h36m elapsed)Audited 96 memory files …
+
+    Inside this block the line is erased and no tick repaints it, so the output
+    starts on a fresh line. The per-item status is dropped too; it described
+    work that is over. Outside a running heartbeat this writes nothing, so piped
+    output stays byte-identical.
+    """
+    global _paused
+    with _paint_lock:
+        _paused = True
+        if _active:
+            set_heartbeat_status(None)
+            sys.stderr.write(_CLEAR_LINE)
+            sys.stderr.flush()
+    try:
+        yield
+    finally:
+        with _paint_lock:
+            _paused = False
+
+
+class _ClearLineFormatter(logging.Formatter):
+    """Prefix each record with the erase sequence while the heartbeat runs.
+
+    A log record is the other writer that lands on the heartbeat's open line
+    (``… audit: working (20s elapsed)LLM unavailable …``). Putting the erase in
+    the formatted text, rather than writing it separately, keeps erase and
+    record in the handler's one ``write`` call, so a tick cannot slip between
+    them.
+    """
+
+    def __init__(self, inner: logging.Formatter) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _CLEAR_LINE + self.inner.format(record)
+
+
+def _wrap_stderr_log_handlers() -> list[tuple[logging.Handler, logging.Formatter]]:
+    """Install :class:`_ClearLineFormatter` on root handlers writing to stderr."""
+    wrapped: list[tuple[logging.Handler, logging.Formatter]] = []
+    for handler in logging.root.handlers:
+        if not isinstance(handler, logging.StreamHandler) or handler.stream is not sys.stderr:
+            continue
+        original = handler.formatter or logging.Formatter()
+        handler.setFormatter(_ClearLineFormatter(original))
+        wrapped.append((handler, original))
+    return wrapped
+
+
+def _unwrap_log_handlers(wrapped: list[tuple[logging.Handler, logging.Formatter]]) -> None:
+    for handler, original in wrapped:
+        # A verb that reconfigured logging mid-run owns the formatter now.
+        if isinstance(handler.formatter, _ClearLineFormatter):
+            handler.setFormatter(original)
+
+
+@contextmanager
 def heartbeat(label: str) -> Iterator[None]:
     """Emit a periodic liveness line on stderr while the body runs.
 
@@ -128,6 +204,7 @@ def heartbeat(label: str) -> Iterator[None]:
         yield
         return
 
+    global _active
     set_heartbeat_status(None)
     done = threading.Event()
     started = time.monotonic()
@@ -136,18 +213,25 @@ def heartbeat(label: str) -> Iterator[None]:
         while not done.wait(interval):
             elapsed = format_elapsed(time.monotonic() - started)
             detail = _status or "working"
-            sys.stderr.write(f"{_CLEAR_LINE}  … {label}: {detail} ({elapsed} elapsed)")
-            sys.stderr.flush()
+            with _paint_lock:
+                if _paused or done.is_set():
+                    continue
+                sys.stderr.write(f"{_CLEAR_LINE}  … {label}: {detail} ({elapsed} elapsed)")
+                sys.stderr.flush()
 
+    wrapped = _wrap_stderr_log_handlers()
     ticker = threading.Thread(target=_tick, name="particles-heartbeat", daemon=True)
+    _active = True
     ticker.start()
     try:
         yield
     finally:
+        _active = False
         done.set()
         # Join before erasing: otherwise a tick already in flight can repaint the
         # line *after* the clear and strand it in the operator's scrollback.
         ticker.join(timeout=1.0)
+        _unwrap_log_handlers(wrapped)
         set_heartbeat_status(None)
         sys.stderr.write(_CLEAR_LINE)
         sys.stderr.flush()

@@ -59,8 +59,10 @@ from particles.extraction.general import PageStat
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.digest import RenderedDigest
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
+    from particles.store.session_exposure_store import SessionExposure
 
 
 class LocalBackend:
@@ -155,27 +157,33 @@ class LocalBackend:
 
     async def extract(self, entry_id: str, snapshot_id: str, *, agent_id: str) -> ExtractOutcome:
         from particles.operations.extract import extract_snapshot
+        from particles.operations.llm_spend import MeteredExtractRun
 
         page_stats: list[PageStat] = []
         carry_forward_ids: list[str] = []
         suppressed_ids: list[str] = []
-        async with session_scope() as session:
-            particles = await extract_snapshot(
-                session,
-                entry_id,
-                snapshot_id,
-                agent_id=agent_id,
-                page_stats_out=page_stats,
-                carry_forward_ids_out=carry_forward_ids,
-                suppressed_ids_out=suppressed_ids,
-            )
-            await session.commit()
+        # meter the run and append its EXTRACT_RUN record.
+        meter = MeteredExtractRun(actor="cli:extract", route="single")
+        async with meter:
+            meter.snapshots = 1
+            async with session_scope() as session:
+                particles = await extract_snapshot(
+                    session,
+                    entry_id,
+                    snapshot_id,
+                    agent_id=agent_id,
+                    page_stats_out=page_stats,
+                    carry_forward_ids_out=carry_forward_ids,
+                    suppressed_ids_out=suppressed_ids,
+                )
+                await session.commit()
         return ExtractOutcome(
             entry_id=entry_id,
             particles=particles,
             page_stats=page_stats,
             carry_forward_ids=carry_forward_ids,
             suppressed_ids=suppressed_ids,
+            llm_usage=meter.llm_usage,
         )
 
     async def query(self, request: QueryRequest) -> QueryResponse:
@@ -264,22 +272,39 @@ class LocalBackend:
         dry_run: bool = False,
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
+        only_changed_components: bool = False,
     ) -> dict[str, object]:
+        from particles.operations.llm_spend import MeteredExtractRun, reindexed_snapshots
         from particles.operations.reindex import reindex as reindex_op
 
-        async with session_scope() as session:
-            return await reindex_op(
-                session,
-                entry_ids=entry_ids,
-                extractor_version=extractor_version,
-                extractor_id=extractor_id,
-                include_failed=include_failed,
-                provider_model=provider_model,
-                progress=progress,
-                dry_run=dry_run,
-                on_plan=on_plan,
-                on_status=on_status,
-            )
+        async def _run() -> dict[str, object]:
+            async with session_scope() as session:
+                return await reindex_op(
+                    session,
+                    entry_ids=entry_ids,
+                    extractor_version=extractor_version,
+                    extractor_id=extractor_id,
+                    include_failed=include_failed,
+                    provider_model=provider_model,
+                    progress=progress,
+                    dry_run=dry_run,
+                    on_plan=on_plan,
+                    on_status=on_status,
+                    only_changed_components=only_changed_components,
+                )
+
+        if dry_run:
+            # The plan makes no call and records nothing.
+            return await _run()
+        # one meter around the whole run, the re-extraction and the
+        # post-reindex lint pass alike; its usage rides the summary for the CLI.
+        meter = MeteredExtractRun(actor="cli:reindex", route="reindex")
+        async with meter:
+            summary = await _run()
+            meter.snapshots = reindexed_snapshots(summary)
+        if meter.llm_usage is not None:
+            summary["llm_usage"] = meter.llm_usage.model_dump(mode="json")
+        return summary
 
     # ------------------------------------------------------------------
     # Operator-verb surface — each lifts the verb's current
@@ -527,6 +552,18 @@ class LocalBackend:
         from particles.operations.digest import build_digest
 
         return await build_digest(store, project)
+
+    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+        from particles.operations.digest import build_digest_located
+
+        return await build_digest_located(store, project)
+
+    async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
+        from particles.store.session_exposure_store import record_session_exposure
+
+        async with session_scope(store, write=True) as session:  # writer lock
+            await record_session_exposure(session, exposure)
+            await session.commit()
 
     async def events_list(
         self,

@@ -37,6 +37,7 @@ from particles.operations.source_passage import (
     derive_passage,
     extractor_view_text,
     find_chunk,
+    focus_window,
     hydrate_source_passage,
     locate_passage,
 )
@@ -335,3 +336,57 @@ def test_ranking_never_imports_hydration() -> None:
         if "source_passage" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# focus_window: the stretch of a long passage the second reading sees
+# ---------------------------------------------------------------------------
+
+_FILLER = "The weather log continues with unrelated remarks about the garden shed. " * 6
+
+
+class TestFocusWindow:
+    def test_text_that_fits_is_returned_whole(self) -> None:
+        assert focus_window("short passage", "anything at all", 100) == "short passage"
+
+    def test_window_holds_the_claims_words_and_marks_its_cuts(self) -> None:
+        text = _FILLER + "The nightly backup job runs at 02:00 on the archive server. " + _FILLER
+        out = focus_window(text, "The nightly backup job runs at 02:00.", 120)
+        assert "nightly backup job runs" in out
+        assert out.startswith("…") and out.endswith("…")
+        assert len(out) <= 122
+
+    def test_a_fix_stated_after_the_bug_stays_in_view(self) -> None:
+        """The held-out failure: a cut from the paragraph's start hid the fix."""
+        text = (
+            "Diagnosis: the scale factor was frozen at its median-times-two seed. "
+            + _FILLER
+            + "Fixes: seed the scale factor at the median (dropped the times-two multiplier)."
+        )
+        claim = (
+            "The scale factor seed was changed to the median, dropping the times-two multiplier."
+        )
+        assert text.index("dropped") > 300
+        assert "dropped the times-two multiplier" in focus_window(text, claim, 300)
+
+    def test_no_window_when_the_claims_words_are_absent(self) -> None:
+        assert focus_window(_FILLER * 3, "Kubernetes ingress certificates expire.", 100) == ""
+
+    def test_the_partner_claim_breaks_a_tie_between_stretches(self) -> None:
+        early = "Port 8080 serves the admin console for staff. "
+        late = "Port 8080 serves the admin console, not the public status endpoint. "
+        text = early + _FILLER + late
+        claim = "Port 8080 serves the admin console."
+        alone = focus_window(text, claim, 90)
+        paired = focus_window(text, claim, 90, also="The public status endpoint is on port 8080.")
+        assert "for staff" in alone
+        assert "public status endpoint" in paired
+
+    def test_partner_words_alone_never_pick_a_window(self) -> None:
+        text = _FILLER + "The public status endpoint answers on port 9000. " + _FILLER
+        assert (
+            focus_window(
+                text, "Kubernetes ingress certificates expire.", 100, also="status endpoint port"
+            )
+            == ""
+        )

@@ -264,6 +264,7 @@ def invalidate_stale_link_articles(
     *,
     hash_field: str = "input_hash",
     recursive: bool = False,
+    only: set[Path] | None = None,
 ) -> list[Path]:
     """Strip the article-cache hash from any cached article whose ``[[X]]``
     wikilinks reference a page name not in ``known_names``.
@@ -277,6 +278,10 @@ def invalidate_stale_link_articles(
     3. Otherwise the article links to a name that no longer exists as a
        canonical or alias — strip ``hash_field`` from frontmatter so the
        next export regenerates the article.
+
+    ``only``, when given, restricts the scan to those resolved paths: the
+    vault exporters pass the files they own, so a user's note that happens
+    to carry ``hash_field`` is never rewritten.
 
     The file's body and non-``hash_field`` frontmatter fields are
     preserved (the operator inspecting the vault between invalidation
@@ -294,6 +299,8 @@ def invalidate_stale_link_articles(
     paths = output_dir.rglob("*.md") if recursive else output_dir.glob("*.md")
     invalidated: list[Path] = []
     for article_path in sorted(paths):
+        if only is not None and article_path.resolve() not in only:
+            continue
         try:
             text = article_path.read_text(encoding="utf-8")
         except OSError:

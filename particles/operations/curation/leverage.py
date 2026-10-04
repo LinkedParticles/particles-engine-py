@@ -14,6 +14,13 @@ contributes nothing while no manifest is configured. Weights live in
 The contestedness signal reads the **composed** badge (all three
 bases) since, not the inconsistency basis alone; it is supplied by the
 caller off the card collection rather than re-queried.
+
+Since the weighted sum is the card's *urgency*, and leverage is
+``stakes · (base + urgency)``: stakes is how much the card's beliefs are relied
+on, the larger of their use (the reinforcement score) and their
+dependents. A conflict between beliefs no session uses is worth little however
+contested it is; the same conflict between heavily used beliefs is worth a lot.
+Config lives in ``curation.stakes``.
 """
 
 from __future__ import annotations
@@ -28,7 +35,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import CurationConfig, get_config
 from particles.core.schema import JudgeVerdictKind
-from particles.store.particle_store import count_active_dependents, get_active_particles
+from particles.store.particle_store import (
+    count_active_dependents,
+    get_active_particles,
+    get_particles_by_ids,
+)
+from particles.store.utility_store import get_reinforcement_scores
 
 from .cards import CardKind, CurationCard
 
@@ -61,16 +73,52 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def stakes_of(
+    particle_ids: list[str],
+    reinforcement: dict[str, float],
+    dependents: dict[str, int],
+    cfg: CurationConfig,
+) -> float:
+    """How much a card's beliefs are relied on, in ``[floor, 1]``.
+
+    The max over the card's beliefs of the larger of normalized use and
+    normalized dependents, lifted by ``floor``. A card naming no belief takes
+    ``floor``: nothing is relied on through it, and it keeps its last place.
+    """
+    stakes = cfg.stakes
+    use_cap = math.log1p(stakes.use_norm_cap)
+    reliance = max(
+        (
+            max(
+                min(1.0, math.log1p(reinforcement.get(pid, 0.0)) / use_cap),
+                _dep_norm(dependents.get(pid, 0), cfg),
+            )
+            for pid in particle_ids
+        ),
+        default=0.0,
+    )
+    return stakes.floor + (1.0 - stakes.floor) * reliance
+
+
+def _dep_norm(count: int, cfg: CurationConfig) -> float:
+    """The dependency normalization: ``log1p(n) / log1p(cap)``, capped at 1."""
+    cap = math.log1p(cfg.dependency_norm_cap)
+    return min(1.0, math.log1p(count) / cap) if cap > 0 else 0.0
+
+
 def contested_ids_from(cards: list[CurationCard]) -> set[str]:
     """The beliefs the composed badge fired on, read off the card list.
 
-    Every badged belief has a ``CONTESTED`` card, so the finder's
-    verdict is already in the collection and needs no second query. Derive this
+    A belief badged on an observer-signal basis has a ``CONTESTED`` card,
+    and a belief in an open conflict is a member of that
+    record's ``INCONSISTENCY`` card, so the finder's verdict is
+    already in the collection and needs no second query. Derive this
     from the **unfiltered** collection: the signal applies to cards of every
     kind, so narrowing by ``--kind`` or dropping snoozed cards first would
     silently strip the boost from a stale/duplicate card on a contested belief.
     """
-    return {pid for c in cards if c.kind is CardKind.CONTESTED for pid in c.particle_ids}
+    kinds = (CardKind.CONTESTED, CardKind.INCONSISTENCY)
+    return {pid for c in cards if c.kind in kinds for pid in c.particle_ids}
 
 
 async def score_cards(
@@ -82,9 +130,9 @@ async def score_cards(
     """Fill each card's ``leverage`` in place.
 
     Loads the signals once for the whole batch (one dependents aggregation, one
-    ACTIVE-particle scan for ages) then scores each card from those — the
-    cost shape (batch-load + in-process math), acceptable at
-    memory-store scale (is the scaling lever).
+    ACTIVE-particle scan for ages, one utility-event read for use) then scores
+    each card from those — the cost shape (batch-load + in-process
+    math), acceptable at memory-store scale (is the scaling lever).
 
     ``contested_ids`` is the composed-badge set: the signal
     widened from "referenced by an open INCONSISTENCY" to all three of the
@@ -115,12 +163,34 @@ async def score_cards(
     asserted_at = {
         p.id: p.asserted_at for p in await get_active_particles(session) if p.id in all_ids
     }
+    # A conflict card's members may be demoted; its signals take
+    # the max over every member, so their ages are read too. Their use and
+    # dependents need no extra read: ``all_ids`` already covers them.
+    # A demotion card's retired claim is never ACTIVE either.
+    conflict_ids = {
+        pid
+        for c in cards
+        if c.kind in (CardKind.INCONSISTENCY, CardKind.DEMOTION)
+        for pid in c.particle_ids
+    }
+    retired = sorted(conflict_ids - asserted_at.keys())
+    if retired:
+        for pid, p in (await get_particles_by_ids(session, retired)).items():
+            asserted_at[pid] = p.asserted_at
+    # use is read under the local store's base utility rule. The
+    # queue is the store owner's own work list, so no adopted lens overlays it.
+    reinforcement = (
+        await get_reinforcement_scores(
+            session, sorted(all_ids), get_config().utility.default.half_life_uses_days
+        )
+        if cfg.stakes.enabled
+        else {}
+    )
 
     now = datetime.now(UTC)
-    dep_cap = math.log1p(cfg.dependency_norm_cap)
     for card in cards:
         dep = max((dependents.get(pid, 0) for pid in card.particle_ids), default=0)
-        dep_norm = min(1.0, math.log1p(dep) / dep_cap) if dep_cap > 0 else 0.0
+        dep_norm = _dep_norm(dep, cfg)
 
         is_contested = 1.0 if any(pid in contested for pid in card.particle_ids) else 0.0
 
@@ -138,6 +208,14 @@ async def score_cards(
             + w.staleness_age * age_norm
             + w.projection_blocking * _projection_blocking(card)
         )
+        # the sum above is the card's urgency; scale it, plus a base,
+        # by how much the card's beliefs are relied on.
+        # A conflict card whose members are all demoted is no exception: their
+        # utility events and dependents stay readable, so it takes the
+        # reliance they recorded.
+        if cfg.stakes.enabled:
+            stakes = stakes_of(card.particle_ids, reinforcement, dependents, cfg)
+            score = stakes * (cfg.stakes.base + score)
 
         # demote a DUPLICATE_PAIR card the LLM judge cleared as DISTINCT
         # (not the same claim) so it sinks toward the bottom — informed by the

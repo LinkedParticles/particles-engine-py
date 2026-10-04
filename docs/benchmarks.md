@@ -186,6 +186,48 @@ Batches API: ≈ US$2.70 per question.
   abstention question.** With no memory the model gets the "you never told me"
   questions right by declining, and nothing else right at all.
 
+## Queue precision: one operator's store, one window, not a benchmark
+
+The full-context ceiling above says how much a reader loses by consulting
+the store instead of the whole history. The other half of the product's
+claim is that tending the store is cheap: that reviewing the curation
+queue is a better use of a domain expert's time than authoring
+the model, which holds only if the cards are mostly right. Nobody else in
+the category publishes that figure, so it is published here, with its
+denominator, from the data the store already keeps: every gesture and
+review ruling is an operator event, and the retained curation collections
+say which cards were open. `particles curate --precision` computes it at
+request time; nothing is stored.
+
+**This is one operator's store over one window, read on one day. It is not
+a benchmark**: the operator is the project's author, the window is the
+month the queue was being dogfooded, and 24 rulings is a small sample.
+It is here because the figure should be visible beside the ceiling, not
+because it is settled.
+
+| Store and window | Cards ruled on | Acted on | Dismissed | Precision | Snoozed | Open, untouched | Expired, untouched |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| The dogfood store (37,382 ACTIVE beliefs), 2026-09-01 to 2026-10-02, read 2026-10-01 | **24** | 19 | 5 | **0.79** | 0 | 6,498 | 342 |
+
+Per kind, the rulings fall on two kinds: open conflicts (`inconsistency`),
+15 acted on and 5 dismissed as `BOTH_VALID`, precision 0.75; and duplicate
+pairs, 3 merged and none dismissed. The one `gated_subjects` batch card was
+relinked. The 342 expired cards are almost all conflict records the nightly
+cycle closed on a second reading without an operator ruling,
+and the 6,498 open cards are the collection's depth, not cards anyone
+looked at. 62 resolving events in the window (mostly `particle retract`
+calls from the command line) named no card the store still holds and are
+not counted, so the acted figure is a floor. Reproduce the row with:
+
+```bash
+particles curate --precision --since 2026-09-01
+```
+
+The report states, per kind, what acted and dismissed mean, because they
+are different findings: a dismissed duplicate pair says the finder paired
+two different claims, and a dismissed conflict says the two claims did
+not really conflict.
+
 ## Why the scores changed
 
 The headline moved from 0.733 to 0.804 between the inaugural run and this
@@ -427,9 +469,19 @@ the same answer scaffold and judge protocol.
 | control | 0.943 | 0.663 | 0.787 | 0.969 | 0.367 | 0.820 |
 | maintenance cycle on ([`10`](benchmarks/longmemeval-s150-abl-consolidation-topk10-2026-09-20.json) · [`40`](benchmarks/longmemeval-s150-abl-consolidation-topk40-2026-09-20.json)) | 0.929 | 0.658 | 0.747 | 0.965 | 0.365 | 0.767 |
 | duplicate judge on ([`10`](benchmarks/longmemeval-s150-abl-dedup-judge-topk10-2026-09-20.json) · [`40`](benchmarks/longmemeval-s150-abl-dedup-judge-topk40-2026-09-20.json)) | 0.941 | 0.664 | 0.780 | 0.969 | 0.366 | 0.819 ‡ |
+| maintenance cycle on, with the slot check, 2026-09-30 ([`10`](benchmarks/longmemeval-s150-abl-update-probe-topk10-2026-09-30.json) · [`40`](benchmarks/longmemeval-s150-abl-update-probe-topk40-2026-09-30.json)) § | 0.936 | 0.662 | 0.800 | 0.969 | 0.366 | 0.813 |
+| maintenance cycle on, with the slot check's kind, 2026-10-01 ([`10`](benchmarks/longmemeval-s150-abl-slot-kind-topk10-2026-10-01.json) · [`40`](benchmarks/longmemeval-s150-abl-slot-kind-topk40-2026-10-01.json)) ¶ | 0.936 | 0.662 | 0.787 | 0.969 | 0.366 | 0.820 |
 
 ‡ 149 questions scored; one answer call returned no text inside its token
 budget and is excluded, not scored wrong.
+
+§ The re-measurement after the update sweep gained its slot check (1.157.0),
+on engine 1.168.1 over a fresh copy of the same control stores. It is read
+in § The re-measurement with the slot check, below.
+
+¶ The same arm after the slot check learned the slot's kind (1.168.17), on a
+fresh copy of the same control stores. It is read in § The slot check's kind,
+below.
 
 Each arm paid for its pass once, at `top_k` 10. The `top_k` 40 column replays
 the same modified stores with the pass's caps at zero, so the population is
@@ -481,6 +533,207 @@ Read plainly, and published as-is:
   structural: linked claims are collapsed *after* the `top_k` cut, so the
   pass shortens the context (39.8 particles instead of 40) without
   refilling the slots it frees, and it cannot bring new evidence into view.
+
+### The re-measurement with the slot check (2026-09-30)
+
+The finding above led to a change in the update sweep (1.157.0). A confirmed
+contradiction now retires the older claim only when a second check also says
+the newer claim gives a new value for the *same slot*: the same attribute of
+the same subject. Two trips, or two sports, are two slots. The change was
+measured on hand-written pairs, not on the 203 retirements above, so the
+same cycle was run again over a fresh copy of the same control stores, on
+engine 1.168.1, and read against the same control reports. The row marked §
+in the table above is that run.
+
+Two departures from the 2026-09-20 arm, both disclosed in the reports. The
+report-only census was switched off (`audit.max_contradiction_probes: 0`):
+it was four fifths of the earlier bill and cannot move retrieval. The kept
+stores also predate five schema revisions and had never been stamped with
+one, so the copy was stamped at the revision it was built with and upgraded.
+The upgrade changes no particle's status, and a retrieval-only replay of an
+identically upgraded copy of the control, run with no LLM call, reproduced
+the 2026-09-18 retrieval question for question at both depths.
+
+Read plainly, and published as-is:
+
+- **The loss is gone.** `multi-session` is back at the control's figure at
+  both depths (0.850 at `top_k` 10, 0.900 at 40, against 0.725 and 0.775 on
+  2026-09-20). `qa_particles` is 0.800 against the control's 0.787 at
+  `top_k` 10 and 0.813 against 0.820 at 40; both differences are inside the
+  ~3-point noise floor measured above, so this arm is a draw with the
+  control, where the 2026-09-20 arm lost.
+- **The sweep now retires one claim in six it retired before.** It made
+  6,960 checks (the contradiction check on every pair it reached, and the
+  slot check on each pair the first one confirmed; the stores record the two
+  together) and retired 33 particles in 26 stores, against 203 in 100. The
+  cycle's only other calls were 3 in the re-anchoring pass. At the 2026-09-20
+  arm's per-call rate that is about US$2. The cycle's disclosure pass, which
+  postdates the earlier arm, also withdrew 5 extraction-time conflict
+  records and made the 5 claims they had held back ACTIVE as new particles;
+  none of them reached a context.
+- **What reached an answer was a real update.** The cycle changed the
+  context of 4 questions at `top_k` 10 and 6 at 40 (22 and 34 on
+  2026-09-20). At `top_k` 10 all four are `knowledge-update` questions whose
+  context lost an earlier value of a count the user later updated ("added 17
+  new postcards" to 25, a Fitbit used for 6 months to nine, a Negroni made
+  five times to 10, three support-group sessions to five), and all four were
+  answered correctly before and after. At 40 one of the six went
+  right-to-wrong: the postcard question, whose answer added the 8 postcards
+  of a later shop visit to the current 25. The control's answer cited the
+  same two facts and was judged right; by the partition rule above it still
+  counts as attributable. Where the context was identical, verdicts flipped
+  2 and 4 times at `top_k` 10 and 4 and 4 at 40, which is sampling.
+  Recall@10 dips from 0.943 to 0.936 for the same reason: the benchmark
+  counts the session that held the superseded value as evidence.
+- **What the sweep still retires that it should not.** Read one by one, the
+  33 are: 7 values the user updated (the four counts above, the book they
+  are reading, their commute time, where they are based); 4 about the user
+  that are not clean updates (two different hotel stays, two cars the user
+  may both own, a sister's birthday two sessions disagree on, and a
+  consistent wake-up time against waking 30 minutes earlier); 4 on
+  abstention questions, about entities that do not exist ("The Art Cube and
+  its curator Rachel Lee do not exist in reality" retired in favour of "The
+  Art Cube is a new contemporary art gallery"); and **18 facts about the
+  world that the assistant stated twice with different figures** (prices,
+  page counts, playtimes, battery capacities, a book's author, an
+  audiobook's narrator, visa rules). The slot check is right that each such
+  pair fills one slot. What decides the pair is recency, and a later
+  statement of a fixed fact is not more likely to be true: the Kawai ES110
+  at "$699 to $799" was retired for "$299", and "The Poison Tree was written
+  by Erin Kelly" for "…by Barbara Hambly". On this benchmark those claims
+  almost never reach a context, so the cost does not show in the score. It
+  is a precision defect all the same, and the next one to fix: a fact that
+  holds one value for all time should go to review when two statements of it
+  disagree, not to the newer one.
+
+The [memory-rot benchmark](benchmarks/rot.md#the-slot-check-on-the-live-probe-2026-09-30)
+measures the other side, whether real updates are still retired, and is
+read there.
+
+### The slot check's kind (2026-10-01)
+
+The 18 world facts above led to a second change in the slot check.
+When it says two claims fill one slot, it now also says what kind of slot it
+is. A slot that holds one value at a time and changes over time (where the
+user lives, their employer, a count that grows) is updated by the later
+value, as before. A slot whose value, once true, stays true (who wrote a
+book, a page count, a product's price as stated at one time) is not: two
+values for it are a contradiction that the later date does not settle. The
+sweep now opens such a pair for review and leaves both claims ACTIVE. At
+extraction it falls through to the ordinary conflict rung. The same prompt
+now also says that a claim recording only a past value ("was previously X")
+gives the slot no new value, the history misreading measured on the rot
+benchmark. When the check cannot tell which kind, it is told to
+answer "fixed", because a wrong "fixed" keeps both claims and a wrong
+"changes" retires a true one.
+
+**The 33 retirements, replayed through the new check.** Each pair the sweep
+retired on 2026-09-30 was read from the kept stores and asked the new
+question three times on `claude-haiku-4-5`, about US$0.05 with the hand
+pairs below. A pair is retired only on the answer "changes". Pairs and
+answers:
+[`update-probe-slot-kind-pairs-2026-10-01.json`](benchmarks/update-probe-slot-kind-pairs-2026-10-01.json).
+
+| The 33, as read on 2026-09-30 | Pairs | Answers "changes" | "fixed" | "different slot" |
+|---|---|---|---|---|
+| World facts stated twice | 18 | 1 of 54 | 21 | 32 |
+| Values the user updated | 7 | 17 of 21 | 0 | 4 |
+| About the user, not clean updates | 4 | 3 of 12 | 2 | 7 |
+| Abstention claims | 4 | 0 of 9 | 0 | 9 |
+
+The one "changes" among the world facts is one of three samples on the Razer
+Viper Mini's price. The Kawai ES110 now reads as a fixed slot in every
+sample, so it would go to review. "The Poison Tree" reads as two different
+slots, so both claims would stay ACTIVE with no record. Of the seven real
+updates, the commute time ("45 minutes by bus" against "a total commute of
+40 minutes") reads as two slots every time, and the Fitbit's months once in
+three. Among the four unclear pairs, the two cars the user may both own still
+read as an update. A further 16 hand pairs gave the intended answer in all 48
+samples: the Delhi scenario's updates and its over-reach, the twelve
+persona attributes of the rot worlds, and two history pairs.
+
+**The rot benchmark's `probe` arm** (seeds 42/43/44, live checks on
+`claude-haiku-4-5`, scripted extraction, about 13 minutes and a projected
+US$0.65). The oracle arm run alongside reproduces its published figures to
+the question. Report of record:
+[`rot-probe-slot-kind-2026-10-01.json`](benchmarks/rot-probe-slot-kind-2026-10-01.json).
+
+| | Oracle | Probe, 2026-09-30 | Probe, 2026-10-01 |
+|---|---|---|---|
+| True updates retired (of the oracle's 58) | 58 | 57 | **56** |
+| Claims retired that the oracle keeps | 0 | 21 | **0** |
+| `recall_current@k` | 216/216 | 215/216 | **216/216** |
+| `current_first` | 203/216 | 202/216 | **202/216** |
+| `stale_over_current` | 1/123 | 1/123 | **2/123** |
+| `stale_retained@k` | 6/123 | 10/123 | **11/123** |
+| `poison_surfaced@k` | 0/51 | 0/51 | **0/51** |
+
+Read plainly:
+
+- **The history retirements are gone.** The 21 claims like "The user's manager
+  was previously Tomasz", retired in favour of other history, are kept. The
+  one current value lost to a history claim on 2026-09-30 is kept too, which
+  is the recall point.
+- **The true-update side moved by one, and not in the changed check.** The
+  two updates not retired are diet changes in one world (halal to kosher,
+  kosher to Mediterranean). For both, the contradiction check, which this
+  change leaves alone, answers that the two diets can hold at once, so the
+  slot check is never asked. Asked directly, the slot check answers "changes"
+  on both in every sample. The 2026-09-30 run missed the second of the two
+  for the same reason, so the difference is sampling in the unchanged check.
+  It costs one more stale value retained and one more ranked above the
+  current one.
+
+**The LongMemEval re-measurement** (the row marked ¶ in the table above).
+The same cycle as on 2026-09-30, on this change as first built (1.168.12, before it merged 1.168.13 to 1.168.16, which leave the sweep unchanged; it ships as 1.168.17), over a fresh copy of the
+kept control stores, upgraded the same way and read against the same control
+reports. One departure, disclosed in the reports: the abstraction pass was
+switched off. It only reads particles at least 14 days old, so it made no
+call on 2026-09-30 and would have run on these stores two days later.
+
+| | 2026-09-30 | 2026-10-01 |
+|---|---|---|
+| Sweep calls | 6,960 | 6,982 |
+| Particles retired | 33 in 26 stores | **13 in 13 stores** |
+| Of them, world facts stated twice | 18 | **0** |
+| Review records opened, both claims kept | (none existed) | **8** |
+| `qa_particles` at `top_k` 10 / 40 (control 0.787 / 0.820) | 0.800 / 0.813 | **0.787 / 0.820** |
+| `multi-session` at 10 / 40 (control 0.850 / 0.900) | 0.850 / 0.900 | **0.850 / 0.900** |
+| Questions whose context changed, at 10 / 40 | 4 / 6 | 7 / 7 |
+
+The sweep cost US$2.45 by the stores' own usage records, against about US$2
+on 2026-09-30, because the slot check's prompt is longer.
+
+Read plainly:
+
+- **None of the 18 world facts was retired.** Eight of them went to review
+  instead, each pair kept ACTIVE behind one INCONSISTENCY record: the Kawai
+  ES110's two prices, the Razer Viper Mini's two prices, two pairs of game
+  playtimes, two battery capacities, the two page counts for "The Song of
+  Achilles", and the two statements of the UK visa rule. The other ten,
+  "The Poison Tree" among them, were read as filling different slots and are
+  simply kept, with no record.
+- **What it still retires is mostly the user's own updates.** Of the 13, six
+  are values the user updated that were retired on 2026-09-30 too (the
+  postcards, the Fitbit's months, the Negroni count, where the user is based,
+  the support-group sessions, the book being read). Three are new and are
+  updates of the same kind: four Korean restaurants tried instead of three,
+  tennis every other week instead of weekly, trails instead of paved roads.
+  Four are not clean updates: the two cars the user may both own and the
+  wake-up routine, as on 2026-09-30, and two new ones where a narrower,
+  situational statement retired a general one (waking at 6:45 on Tuesdays and
+  Thursdays retired "wakes at 6:30 on weekdays"; a new twice-weekly morning
+  yoga class retired "yoga three times a week"). The five new retirements
+  are pairs the contradiction check passed this time and not on 2026-09-30.
+  The commute time is no longer retired.
+- **The answers did not move.** `qa_particles` and `multi-session` equal the
+  control's at both depths. Every question whose context changed was answered
+  correctly before and after; six are `knowledge-update` questions losing a
+  truly superseded value and one is the cycling question (trails for paved
+  roads). The only verdicts that flipped did so on byte-identical contexts (2
+  and 2 at `top_k` 10, 3 and 3 at 40), which is sampling. As on 2026-09-30,
+  LongMemEval rarely puts these claims in a context, so the gain is in what
+  the store keeps, not in the score.
 
 ### The subject rendering: three arms, three repeats each
 
@@ -1108,6 +1361,21 @@ judged false negative appears at a floor of 0.40). The floor is a coarse
 filter, though: 95.9% of unanswerable questions pass it, and the answer
 step's own decline rule does most of the refusing. It is a separate
 family from both tables above and is never merged with them.
+
+## The answer step: model-prior leakage
+
+When the store does hold relevant beliefs, the model that composes the answer
+can still add content of its own, and nothing in the answer marks it. That has
+its own measurement:
+[model-prior leakage in query answers](benchmarks/leakage.md). Each answer
+sentence is judged against the particles the answer was composed from, by a
+different model from the composer. On the owner's 39,571-belief store, over the
+same 338 real questions, 23.6% of claim-bearing answer sentences (379 of 1,609)
+were not supported by the retrieved particles, and two answers in three carried
+at least one such sentence. On a store about a private project the additions
+are mostly the model's own interpretation (motives, status, conclusions)
+written in the same voice as the recorded claims. It is a separate family from
+every table above and is never merged with them.
 
 ## Relationship to the extractor benchmarks
 

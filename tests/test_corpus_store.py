@@ -175,3 +175,116 @@ class TestResolveSnapshotForBlob:
         await self._seed(db_session)
         with pytest.raises(ValueError, match="Ambiguous entry prefix"):
             await resolve_snapshot_for_blob(db_session, "entry-")  # type: ignore[arg-type]
+
+
+class TestCatchupOrdering:
+    """The consolidation catch-up queue: least-tried first, then oldest.
+
+    Measured on the owner's store 2026-09-25: the same handful of transcript
+    snapshots failed every night, were handed back PENDING, and led the queue
+    again the next night, while 337 snapshots waited behind them.
+    """
+
+    @staticmethod
+    async def _seed(session: object, rows: list[tuple[str, int]]) -> None:
+        """One entry per ``(snapshot_id, age_days)``, every snapshot PENDING."""
+        now = datetime.now(UTC)
+        for snapshot_id, age in rows:
+            entry_id = f"e-{snapshot_id}"
+            session.add(CorpusEntryRow.from_model(_entry(entry_id, None)))  # type: ignore[attr-defined]
+            snap = Snapshot(
+                snapshot_id=snapshot_id,
+                captured_at=now - timedelta(days=age),
+                content_hash="b" * 64,
+                archive_path="/x",
+                extraction_status=ExtractionStatus.PENDING,
+                warc_record_type=WarcRecordType.RESPONSE,
+            )
+            session.add(SnapshotRow.from_model(snap, entry_id))  # type: ignore[attr-defined]
+        await session.commit()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_claim_counts_attempts(self, db_session: object) -> None:
+        from particles.corpus.store import claim_snapshot_for_extraction, update_extraction_status
+
+        session = db_session
+        await self._seed(session, [("s-1", 1)])
+        for _ in range(2):
+            await claim_snapshot_for_extraction(session, "s-1", started_at=datetime.now(UTC))  # type: ignore[arg-type]
+            # The pipeline's hand-back after every LLM call failed.
+            await update_extraction_status(session, "s-1", ExtractionStatus.PENDING)  # type: ignore[arg-type]
+        await session.commit()  # type: ignore[attr-defined]
+
+        row = await session.get(SnapshotRow, "s-1")  # type: ignore[attr-defined]
+        assert row.extraction_attempts == 2
+        assert row.extraction_status == ExtractionStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_a_tried_snapshot_waits_behind_untried_ones(self, db_session: object) -> None:
+        from particles.corpus.store import (
+            claim_snapshot_for_extraction,
+            list_pending_snapshots_for_catchup,
+            update_extraction_status,
+        )
+
+        session = db_session
+        await self._seed(session, [("old-poison", 60), ("mid", 30), ("new", 1)])
+        listed = await list_pending_snapshots_for_catchup(session)  # type: ignore[arg-type]
+        assert [p.snapshot_id for p in listed] == ["old-poison", "mid", "new"]
+
+        await claim_snapshot_for_extraction(  # type: ignore[arg-type]
+            session, "old-poison", started_at=datetime.now(UTC)
+        )
+        await update_extraction_status(session, "old-poison", ExtractionStatus.PENDING)  # type: ignore[arg-type]
+        await session.commit()  # type: ignore[attr-defined]
+
+        listed = await list_pending_snapshots_for_catchup(session)  # type: ignore[arg-type]
+        assert [p.snapshot_id for p in listed] == ["mid", "new", "old-poison"]
+        assert [p.attempts for p in listed] == [0, 0, 1]
+
+
+@pytest.mark.asyncio
+async def test_release_extraction_claim_only_releases_in_progress(
+    db_session: object, tmp_path: object
+) -> None:
+    """The extraction failure path hands back its own IN_PROGRESS claim, and
+    never overwrites a status the snapshot already moved to (FAILED on a
+    missing blob, PENDING on a transient reset, COMPLETE at the write)."""
+    from pathlib import Path
+
+    from particles.corpus.deposit import deposit_file
+    from particles.corpus.store import (
+        claim_snapshot_for_extraction,
+        release_extraction_claim,
+        update_extraction_status,
+    )
+
+    session = db_session  # type: ignore[assignment]
+    base = Path(str(tmp_path))
+    ids = []
+    for name in ("claimed", "done", "failed"):
+        doc = base / f"{name}.txt"
+        doc.write_text(f"{name} content")
+        ids.append((await deposit_file(session, doc, deposited_by="test"))[1])  # type: ignore[arg-type]
+    claimed, done, failed = ids
+    now = datetime.now(UTC)
+    for snapshot_id in ids:
+        await claim_snapshot_for_extraction(session, snapshot_id, started_at=now)  # type: ignore[arg-type]
+    await update_extraction_status(session, done, ExtractionStatus.COMPLETE)  # type: ignore[arg-type]
+    await update_extraction_status(session, failed, ExtractionStatus.FAILED)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+
+    released = [
+        await release_extraction_claim(session, snapshot_id)  # type: ignore[arg-type]
+        for snapshot_id in ids
+    ]
+    await session.commit()  # type: ignore[attr-defined]
+
+    assert released == [True, False, False]
+    rows = {sid: await session.get(SnapshotRow, sid) for sid in ids}  # type: ignore[attr-defined]
+    for row in rows.values():
+        await session.refresh(row)  # type: ignore[attr-defined]
+    assert rows[claimed].extraction_status == ExtractionStatus.PENDING.value
+    assert rows[claimed].extraction_started_at is None
+    assert rows[done].extraction_status == ExtractionStatus.COMPLETE.value
+    assert rows[failed].extraction_status == ExtractionStatus.FAILED.value

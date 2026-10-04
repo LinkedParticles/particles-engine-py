@@ -70,8 +70,10 @@ from particles.secrets import get_engine_token_optional
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
+    from particles.operations.digest import RenderedDigest
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
+    from particles.store.session_exposure_store import SessionExposure
 
 log = logging.getLogger(__name__)
 
@@ -434,9 +436,17 @@ class HttpBackend:
         dry_run: bool = False,
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
+        only_changed_components: bool = False,
     ) -> dict[str, object]:
         # progress/on_plan/on_status are local-stderr streams with no HTTP
         # analogue; ignored here. The plan still comes back in the response body.
+        if only_changed_components:
+            # POST /reindex has no such field; route or refuse, never
+            # silently widen.
+            raise NotYetRemoteError(
+                "--only-changed-components is not available against a remote engine yet "
+                ": POST /reindex does not accept it. Run it on the engine host."
+            )
         body = await self._post(
             "/reindex",
             {
@@ -619,6 +629,18 @@ class HttpBackend:
         params = {"project": project} if project is not None else None
         body = await self._get(f"/digest/{store}", params=params)
         return str(body["markdown"])
+
+    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+        from particles.operations.digest import RenderedDigest
+
+        params = {"project": project} if project is not None else None
+        body = await self._get(f"/digest/{store}", params=params)
+        # An engine that predates the line ids sends no ``lines``; the model defaults them.
+        return RenderedDigest.model_validate(body)
+
+    async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
+        # Like the harvest deposits, the row lands in the engine's own store.
+        await self._post("/session-exposures", exposure.model_dump(mode="json"))
 
     async def events_list(
         self,

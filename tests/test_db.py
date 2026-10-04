@@ -17,9 +17,20 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles import db
 from particles.config import reset_config
+from particles.core.schema import (
+    Confidence,
+    Particle,
+    ProvenanceRef,
+    ProvenanceRefType,
+    UncertaintyNature,
+)
+from particles.core.scoring.confidence import CalibrationSource
+from particles.store.particle_store import get_particles_by_ids, insert_particle
+from tests._write_probe import store_accepts_a_writer
 
 
 @pytest.fixture(autouse=True)
@@ -380,3 +391,108 @@ def test_get_write_session_dep_holds_lock(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert isinstance(session, AsyncSession)
     assert locked_during
     assert not db._file_write_locks["default"].is_locked
+
+
+# ---------------------------------------------------------------------------
+# Missing SQLite parent directory: created on first use, or one clear error
+# ---------------------------------------------------------------------------
+
+
+def test_create_tables_creates_missing_sqlite_parent_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite never creates a database file's directory; ``create_tables`` must.
+
+    Regression: ``particles db init`` against a fresh ``DATABASE_URL`` path used
+    to die inside Alembic with ``unable to open database file``.
+    """
+    db_file = tmp_path / "missing" / "nested" / "particles.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    reset_config()
+
+    asyncio.run(db.create_tables())
+
+    assert db_file.parent.is_dir()
+    assert db_file.is_file()
+
+
+def test_get_engine_creates_missing_sqlite_parent_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every entry point benefits, not just ``db init``: the engine factory creates it too."""
+    db_file = tmp_path / "missing" / "nested" / "particles.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    reset_config()
+
+    db.get_engine()
+
+    assert db_file.parent.is_dir()
+
+
+def test_ensure_sqlite_parent_dir_ignores_memory_and_postgres(tmp_path: Path) -> None:
+    for url in (
+        "sqlite+aiosqlite:///:memory:",
+        "sqlite://",
+        "postgresql+asyncpg://user@host/db",
+    ):
+        db._ensure_sqlite_parent_dir(url)  # must not raise or touch the filesystem
+
+
+def test_ensure_sqlite_parent_dir_raises_one_line_error_when_blocked(tmp_path: Path) -> None:
+    """A file where the directory should be yields a clean, path-naming error."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+
+    with pytest.raises(db.StoreDirectoryError) as excinfo:
+        db._ensure_sqlite_parent_dir(f"sqlite+aiosqlite:///{blocker / 'particles.db'}")
+    message = str(excinfo.value)
+    assert str(blocker) in message
+    assert "a file already exists" in message
+    assert "\n" not in message
+
+    with pytest.raises(db.StoreDirectoryError, match=str(blocker / "sub")):
+        db._ensure_sqlite_parent_dir(f"sqlite+aiosqlite:///{blocker / 'sub' / 'particles.db'}")
+
+
+# ---------------------------------------------------------------------------
+# write_transaction
+# ---------------------------------------------------------------------------
+
+
+def _claim(content: str) -> Particle:
+    return Particle(
+        content=content,
+        confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        provenance=[
+            ProvenanceRef(type=ProvenanceRefType.SOURCE, corpus_entry_id="e1", snapshot_id="s1")
+        ],
+        asserted_by="general-extractor",
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_transaction_commits_before_releasing_the_lock(
+    file_db_session: AsyncSession,
+) -> None:
+    p = _claim("a claim")
+    async with db.write_transaction(file_db_session):
+        await insert_particle(file_db_session, p)
+        assert not store_accepts_a_writer()  # the write is in flight
+        assert db._file_write_locks["default"].is_locked
+    assert store_accepts_a_writer()
+    assert not db._file_write_locks["default"].is_locked
+    assert p.id in await get_particles_by_ids(file_db_session, [p.id])
+
+
+@pytest.mark.asyncio
+async def test_write_transaction_rolls_back_a_failure_before_releasing_the_lock(
+    file_db_session: AsyncSession,
+) -> None:
+    p = _claim("a claim that fails")
+    with pytest.raises(RuntimeError):
+        async with db.write_transaction(file_db_session):
+            await insert_particle(file_db_session, p)
+            raise RuntimeError("boom")
+    assert store_accepts_a_writer()
+    assert p.id not in await get_particles_by_ids(file_db_session, [p.id])

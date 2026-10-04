@@ -15,7 +15,7 @@
  * calls go to sibling paths (/curation, /query, /graph, …) outside this scope.
  * The network-only guard below is belt-and-suspenders.
  */
-const SHELL_CACHE = "particles-web-ui-shell-0.3.0+1985fa0328ba";
+const SHELL_CACHE = "particles-web-ui-shell-0.3.0+fe348fc7d2e8";
 const SHELL_ASSETS = [
   "./",
   "./index.html",
@@ -28,8 +28,17 @@ const SHELL_ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
+  // `cache: "reload"` fetches each asset from the network, bypassing the HTTP
+  // cache. The engine serves the shell with Last-Modified and no
+  // Cache-Control, so a plain addAll can refill the new build's cache with a
+  // heuristically "fresh" asset from the previous build: new app.js markup
+  // styled by the old styles.css.
   event.waitUntil(
-    caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL_ASSETS)),
+    caches
+      .open(SHELL_CACHE)
+      .then((cache) =>
+        cache.addAll(SHELL_ASSETS.map((u) => new Request(u, { cache: "reload" }))),
+      ),
   );
   self.skipWaiting();
 });

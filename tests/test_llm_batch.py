@@ -308,10 +308,73 @@ async def test_batch_truncated_request_warns_with_its_budget(
     # The truncated text is still returned — the call site's parser is the
     # backstop, as before; what changes is that the cause is now legible.
     assert out == ["reply 0", '[{"claim": "half a jso', "r2", "r3"]
-    warnings = [r.getMessage() for r in caplog.records if "truncated" in r.getMessage()]
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "truncated" in r.getMessage()
+    ]
     assert len(warnings) == 1
     assert "max_tokens=4096" in warnings[0]
-    assert "request 1" in warnings[0]
+    assert "1 of 4 request(s)" in warnings[0]
+
+
+def _truncated(custom_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        custom_id=custom_id,
+        result=SimpleNamespace(
+            type="succeeded",
+            message=SimpleNamespace(
+                content=[SimpleNamespace(text="The actions show")], stop_reason="max_tokens"
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_truncations_aggregate_to_one_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A batch whose requests mostly truncate warns once, with the count.
+
+    A nightly run of 14-request batches that nearly all truncated wrote one
+    WARNING per request, 2,584 of one night's 4,092 stderr lines. The count,
+    budget, purpose, and fix hint go in one line per batch; the per-request
+    lines are INFO detail that ``--verbose`` turns back on.
+    """
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    results = [_truncated("0"), _truncated("1"), _truncated("2"), _succeeded("3", "[1]")]
+    llm.set_client(_batches_client(results))
+
+    with caplog.at_level("INFO", logger="particles.llm.adapters.anthropic"):
+        out = await llm.complete_many(
+            "semantic_lint", _REQUESTS, max_tokens=200, latency_tolerant=True
+        )
+
+    assert out == ["The actions show"] * 3 + ["[1]"]
+    truncations = [r for r in caplog.records if "truncated" in r.getMessage()]
+    warnings = [r.getMessage() for r in truncations if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "3 of 4 request(s)" in warnings[0]
+    assert "max_tokens=200" in warnings[0]
+    assert "llm purpose semantic_lint" in warnings[0]
+    assert warnings[0].count("To fix:") == 1
+    detail = [r.getMessage() for r in truncations if r.levelname == "INFO"]
+    assert [m.split(" request ")[1].split()[0] for m in detail] == ["0", "1", "2"]
+    assert all("To fix" not in m for m in detail)
+
+
+@pytest.mark.asyncio
+async def test_batch_with_no_truncation_does_not_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The aggregate line appears only when some request actually truncated."""
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    llm.set_client(_batches_client([_succeeded(str(i), f"r{i}") for i in range(4)]))
+
+    with caplog.at_level("INFO", logger="particles.llm.adapters.anthropic"):
+        await llm.complete_many("semantic_lint", _REQUESTS, max_tokens=200, latency_tolerant=True)
+
+    assert not [r for r in caplog.records if "truncated" in r.getMessage()]
 
 
 @pytest.mark.asyncio
@@ -338,6 +401,7 @@ async def test_batch_that_outlives_its_deadline_is_cancelled(
         min_requests=2,
         poll_interval_seconds=0.01,
         max_wait_seconds=0.02,
+        cancel_grace_seconds=0,  # no grace: the old discard
     )
     client = _batches_client([], statuses=["in_progress"])
     llm.set_client(client)
@@ -505,3 +569,71 @@ async def test_batch_honours_a_request_cache_prefix(
     assert system[0]["cache_control"] == {"type": "ephemeral"}
     assert system[1]["text"] == "VARIABLE"
     assert "cache_control" not in system[1]
+
+
+# ---------------------------------------------------------------------------
+# Per-request failure kinds: only an empty reply is a budget failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_reports_why_each_request_came_back_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An errored request is UNAVAILABLE; a reply with no text block is EMPTY."""
+    from particles.llm import RequestFailure
+    from particles.llm.registry import complete_many_with_provider_model
+
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    thinking_only = SimpleNamespace(
+        content=[SimpleNamespace(type="thinking")], stop_reason="max_tokens"
+    )
+    results = [
+        _succeeded("0", "reply 0"),
+        SimpleNamespace(custom_id="1", result=SimpleNamespace(type="errored")),
+        SimpleNamespace(
+            custom_id="2", result=SimpleNamespace(type="succeeded", message=thinking_only)
+        ),
+        SimpleNamespace(custom_id="3", result=SimpleNamespace(type="expired")),
+    ]
+    llm.set_client(_batches_client(results))
+
+    failures: list[RequestFailure | None] = []
+    out, _ = await complete_many_with_provider_model(
+        "extraction", _REQUESTS, max_tokens=10, latency_tolerant=True, failures_out=failures
+    )
+
+    assert out == ["reply 0", None, None, None]
+    assert failures == [
+        None,
+        RequestFailure.UNAVAILABLE,
+        RequestFailure.EMPTY,
+        RequestFailure.UNAVAILABLE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sequential_fallback_reports_an_empty_completion_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sequential path classifies the same way: EmptyCompletionError is EMPTY."""
+    from particles.llm import EmptyCompletionError, RequestFailure
+    from particles.llm.registry import complete_many_with_provider_model
+
+    _batch_config(tmp_path, monkeypatch, enabled=False)
+    client = MagicMock(spec=anthropic.Anthropic)
+    client.messages.create.side_effect = [
+        _text_message("reply 0"),
+        EmptyCompletionError("no text"),
+        RuntimeError("network"),
+        _text_message("reply 3"),
+    ]
+    llm.set_client(client)
+
+    failures: list[RequestFailure | None] = []
+    out, _ = await complete_many_with_provider_model(
+        "semantic_lint", _REQUESTS, max_tokens=10, failures_out=failures
+    )
+
+    assert out == ["reply 0", None, None, "reply 3"]
+    assert failures == [None, RequestFailure.EMPTY, RequestFailure.UNAVAILABLE, None]

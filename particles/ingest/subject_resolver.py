@@ -20,6 +20,7 @@ alias-merge / cache); authorities only recognize and resolve.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,8 @@ from particles.config import get_config
 from particles.core.schema import ExternalRef, Subject
 from particles.extraction.registry import infer_domain
 from particles.ingest.authorities import (
+    ContextualRecognizer,
+    RecognizeContext,
     SubjectAuthority,
     get_authorities,
     is_applicable,
@@ -39,6 +42,7 @@ from particles.store.subject_store import (
     find_by_external_ref,
     find_by_name,
     insert_subject,
+    is_persona_source,
     persona_alias_guard,
     split_subject,
 )
@@ -111,35 +115,61 @@ async def _attach_alias(session: AsyncSession, subject: Subject, name: str) -> S
     return updated
 
 
-def _persona_canonical(name: str, source_type: str | None) -> str:
-    """Fold a conversational source's persona aliases onto one name.
+def _persona_fold(
+    name: str, source_type: str | None, source_tags: Collection[str] = ()
+) -> str | None:
+    """The persona Subject's name when ``name`` is the speaker of a persona source.
+
+    ``None`` when the source is not a persona source
+    (:func:`~particles.store.subject_store.is_persona_source`) or ``name`` is
+    not one of ``subjects.persona_aliases`` nor the canonical name itself.
+    """
+    cfg = get_config().subjects
+    if not is_persona_source(source_type, source_tags):
+        return None
+    form = name.strip().casefold()
+    if form == cfg.persona_canonical_name.casefold() or form in {
+        a.casefold() for a in cfg.persona_aliases
+    }:
+        return cfg.persona_canonical_name
+    return None
+
+
+def _persona_canonical(
+    name: str, source_type: str | None, source_tags: Collection[str] = ()
+) -> str:
+    """Fold a persona source's speaker references onto one name.
 
     "user", "the user", "the speaker", "I" are the same person in a chat
     transcript, but each surface form minted its own Subject, which split that
     person's beliefs into groups that never reconciled against each other. The
     fold is a *resolution* rule: it changes which Subject a new claim binds to,
-    never an existing binding.
+    never an existing binding. A persona source is a persona source type or an
+    entry carrying a persona tag, such as a Claude Code memory file.
     """
-    cfg = get_config().subjects
-    if source_type is None or source_type not in cfg.persona_source_types:
-        return name
-    if name.strip().casefold() in {a.casefold() for a in cfg.persona_aliases}:
-        return cfg.persona_canonical_name
-    return name
+    folded = _persona_fold(name, source_type, source_tags)
+    return name if folded is None else folded
 
 
-async def _find_local(session: AsyncSession, name: str, source_type: str | None) -> Subject | None:
+async def _find_local(
+    session: AsyncSession, name: str, source_type: str | None, source_tags: Collection[str] = ()
+) -> Subject | None:
     """The local name/alias lookup of a path that binds a particle to the result.
 
-    ``name`` is already folded. Outside a persona source type a persona form
-    never resolves through the persona Subject's recorded aliases
+    ``name`` is already folded. Outside a persona source a persona form never
+    resolves through the persona Subject's recorded aliases
     (:func:`~particles.store.subject_store.persona_alias_guard`).
     """
-    return await find_by_name(session, name, skip_aliases_of=persona_alias_guard(name, source_type))
+    guard = persona_alias_guard(name, source_type, source_tags)
+    return await find_by_name(session, name, skip_aliases_of=guard)
 
 
 async def find_existing_subject(
-    session: AsyncSession, name: str, *, source_type: str | None
+    session: AsyncSession,
+    name: str,
+    *,
+    source_type: str | None,
+    source_tags: Collection[str] = (),
 ) -> Subject | None:
     """Resolve ``name`` to an *existing* Subject exactly as the write path would, read-only.
 
@@ -151,7 +181,8 @@ async def find_existing_subject(
     scoped by both; routing both through here is what keeps that
     true by construction.
     """
-    return await _find_local(session, _persona_canonical(name, source_type), source_type)
+    folded = _persona_canonical(name, source_type, source_tags)
+    return await _find_local(session, folded, source_type, source_tags)
 
 
 async def _record_persona_alias(session: AsyncSession, subject: Subject, form: str) -> Subject:
@@ -198,10 +229,26 @@ async def resolve_subject(
     particle_content: str | None = None,
     *,
     source_type: str | None = None,
+    source_tags: Collection[str] = (),
 ) -> Subject:
-    """Resolve a subject name to a canonical Subject, creating one if needed."""
-    folded = _persona_canonical(name, source_type)
-    subject = await _resolve(session, folded, asserted_by, particle_content, source_type)
+    """Resolve a subject name to a canonical Subject, creating one if needed.
+
+    ``source_tags`` are the corpus entry's tags; with ``source_type`` they
+    decide whether the speaker fold applies. A folded name never goes to a
+    live authority: the speaker is a private referent, and Wikidata
+    answered "user" with "user account" and so split one person across files.
+    """
+    persona = _persona_fold(name, source_type, source_tags)
+    folded = name if persona is None else persona
+    subject = await _resolve(
+        session,
+        folded,
+        asserted_by,
+        particle_content,
+        source_type,
+        source_tags,
+        live=persona is None,
+    )
     if folded == name:
         return subject
     recorded = await _record_persona_alias(session, subject, name.strip())
@@ -219,8 +266,15 @@ async def _resolve(
     asserted_by: str,
     particle_content: str | None,
     source_type: str | None,
+    source_tags: Collection[str] = (),
+    *,
+    live: bool = True,
 ) -> Subject:
-    """The resolution cascade for an already-folded ``name``."""
+    """The resolution cascade for an already-folded ``name``.
+
+    ``live=False`` skips the live-authority pass, as a conversational source
+    type does for every name.
+    """
     cache_key = subject_cache.make_key(session, name)
 
     # Check in-memory cache first (avoids repeat DB + API calls for same name)
@@ -229,7 +283,7 @@ async def _resolve(
         return cached.subject
 
     # Step 1: local alias index
-    existing = await _find_local(session, name, source_type)
+    existing = await _find_local(session, name, source_type, source_tags)
     if existing:
         subject_cache.cache_set(cache_key, existing)
         log.debug("Subject resolved locally: %r → %s", name, existing.id)
@@ -261,7 +315,7 @@ async def _resolve(
     # search recorded a process-global miss for this name (negative cache). Both
     # fall straight through to the Step 4 bare-local Subject; only positive
     # resolutions are store-scoped, so the negative check is unscoped by design.
-    skip_live = _skip_live_authorities(source_type)
+    skip_live = not live or _skip_live_authorities(source_type)
     if not skip_live and subject_cache.negative_get(name):
         skip_live = True
     if not skip_live:
@@ -281,6 +335,11 @@ async def _resolve(
                 attached = await _attach_alias(session, res.existing, name)
                 subject_cache.cache_set(cache_key, attached)
                 return attached
+            if res.abstained:
+                # The authority judged every candidate wrong for this claim.
+                # Treated as an abstention: no ref, and no negative
+                # cache entry, since ``all_missed`` is already False.
+                continue
             # Build a new Subject from the authority's resolution.
             assert res.external_ref is not None  # resolve() contract: existing xor new
             # resolver abstention. An external-authority candidate scored
@@ -315,7 +374,7 @@ async def _resolve(
                 session, res.external_ref.namespace, res.external_ref.id
             )
             if dup is None and resolved_name.lower() != name.lower():
-                dup = await _find_local(session, resolved_name, source_type)
+                dup = await _find_local(session, resolved_name, source_type, source_tags)
             if dup is not None:
                 attached = await _attach_alias(session, dup, name)
                 subject_cache.cache_set(cache_key, attached)
@@ -370,6 +429,69 @@ async def _resolve(
     return subject
 
 
+def _recognize_qualified(
+    name: str, context: RecognizeContext
+) -> tuple[ExternalRef, ContextualRecognizer] | None:
+    """The first contextual authority's recognition of a qualified name."""
+    for auth in get_authorities():
+        if not isinstance(auth, ContextualRecognizer):
+            continue
+        ref = auth.recognize_in(name, context)
+        if ref is not None:
+            return ref, auth
+    return None
+
+
+async def find_existing_qualified(
+    session: AsyncSession, name: str, context: RecognizeContext
+) -> Subject | None:
+    """The existing Subject a qualified name resolves to, read-only.
+
+    The qualified twin of :func:`find_existing_subject`: it matches by the
+    project-scoped external ref alone, never by the bare name, so a qualified
+    ``config.py`` never binds to an unscoped Subject of the same name.
+    """
+    recognized = _recognize_qualified(name, context)
+    if recognized is None:
+        return None
+    ref, _ = recognized
+    return await find_by_external_ref(session, ref.namespace, ref.id)
+
+
+async def resolve_qualified_subject(
+    session: AsyncSession,
+    name: str,
+    context: RecognizeContext,
+    asserted_by: str = "general-extractor",
+) -> Subject | None:
+    """Resolve a name the gate qualified to its project-scoped Subject.
+
+    The cascade for a qualified name is the recognize pass and nothing else:
+    there is no bare-name local match (an unscoped Subject of the same name is
+    a different identity), no live authority, and no bare-local fallback. A
+    recognized ref finds its Subject or mints one carrying the ref and the
+    authority's ``subject_class``. Returns ``None`` when no contextual
+    authority recognizes the name, which the caller treats as suppression.
+    """
+    recognized = _recognize_qualified(name, context)
+    if recognized is None:
+        return None
+    ref, auth = recognized
+    existing = await find_by_external_ref(session, ref.namespace, ref.id)
+    if existing is not None:
+        return existing
+    subject = Subject(
+        canonical_name=name.strip(),
+        external_ids=[ref],
+        subject_class=auth.subject_class_for(context),
+        created_at=datetime.now(UTC),
+        asserted_by=asserted_by,
+    )
+    await insert_subject(session, subject)
+    log.info("Created qualified subject: %r (%s:%s)", subject.canonical_name, ref.namespace, ref.id)
+    return subject
+
+
 async def resolve_subjects(
     session: AsyncSession,
     names: list[str],
@@ -377,11 +499,27 @@ async def resolve_subjects(
     particle_content: str | None = None,
     *,
     source_type: str | None = None,
+    source_tags: Collection[str] = (),
+    qualified: Mapping[str, RecognizeContext] | None = None,
 ) -> list[str]:
-    """Resolve a list of subject names and return their UUIDs."""
+    """Resolve a list of subject names and return their UUIDs.
+
+    A name in ``qualified`` goes through
+    :func:`resolve_qualified_subject` instead of the ordinary cascade. The
+    result stays positionally aligned with ``names`` (the pipeline zips the
+    two), so a qualified name no contextual authority recognizes is skipped
+    only in the case the gate never produces: one with nothing left after
+    normalization, the same case a blank name already is.
+    """
     ids: list[str] = []
     for name in names:
         if not name.strip():
+            continue
+        context = (qualified or {}).get(name)
+        if context is not None:
+            found = await resolve_qualified_subject(session, name, context, asserted_by)
+            if found is not None:
+                ids.append(found.id)
             continue
         subject = await resolve_subject(
             session,
@@ -389,6 +527,7 @@ async def resolve_subjects(
             asserted_by,
             particle_content=particle_content,
             source_type=source_type,
+            source_tags=source_tags,
         )
         ids.append(subject.id)
     return ids

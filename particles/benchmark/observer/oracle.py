@@ -29,6 +29,7 @@ from particles.benchmark.observer.schema import MemoryLine
 from particles.core.schema import Snapshot, UncertaintyNature
 from particles.extraction.general import CandidateParticle, ExtractionResult
 from particles.extraction.incremental import ChunkUnit, extract_with_carry_forward
+from particles.ingest.pipeline import UPDATE_SLOT_REQUEST
 from particles.llm import CompletionError, VisionImage
 
 _CLAIMS = re.compile(r"Claim A:\s*(?P<a>.*?)\n\s*\nClaim B:\s*(?P<b>.*)\Z", re.DOTALL)
@@ -182,6 +183,10 @@ class SlotProbeProvider:
         match = _CLAIMS.search(prompt)
         if match is None:
             raise CompletionError("observer-oracle: not a contradiction-probe prompt")
+        # The update probe asks for the slot's kind too; every slot
+        # in the table holds one value at a time and changes over time.
+        slot = "SLOT: CHANGES\n" if UPDATE_SLOT_REQUEST in prompt else ""
         if contradicts(match["a"].strip(), match["b"].strip()):
-            return "YES: the claims give one attribute different values"
-        return "NO"
+            return f"REASON: the claims give one attribute different values\n{slot}VERDICT: YES"
+        none = "SLOT: NONE\n" if slot else ""
+        return f"REASON: the claims do not disagree\n{none}VERDICT: NO"

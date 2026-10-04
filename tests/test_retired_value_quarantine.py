@@ -63,6 +63,7 @@ from particles.store.particle_store import (
     insert_particle,
     update_particle_status,
 )
+from tests._client_fixtures import stream_via_create
 
 EMB = [0.1, 0.2, 0.3, 0.4]
 
@@ -434,6 +435,7 @@ def _mock_llm(contents: list[str]) -> MagicMock:
     client = MagicMock(spec=anthropic.Anthropic)
     client.messages = MagicMock()
     client.messages.create = MagicMock(return_value=resp)
+    stream_via_create(client)
     return client
 
 

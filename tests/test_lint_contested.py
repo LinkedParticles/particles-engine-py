@@ -265,22 +265,20 @@ class TestFindingAndCard:
         assert cards[0].key == f"contested:{_A}"
 
     @pytest.mark.asyncio
-    async def test_inconsistency_card_carries_the_full_evidence_id(
+    async def test_inconsistency_only_belief_is_carded_by_its_record(
         self, db_session: AsyncSession
     ) -> None:
-        """The CONTESTED card links the evidence graph structurally."""
+        """the conflict card, keyed by the record, replaces the CONTESTED card."""
         await _add_entry(db_session, "e1", "https://sketchy.example/p")
         await insert_particle(db_session, _claim("A claim.", _A, "e1"))
         await _add_inconsistency(db_session, _A)
         await db_session.commit()
 
-        cards = [
-            c
-            for c in await collect_cards(db_session, semantic=False)
-            if c.kind is CardKind.CONTESTED
-        ]
-        assert len(cards) == 1
-        assert cards[0].inconsistency_id == _INC
+        cards = await collect_cards(db_session, semantic=False)
+        assert not [c for c in cards if c.kind is CardKind.CONTESTED]
+        (conflict,) = [c for c in cards if c.kind is CardKind.INCONSISTENCY]
+        assert conflict.inconsistency_id == _INC
+        assert conflict.key == f"inconsistency:{_INC}"
 
     @pytest.mark.asyncio
     async def test_divergence_only_card_offers_no_comment_gesture(
@@ -301,18 +299,22 @@ class TestFindingAndCard:
         assert "affirm" in cards[0].suggested_gestures
 
     @pytest.mark.asyncio
-    async def test_inconsistency_card_still_offers_comment(self, db_session: AsyncSession) -> None:
+    async def test_observer_and_inconsistency_card_points_at_its_conflict(
+        self, db_session: AsyncSession
+    ) -> None:
+        """the CONTESTED card stays for its observer basis, without comment."""
+        await _adopt_lens(db_session)
         await _add_entry(db_session, "e1", "https://sketchy.example/p")
-        await insert_particle(db_session, _claim("A claim.", _A, "e1"))
+        await insert_particle(db_session, _claim("Sketchy claim.", _A, "e1"))
         await _add_inconsistency(db_session, _A)
         await db_session.commit()
 
-        cards = [
-            c
-            for c in await collect_cards(db_session, semantic=False)
-            if c.kind is CardKind.CONTESTED
-        ]
-        assert "comment" in cards[0].suggested_gestures
+        cards = await collect_cards(db_session, semantic=False)
+        (contested,) = [c for c in cards if c.kind is CardKind.CONTESTED]
+        assert contested.contested_bases == ["divergence", "inconsistency"]
+        assert "comment" not in contested.suggested_gestures
+        assert f"inconsistency:{_INC}" in contested.diagnostic
+        assert [c.inconsistency_id for c in cards if c.kind is CardKind.INCONSISTENCY] == [_INC]
 
     @pytest.mark.asyncio
     async def test_retired_beliefs_get_no_card(self, db_session: AsyncSession) -> None:

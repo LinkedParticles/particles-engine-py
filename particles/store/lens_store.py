@@ -25,8 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.core.schema import (
+    AssertionModality,
     TrustLensDecayRule,
     TrustLensDefinition,
+    TrustLensModalityRule,
     TrustLensStatement,
     TrustLensUrlRule,
     TrustLensUtilityRule,
@@ -66,6 +68,7 @@ class TrustLensEntryRow(Base):
         String, nullable=False
     )  # "statement" | "domain" | "url_pattern" | "extractor_weight"
     #    | "decay_source_type" | "decay_url_pattern"
+    #    | "utility_<scope>" | "modality_<scope>"
     # statement fields
     domain: Mapped[str | None] = mapped_column(String, nullable=True)
     source_type: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -86,6 +89,10 @@ class TrustLensEntryRow(Base):
     # replaced the superseded ``weight`` / ``floor`` / ``cap`` triple.
     half_life_uses_days: Mapped[float | None] = mapped_column(Float, nullable=True)
     rank_lift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # modality-rule fields. Reuses ``pattern`` for the particle id,
+    # subject id, URL regex or source_type the rule selects.
+    modality: Mapped[str | None] = mapped_column(String, nullable=True)
+    modality_when: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class LensAdoptionRow(Base):
@@ -96,6 +103,12 @@ class LensAdoptionRow(Base):
     lens_name: Mapped[str] = mapped_column(String, primary_key=True)
     adopted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     adopted_by: Mapped[str] = mapped_column(String, nullable=False)
+
+
+#: Entry kinds of the modality layer, one per rule scope.
+_MODALITY_ENTRY_KINDS = frozenset(
+    {"modality_particle", "modality_subject", "modality_url_pattern", "modality_source_type"}
+)
 
 
 def _entry_rows(lens: TrustLensDefinition) -> list[TrustLensEntryRow]:
@@ -150,6 +163,16 @@ def _entry_rows(lens: TrustLensDefinition) -> list[TrustLensEntryRow]:
                 rank_lift=u.rank_lift,
             )
         )
+    for m in lens.modality_rules:
+        rows.append(
+            TrustLensEntryRow(
+                lens_id=lens.lens_id,
+                entry_kind=f"modality_{m.scope}",
+                pattern=m.pattern,
+                modality=m.modality.value,
+                modality_when=m.when.value if m.when is not None else None,
+            )
+        )
     return rows
 
 
@@ -159,6 +182,7 @@ def _to_definition(row: TrustLensRow, entries: list[TrustLensEntryRow]) -> Trust
     extractor_weights: dict[str, float] = {}
     decay_rules: list[TrustLensDecayRule] = []
     utility_rules: list[TrustLensUtilityRule] = []
+    modality_rules: list[TrustLensModalityRule] = []
     for e in entries:
         if e.entry_kind == "statement" and e.domain and e.source_type and e.trust_rank is not None:
             statements.append(
@@ -211,6 +235,15 @@ def _to_definition(row: TrustLensRow, entries: list[TrustLensEntryRow]) -> Trust
                     rank_lift=e.rank_lift,
                 )
             )
+        elif e.entry_kind in _MODALITY_ENTRY_KINDS and e.pattern and e.modality:
+            modality_rules.append(
+                TrustLensModalityRule(
+                    scope=e.entry_kind[len("modality_") :],  # type: ignore[arg-type]
+                    pattern=e.pattern,
+                    modality=AssertionModality(e.modality),
+                    when=AssertionModality(e.modality_when) if e.modality_when else None,
+                )
+            )
     return TrustLensDefinition(
         lens_id=row.lens_id,
         name=row.name,
@@ -222,6 +255,7 @@ def _to_definition(row: TrustLensRow, entries: list[TrustLensEntryRow]) -> Trust
         extractor_weights=extractor_weights,
         decay_rules=decay_rules,
         utility_rules=utility_rules,
+        modality_rules=modality_rules,
         corpus_entry_id=row.corpus_entry_id,
     )
 
@@ -366,6 +400,21 @@ async def get_adopted_lens_extractor_weights(session: AsyncSession) -> dict[str,
             current = weights.get(extractor_id)
             weights[extractor_id] = weight if current is None else min(current, weight)
     return weights
+
+
+async def get_adopted_lens_modality_rules(
+    session: AsyncSession,
+) -> list[tuple[str, list[TrustLensModalityRule]]]:
+    """Each adopted lens's modality rules, by lens name.
+
+    Lenses silent about modality are omitted, so a store with none returns an
+    empty list and every claim reads as its stored default.
+    """
+    return [
+        (lens.name, list(lens.modality_rules))
+        for lens in await get_adopted_lenses(session)
+        if lens.modality_rules
+    ]
 
 
 # ---------------------------------------------------------------------------

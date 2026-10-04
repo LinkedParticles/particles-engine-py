@@ -71,8 +71,10 @@ cli:  # [engine]
   heartbeat_seconds: 20.0
 
 http:  # [client]
-  # User-Agent sent on all outbound HTTP requests.
-  user_agent: "particles-sdk/0.3.0 (https://github.com/LinkedParticles/particles-engine-py)"
+  # User-Agent sent on all outbound HTTP requests. Defaults to
+  # "particles-sdk/<installed version> (+https://github.com/LinkedParticles/particles-engine-py)";
+  # set it only to override that.
+  # user_agent: "my-bot/1.0 (+https://example.org/contact)"
   timeout_seconds: 30
   # Hard cap on the (decompressed) size of any single fetched HTTP body, in
   # bytes. Guards against compression bombs: a small gzip/br payload that
@@ -387,6 +389,13 @@ llm:  # [client]
   #   model: claude-sonnet-4-6    # model across QA conditions ii–iv (runner-enforced)
   # abstraction:       # abstraction-promotion synthesis + entailment/dedup judges
   #   model: claude-sonnet-4-6
+  # verification:      # the audit's second reading of each flagged contradiction
+  #   model: claude-sonnet-4-6
+  # subject_resolution: # the Wikidata candidate judge, when subjects.wikidata_candidate_selection
+  #   model: claude-sonnet-4-6    # is llm_judge
+  # use_judge:          # the utility-mining use judge. Compiled default
+  #   provider: anthropic # is Sonnet: the activation gate measured a Haiku-class judge
+  #   model: claude-sonnet-5-5  # short of its bar and Sonnet well over it.
   #
   # Named OpenAI-compatible providers: every non-Anthropic vendor —
   # hosted (OpenAI, DeepSeek, Kimi, gateways) or local (Ollama, llama.cpp,
@@ -453,6 +462,13 @@ llm:  # [client]
   #   max_wait_seconds: 3600       # per-batch ceiling; on expiry the batch is
   #                                # cancelled and its probes report unavailable,
   #                                # rather than stalling the run to the API's 24h
+  #   cancel_grace_seconds: 180    # after cancelling, wait this long for the batch
+  #                                # to end and keep the requests it finished
+  #                                # ; 0 ⇒ discard them, as before
+  #   cancel_rerun_max_output_tokens: 15000  # in the consolidation cycle, re-run a
+  #                                # cancelled batch's unanswered remainder
+  #                                # sequentially when remainder × max_tokens is
+  #                                # at most this; 0 disables the re-run
   # Prompt caching for a repeated system prefix. Only the Anthropic
   # adapter acts on it: a request's cache_prefix is sent as a cached system
   # block (billed ~10% on re-use). The extraction instructions (~1.3k+ tokens,
@@ -460,18 +476,58 @@ llm:  # [client]
   # system string, exact pre-0252 billing.
   # prompt_cache:
   #   enabled: true                # false ⇒ no cache_control sent, as before 0252
+  #
+  # List prices in US$ per million tokens that every cost estimate (the
+  # `particles audit` estimate, the benchmark harnesses) turns tokens into
+  # dollars with. Keyed by resolved model id, or "<provider>:<model>" to pin
+  # one provider's route. The Anthropic list prices ship as defaults (checked
+  # against https://platform.claude.com/docs/en/about-claude/pricing on
+  # 2026-09-17), and every estimate prints the per-MTok figure it used, so a
+  # stale one is visible. Entries set here merge over the shipped ones: set a
+  # key to correct a price or to price a model routed through llm.providers.
+  # A model with no entry is reported as unpriced, never as free.
+  # (Formerly benchmark_memory.price_per_mtok; the old key is migrated.)
+  # price_per_mtok:
+  #   claude-sonnet-5: {input: 2.00, output: 10.00}
+  #   "local:llama3.1": {input: 0.00, output: 0.00}
+  # Fraction of list price removed when a call rides a batch API (llm.batch).
+  # Anthropic's batch discount is 50 % on input and output. Used by the
+  # benchmark estimates (--pooled, --batch-qa) and when a run prints its
+  # measured LLM usage (`particles audit`, `particles memory consolidate`).
+  # (Formerly benchmark_memory.batch_discount; the old key is migrated.)
+  batch_discount: 0.5
+  # Prompt-cache pricing as multiples of a model's input price, used when a
+  # run's measured LLM usage is priced. Anthropic bills a 5-minute cache write
+  # at 1.25x input and a cache read at 0.1x.
+  cache_write_price_multiplier: 1.25
+  cache_read_price_multiplier: 0.1
 
 extraction:  # [client]
   # NOTE: `extraction.model` moved to `llm.default.model`. The old
   # key is still honoured for one deprecation cycle (it is migrated to
   # llm.default.model with a warning), but prefer the `llm` section above.
   # Max tokens for claim extraction responses. NOTE: a reasoning model
-  # (DeepSeek-V4, Kimi K3, the GPT-5.6 family) spends its thinking tokens from
-  # this same budget, so 8192 can run out mid-JSON-array — the reply comes back
-  # truncated (finish_reason=length) and the parser reports "Unterminated
-  # string". The adapter logs a WARNING naming the budget when that happens;
-  # 16384 cleared it for all three models in the 2026-08 trial.
-  max_tokens: 8192
+  # (claude-sonnet-5, DeepSeek-V4, Kimi K3, the GPT-5.6 family) spends its
+  # thinking tokens from this same budget, so 8192 can run out mid-JSON-array
+  # or before any text at all. The reply comes back truncated
+  # (finish_reason=length / stop_reason=max_tokens) and the adapter logs a
+  # WARNING naming the budget. The reply itself also grows with the source:
+  # 2 to 3.5 tokens per source character (about 300 a claim). On 2026-09-26,
+  # 16384 with the retry at 20000 still cut many Claude Code memory files
+  # twice, and the claims past the cut were lost with both attempts billed.
+  # 32000 covers a memory file of about 8,000 characters. The Anthropic
+  # adapter streams any call above the SDK's ~21333-token non-streaming
+  # ceiling, so budgets above it work. Only tokens produced are billed.
+  # An OpenAI-compatible provider has no such ceiling, but a vendor whose own
+  # output cap is lower rejects the request, and a long reply must finish
+  # within that provider's timeout_seconds. Lower this for such a provider.
+  max_tokens: 32000
+  # One retry at this larger budget when a reply came back empty, cut at the
+  # budget, or unparseable. Billing, network, and refusal failures are never
+  # retried. A value at or below max_tokens disables the retry. 64000 covers a
+  # whole html_chunk_size chunk at the worst measured rate, and is
+  # claude-haiku-4-5's output limit.
+  retry_max_tokens: 64000
   # NOTE: `extraction.query_max_tokens` moved to `query.answer_max_tokens`. It
   # never drove extraction — it is the §9.3 answer call's budget — and its 1024
   # default left an extended-thinking model no tokens for the answer. The old
@@ -510,6 +566,11 @@ extraction:  # [client]
   # next run picks it up. Set above the longest expected single-snapshot
   # extraction runtime so a still-running job is never reclaimed.
   stale_in_progress_minutes: 30.0
+  # Cost-estimate assumption, not a runtime knob: input tokens the general
+  # extractor's fixed system prompt (~8k chars) adds to every call. Read by the
+  # `particles audit` estimate and the memory-rot benchmark. (Formerly
+  # benchmark_rot.estimate_extraction_prompt_overhead_tokens; migrated.)
+  estimate_prompt_overhead_tokens: 2500
   # Skip superseded generations of a MUTABLE source. Extraction is
   # deferred by default, so a file edited in N sessions between two passes has
   # N pending snapshots. With this on, the bulk paths (`extract --all-pending`,
@@ -522,6 +583,24 @@ extraction:  # [client]
   # intermediate one is kept as PROVENANCE_STALE history, at one LLM call per
   # generation).
   collapse_superseded_pending: true
+  # Extract only what an append-only snapshot adds. A session
+  # transcript or an append-only archive is deposited again at every harvest,
+  # each snapshot a longer copy of the last. With this on, a snapshot of an
+  # APPEND_ONLY entry is read as a delta: only the text after the point the
+  # previous extracted snapshot was read to, with the end of the earlier text
+  # shown to the model as context that it uses to resolve references and
+  # extracts nothing from. The earlier text's claims stand as they are, and an
+  # extractor version bump reaches them only through `particles reindex`.
+  # The delta falls back to a whole read (counted and disclosed as a quality
+  # note) when the new snapshot does not extend the previous one. Set false to
+  # read every snapshot whole, as before.
+  append_only_delta: true
+  # Characters of already-extracted text shown before the delta, cut back to
+  # a paragraph boundary. 0 reads the delta with no context.
+  append_context_chars: 4000
+  # The largest delta chunk sent in one call (minimum 1000). Each chunk after
+  # the first takes the end of the chunk before it as its context.
+  append_chunk_chars: 7500
   # Extract-time exact-duplicate suppression. When a candidate's
   # claim is already held verbatim by an ACTIVE particle with the same
   # subjects and the same stance:holder, don't mint a second particle —
@@ -540,6 +619,20 @@ extraction:  # [client]
   duplicate_suppression:
     enabled: true
 
+  # Second reading of a confirmed contradiction. A pair the §6.6
+  # contradiction probe confirms is read again before extraction acts on it:
+  # on `llm.verification`, with each claim's source name and kind (a note, or
+  # an append-only record such as a session transcript), its time and its
+  # passage, under the instruction the pair's source kinds choose.
+  # A pair the reading does not confirm is treated as the probe's NO: the
+  # candidate is written ACTIVE and no record, retirement or CONTRADICTS edge
+  # rests on it. A reading that fails (breaker open, call error, reply still
+  # cut after the retry) keeps the probe's signal for a pair from one entry,
+  # which no other check reads, and drops it for a cross-entry pair, which the
+  # nightly census reads. Costs one verification call per probe-confirmed
+  # pair. false restores the write path before it: the first probe decides.
+  verify_conflicts: true
+
   # Retired-value quarantine. A candidate that is the exact twin
   # (normalized content + subject set + stance holder, the exact-duplicate
   # key) of a
@@ -557,6 +650,20 @@ extraction:  # [client]
   # is disclosed in the extraction quality notes and the log.
   retired_value_quarantine:
     enabled: true
+  # source types whose prose is scanned for tool turns before
+  # extraction. A `tool:` line in a transcript is relabelled "tool output
+  # (unverified, not the speaker's words)" in the prompt copy only (the
+  # archived blob is untouched) and the prompt gains one rule: tool output is
+  # evidence about what a tool returned, never a fact about the speaker.
+  # Empty disables the marker.
+  tool_turn_source_types: [CONVERSATION, JOURNAL]
+  # Source types whose extracted claims are screened for an agent session's
+  # momentary working state: a claim naming a concrete .claude/worktrees/<name>
+  # path, or opening "The session now operates on …", "The working directory
+  # is …", "The current branch is …", is dropped, and a worktree name is never
+  # minted as a Subject. Each drop is disclosed as a quality note. Empty
+  # disables the filter.
+  session_state_source_types: [CONVERSATION]
 
 # Document-scope meta-claim labelling. The general extractor
 # classifies each candidate as WORLD or DOCUMENT_META (a claim about the
@@ -584,13 +691,6 @@ extraction_scope:  # [client]
   # re-applies it to already-extracted entries after a change here.
   exempt_source_tags:
     - rule-file
-  # source types whose prose is scanned for tool turns before
-  # extraction. A `tool:` line in a transcript is relabelled "tool output
-  # (unverified, not the speaker's words)" in the prompt copy only (the
-  # archived blob is untouched) and the prompt gains one rule: tool output is
-  # evidence about what a tool returned, never a fact about the speaker.
-  # Empty disables the marker.
-  tool_turn_source_types: [CONVERSATION, JOURNAL]
 
 
 extraction_modality:  # [client]
@@ -601,6 +701,21 @@ extraction_modality:  # [client]
   # FALSIFIABLE. Set false to opt out — output reverts to all-FALSIFIABLE,
   # byte-for-byte the pre-0.7.0 behaviour.
   enabled: true
+
+modality_regeneration:  # [engine]
+  # Defaults for `particles modality`, which reclassifies the ACTIVE
+  # claims whose assertion_modality was set by a classifier rule other than
+  # today's (`particles lint` reports them as MODALITY_CLASSIFIER_STALE). One
+  # LLM call per claim on the `extraction` purpose. It rewrites only the
+  # modality record, never content, confidence or provenance, and it never
+  # overwrites an operator's `particles particle reclassify` verdict.
+  # Max classifier calls per minute; 0 disables the delay.
+  rate_limit_per_minute: 60
+  # Default cap on claims one run classifies; `0` (or --limit 0) means the
+  # whole backlog, which is safe because the pass commits as it goes.
+  batch_limit: 200
+  # How often a run commits.
+  commit_interval: 25
 
 extraction_stance:  # [client]
   # When true (default), the general extractor flags a candidate
@@ -1040,11 +1155,13 @@ utility:  # [engine]
   # The transcript-mining pass that produces per-belief utility evidence.
   mining:
     enabled: true
-    # The bounded LLM soft-guideline matcher (the literal matcher is always on,
-    # deterministic and zero-cost).
+    # The LLM judge that credits a shown belief only when the session's actions
+    # applied it. A literal token match only nominates a candidate,
+    # so with the judge off the pass records nothing.
     behavioural_matching: true
-    # Hard cap on behavioural LLM match calls per mining run (discipline).
-    max_behavioural_calls: 50
+    # Hard cap on judge calls per mining run, both routes (discipline).
+    # A median session makes about 11.
+    max_behavioural_calls: 150
     # Relevance pre-filter for the behavioural tier: rank the unmatched beliefs
     # by embedding similarity to the session's action lines (local model, no
     # LLM cost) and judge only the top N. Without it the call budget is spent
@@ -1198,14 +1315,39 @@ subjects:  # [engine]
   # Subject. Must be <= wikidata_link_suppress_threshold and below the 0.5
   # "unscoreable" sentinel (so links that cannot be scored still attach).
   external_link_abstain_threshold: 0.15
+  # which Wikidata search candidate an unqualified name takes.
+  # top_hit takes the first usable hit. best_description scores each
+  # of the up-to-five candidates' descriptions against the claim text with the
+  # local encoder, adopts the best at or above wikidata_link_suppress_threshold,
+  # and below it keeps the extracted name with the candidate as a low-confidence
+  # ref. It measured worse than top_hit on 2026-09-30 (subject resolution
+  # accuracy 0.800 against 0.886); see docs/benchmarks/subject-resolution-2026-09-30.md.
+  # llm_judge (default) asks the llm.subject_resolution model, once per ambiguous name
+  # (several candidates, or one scored below wikidata_link_suppress_threshold),
+  # to pick a candidate or answer "none of these"; "none" leaves a bare local
+  # Subject. Verdicts are kept and reused for the same name, claim, candidates
+  # and model. Every other name takes the top hit. Measured
+  # 2026-10-01: accuracy 0.971 against 0.914 for top_hit, and 0.898 to 0.918
+  # against 0.735 on ordinary prose, at US$0.08 to 0.20 per 100 names; see
+  # docs/benchmarks/subject-resolution-judge-2026-10-01.md. With no LLM key or
+  # an unusable reply it takes the top hit; set top_hit for no model call at all.
+  wikidata_candidate_selection: llm_judge
+  # Output budget of one llm_judge call.
+  wikidata_judge_max_tokens: 200
+  # How many search hits the llm_judge is shown (5 to 50). The ambiguity gate
+  # and the other selection values still read the first five, so which names
+  # reach the model is unchanged; the extra hits come with the same one search
+  # request. Measured 2026-10-02: the right item for "Jest" and "Chelsea" sat
+  # at rank 6, which 7 hits show the judge and five do not, for about 20 more
+  # input tokens per judged name. The judge is never shown a given-name,
+  # family-name or disambiguation item, at any depth; see
+  # docs/benchmarks/subject-resolution-judge-2026-10-02.md. The hits are part
+  # of the verdict key, so changing this asks once more about each judged name
+  # whose search returns more than five hits.
+  wikidata_judge_search_limit: 7
   # `subjects find-duplicates`: report subject pairs whose max
   # name/alias embedding cosine similarity is at or above this value.
   find_duplicates_similarity_threshold: 0.88
-  # Source types whose subject names are private referents by construction
-  # (chat-transcript harvests, personal journals): skip live-ontology
-  # authorities (Wikidata) during resolution — ~none of the names resolve and
-  # the fruitless, rate-limited calls serialise the process. Exact-identifier
-  # authorities (Numista / ISBN / DOI) are recognize-only and unaffected.
   # one persona per store for conversational sources. The
   # extractor names the speaker differently across sessions ("user", "the
   # user", "the speaker"), which split one persona into several Subjects and
@@ -1222,14 +1364,32 @@ subjects:  # [engine]
   #
   # Each form the fold meets is recorded as an alias of the canonical Subject
   # (visible in `particles subjects show`), so lookups by name resolve it.
-  # Those aliases never bind a claim from any other source type: "I" or "User"
-  # in a web page or an imported bundle still becomes its own Subject.
+  # Those aliases never bind a claim from any other source: "I" or "User" in a
+  # web page or an imported bundle still becomes its own Subject.
   persona_aliases: [user, the user, speaker, the speaker, i, me, myself]
   persona_canonical_name: the user
   persona_source_types: [CONVERSATION, JOURNAL]
+  # an entry carrying any of these tags folds too, whatever its
+  # source type. A Claude Code memory file is LOCAL_MARKDOWN on disk, but its
+  # "I" is the store's speaker. A folded persona form is never looked up in a
+  # live authority (without this, "user" came back from Wikidata as "user
+  # account" and split the speaker from "the user" in the next file). Empty
+  # keys the fold on source type alone. A store whose speaker has other names
+  # ("the owner", or a first name) adds them to persona_aliases, or merges
+  # the Subjects with `particles subjects merge`.
+  persona_source_tags: [memory-file]
+  # Source types that skip live-ontology authorities (Wikidata) during
+  # resolution. Chat-transcript harvests and personal journals name private
+  # referents by construction: ~none of the names resolve and the fruitless,
+  # rate-limited calls serialise the process. Bulk migration intake
+  # (MCP_MEMORY_EXPORT) is slow to look up entity by entity and
+  # a live match can rewrite a canonical_name the migrating user chose;
+  # enrichment stays available afterwards. Exact-identifier authorities
+  # (Numista / ISBN / DOI) are recognize-only and unaffected.
   skip_live_authorities_source_types:
     - CONVERSATION
     - JOURNAL
+    - MCP_MEMORY_EXPORT
 
 # extraction-time non-entity subject gate. Suppresses promotion of
 # non-entity token classes (self-vocabulary enums, reference / doc-ID codes,
@@ -1249,10 +1409,27 @@ subject_gate:  # [engine]
   # otherwise strip — the exemption keys on the source type, not the name shape.
   exempt_source_types:
     - PYTHON_SOURCE
+  # What the gate does with each token class: `qualify` keeps the
+  # name as a Subject scoped by the source's project (only when a project key
+  # is known; otherwise it is suppressed), `suppress` drops it. A class missing
+  # here is suppressed; set every class to `suppress` for behaviour.
+  dispositions:
+    self_vocabulary: suppress
+    version_number: suppress
+    reference_code: qualify
+    filename: qualify
+    snake_case: qualify
+    cli_command: qualify
+  # Recovery tiers `subjects relink-gated` applies by default, and that the
+  # `gated_subjects` curation card covers: 1 = the gated-subjects
+  # record on the particle, 2 = the structured claim's subject term, 3 = the
+  # claim's backtick spans. Add a tier only after checking its precision on a
+  # dry-run sample of your own store.
+  relink_tiers: [1, 2, 3]
 
 # Per-authority subject-resolution policy. Keyed by namespace; any
 # omitted authority uses its built-in defaults. Built-in authorities:
-# numista, km_catalog, wikidata, isbn, doi. Example:
+# artifact, numista, km_catalog, wikidata, isbn, doi. Example:
 #   authorities:
 #     wikidata:
 #       enabled: true     # turn an authority off without code
@@ -1374,6 +1551,13 @@ query:  # [engine]
   # refusal failure is never retried (it would only bill twice). 0 disables
   # the retry; it costs nothing on a query that answered.
   answer_retry_max_tokens: 16384
+  # Grounded answers. When true, the composer cites the retrieved
+  # particle ids behind every sentence and tags each uncited sentence as its
+  # own inference (drawn over cited claims) or background (from nothing in the
+  # store). Every cited id is checked against the retrieved set, the labels
+  # are shown with the answer, and nothing is dropped or stored. A request's
+  # `grounded` field (CLI --grounded / --ungrounded) overrides this per call.
+  grounded_answers: false
 
 contestedness:  # [client]
   # per-claim contestedness is the max−min spread of a claim's
@@ -1422,8 +1606,10 @@ obsidian:  # [engine]
   # Default output directory for `particles export obsidian` when the
   # operator omits the path argument. `~` is expanded to the home dir.
   # Leave commented out (or null) to require an explicit path on the CLI.
-  # Typical iCloud-vault location:
-  # default_output_path: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault
+  # Typical location, a folder of its own inside an iCloud vault. The export
+  # prunes only notes it wrote (tracked in .particles-export.json); the first
+  # export into a directory that already holds your own notes needs --force.
+  # default_output_path: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault/Particles
   # `synthesis_min_particles` moved to `exporter_common` in 0.42.1
   # so the Logseq exporter honours the same gate.
   # when true (default), `export obsidian --with-synthesis` also emits
@@ -1594,6 +1780,18 @@ links_suggest:  # [engine]
 # the corpus — including undeposited ones — and rank the undeposited ones as
 # deposit suggestions (`particles corpus links suggest`). Suggestion-only;
 # never auto-deposits or crawls.
+vocabulary:  # [engine]
+  # the vocabulary document, where reviewed predicate aliases,
+  # alignments and profiles live. `particles vocab propose` clusters
+  # a store's predicates by subject class and records the top candidates as
+  # proposals; nothing enters a document until a reviewer confirms it.
+  # Cosine similarity at which normalised forms join one alias candidate
+  # (average linkage, within one subject class).
+  alias_similarity: 0.85
+  # Candidates of each kind (alias, profile) one propose run records, ranked by
+  # the claims each would cover.
+  propose_limit: 30
+
 citation_signal:  # [engine]
   # Harvest URL mentions at extraction time. Off = stop capturing new mentions
   # (existing rows and suggestions stay readable).
@@ -1629,6 +1827,12 @@ curation:  # [engine]
   # Run the LLM-assisted finders (semantic contradiction). Off by default so the
   # queue is cheap; `particles curate --semantic` opts in per-run.
   semantic: false
+  # who an operator-authored belief is attributed to. The successor an
+  # operator supersede writes (`curate apply supersede`, or
+  # POST /particles/{id}/supersede) carries this as asserted_by, with
+  # HUMAN_REVIEW calibration and no agent confidence ceiling. Use the
+  # platform:identifier form.
+  operator_identity: "operator:local"
   # Soft cap for the dependency-count normalizer: log1p(n) / log1p(cap).
   dependency_norm_cap: 20
   # Age (days) at which the staleness_age signal saturates to 1.0.
@@ -1653,7 +1857,9 @@ curation:  # [engine]
   snapshot_enabled: true
   # Age past which the queue response is stamped `stale: true` (clients render
   # "as of <built_at>" either way). 36 h gives the nightly cadence a day of
-  # slack, so one skipped run does not cry wolf.
+  # slack, so one skipped run does not cry wolf. The nightly cycle rebuilds
+  # the collection only when its census runs, so while consolidation.census is
+  # enabled the threshold is at least its interval_hours plus a day.
   snapshot_max_age_hours: 36.0
   # Collections kept per store. A small ring so a bad build is one row from a
   # rollback; these rows are pure cache and nothing references them.
@@ -1663,6 +1869,11 @@ curation:  # [engine]
   # contradiction is not re-found tonight and must be carried; this bounds how
   # long an un-re-probed card survives.
   snapshot_carry_forward_days: 30
+  # Queue precision: the window, in days back from now, over which
+  # `particles curate --precision` and the `curation_precision` block of
+  # `particles quality` read the gesture log and the retained collections.
+  # `curate --precision --since DATE` overrides it for one run.
+  precision_window_days: 30
   # Weights for the additive leverage score.
   leverage_weights:
     dependency_count: 1.0
@@ -1671,6 +1882,23 @@ curation:  # [engine]
     # Live since wired the projection-manifest hook;
     # contributes only when curation.projection_manifests is non-empty.
     projection_blocking: 1.0
+  # leverage = stakes * (base + the weighted sum above). Stakes is
+  # how much the card's beliefs are relied on: the larger of their use (the
+  # utility reinforcement score R, counting mined use and `memory useful`
+  # presses) and their dependents. A card about beliefs no session uses ranks
+  # below a card about beliefs sessions rely on, whatever its kind or age.
+  stakes:
+    # false restores the score exactly.
+    enabled: true
+    # Urgency every card gets, so a young, heavily used belief's card can rank
+    # high even when its weighted sum is near zero.
+    base: 0.25
+    # Stakes of a card about unused beliefs with no dependents, and of a card
+    # naming no belief (uncited_url, failed_snapshots). Keeps today's order on
+    # a store with no utility evidence yet. Lower demotes unused cards harder.
+    floor: 0.05
+    # R at which use saturates: ln(1 + R) / ln(1 + use_norm_cap).
+    use_norm_cap: 20
 
 # First-run memory audit — `particles audit [PATH]`, also the
 # closing step of `particles init claude-code`. Presentation + cost gating
@@ -1695,14 +1923,90 @@ audit:  # [engine]
   # populated store the candidate set can be large; when the cap binds, the
   # report discloses "probed X of Y candidate pairs" (with the tier split on
   # harvest runs). 0 probes nothing. `particles lint` is unaffected (stays
-  # exhaustive).
+  # exhaustive). Within each tier, pairs from two different notes are probed
+  # before pairs from one note.
   max_contradiction_probes: 50
+  # Read each pair the probe flagged a second time, on llm.verification, with
+  # each claim's source passage, note name and note date, and count only the
+  # confirmed pairs. The report discloses "N flagged, M confirmed".
+  # false counts every flag, as before. The nightly census and
+  # `particles curate --semantic` follow this setting too; lint never verifies.
+  verify_contradictions: true
+  # Cap on second readings per run, spent in probe order. A flag past the cap
+  # is disclosed as unverified and is not counted.
+  max_contradiction_verifications: 25
+  # Output budget of one second reading. llm.verification defaults to a model
+  # that may think before it answers, and the thinking spends from this budget.
+  verify_max_tokens: 1024
+  # A second reading cut at verify_max_tokens (or empty, the budget spent on
+  # thinking) is re-issued once at this larger budget; a reply still cut
+  # leaves its flag unverified. At or below verify_max_tokens disables it.
+  verify_retry_max_tokens: 4096
+  # Assumptions behind the dollar range and wall time the estimate prints
+  # (priced from llm.price_per_mtok; each figure is disclosed with it). Measured
+  # on 2026-09-25: a first-run audit of 96 Claude Code memory files (~53k
+  # source tokens) into a fresh store, claude-sonnet-5 extraction at
+  # extraction.max_tokens 16384 with the retry at 20000 (since raised to 32000
+  # and 64000), claude-haiku-4-5
+  # probes, a 200-probe cap. It made 104 extraction calls averaging ~7,000
+  # output tokens each (mostly thinking, so nearly flat in the source size),
+  # retried 8 of the 96 first calls, made 374 semantic-lint calls (the 200
+  # audit probes plus ~174 §6.6 probes during extraction), billed $7.97, and
+  # took 96 minutes. The estimate before this re-basing printed $1.92-3.57.
+  #
+  # Expected output tokens per extraction call, retries averaged in. The
+  # per-model mapping is keyed like llm.price_per_mtok and wins over the
+  # scalar; the 2026-09 provider survey measured ~3,600 per call on
+  # claude-haiku-4-5, for example:
+  #   estimate_output_tokens_per_extraction_call_by_model: {claude-haiku-4-5: 3600}
+  estimate_output_tokens_per_extraction_call: 7000
+  estimate_output_tokens_per_extraction_call_by_model: {}
+  # The expected range runs from (1 - spread) x that figure with no retries to
+  # (1 + spread) x it with the expected retries. The ceiling is every call at
+  # extraction.max_tokens plus the expected retries at
+  # extraction.retry_max_tokens.
+  estimate_output_spread: 0.25
+  # Fraction of extraction calls retried at extraction.retry_max_tokens (8 of
+  # 96 in the measured run, at the old 16384 first budget, so a conservative
+  # bound now). Ignored when the retry is disabled.
+  estimate_extraction_retry_rate: 0.083
+  # §6.6 contradiction probes the extraction pipeline makes per extraction
+  # call, on top of the capped audit probes. Uncapped and density-dependent.
+  estimate_reconcile_probes_per_extraction_call: 1.8
+  # One contradiction probe: instruction + two claims in, a one-sentence reason
+  # and a verdict line out (the probe call's own max_tokens is 250, so the
+  # output figure is a bound; the measured run averaged ~305 in, ~56 out).
+  estimate_probe_input_tokens: 350
+  estimate_probe_output_tokens: 250
+  # Wall time per call; calls run one at a time. 50 s per extraction call and
+  # 1.5 s per probe reproduce the measured run's 96 minutes (the total is
+  # measured, the split between the two is assumed).
+  estimate_seconds_per_extraction_call: 50
+  estimate_seconds_per_probe: 1.5
+  # One second reading: instruction + two claims with their passages in, and
+  # the call's own budget (verify_max_tokens, 1024) out as a bound; the
+  # measured runs read 22 flags in ~41 s.
+  estimate_verify_input_tokens: 1500
+  estimate_verify_output_tokens: 1024
+  estimate_seconds_per_verification: 2
 
 # Scheduled consolidation — the dream cycle:
 # `particles memory consolidate`, typically run from launchd/cron with
 # --if-due. Cadence + cost gating only: detection thresholds and probe caps
 # stay with their finders (audit.max_contradiction_probes,
 # utility.mining.max_behavioural_calls, extraction.max_llm_calls_per_source).
+reindex:  # [engine]
+  # `particles reindex --estimate`: before a version-scoped sweep,
+  # re-extract a seeded sample of its snapshots, judge each sample's new claims
+  # against the stored ones (the equivalence judge), and project the
+  # changed share and the full sweep's cost. Spends only on the sample.
+  # Snapshots re-extracted per estimate (--sample-size overrides).
+  estimate_sample_size: 12
+  # Random seed of the sample, so repeat estimates sample the same snapshots
+  # (--seed overrides).
+  estimate_seed: 0
+  # Claim pairs per equivalence-judge call.
+  estimate_judge_batch_pairs: 25
 consolidation:  # [engine]
   # --if-due threshold (hours): skip when the last successful run is younger.
   # 20 = daily scheduling with headroom for clock drift, so a laptop that was
@@ -1719,6 +2023,11 @@ consolidation:  # [engine]
   # llm.batch.enabled false degrades dispatch to sequential full-price calls).
   # false restores the pre-0237 serial per-snapshot loop exactly.
   extract_batching: true
+  # Pooled pass: snapshot tasks that may use the store at once. A task hands
+  # its slot and its DB connection back while it waits on the batch, so all
+  # snapshots still share one batch; this bounds the database work before and
+  # after it. Keep it well under the SQLAlchemy connection pool (5 + 10).
+  extract_db_concurrency: 4
   # Run the LLM passes (extract catch-up, reconcile probes, contradiction
   # probe, behavioural utility matching) on scheduled runs. false ships
   # structural-only — the demotion path if the semantic passes
@@ -1734,9 +2043,17 @@ consolidation:  # [engine]
   # spent on a pair the update rung can actually act on (the sweep pre-filters
   # by lineage and date), so the budget goes further than the figure above.
   max_update_probes: 100
-  # Stale cycle-lock reclaim (minutes): a consolidate.lock whose pid is dead
-  # or older than this is reclaimed, so a crashed run cannot wedge the cadence.
+  # Cycle lock. The kernel holds consolidate.lock for the whole
+  # cycle: a live cycle is never reclaimed, and a crashed one frees it at once.
+  # Minutes after which a skipped caller warns on stderr that the holder may
+  # be hung (it names the pid to stop). Also the reclaim age where the lock
+  # falls back to pid-and-age (no advisory file locks, or a pre-change holder).
   lock_timeout_minutes: 120
+  # Seconds between the holder's heartbeat_at refreshes.
+  lock_heartbeat_seconds: 60
+  # Minutes after which a holder on another host (a container on a shared
+  # mount) with no heartbeat is treated as stopped.
+  lock_heartbeat_stale_minutes: 10
   # Abstraction-promotion pass: cluster settled, subject-scoped
   # specifics into one semantic belief carrying premise links. Runs between
   # utility mining and the projection re-render. LLM-priced (synthesis +
@@ -1777,6 +2094,69 @@ consolidation:  # [engine]
     # the date the question needs. Deliberately over-inclusive: a missed
     # abstraction is cheap, a blurred date is the regression.
     exclude_time_anchored: true
+  # Nightly contradiction disclosure, pass 3b. A contradiction the
+  # census's second reading confirms, between claims from two different
+  # sources, opens one INCONSISTENCY record per disagreement, so the next
+  # session's digest flags every claim in it. Disclosure only: no status or
+  # confidence changes. A record closes itself when a side is no longer stated
+  # by any current source. Needs audit.verify_contradictions: true (only
+  # confirmed pairs are disclosed).
+  contradiction_disclosure:
+    # Off: the cycle runs as before, and its report says the pass is off.
+    enabled: true
+    # New records opened per run (regroup replacements do not count). A
+    # disagreement past the cap waits in the run record for the next run.
+    max_per_run: 10
+    # Second readings per run re-reading the pairs of open records confirmed
+    # under an instruction that has since changed. A pair the new
+    # reading rejects is withdrawn; a record left with none closes as
+    # `withdrawn` without a review. The rest are re-read on a later night.
+    max_rereadings_per_run: 25
+  # Re-anchoring: when an update retires a state claim ("the user
+  # lives in Delhi"), a claim from the same passage that relied on it ("the
+  # restaurant is a ten-minute walk from the user's flat") is replaced by a
+  # dated restatement anchored to the old state, checked by a second reading.
+  # A claim that cannot be restated safely stays and becomes a stale_basis card.
+  reanchor:
+    enabled: true
+    # Update retirements examined per run (one probe call each), oldest first.
+    max_retirements_per_run: 20
+    # Candidate claims sent in one probe call.
+    max_candidates_per_retirement: 8
+    # Second readings, and so writes, per run.
+    max_restatements_per_run: 20
+  # Run-level batch-wait budget. llm.batch.max_wait_seconds bounds
+  # one Message Batches job; this bounds the total one run waits on all of
+  # them. Each batch waits at most the balance left; below the floor, the
+  # remaining sets run sequentially at full price (nothing is skipped). The run
+  # report and CONSOLIDATION_RUN record disclose what was moved.
+  batch_wait:
+    budget_seconds: 3600        # total batch waiting per run
+    min_remaining_seconds: 300  # below this, remaining sets skip the batch path
+  # The run's dollar budget, US$ at list price over the token
+  # counts the provider reports (llm.price_per_mtok). Checked before each
+  # LLM-priced pass against the run's spend so far plus the pass's estimate,
+  # and before each Message Batches chunk. A pass that would exceed it is
+  # skipped and disclosed ("spent US$X of US$Y; pass N skipped"); zero-LLM
+  # passes always run. `memory consolidate --dry-run` prints the per-pass
+  # estimates. null (the default) is unbounded.
+  budget_usd: null
+  # The census, pass 3: the contradiction and duplicate sweep whose cards are
+  # the curation queue (`particles curate`, GET /curation). It is report-only,
+  # so it cannot move retrieval, and it is the cycle's largest LLM cost: on the
+  # 2026-09-20 LongMemEval cycle it made 30,000 of 36,627 calls, about four
+  # fifths of the spend (docs/benchmarks.md § Ablations). It therefore runs
+  # weekly beside the nightly cycle. On the nights between, the report says
+  # "census skipped: last ran <when>, next due <when>" and the queue serves the
+  # last census's stored cards. The probe cap stays audit.max_contradiction_probes.
+  # `particles audit` is unaffected: it still runs its census on first contact.
+  census:
+    # false: the cycle never runs the census; the queue serves what is stored.
+    enabled: true
+    # Hours since the last census started before the next one is due. 168 =
+    # weekly; a run up to an hour early still counts. 0 = every run, the
+    # behaviour before this setting existed.
+    interval_hours: 168
 
 # Resident daemon mode — in-process scheduling inside
 # `particles engine serve`. Opt-in and off by default: without `--daemon` or
@@ -1901,7 +2281,7 @@ benchmark_memory:  # [engine]
   # run records usage.
   estimate_output_tokens_per_judge_call: 32
   # Per-model override of the extraction figure, keyed exactly like
-  # price_per_mtok below (resolved model id, or "<provider>:<model>" to pin
+  # llm.price_per_mtok (resolved model id, or "<provider>:<model>" to pin
   # one route) and consulted before the scalar above, which remains the
   # fallback. Output per call is a property of the model: the 2026-09
   # provider survey (docs/benchmarks/provider-survey-2026-09.md) measured
@@ -1928,7 +2308,7 @@ benchmark_memory:  # [engine]
   # 0.9996x. Without an entry here a Sonnet 5 input projection runs ~37 %
   # low and the window check overstates its margin (the largest `s` prompt
   # reads ~130k at 4 chars/token, ~177k for real, against a 195,904 budget).
-  # Same key shape and lookup as price_per_mtok. The write side is keyed on
+  # Same key shape and lookup as llm.price_per_mtok. The write side is keyed on
   # the extraction model, the answer side and the window check on the answer
   # model; both rendered lines disclose the factor and its source. Example
   # (Sonnet 5 = 4 / 1.369):
@@ -1937,28 +2317,14 @@ benchmark_memory:  # [engine]
   #     claude-haiku-4-5: 4.0
   chars_per_token: 4.0
   chars_per_token_by_model: {}
-  # Fraction of list price removed when a call rides the Message Batches API:
-  # --pooled batches the write side, --batch-qa the answerer/judge, both only
-  # while llm.batch.enabled. Anthropic's batch discount is 50 % on both input
-  # and output tokens.
-  batch_discount: 0.5
-  # List prices in US$ per million tokens, keyed by resolved model id (or
-  # "<provider>:<model>" to pin one provider's route). EMPTY by default:
-  # prices go stale, and a compiled-in figure would quietly misprice every
-  # run after the next price change, so the estimate prints "no price
-  # configured for <model>" until you fill this in. Verify against
-  # https://platform.claude.com/docs/en/about-claude/pricing before copying
-  # the example — these were correct on 2026-09-17:
-  #   price_per_mtok:
-  #     claude-sonnet-5: {input: 2.00, output: 10.00}
-  #     claude-haiku-4-5: {input: 1.00, output: 5.00}
-  #     claude-opus-5: {input: 5.00, output: 25.00}
-  price_per_mtok: {}
+  # The batch discount --pooled / --batch-qa apply is llm.batch_discount
+  # (formerly benchmark_memory.batch_discount; the old key is migrated).
+  # Prices come from llm.price_per_mtok (shared with the audit estimate).
 
 # Memory-rot benchmark: currency, supersession, and source-trust
 # leakage across a simulated changing world. `particles benchmark rot`. Run
 # knobs and cost assumptions only — the pipeline under test runs the shipped
-# defaults. Prices come from benchmark_memory.price_per_mtok.
+# defaults. Prices come from llm.price_per_mtok.
 benchmark_rot:  # [engine]
   # Seeds a run covers by default; a seed IS the fixture (the world is a pure
   # function of seed + days), so three seeds are three independent worlds.
@@ -1977,8 +2343,7 @@ benchmark_rot:  # [engine]
   floor_sweep: [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
   # `live`-arm cost-projection assumptions (disclosed by --estimate).
   estimate_output_tokens_per_extraction_call: 1500
-  # Fixed extractor system prompt re-sent per call (~8k chars).
-  estimate_extraction_prompt_overhead_tokens: 2500
+  # The per-call prompt overhead is extraction.estimate_prompt_overhead_tokens.
   estimate_probe_calls_per_update: 4.0
   estimate_probe_input_tokens: 120
   estimate_probe_output_tokens: 200
@@ -1990,7 +2355,7 @@ benchmark_rot:  # [engine]
 # assumptions only: the query op under test runs as configured, and the judged
 # stage disables the gate for the run so the response step can be scored over
 # the top-k the floor would have suppressed. Prices come from
-# benchmark_memory.price_per_mtok.
+# llm.price_per_mtok.
 benchmark_relevance_floor:  # [engine]
   # Floors the sweep evaluates (the memory-rot sweep's range, so the synthetic
   # and the real-question curves line up setting for setting).
@@ -2021,6 +2386,53 @@ benchmark_relevance_floor:  # [engine]
   estimate_answer_output_tokens: 500
   estimate_judge_prompt_overhead_tokens: 350
   estimate_judge_output_tokens: 20
+  # Ask before spending above this many projected LLM calls (--yes skips).
+  confirm_call_threshold: 50
+
+# Model-prior leakage benchmark — the share of query-answer sentences the
+# retrieved particles do not support (`particles benchmark leakage`). Each
+# sentence is judged against the particles the answer was composed from by
+# the shared entailment judge on the llm.benchmark purpose. The query op under
+# test runs as configured; the questions are the relevance-floor benchmark's
+# held-out set (benchmark_relevance_floor.heldout_path). Prices come from
+# llm.price_per_mtok.
+benchmark_leakage:  # [engine]
+  # Retrieval depth the query op answers over — the query surfaces' default.
+  top_k: 40
+  # Seed of the `--limit` sample (stratified by source).
+  sample_seed: 0
+  # Version of the sentence-attribution rubric. 1 asks for the verdict before
+  # the reason and is what the first measurement used; 2 asks for
+  # the reason first. Compare numbers only within one protocol.
+  judge_protocol: 2
+  # Refuse a run whose judge (llm.benchmark) resolves to the same model as the
+  # composer (llm.query_response): a model judging its own output tends to find
+  # its own background facts supported. Point llm.benchmark at another model.
+  require_distinct_judge: true
+  # Preceding answer sentences shown to the judge with each sentence, to
+  # resolve an "it" or "this". Context only, never a premise.
+  context_sentences: 2
+  # Token budget of one judge call (room for an adaptive-thinking judge).
+  judge_max_tokens: 1024
+  # Concurrent questions. Keep it under the store's connection pool
+  # (SQLAlchemy's default, 5 + 10 overflow); above that a question times out
+  # waiting for a connection and is excluded as `infra`.
+  concurrency: 4
+  # Judge calls in flight at once, across the whole run (an answer's
+  # sentences are judged concurrently under this bound).
+  judge_concurrency: 8
+  # Transient answer/judge failures: retries, then exclusion as `infra`.
+  call_retries: 2
+  call_retry_backoff_seconds: 2.0
+  # Cost-projection assumptions (disclosed by --estimate). Nothing is
+  # retrieved before the projection, so the top-k's size and the answer's
+  # length are both assumed; the judge count is an upper bound.
+  estimate_answer_prompt_overhead_tokens: 700
+  estimate_answer_output_tokens: 500
+  estimate_particle_tokens: 45
+  estimate_sentences_per_answer: 8.0
+  estimate_judge_prompt_overhead_tokens: 600
+  estimate_judge_output_tokens: 120
   # Ask before spending above this many projected LLM calls (--yes skips).
   confirm_call_threshold: 50
 
@@ -2056,6 +2468,15 @@ benchmark:  # [engine]
   # a pre-1.140.0 number — old run files and the provider-survey pages were
   # measured under the old semantics and are not comparable to new runs.
   subject_aware_matching: true
+  # Record each affirm or dismiss of a `demotion` curation card as a labelled
+  # pair in <runs_dir>/demotion-rulings.jsonl (append-only JSONL): both
+  # claims' texts and content hashes, the subject, the demotion reason, any
+  # recorded probe verdicts, the ruling ("coexist" for a dismiss, "replacement"
+  # for an affirm), who and when. `particles benchmark rot` scores the live
+  # update checks against these real pairs in a section of its own. The file
+  # holds claim text from your store and stays under your home directory; set
+  # false to stop writing it. The gestures mean the same either way.
+  record_demotion_rulings: true
 
 # Minimum re-fetch interval per source type (seconds), for entries with
 # fetch_policy: LAZY. 0 = no floor — re-check whenever the ladder is invoked

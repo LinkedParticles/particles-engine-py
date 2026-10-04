@@ -103,3 +103,50 @@ async def test_success_clears_a_stale_breaker(monkeypatch: pytest.MonkeyPatch) -
     # the breaker stays closed.
     assert await seam._llm_call("probe") == "ANSWER"
     assert seam.llm_circuit_open() is False
+
+
+async def test_trip_is_counted_with_its_cause_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_complete(purpose: str, prompt: str, max_tokens: int = 200, **_: object) -> str:
+        raise _FakeStatusError("Your credit balance is too low to access the Anthropic API.", 400)
+
+    monkeypatch.setattr("particles.llm.complete", fake_complete)
+    before = seam.llm_trip_count()
+    assert await seam._llm_call("first") is None
+    assert await seam._llm_call("second") is None  # short-circuited: no second trip
+    assert seam.llm_trip_count() == before + 1
+    assert seam.llm_unavailable_cause() == "credit balance too low"
+
+
+@pytest.mark.parametrize(
+    ("message", "status", "cause"),
+    [
+        ("Your credit balance is too low.", 400, "credit balance too low"),
+        ("Billing hard limit reached.", 400, "billing error"),
+        ("invalid x-api-key", 401, "API key rejected"),
+        ("forbidden", 403, "API key lacks permission"),
+    ],
+)
+def test_account_level_cause_class(message: str, status: int, cause: str) -> None:
+    from particles.llm.errors import describe_account_level_failure
+
+    assert describe_account_level_failure(_FakeStatusError(message, status)) == cause
+
+
+async def test_empty_reply_as_text_returns_empty_string_uncounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opted in, a no-text reply (budget spent on thinking) is ``""``, not a failed call."""
+    from particles.llm import EmptyCompletionError
+
+    async def fake_complete(purpose: str, prompt: str, max_tokens: int = 200, **_: object) -> str:
+        raise EmptyCompletionError("no text block (stop_reason=max_tokens)")
+
+    monkeypatch.setattr("particles.llm.complete", fake_complete)
+    before = seam.llm_failure_count()
+
+    assert await seam._llm_call("x", empty_reply_as_text=True) == ""
+    assert seam.llm_failure_count() == before
+    # Not opted in: the historical contract, a counted failure returning None.
+    assert await seam._llm_call("x") is None
+    assert seam.llm_failure_count() == before + 1
+    assert seam.llm_circuit_open() is False

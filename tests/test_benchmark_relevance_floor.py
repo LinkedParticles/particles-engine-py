@@ -608,6 +608,7 @@ class TestRunner:
         self, floor_store: None
     ) -> None:
         answer = _Scripted("answer", "unused")
+        get_config().llm.price_per_mtok.clear()
         with override_providers({"query_response": answer, "benchmark": answer}):
             rows = await replay_retrieval([_ON_TOPIC, _OFF_TOPIC], top_k=5)
             unpriced = estimate_judged_stage(rows)
@@ -617,9 +618,7 @@ class TestRunner:
         assert answer.calls == 0
 
         selection = get_config().llm.for_purpose("query_response")
-        get_config().benchmark_memory.price_per_mtok[selection.model] = TokenPrice(
-            input=3.0, output=15.0
-        )
+        get_config().llm.price_per_mtok[selection.model] = TokenPrice(input=3.0, output=15.0)
         priced = estimate_judged_stage(rows)
         assert priced.cost_usd is not None and priced.cost_usd > 0
 

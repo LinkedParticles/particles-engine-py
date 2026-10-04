@@ -17,8 +17,9 @@ mocked; embeddings are supplied directly so cosine similarity is deterministic.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import numpy as np
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +36,8 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import deposit_text
 from particles.operations.reconcile import reconcile_supersession
-from particles.store.particle_store import get_particle, insert_particle
+from particles.store.particle_store import get_particle, get_particles_by_ids, insert_particle
+from tests._write_probe import store_accepts_a_writer
 
 
 def _adr(adr_id: str, *, supersedes: str | None = None, superseded_by: str | None = None) -> str:
@@ -244,3 +246,61 @@ class TestReconcileSupersessionSweep:
         assert summary["demoted"] == 0
         loser = await get_particle(db_session, superseded_id)
         assert loser is not None and loser.status is Status.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_a_demotion_is_committed_before_the_next_probe(
+    file_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer in another process can write while the sweep probes.
+
+    Demotions used to stay uncommitted until the sweep ended, so SQLite's
+    write lock was held across every later probe and a concurrent writer
+    failed with ``database is locked``.
+    """
+    import particles.operations.reconcile as reconcile_mod
+    from particles.config import get_config
+
+    session = file_db_session
+    get_config().extraction.similarity_threshold = 0.5
+    sup = _particle(content="the superseding claim", entry_id="sup-e", snapshot_id="s1")
+    subs = [
+        _particle(content=f"old claim {i}", entry_id="sub-e", snapshot_id="s2") for i in range(3)
+    ]
+    for p in [sup, *subs]:
+        await insert_particle(session, p)
+    await session.commit()
+
+    monkeypatch.setattr(
+        "particles.operations.version_guard.assert_store_schema_current",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        reconcile_mod,
+        "iter_supersession_entry_pairs",
+        AsyncMock(return_value=[("sup-e", "sub-e")]),
+    )
+    sims = [0.95, 0.90, 0.85]
+    monkeypatch.setattr(
+        reconcile_mod,
+        "get_active_particles_with_embeddings",
+        AsyncMock(
+            return_value=[(sup, np.array([1.0], dtype=np.float32))]
+            + [(p, np.array([s], dtype=np.float32)) for p, s in zip(subs, sims, strict=True)]
+        ),
+    )
+    monkeypatch.setattr(reconcile_mod, "_cosine", lambda a, b: float(a[0] * b[0]))
+    writable_during_probes: list[bool] = []
+
+    async def probe(_a: str, _b: str) -> bool | None:
+        writable_during_probes.append(store_accepts_a_writer())
+        return True  # replaces: every pair demotes
+
+    monkeypatch.setattr(reconcile_mod, "_has_contradiction_signal", probe)
+
+    summary = await reconcile_supersession(session)
+
+    assert summary["demoted"] == 3
+    assert writable_during_probes == [True, True, True]
+    stored = await get_particles_by_ids(session, [p.id for p in subs])
+    assert {p.status for p in stored.values()} == {Status.PROVENANCE_STALE}

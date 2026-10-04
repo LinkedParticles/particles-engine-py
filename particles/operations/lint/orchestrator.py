@@ -13,6 +13,8 @@ Structural checks (no LLM):
   - Orphans, no-subject claims, phantom/low-coverage subjects, extraction-quality report,
     pending extractions, empty-COMPLETE-snapshot audit, schema-version audit,
     structured-claim subject mismatch, bare ``properties`` keys (``.coverage``).
+  - Stale modality classifier stamps and the modality lens queue
+    (``.modality``).
   - Granularity length pre-check (``.granularity``).
   - Undated-retirement census (``.retirement``) — once-believed retired
     particles with no stored retirement instant.
@@ -20,6 +22,8 @@ Structural checks (no LLM):
   - Contestedness distribution (``.contestedness``) — store-level lens-divergence
     histogram under the store's own adopted policy set (absent when
     fewer than two policies are configured).
+  - Open conflicts (``.open_inconsistency``) — one ``OPEN_INCONSISTENCY``
+    WARNING per open INCONSISTENCY record, whatever its members' statuses.
 
 Semantic checks (LLM-assisted, when ``semantic=True``):
   - Contradictions (``.contradictions``).
@@ -40,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.schema import FIX_CAPABLE_CATEGORIES, LintFinding, LintReport
 from particles.observability import traced
 from particles.operations._llm import llm_circuit_open
+from particles.store.particle_store import get_inconsistency_particles
 
 from .assertion_quality import _check_compound_assertions
 from .citation_signal import _check_undeposited_cited_sources
@@ -64,6 +69,12 @@ from .granularity import (
     _check_granularity_length,
     _check_granularity_violations,
 )
+from .modality import (
+    _check_modality_lens_divergence,
+    _report_modality_classifiers,
+    _report_pending_modality_grants,
+)
+from .open_inconsistency import open_inconsistency_findings
 from .retirement import _check_undated_retirements
 from .staleness import (
     _check_confidence_decay,
@@ -116,6 +127,9 @@ async def run_lint(
     findings += await _report_pending_extractions(session)
     findings += await _report_empty_complete_snapshots(session)
     findings += await _report_schema_versions(session)
+    findings += await _report_modality_classifiers(session)
+    findings += await _report_pending_modality_grants(session)
+    findings += await _check_modality_lens_divergence(session)
     findings += await _check_structured_claim_subjects(session)
     findings += await _check_bare_properties_keys(session)
     findings += await _check_granularity_length(session)
@@ -124,7 +138,11 @@ async def run_lint(
 
     findings += await _check_wikidata_link_confidence(session)
     findings += await _check_undeposited_cited_sources(session)
-    findings += await _check_contested(session)
+    # One INCONSISTENCY status scan feeds both the contested badges and the
+    # per-record OPEN_INCONSISTENCY findings.
+    open_records = await get_inconsistency_particles(session)
+    findings += await _check_contested(session, open_records)
+    findings += await open_inconsistency_findings(session, open_records)
     findings += await _check_recorded_contradictions(session)
 
     # --- Semantic checks (LLM-assisted) ---

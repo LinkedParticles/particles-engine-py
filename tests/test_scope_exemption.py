@@ -54,6 +54,7 @@ from particles.extraction.scope import (
     is_excluded_document_meta,
     is_scope_exempt_source,
 )
+from tests._client_fixtures import stream_via_create
 from tests._upstream import IS_UPSTREAM
 
 FIXTURES = Path("tests/fixtures/scope")
@@ -171,6 +172,7 @@ class _ReplayClient:
         self.calls = 0
         self.messages = MagicMock()
         self.messages.create = MagicMock(side_effect=self._create)
+        stream_via_create(self)
 
     def _create(self, *_a: Any, **_kw: Any) -> Any:
         self.calls += 1

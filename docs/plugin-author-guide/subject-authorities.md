@@ -13,11 +13,11 @@ subject resolver; it iterates the registry.
 
 ```python
 class MyAuthority:
-    NAMESPACE = "myns"                 # stored in ExternalRef.namespace; never rename
-    PRIORITY = 60                      # arbitration rank: lower wins
-    LIVE = True                        # True if resolve() does a network lookup
-    DEFAULT_LINK_CONFIDENCE = 1.0      # feeds ExternalRef.confidence
-    APPLICABILITY: list[ApplicabilityClause] = []   # [] = applies to every domain
+    NAMESPACE = "myns"  # stored in ExternalRef.namespace; never rename
+    PRIORITY = 60  # arbitration rank: lower wins
+    LIVE = True  # True if resolve() does a network lookup
+    DEFAULT_LINK_CONFIDENCE = 1.0  # feeds ExternalRef.confidence
+    APPLICABILITY: list[ApplicabilityClause] = []  # [] = applies to every domain
 
     def uri_for(self, external_id: str) -> str | None: ...
     def recognize(self, name: str) -> ExternalRef | None: ...
@@ -64,7 +64,7 @@ from an authority.
 | Attribute | Rule |
 |---|---|
 | `NAMESPACE` | Lower-case slug, unique across the registry, **never renamed**. It is stored on every `ExternalRef` the authority produces and is the key of its `authorities` config entry. Renaming it strands every stored ref: step 2 can no longer find existing Subjects by `(namespace, id)`, and duplicates follow. |
-| `PRIORITY` | Arbitration rank when more than one authority recognises the same name, and the order of the live pass. **Lower wins**; registry order breaks ties. Built-ins use 10–50 in steps of 10 (`numista` 10, `km_catalog` 20, `wikidata` 30, `isbn` 40, `doi` 50). An operator can override it. |
+| `PRIORITY` | Arbitration rank when more than one authority recognises the same name, and the order of the live pass. **Lower wins**; registry order breaks ties. Built-ins use 10–50 in steps of 10 (`numista` 10, `km_catalog` 20, `wikidata` 30, `isbn` 40, `doi` 50), plus the contextual `artifact` authority at 5. An operator can override it. |
 | `LIVE` | `True` only if `resolve()` performs a lookup. Recognise-only authorities are `False` and never reach step 3. |
 | `DEFAULT_LINK_CONFIDENCE` | Your default for `ExternalRef.confidence`. Exact-identifier authorities use `1.0`. |
 | `APPLICABILITY` | `ApplicabilityClause`s gating the live pass by domain. An empty list means "every domain". A `MUST_NOT` clause for a domain excludes you; otherwise, if you declare any `MUST` / `SHOULD` clause, the domain must match one of them. A claim whose domain is unknown always passes. The domain is derived from the entry's source type (see [Extractors](extractors.md#identity-constants-what-must-never-change)). |
@@ -88,6 +88,22 @@ from an authority.
   authority, then to a bare local Subject. Use `particle_content` to judge
   whether a candidate entity fits the claim, and return a low confidence for a
   plausible-but-wrong match rather than asserting it at `1.0`.
+- **Record a weak link without adopting its identity** by returning only
+  `external_ref`, with no `canonical_name`, `aliases` or `description`. The
+  resolver then creates the Subject under the extracted name and attaches the
+  ref at the confidence you gave, so the link is kept for review without the
+  entity's label replacing the name. The Wikidata authority does this for a
+  candidate scored below the display threshold when
+  `subjects.wikidata_candidate_selection` is `best_description`.
+- **Abstain when you judged every candidate wrong** by returning
+  `AuthorityResolution(abstained=True)` and nothing else. Return it only when
+  you found candidates and decided, from `particle_content`, that none of them
+  is the entity the claim names. The resolver treats it as a below-floor
+  link: no ref is attached, the next authority is tried, and the name is not
+  recorded as a miss, because the decision depends on the claim. Return `None`
+  instead when the lookup found nothing. The Wikidata authority abstains when
+  `subjects.wikidata_candidate_selection` is `llm_judge` and the judge answers
+  that none of a name's candidates is meant.
 - **`canonical_name_for(session, external_id)`** is optional enrichment:
   return a better display name for an id you recognised (Wikidata uses its
   label cache), or `None`.
@@ -107,9 +123,9 @@ an authority.
 ```python
 PatternAuthority(
     namespace="doi",
-    pattern=re.compile(r"\bDOI:\s*(\S+)", re.I),   # group 1 is the id
+    pattern=re.compile(r"\bDOI:\s*(\S+)", re.I),  # group 1 is the id
     priority=50,
-    uri_template="https://doi.org/{id}",           # optional
+    uri_template="https://doi.org/{id}",  # optional
 )
 ```
 
@@ -126,6 +142,31 @@ It also accepts `applicability=` and `default_link_confidence=`.
   and read them **at call time** with `get_config()`, never at import or in
   `__init__`. Secrets such as API keys come from `particles.secrets`, never
   from config.
+
+## Qualified names: the contextual form
+
+The non-entity gate withholds filenames, reference codes, identifiers and
+command strings from the cascade above, because an unscoped `config.py` would
+merge every repository's file into one Subject. Where the source's project is
+known, the gate *qualifies* such a name instead, and the resolver offers it
+only to authorities that implement the additive `ContextualRecognizer`
+protocol:
+
+```python
+class ContextualRecognizer(Protocol):
+    def recognize_in(self, name: str, context: RecognizeContext) -> ExternalRef | None: ...
+    def subject_class_for(self, context: RecognizeContext) -> str | None: ...
+```
+
+`RecognizeContext` carries the gate's `token_class`, the opaque
+`namespace_key` that scopes the name, and the `source_type`. A qualified name
+skips the local name index, the plain recognize pass and the live pass: the
+resolver matches the ref `recognize_in` returns, or mints a Subject carrying
+that ref and the `subject_class_for` value. A plain authority never sees a
+qualified name, and a contextual authority's plain `recognize` should return
+`None`, so the two kinds cannot change each other's results. The built-in
+`artifact` authority (priority 5) is the reference implementation: it keys a
+Subject as `artifact:<namespace key>/<normalized name>`.
 
 ## Registering and operator control
 

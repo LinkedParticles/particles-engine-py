@@ -8,7 +8,9 @@ One aggregate, read-only structural finding: how many once-believed retired
 particles carry no stored retirement instant (``NULL retired_at``). Shares the
 born-retired exclusion helper with the query disclosure count
 (``operations/query/as_of.py``), so quarantine losers and INCONSISTENCY
-records — never believed, correctly unstamped — are not counted.
+records — never believed, correctly unstamped — are not counted. Both are
+recognised by the ``born_retired`` column, so a resolved one is still
+excluded after its status or reason has moved on.
 
 On a store born after migration 029 the count is zero and any hit is an
 anomaly; on an older store it names the fixed legacy population. **Growth over
@@ -39,14 +41,15 @@ async def _check_undated_retirements(session: AsyncSession) -> list[LintFinding]
             ParticleRow.status_reason,
             ParticleRow.retired_at,
             ParticleRow.asserted_at,
+            ParticleRow.born_retired,
         ).where(ParticleRow.status != Status.ACTIVE.value)
     )
     count = 0
     latest_asserted: datetime | None = None
-    for status_value, reason_value, retired_at, asserted_at in result.all():
+    for status_value, reason_value, retired_at, asserted_at, born_retired in result.all():
         status = Status(status_value)
         reason = StatusReason(reason_value) if reason_value else None
-        if not is_once_believed_retirement(status, reason):
+        if not is_once_believed_retirement(status, reason, born_retired=born_retired):
             continue
         if retired_at is not None:
             continue

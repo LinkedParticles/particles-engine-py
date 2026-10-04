@@ -165,3 +165,33 @@ class TestExplicitChannel:
         assert await clear_utility_events(db_session, source=SOURCE_EXPLICIT) == 1  # type: ignore[arg-type]
         scores = await get_reinforcement_scores(db_session, ["p-a"], 30.0, now=_NOW)  # type: ignore[arg-type]
         assert math.isclose(scores["p-a"], 1.0, abs_tol=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_scores_chunk_an_id_set_past_the_in_clause_limit(
+    db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More ids than one ``IN`` clause holds are scored across batches.
+
+    A digest passes every ACTIVE belief id; past SQLite's bound-variable limit a
+    single ``IN (...)`` fails with ``too many SQL variables``. The chunk size is
+    lowered so the test spans several batches without inserting 33k rows.
+    """
+    from particles.store import utility_store
+
+    monkeypatch.setattr(utility_store, "_IN_CHUNK", 2)
+    await record_utility_events(
+        db_session,  # type: ignore[arg-type]
+        "sess-1",
+        {"p-a": "literal", "p-c": "literal", "p-e": "literal"},
+        observed_at=_NOW,
+    )
+    await record_utility_events(db_session, "sess-2", {"p-e": "literal"}, observed_at=_NOW)  # type: ignore[arg-type]
+    scores = await get_reinforcement_scores(
+        db_session,  # type: ignore[arg-type]
+        ["p-a", "p-b", "p-c", "p-d", "p-e"],
+        30.0,
+        now=_NOW,
+    )
+    assert set(scores) == {"p-a", "p-c", "p-e"}
+    assert math.isclose(scores["p-e"], 2.0, abs_tol=1e-9)

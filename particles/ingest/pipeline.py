@@ -25,8 +25,9 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import numpy as np
 from opentelemetry import metrics, trace
@@ -37,6 +38,7 @@ import particles.store.wikidata_cache  # noqa: F401  # register wikidata label c
 from particles.config import get_config
 from particles.core.conflict_resolution import (
     RungInputs,
+    SlotVerdict,
     UpdateOrderSource,
     decide_ladder,
     effective_single_trust_order,
@@ -44,7 +46,9 @@ from particles.core.conflict_resolution import (
     needs_rung_inputs,
     update_order_source,
 )
+from particles.core.generics import is_generic_claim
 from particles.core.observer_scope import BeliefScope, PairPrecondition
+from particles.core.probe_verdict import prompt_hash
 from particles.core.provenance import reobservation_ref
 from particles.core.schema import (
     AssertionModality,
@@ -57,6 +61,7 @@ from particles.core.schema import (
     ProvenanceRefType,
     RelationCreatedBy,
     RelationType,
+    Snapshot,
     is_truth_apt,
 )
 from particles.core.stance import (
@@ -70,19 +75,42 @@ from particles.corpus.deposit import load_blob
 from particles.corpus.store import (
     claim_snapshot_for_extraction,
     get_entry,
+    get_extraction_component_records,
+    get_partial_read_state,
     get_snapshot_superseded_by,
+    list_extraction_bases,
+    release_extraction_claim,
     update_extraction_status,
 )
 from particles.db import write_lock
 from particles.embeddings import cosine_similarity, get_embedding_model
-from particles.extraction.calibration import scaler_for_record
-from particles.extraction.general import CandidateParticle, PageStat, candidate_to_particle
+from particles.extraction.append_delta import raw_offset_for
+from particles.extraction.calibration import scaler_for_record, version_mismatch_reason
+from particles.extraction.components import ComponentRecord, ComponentTally, tally_components
+from particles.extraction.general import (
+    CandidateParticle,
+    ExtractionResult,
+    PageStat,
+    candidate_to_particle,
+    general_component_table,
+    source_text_flags,
+    tally_replies,
+)
 from particles.extraction.registry import ExtractorPlugin, infer_domain, select_extractor
 from particles.extraction.scope import (
     apply_source_exemption,
     is_scope_exempt_source,
 )
-from particles.extraction.subject_gate import gate_candidate_subjects
+from particles.extraction.subject_gate import GATE_COMPONENT, gate_candidate_subjects, gate_digest
+from particles.ingest.append_base import (
+    AUTO_BASE,
+    earlier_all_complete,
+    in_scope,
+    plan_append,
+    waiting_on,
+)
+from particles.ingest.artifact_namespace import artifact_namespace_for, qualified_contexts
+from particles.ingest.authorities.registry import RecognizeContext
 from particles.ingest.candidate_dedup import dedupe_exact_candidates
 from particles.ingest.conflict_plan import (
     ConflictWritePlan,
@@ -106,18 +134,38 @@ from particles.ingest.narrative_merge import (
 from particles.ingest.observer_gate import DivergenceTally, ObserverGate, divergence_note
 from particles.ingest.pair_selection import (
     CandidatePairs,
+    PairReading,
     PairRole,
     PairSelection,
+    ReadingTally,
+    apply_readings,
     first_source_ref_entry_id,
     plan_probes,
+    plan_readings,
     plan_update_extras,
+    plan_update_probes,
     select_pairs,
+)
+from particles.ingest.partial_read import (
+    PartialKeep,
+    chunking_change_note,
+    decide_partial_keep,
+    own_chunk_claims,
 )
 from particles.ingest.routing import Route, route_particle
 from particles.ingest.routing import skips_conflict_resolution as _skips_conflict_resolution
+from particles.ingest.second_reading import (
+    claim_context,
+    in_flight_context,
+    read_pair,
+    reading_for,
+    snapshot_text,
+    source_name,
+)
 from particles.ingest.structure_edges import plan_structure_edges
 from particles.ingest.subject_resolver import (
     _persona_canonical,
+    find_existing_qualified,
     find_existing_subject,
     resolve_subjects,
 )
@@ -170,6 +218,71 @@ EmbeddingPair = tuple[Particle, "np.ndarray[Any, np.dtype[np.float32]]"]
 _DEFAULT_AGENT = "general-extractor"
 
 
+@dataclass
+class SnapshotOutcome:
+    """How one snapshot's extraction went, for a caller that must disclose it.
+
+    ``extract_snapshot`` returns the particles it wrote, and an empty list
+    reads the same whether the source held no claims or the model never
+    answered. The first-run audit tells those apart per file,
+    so it passes one of these and reads it back.
+    """
+
+    failed_calls: int = 0
+    """LLM calls that produced nothing usable; the snapshot was left PENDING.
+    Nothing was written unless ``kept_calls`` says otherwise. Re-running the
+    extraction retries it."""
+    kept_calls: int = 0
+    """…of the calls that did answer, those whose claims were written anyway:
+    an APPEND_ONLY read keeps its leading run and the later chunks its retry
+    will skip. The snapshot stays PENDING and its retry reads only
+    the rest."""
+    rebilled_calls: int = 0
+    """…and the answered calls whose results were discarded, which the retry
+    sends again and which are billed twice."""
+    truncated_replies: int = 0
+    """Replies cut at the output budget. Their leading claims were kept, and the
+    claims after the cut were lost."""
+    retried_replies: int = 0
+    """Replies re-issued once at ``extraction.retry_max_tokens``."""
+    conflicts_read: int = 0
+    """Probe-confirmed contradictions read a second time before the write loop."""
+    conflicts_cleared: int = 0
+    """…of those, the pairs the reading did not confirm: no record, retirement
+    or edge was written on them."""
+    conflict_unread: int = 0
+    """…of those, the pairs whose reading failed. A pair from the snapshot's own
+    entry kept the probe's signal; a cross-entry one lost it."""
+    append_fallback: int = 0
+    """1 when an APPEND_ONLY snapshot the delta read covers was read whole
+    instead; ``append_fallback_reason`` says why."""
+    append_fallback_reason: str | None = None
+    """Why the delta was not used, as the quality note names it."""
+    skipped: Literal["superseded", "no archive", "waiting"] | None = None
+    """Why the snapshot was never claimed, when it was not: a newer generation
+    superseded it (nothing is owed), it has no stored blob (it
+    stays PENDING), or an earlier snapshot of its entry holds a partial whole
+    read (``waiting_on`` names it; it stays PENDING). ``None``
+    when extraction ran."""
+    waiting_on: str | None = None
+    """The earlier snapshot holding the whole-read marker, when ``skipped`` is
+    ``waiting``."""
+    waiting_on_failed: bool = False
+    """…and that snapshot is FAILED (its blob is missing): only restoring the
+    blob or `particles reindex <entry>` releases the wait."""
+
+    @property
+    def extracted(self) -> Literal["full", "partial", "none"]:
+        """``none`` when nothing was written, ``partial`` when part of the read was.
+
+        Part of the read is a reply cut short, or a partly failed read that
+        kept what it answered.
+        """
+        if self.failed_calls:
+            return "partial" if self.kept_calls else "none"
+        return "partial" if self.truncated_replies else "full"
+
+
 def _current_extraction_provider_model() -> str:
     """``"<provider>:<model>"`` the extraction purpose resolves to right now."""
     sel = get_config().llm.for_purpose("extraction")
@@ -189,6 +302,9 @@ async def extract_snapshot(
     completion_pool: CompletionPool | None = None,
     skip_if_superseded: bool = False,
     divergences_out: DivergenceTally | None = None,
+    outcome_out: SnapshotOutcome | None = None,
+    append_base: str | None = AUTO_BASE,
+    ignore_partial: bool = False,
 ) -> list[Particle]:
     """Run extraction for a single corpus snapshot.
 
@@ -205,6 +321,9 @@ async def extract_snapshot(
     If divergences_out is provided, it is incremented by the pairs
     the observer precondition declined and by how many of them this pass joined
     with a ``CONTRADICTS`` relation — the count the quality note carries.
+    If outcome_out is provided, it is filled with how the pass went: LLM calls
+    that failed (the snapshot is left PENDING and nothing is written) and
+    replies cut at the output budget (some claims were lost).
     ``completion_pool`` is the latency-tolerance assertion, threaded
     as a parameter and never sniffed: only the consolidation extract pass
     passes one, and pool-aware extractors then merge their LLM requests into
@@ -215,6 +334,16 @@ async def extract_snapshot(
     another — is skipped with no claim and no LLM call. The default ``False``
     is the explicit ``extract <entry> --snapshot-id`` contract: naming a
     generation extracts it, and the claim un-collapses it.
+    ``append_base`` decides what an APPEND_ONLY snapshot read by the
+    general extractor is read as a delta from: ``"auto"`` (the default) finds
+    the latest earlier COMPLETE snapshot, a snapshot id names it, and ``None``
+    reads the snapshot whole with no base. Only the reindex replay passes
+    anything but the default.
+    A partly failed APPEND_ONLY read keeps what it answered and leaves the
+    snapshot PENDING only under the default ``append_base``.
+    ``ignore_partial`` is a reindex's: it plans as if the snapshot held no
+    partial read of its own, skips the whole-read wait, and keeps nothing
+    from a failed read, since the reindex is about to retire those claims.
 
     Span-wrapped: the work runs under an ``extract.snapshot`` span so a
     request's time localizes across the embed / LLM / DB child spans, and the
@@ -236,6 +365,9 @@ async def extract_snapshot(
             completion_pool=completion_pool,
             skip_if_superseded=skip_if_superseded,
             divergences_out=divergences_out,
+            outcome_out=outcome_out,
+            append_base=append_base,
+            ignore_partial=ignore_partial,
         )
         span.set_attribute("particles.extracted_count", len(written))
         _extracted_counter.add(len(written))
@@ -255,6 +387,9 @@ async def _extract_snapshot_impl(
     completion_pool: CompletionPool | None = None,
     skip_if_superseded: bool = False,
     divergences_out: DivergenceTally | None = None,
+    outcome_out: SnapshotOutcome | None = None,
+    append_base: str | None = AUTO_BASE,
+    ignore_partial: bool = False,
 ) -> list[Particle]:
     """Body of :func:`extract_snapshot` (span-wrapped by the public function)."""
     # refuse to extract into a store with mismatched-schema
@@ -279,6 +414,8 @@ async def _extract_snapshot_impl(
 
     if snapshot.archive_path is None:
         log.warning("Snapshot %s has no archive_path; skipping extraction", snapshot_id)
+        if outcome_out is not None:
+            outcome_out.skipped = "no archive"
         return []
 
     # a bulk caller's work list can predate a collapse (another
@@ -293,7 +430,43 @@ async def _extract_snapshot_impl(
                 snapshot_id[:8],
                 superseded_by[:8],
             )
+            if outcome_out is not None:
+                outcome_out.skipped = "superseded"
             return []
+
+    # whether a partly failed read of this snapshot may keep what it
+    # answered, and the whole-read wait. Both are read before the claim: the
+    # claim counts an attempt, and a waiting snapshot is not tried at all.
+    partial_policy: _PartialPolicy | None = None
+    if (
+        append_base == AUTO_BASE
+        and not ignore_partial
+        and in_scope(entry, extractor)
+        and get_config().extraction.append_only_delta
+    ):
+        rows = await list_extraction_bases(session, entry_id)
+        holder = waiting_on(rows, snapshot_id)
+        if holder is not None:
+            log.info(
+                "Snapshot %s: waiting on %s, an earlier snapshot of the entry holding a "
+                "partial whole read (%s, %d attempt(s)); `particles reindex %s` releases it",
+                snapshot_id[:8],
+                holder.snapshot_id[:8],
+                holder.extraction_status.value,
+                holder.extraction_attempts,
+                entry_id[:8],
+            )
+            if outcome_out is not None:
+                outcome_out.skipped = "waiting"
+                outcome_out.waiting_on = holder.snapshot_id
+                outcome_out.waiting_on_failed = holder.extraction_status is ExtractionStatus.FAILED
+            return []
+        state = await get_partial_read_state(session, snapshot_id)
+        partial_policy = _PartialPolicy(
+            holds_partial=state is not None and state.holds_partial,
+            marker=state is not None and state.resume_whole,
+            earlier_complete=earlier_all_complete(rows, snapshot_id),
+        )
 
     # Claim the snapshot by committing IN_PROGRESS BEFORE the long LLM
     # call below. Without this commit, the SQLite WAL-WRITE lock is held
@@ -309,9 +482,123 @@ async def _extract_snapshot_impl(
     # rows stranded by a SIGKILL whose try/except cleanup didn't run.
     from datetime import UTC, datetime
 
+    # Snapshot the context fingerprint once before extraction begins.
+    # Every candidate produced in this run shares this fingerprint — they were
+    # all asserted "in the same context". Carry-forward particles keep their
+    # original fingerprint (handled below by leaving theirs in place). Read
+    # before the claim so the claim's commit ends this read too: the session
+    # enters the extractor holding no connection, which is what lets a pooled
+    # extraction wait on its batch without pinning one.
+    run_fingerprint = await compute_context_fingerprint(session)
+
     await claim_snapshot_for_extraction(session, snapshot_id, started_at=datetime.now(UTC))
     await session.commit()
 
+    # On Ctrl+C, programming error, a DB error, or any other failure after the
+    # claim, release it so the next run picks the snapshot up. Without this, a
+    # failure leaves the snapshot stranded IN_PROGRESS, invisible to every
+    # PENDING-filtered scan until the stale-claim reset reclaims it. Covering
+    # only the LLM call was not enough: a failure in the §6.6 precompute or the
+    # write phase stranded it too (the 2026-09-27 pool timeouts did exactly
+    # that to six snapshots).
+    try:
+        return await _extract_claimed(
+            session,
+            entry,
+            snapshot,
+            extractor,
+            run_fingerprint=run_fingerprint,
+            agent_id=agent_id,
+            page_stats_out=page_stats_out,
+            supersede_ids=supersede_ids,
+            carry_forward_ids_out=carry_forward_ids_out,
+            suppressed_ids_out=suppressed_ids_out,
+            completion_pool=completion_pool,
+            divergences_out=divergences_out,
+            outcome_out=outcome_out,
+            append_base=append_base,
+            ignore_partial=ignore_partial,
+            partial_policy=partial_policy,
+        )
+    except BaseException:
+        await _release_claim(session, snapshot_id)
+        raise
+
+
+@dataclass(frozen=True)
+class _PartialPolicy:
+    """What the pipeline knew about a partial read before claiming the snapshot.
+
+    Present only when a partly failed read may keep what it answered: an
+    APPEND_ONLY entry read by the general extractor, the default base, no
+    reindex. ``holds_partial`` says the snapshot already holds an earlier
+    attempt's claims (an offset not yet COMPLETE, or the marker), which turns
+    on the own-claim carry-forward (§9) and the component-record merge (§10).
+    """
+
+    holds_partial: bool
+    marker: bool
+    earlier_complete: bool
+
+
+async def _release_claim(session: AsyncSession, snapshot_id: str) -> None:
+    """Hand a failed extraction's IN_PROGRESS claim back as PENDING, best effort.
+
+    ``session`` is rolled back first, as every caller does next anyway: a
+    half-written transaction would otherwise hold SQLite's write lock against
+    the reset below. The reset runs on a fresh session because ``session`` may
+    be unusable after a cancelled await or a connection error, and it is
+    conditional (``release_extraction_claim``), so a snapshot that already
+    reached PENDING, COMPLETE or FAILED is left as it is. BaseException
+    callers cover both KeyboardInterrupt and asyncio's CancelledError.
+    """
+    from particles.db import session_scope
+
+    try:
+        await session.rollback()
+    except Exception as exc:  # noqa: BLE001 — best effort; the reset below is what matters
+        log.debug("Snapshot %s: rollback before releasing the claim failed: %s", snapshot_id, exc)
+    try:
+        async with session_scope() as cleanup_session:
+            released = await release_extraction_claim(cleanup_session, snapshot_id)
+            await cleanup_session.commit()
+        if released:
+            log.warning(
+                "Snapshot %s: extraction interrupted; reset IN_PROGRESS → PENDING",
+                snapshot_id,
+            )
+    except Exception as cleanup_exc:
+        # Best-effort. If the cleanup itself fails (DB gone, disk full), the
+        # stale-IN_PROGRESS reset at the next bulk run is the safety net.
+        log.warning(
+            "Snapshot %s: cleanup after interrupted extraction failed: %s",
+            snapshot_id,
+            cleanup_exc,
+        )
+
+
+async def _extract_claimed(
+    session: AsyncSession,
+    entry: CorpusEntry,
+    snapshot: Snapshot,
+    extractor: ExtractorPlugin,
+    *,
+    run_fingerprint: str,
+    agent_id: str,
+    page_stats_out: list[PageStat] | None,
+    supersede_ids: frozenset[str],
+    carry_forward_ids_out: list[str] | None,
+    suppressed_ids_out: list[str] | None,
+    completion_pool: CompletionPool | None,
+    divergences_out: DivergenceTally | None,
+    outcome_out: SnapshotOutcome | None,
+    append_base: str | None = AUTO_BASE,
+    ignore_partial: bool = False,
+    partial_policy: _PartialPolicy | None = None,
+) -> list[Particle]:
+    """Everything :func:`_extract_snapshot_impl` does once it holds the claim."""
+    entry_id = entry.entry_id
+    snapshot_id = snapshot.snapshot_id
     try:
         content = load_blob(snapshot.content_hash)
     except FileNotFoundError:
@@ -319,24 +606,47 @@ async def _extract_snapshot_impl(
         await session.commit()
         raise
 
-    # Snapshot the context fingerprint once before extraction begins.
-    # Every candidate produced in this run shares this fingerprint — they were
-    # all asserted "in the same context". Carry-forward particles keep their
-    # original fingerprint (handled below by leaving theirs in place).
-    run_fingerprint = await compute_context_fingerprint(session)
+    # an APPEND_ONLY snapshot is read as a delta from the last
+    # snapshot the store extracted. The base, its raw offset and the raw-byte
+    # check are decided here, before the extractor runs; the extractor gets the
+    # raw prefix and checks it again after decoding. The read transaction ends
+    # before the extractor call, as the claim's commit ended the one before it.
+    append_plan = await plan_append(
+        session,
+        entry,
+        snapshot,
+        extractor,
+        content,
+        append_base=append_base,
+        ignore_own_partial=ignore_partial,
+    )
+    delta_kwargs: dict[str, Any] = {}
+    if append_plan is not None and append_plan.prefix is not None:
+        delta_kwargs["append_prefix"] = append_plan.prefix
+    # the retry of a snapshot holding a partial read skips the
+    # chunks its own claims carry, whatever extractor version wrote them, and
+    # says so when a chunking knob changed since, which no match can absorb.
+    chunking_note: str | None = None
+    if partial_policy is not None and partial_policy.holds_partial:
+        own = own_chunk_claims(
+            await get_active_particles_for_entry(session, entry_id),
+            entry_id=entry_id,
+            snapshot_id=snapshot_id,
+            exclude_ids=supersede_ids,
+        )
+        if own:
+            delta_kwargs["resume_carried"] = own
+        stored_own = (await get_extraction_component_records(session, [snapshot_id])).get(
+            snapshot_id
+        )
+        chunking_note = chunking_change_note(
+            stored_own, general_component_table().digests, marker=partial_policy.marker
+        )
+    await session.commit()
 
-    # On Ctrl+C, programming error, or any other interrupt during the
-    # long LLM extraction below, release the IN_PROGRESS claim so the
-    # next ``extract --all-pending`` picks the snapshot up. Without this,
-    # an interrupted run leaves the snapshot stranded — invisible to the
-    # PENDING-filtered scan and recoverable only by direct SQL or
-    # ``db init --force`` (which wipes the entire particle store).
-    #
-    # The cleanup uses a fresh session because ``session`` may be in an
-    # indeterminate state after a cancelled await (open transaction,
-    # connection-level error). BaseException catches both the synchronous
-    # KeyboardInterrupt path and asyncio's CancelledError.
-    try:
+    # the components the extraction exercises are recorded on this
+    # tally, and stored with the COMPLETE status below.
+    with tally_replies() as reply_tally, tally_components() as component_tally:
         result = await extractor.extract(
             snapshot,
             content,
@@ -358,30 +668,26 @@ async def _extract_snapshot_impl(
             # a same-version scope like ``reindex --provider-model`` (ADR
             # 0229) never reaches the LLM it exists to re-run.
             supersede_ids=supersede_ids,
+            **delta_kwargs,
         )
-    except BaseException:
-        from particles.db import session_scope
 
-        try:
-            async with session_scope() as cleanup_session:
-                await update_extraction_status(
-                    cleanup_session, snapshot_id, ExtractionStatus.PENDING
-                )
-                await cleanup_session.commit()
-            log.warning(
-                "Snapshot %s: extraction interrupted; reset IN_PROGRESS → PENDING",
-                snapshot_id,
-            )
-        except Exception as cleanup_exc:
-            # Best-effort. If the cleanup itself fails (DB gone, disk
-            # full), the stale-IN_PROGRESS reset at the next
-            # ``--all-pending`` start is the safety net.
-            log.warning(
-                "Snapshot %s: cleanup after interrupted extraction failed: %s",
-                snapshot_id,
-                cleanup_exc,
-            )
-        raise
+    # a delta that could not be used is never silent. The reason
+    # is the pipeline's (no base, the raw prefix, another extractor, the knob)
+    # or the extractor's (the decoded prefix, a binary source).
+    fallback = (append_plan.fallback if append_plan is not None else None) or (
+        result.append_fallback
+    )
+    if fallback is not None:
+        note = f"append-only delta not used, the snapshot was read whole: {fallback}"
+        result.quality_notes.append(note)
+        log.info("Snapshot %s: %s", snapshot_id, note)
+        if outcome_out is not None:
+            outcome_out.append_fallback += 1
+            outcome_out.append_fallback_reason = fallback
+
+    if chunking_note is not None:
+        result.quality_notes.append(chunking_note)
+        log.warning("Snapshot %s: %s", snapshot_id, chunking_note)
 
     # Stamp the run fingerprint on every newly-emitted candidate. Carry-forward
     # candidates are short-circuited by the extractor in this same call,
@@ -407,21 +713,85 @@ async def _extract_snapshot_impl(
     # and stamped fully-failed multi-call extractions COMPLETE with zero
     # particles (F4.1). Any transient failure — even a partial one where some
     # chunks succeeded — resets the whole snapshot: the partial candidates are
-    # discarded here (before the insert loop) and carry-forward dedupes the
-    # already-succeeded chunks cheaply on the retry, so no claim is silently lost.
-    if result.transient_error_count:
+    # discarded here (before the insert loop), so no claim is silently lost.
+    # That has a price. Carry-forward skips a chunk only when an
+    # ACTIVE particle carries its hash, and nothing from this pass is written,
+    # so the retry sends every answered call again and pays for it twice. The
+    # count is reported (``rebilled_calls``) rather than hidden.
+    #
+    # narrows that for an APPEND_ONLY read: it keeps its leading run,
+    # and the later chunks its retry is shown to skip, and stays PENDING with
+    # the place its next read starts (an exact offset, or the whole-read
+    # marker). ``decide_partial_keep`` says what, or ``None`` for the reset.
+    keep: PartialKeep | None = None
+    if result.transient_error_count and partial_policy is not None:
+        is_markdown, mark_tools = source_text_flags(entry.source_type)
+        extraction_cfg = get_config().extraction
+        keep = decide_partial_keep(
+            result.chunk_outcomes,
+            delta=result.append_delta,
+            content=content,
+            is_markdown=is_markdown,
+            mark_tools=mark_tools,
+            earlier_all_complete=partial_policy.earlier_complete,
+            chunk_chars=extraction_cfg.append_chunk_chars,
+            context_chars=extraction_cfg.append_context_chars,
+        )
+    if outcome_out is not None:
+        outcome_out.failed_calls = result.transient_error_count
+        outcome_out.rebilled_calls = result.answered_calls if result.transient_error_count else 0
+        if keep is not None:
+            outcome_out.kept_calls = keep.kept_calls
+            outcome_out.rebilled_calls = keep.resent_calls
+        outcome_out.truncated_replies = reply_tally.truncated
+        outcome_out.retried_replies = reply_tally.retried
+    if keep is not None:
+        discarded = sum(1 for c in result.candidates if c.chunk_hash not in keep.kept_hashes)
+        result.candidates = [c for c in result.candidates if c.chunk_hash in keep.kept_hashes]
+        resume = (
+            "its retry reads it whole again and the entry's later snapshots wait"
+            if keep.marker
+            else f"its retry resumes at byte {keep.offset}"
+        )
+        log.warning(
+            "Snapshot %s: %d extraction call(s) produced nothing usable; keeping %d answered "
+            "call(s) (%d after the first failure) and leaving the snapshot PENDING: %s. "
+            "%d candidate(s) from %d other answered call(s) are discarded, and the retry "
+            "sends those calls again",
+            snapshot_id,
+            result.transient_error_count,
+            keep.kept_calls,
+            keep.later_calls,
+            resume,
+            discarded,
+            keep.resent_calls,
+        )
+    elif result.transient_error_count:
         await update_extraction_status(session, snapshot_id, ExtractionStatus.PENDING)
         # Commit the PENDING reset eagerly so concurrent writers see the
         # released-back state. Same rationale as the IN_PROGRESS commit
         # above — paired writes that must be visible without holding the
         # WAL-WRITE lock through the rest of the function.
         await session.commit()
+        # One statement of what happened to the whole pass. A reply cut at the
+        # budget logged the claims it kept; those are among the discarded ones
+        # here, so say so rather than leave "kept" standing beside "discarded".
+        kept_from_cut = (
+            f", including those kept from {reply_tally.truncated} reply(ies) cut at the "
+            "output budget"
+            if reply_tally.truncated
+            else ""
+        )
         log.warning(
-            "Snapshot %s: %d extraction API call(s) failed; resetting to PENDING for retry "
-            "(%d partial candidate(s) discarded)",
+            "Snapshot %s: %d extraction call(s) produced nothing usable; resetting to "
+            "PENDING for retry. Nothing from this pass is written: %d candidate(s) from "
+            "its other replies are discarded%s, and the retry sends its %d answered "
+            "call(s) again",
             snapshot_id,
             result.transient_error_count,
             len(result.candidates),
+            kept_from_cut,
+            result.answered_calls,
         )
         return []
 
@@ -554,6 +924,25 @@ async def _extract_snapshot_impl(
             ext_agent,
         )
         calibration = None
+    # a record applies only to the extractor version it was fitted
+    # under, because a prompt change can reverse what the temperature does.
+    # Dropped here for the same reason as above: one warning and one quality
+    # note per run, never one per claim. The record stays stored and listed.
+    if calibration is not None and (
+        mismatch := version_mismatch_reason(calibration, extractor.EXTRACTOR_VERSION)
+    ):
+        note = calibration_not_applied_note(mismatch)
+        log.warning(
+            "Ignoring the stored calibration for %s under %s: %s. Particles carry "
+            "EXTRACTOR_DIRECT until you re-fit with `particles extractor calibrate "
+            "%s --regenerate`.",
+            ext_agent,
+            current_model,
+            note,
+            ext_agent,
+        )
+        result.quality_notes.append(note)
+        calibration = None
     if calibration is None:
         log.debug(
             "No calibration for %s under %s; particles carry EXTRACTOR_DIRECT "
@@ -571,9 +960,10 @@ async def _extract_snapshot_impl(
         # longer has is at least *visible* in the extract log at the moment it
         # is applied, instead of silently scaling every confidence.
         log.info(
-            "Applying calibration for %s under %s: T=%.4f, fitted over %s "
+            "Applying calibration for %s %s under %s: T=%.4f, fitted over %s "
             "(`particles extractor calibrations %s` reports suite-set staleness).",
             ext_agent,
+            calibration.extractor_version,
             current_model,
             calibration.temperature,
             calibration.benchmark_suite_id,
@@ -625,6 +1015,48 @@ async def _extract_snapshot_impl(
             candidate.properties = props
             stance_specs.append((i, candidate.stance_target_index, candidate.stance_kind))
 
+    # non-entity subject gate. Drop doc-ID / enum / filename / CLI /
+    # snake_case tokens from each candidate's subjects (and the parallel
+    # subject_classes / external_refs maps) before resolution, so they are never
+    # promoted to Subjects. Lexical + general (covers every extractor at this one
+    # choke point); the MCP deliberate-assertion path is intentionally not gated.
+    # binding constraint: a code-domain extractor legitimately mints
+    # snake_case / dotted code-symbol subjects (e.g. the docstring extractor's
+    # ``particles.core.scoring.confidence.effective_confidence``); keying the exemption on
+    # the source type keeps the blanket lexical gate from stripping them.
+    # a class configured to qualify keeps its names, scoped by the
+    # entry's project, when the Surface's namespace hook can name one; without
+    # a key the gate suppresses as it always did. The gate runs before
+    # the §6.6 precompute below so the subject-keyed search and the write loop
+    # see the same subjects.
+    gate_cfg = get_config().subject_gate
+    if gate_cfg.enabled:
+        component_tally.declare([GATE_COMPONENT])
+    if gate_cfg.enabled and entry.source_type not in gate_cfg.exempt_source_types:
+        component_tally.add(
+            GATE_COMPONENT,
+            gate_digest(
+                cli_binaries=gate_cfg.cli_binaries,
+                allowlist=gate_cfg.allowlist,
+                dispositions=gate_cfg.dispositions,
+            ),
+        )
+        namespace_key = artifact_namespace_for(entry.tags, entry.uri_r)
+        for candidate in result.candidates:
+            suppressed = gate_candidate_subjects(
+                candidate,
+                cli_binaries=gate_cfg.cli_binaries,
+                allowlist=gate_cfg.allowlist,
+                dispositions=gate_cfg.dispositions,
+                namespace_key=namespace_key,
+            )
+            if suppressed:
+                log.info(
+                    "Subject gate suppressed %d non-entity name(s): %s",
+                    len(suppressed),
+                    ", ".join(f"{name!r} [{cls}]" for name, cls in suppressed),
+                )
+
     # F4.3: run the §6.6 contradiction-signal (LLM) checks up front — before the
     # write loop below opens its transaction — so the SQLite WAL write lock is
     # never held across these network round-trips. Commit first to flush any
@@ -663,10 +1095,33 @@ async def _extract_snapshot_impl(
         updates_only=updates_only,
         entries=entries,
     )
+    # The probes below are LLM round-trips. End the gather's read transaction
+    # first so no pooled connection is held across them (a pooled
+    # run resumes many of these tasks at once).
+    await session.commit()
     selections: list[PairSelection] = []
     for candidate, pairs in zip(result.candidates, candidate_pairs, strict=True):
         probes = await _probe_pairs(candidate.content, plan_probes(pairs))
-        selections.append(select_pairs(pairs, probes))
+        # a confirmed contradiction rung 2.5 could settle is asked the
+        # update question before it may retire anything on a date.
+        slots = await _probe_update_slots(
+            session,
+            entry,
+            snapshot_id,
+            candidate,
+            plan_update_probes(pairs, probes),
+            entries,
+            require_attribution=updates_only,
+        )
+        selections.append(select_pairs(pairs, probes, slots))
+    # the second reading, the fourth gather step. Every
+    # probe-confirmed pair the pass would act on is read again with each
+    # claim's source kind, name, time and passage; its verdict replaces the
+    # probe's. Like the probes, it runs before the write lock (F4.3).
+    if get_config().extraction.verify_conflicts:
+        selections = await _read_confirmed_pairs(
+            session, entry, snapshot, content, result, selections, outcome_out
+        )
     # Per candidate: existing claims the precondition declined and the probe
     # confirmed, recorded as CONTRADICTS once the candidate has an id.
     divergent = [list(selection.declined) for selection in selections]
@@ -681,30 +1136,6 @@ async def _extract_snapshot_impl(
                 and pairs.precondition_of(other) is PairPrecondition.RECONCILE
             ):
                 entries[key] = await get_entry(session, key)
-
-    # non-entity subject gate. Drop doc-ID / enum / filename / CLI /
-    # snake_case tokens from each candidate's subjects (and the parallel
-    # subject_classes / external_refs maps) before resolution, so they are never
-    # promoted to Subjects. Lexical + general (covers every extractor at this one
-    # choke point); the MCP deliberate-assertion path is intentionally not gated.
-    # binding constraint: a code-domain extractor legitimately mints
-    # snake_case / dotted code-symbol subjects (e.g. the docstring extractor's
-    # ``particles.core.scoring.confidence.effective_confidence``); keying the exemption on
-    # the source type keeps the blanket lexical gate from stripping them.
-    gate_cfg = get_config().subject_gate
-    if gate_cfg.enabled and entry.source_type not in gate_cfg.exempt_source_types:
-        for candidate in result.candidates:
-            suppressed = gate_candidate_subjects(
-                candidate,
-                cli_binaries=gate_cfg.cli_binaries,
-                allowlist=gate_cfg.allowlist,
-            )
-            if suppressed:
-                log.info(
-                    "Subject gate suppressed %d non-entity name(s): %s",
-                    len(suppressed),
-                    ", ".join(f"{name!r} [{cls}]" for name, cls in suppressed),
-                )
 
     # load the exact-duplicate suppression index for this pass — one
     # indexed probe over ACTIVE particles whose normalized-content hash matches
@@ -747,6 +1178,10 @@ async def _extract_snapshot_impl(
     # the lock — releasing SQLite's write lock before the advisory lock — so
     # the caller's later commit is a no-op.
     divergences = 0
+    # Waiting on the write lock can take as long as every other writer's write
+    # phase, so end the reads above before it: a task queued on the lock must
+    # not pin a pooled connection while it queues.
+    await session.commit()
     async with write_lock():
         # candidate index → the stored particle id that represents it,
         # so post-write edge creation can bind a stance to its (co-extracted) target.
@@ -759,6 +1194,8 @@ async def _extract_snapshot_impl(
                 ext_agent,
                 particle_content=candidate.content,
                 source_type=entry.source_type,
+                source_tags=entry.tags,
+                qualified=qualified_contexts(candidate, entry.tags, entry.uri_r, entry.source_type),
             )
 
             # Apply subject classification for structured extractors
@@ -886,9 +1323,11 @@ async def _extract_snapshot_impl(
                     probe=selection.signal,
                     new_embedding=emb,
                     allow_update_supersession=True,
+                    slot=selection.slot_of(target.id),
                     retired_out=retired,
                     observer=gate,
                     candidate_scope=candidate_scope,
+                    reading=selection.reading,
                 )
                 if resolved is not None:
                     written.append(resolved)
@@ -904,6 +1343,7 @@ async def _extract_snapshot_impl(
                             retired,
                             entries=entries,
                             precondition=candidate_pairs[i].precondition,
+                            updatable=selection.updatable,
                         )
 
         # record every declined, probe-confirmed pair once the claim
@@ -929,7 +1369,13 @@ async def _extract_snapshot_impl(
         # appended ref naming this snapshot, nothing re-pointed.
         # That is what lets "a source currently states a claim" be read off the
         # claim's own provenance.
-        await _record_carry_forward(session, result.carry_forward_ids, entry_id, snapshot_id)
+        # except after a delta read. The earlier text of an
+        # APPEND_ONLY entry was not shown again, and every snapshot of such an
+        # entry states what it stated, so the ref would add
+        # nothing; a claim restated in the new text still gains one, from the
+        # fold above.
+        if not result.append_delta:
+            await _record_carry_forward(session, result.carry_forward_ids, entry_id, snapshot_id)
 
         # a MUTABLE source's new snapshot retires the generation it
         # replaced. Runs HERE — after extraction, in the same transaction as the
@@ -978,7 +1424,37 @@ async def _extract_snapshot_impl(
             divergences_out.declined += declined_total
             divergences_out.recorded += divergences
 
-        await update_extraction_status(session, snapshot_id, ExtractionStatus.COMPLETE)
+        # How far this read went, in raw bytes, written with the COMPLETE
+        # status it belongs to, and what it exercised, likewise.
+        # A partial read writes the same two with PENDING, the
+        # offset its retry resumes at or the whole-read marker in place of the
+        # offset (§8, §10), in this same transaction as its claims.
+        components = await _component_record(
+            session,
+            component_tally,
+            extractor_id=getattr(extractor, "EXTRACTOR_ID", None),
+            entry_id=entry_id,
+            snapshot_id=snapshot_id,
+            carry_forward_ids=result.carry_forward_ids,
+            own_partial=partial_policy is not None and partial_policy.holds_partial,
+        )
+        if keep is not None:
+            await update_extraction_status(
+                session,
+                snapshot_id,
+                ExtractionStatus.PENDING,
+                extracted_through=keep.offset,
+                components=components,
+                resume_whole=keep.marker,
+            )
+        else:
+            await update_extraction_status(
+                session,
+                snapshot_id,
+                ExtractionStatus.COMPLETE,
+                extracted_through=_extracted_through(content, result, entry.source_type),
+                components=components,
+            )
         log.info(
             "Extracted %d particles from snapshot %s (entry %s; %d duplicate(s) suppressed)",
             len(written),
@@ -988,6 +1464,66 @@ async def _extract_snapshot_impl(
         )
         await session.commit()
     return written
+
+
+async def _component_record(
+    session: AsyncSession,
+    tally: ComponentTally,
+    *,
+    extractor_id: str | None,
+    entry_id: str,
+    snapshot_id: str,
+    carry_forward_ids: Sequence[str],
+    own_partial: bool = False,
+) -> ComponentRecord:
+    """The component record this extraction stores on its snapshot.
+
+    What the tally saw, plus the records of the snapshots any carried-forward
+    claim was first extracted from. A carried claim now cites this
+    snapshot too, but it was made under that earlier extraction's
+    components, so a record of this pass alone would claim this snapshot never
+    exercised them. A carried claim whose earlier snapshot has no record makes
+    the result incomplete, which the selection rule treats as no record.
+
+    ``own_partial`` says the snapshot already holds an earlier attempt's
+    claims. Those are carried claims citing this snapshot
+    itself, which the fold below skips, so the snapshot's own stored record is
+    merged in instead. With no stored record the merge makes the result
+    incomplete, the selection rule's conservative direction.
+    """
+    record = tally.record(extractor_id)
+    if own_partial:
+        stored_own = await get_extraction_component_records(session, [snapshot_id])
+        record = record.merged(stored_own.get(snapshot_id))
+    if not carry_forward_ids:
+        return record
+    carried = await get_particles_by_ids(session, list(dict.fromkeys(carry_forward_ids)))
+    sources = {
+        ref.snapshot_id
+        for particle in carried.values()
+        for ref in particle.provenance
+        if ref.type is ProvenanceRefType.SOURCE
+        and ref.corpus_entry_id == entry_id
+        and ref.snapshot_id
+        and ref.snapshot_id != snapshot_id
+    }
+    stored = await get_extraction_component_records(session, sources)
+    for source in sorted(sources):
+        record = record.merged(stored.get(source))
+    return record
+
+
+def _extracted_through(content: bytes, result: ExtractionResult, source_type: str) -> int:
+    """The raw byte offset a read stopped at.
+
+    The content's length, unless the call cap cut the read short.
+    """
+    if result.read_through is None:
+        return len(content)
+    is_markdown, mark_tools = source_text_flags(source_type)
+    return raw_offset_for(
+        content, result.read_through, is_markdown=is_markdown, mark_tools=mark_tools
+    )
 
 
 async def _record_divergences(
@@ -1013,6 +1549,118 @@ async def _record_divergences(
         standing = [o for o in others if o.id != landed and status.get(o.id) is Status.ACTIVE]
         written += await gate.record(session, landed, standing)
     return written
+
+
+async def _read_confirmed_pairs(
+    session: AsyncSession,
+    entry: CorpusEntry,
+    snapshot: Snapshot,
+    content: bytes,
+    result: ExtractionResult,
+    selections: list[PairSelection],
+    outcome_out: SnapshotOutcome | None,
+) -> list[PairSelection]:
+    """Gather 4 of the §6.6 pair selection: read each confirmed pair a second time.
+
+    Gather, then read, then decide:
+
+      - **Gather** (store and blob reads): each pair :func:`plan_readings`
+        names. The existing claim's context is built as the census builds it
+        (:func:`~particles.ingest.second_reading.claim_context`). The
+        candidate is not stored yet, so its context comes from what extraction
+        holds: the entry's name and source kind, the chunk the candidate was
+        read from (windowed around both claims' words), and the snapshot's
+        content date, else its capture time
+        (:func:`~particles.ingest.second_reading.in_flight_context`).
+      - **Read** (``llm.verification``), after the read transaction ends, so
+        no pooled connection is held across the round trip.
+      - **Decide** (pure): :func:`apply_readings`.
+
+    A reading that fails keeps the signal of a pair whose existing claim came
+    from this entry and drops a cross-entry pair's; both are
+    counted in ``outcome_out.conflict_unread`` and disclosed in a quality note.
+    """
+    plans = [plan_readings(selection) for selection in selections]
+    if not any(plans):
+        return selections
+    text = snapshot_text(content, entry.source_type)
+    when = snapshot.content_published_at or snapshot.captured_at
+    contexts = []
+    for candidate, others in zip(result.candidates, plans, strict=True):
+        pair_contexts = []
+        for other in others:
+            existing_ctx = await claim_context(session, other, candidate.content)
+            candidate_ctx = in_flight_context(
+                candidate.content,
+                text=text,
+                chunk_hash=candidate.chunk_hash,
+                partner=other.content,
+                source=source_name(entry.uri_r),
+                source_type=entry.source_type,
+                mutability=entry.mutability,
+                when=when,
+            )
+            pair_contexts.append((other, existing_ctx, candidate_ctx))
+        contexts.append(pair_contexts)
+    # The readings are LLM round trips: end the gather's read transaction first.
+    await session.commit()
+
+    tallies: list[ReadingTally] = []
+    out: list[PairSelection] = []
+    for selection, pair_contexts in zip(selections, contexts, strict=True):
+        readings: dict[str, PairReading] = {}
+        same_entry: set[str] = set()
+        for other, existing_ctx, candidate_ctx in pair_contexts:
+            # The existing claim is A and the newcomer B, as the record names them.
+            verdict = await read_pair(existing_ctx, candidate_ctx)
+            readings[other.id] = PairReading(
+                confirmed=None if verdict is None else verdict.contradicts,
+                reading=reading_for(existing_ctx, candidate_ctx),
+            )
+            if entry.entry_id in _source_entry_ids(other):
+                same_entry.add(other.id)
+        decided, tally = apply_readings(selection, readings, same_entry)
+        out.append(decided)
+        tallies.append(tally)
+
+    read = sum(t.read for t in tallies)
+    cleared = sum(t.cleared for t in tallies)
+    unread = sum(t.unread for t in tallies)
+    if cleared or unread:
+        note = second_reading_note(read, cleared, unread)
+        result.quality_notes.append(note)
+        log.info("Snapshot %s: %s", snapshot.snapshot_id, note)
+    if outcome_out is not None:
+        outcome_out.conflicts_read += read
+        outcome_out.conflicts_cleared += cleared
+        outcome_out.conflict_unread += unread
+    return out
+
+
+def _source_entry_ids(particle: Particle) -> set[str]:
+    """The corpus entries a particle's SOURCE refs name."""
+    return {
+        r.corpus_entry_id
+        for r in particle.provenance
+        if r.type is ProvenanceRefType.SOURCE and r.corpus_entry_id
+    }
+
+
+def calibration_not_applied_note(reason: str) -> str:
+    """The quality note for a run whose stored calibration was refused."""
+    return f"calibration NOT APPLIED ({reason}); particles carry EXTRACTOR_DIRECT"
+
+
+def second_reading_note(read: int, cleared: int, unread: int) -> str:
+    """The quality note for a pass whose second readings changed or missed a verdict."""
+    parts = [
+        f"{cleared} of {read} probe-confirmed contradiction(s) not confirmed by a second reading"
+    ]
+    if unread:
+        parts.append(
+            f"{unread} unread (the reading failed; a same-entry pair kept the probe's signal)"
+        )
+    return "conflict reading: " + "; ".join(parts)
 
 
 async def _record_carry_forward(
@@ -1222,7 +1870,8 @@ async def reconcile_and_insert(
     existing = [p for p, _ in pairs]
     existing_embs = [e for _, e in pairs]
 
-    conflict = _find_conflict(emb, existing, existing_embs)
+    generic = is_generic_claim(particle.content)
+    conflict = _find_conflict(emb, existing, existing_embs, candidate_generic=generic)
     if conflict is None and emb is not None:
         # the subject-keyed search reaches this path too — an
         # agent's "the user lives in Denver" scores ~0.70 against its own
@@ -1235,6 +1884,7 @@ async def reconcile_and_insert(
                 emb,
                 floor=update_cfg.subject_floor,
                 limit=1,
+                generic=generic,
             )
             conflict = nearest[0] if nearest else None
     # This path's candidacy policy, stated as arguments (``ingest.pair_selection``):
@@ -1245,7 +1895,15 @@ async def reconcile_and_insert(
     probe_results: dict[str, bool | None] = {}
     for other, _role in plan_probes(candidacy):
         probe_results[other.id] = await _has_contradiction_signal(particle.content, other.content)
-    selection = select_pairs(candidacy, {pid: bool(p) for pid, p in probe_results.items()})
+    # an agent revising its own belief goes through rung 2.5 too, so
+    # the pair is asked the update question when the carve-out could order it.
+    slots: dict[str, SlotVerdict] = {}
+    for other in plan_update_probes(candidacy, {pid: bool(p) for pid, p in probe_results.items()}):
+        if own_assertion_order(particle, other) is not None:
+            verdict = await _has_update_signal(other.content, particle.content)
+            if verdict is not None:
+                slots[other.id] = verdict
+    selection = select_pairs(candidacy, {pid: bool(p) for pid, p in probe_results.items()}, slots)
     route, target = route_particle(
         particle,
         duplicates=duplicates,
@@ -1275,6 +1933,7 @@ async def reconcile_and_insert(
         fail_closed=fail_closed,
         trigger_ref_type=trigger_ref_type,
         allow_own_assertion_supersession=True,
+        slot=selection.slot_of(target.id),
         observer=await ObserverGate.open(session),
     )
 
@@ -1284,6 +1943,7 @@ def _find_conflict(
     existing: Sequence[Particle],
     existing_embs: Sequence[np.ndarray[Any, np.dtype[np.float32]] | None],
     candidate_stance_holder: str | None = None,
+    candidate_generic: bool | None = None,
 ) -> Particle | None:
     """Return the most similar existing ACTIVE particle if similarity > threshold, else None.
 
@@ -1298,6 +1958,14 @@ def _find_conflict(
     stance of the *same* holder (the same-holder reversal, the one case §6.6
     catches when both are co-located in this entry). Different-holder and
     stance-vs-claim pairs are skipped before the signal probe.
+
+    ``candidate_generic`` is whether the candidate's text is a generic claim
+    (:func:`~particles.core.generics.is_generic_claim`), or ``None`` to skip
+    the check. A generic and an instance claim are not an adjudicable pair,
+    so an existing claim of the other kind is passed over and the
+    next most similar claim is considered instead. The check runs only on a
+    claim that would otherwise become the best match, so it costs a few regex
+    passes per candidate, not one per stored claim.
     """
     if candidate_emb is None or not existing:
         return None
@@ -1327,6 +1995,9 @@ def _find_conflict(
         # (extraction.similarity_threshold) lives on this scale.
         sim = cosine_similarity(candidate_emb, emb)
         if sim > best_sim:
+            # a generic never pairs with an instance claim.
+            if candidate_generic is not None and is_generic_claim(p.content) != candidate_generic:
+                continue
             best_sim = sim
             best_particle = p
 
@@ -1362,20 +2033,62 @@ def _is_attribution_paraphrase(content_a: str, content_b: str) -> bool:
     return any(pat.search(content_a) or pat.search(content_b) for pat in _ATTRIBUTION_PATTERNS)
 
 
+#: The §6.6 probe's output budget. The reply is a one-sentence reason and a
+#: verdict line (~60 tokens). At 120, with the verdict first, claude-haiku-4-5
+#: still cut a reply in the 2026-09-25 audit. The verdict now comes last, so a
+#: reply cut at this budget has none and reads as a probe that did not complete.
+_CONTRADICTION_PROBE_MAX_TOKENS = 250
+
+_VERDICT_LINE_RE = re.compile(r"^\W*VERDICT\W*:\W*(YES|NO)\W*$", re.IGNORECASE)
+#: The update probe's request for a slot line. A scripted probe
+#: (the rot and observer oracles) recognises the update prompt by it.
+UPDATE_SLOT_REQUEST = "SLOT: CHANGES or SLOT: FIXED"
+_SLOT_LINE_RE = re.compile(r"^\W*SLOT\W*:\W*(CHANGES|FIXED|NONE)\W*$", re.IGNORECASE)
+
+
 def _contradiction_prompt(content_a: str, content_b: str) -> str:
     """The L-SEM-01-style contradiction-probe prompt (one source of truth).
 
     Shared with the reconcile sweep
     (:mod:`particles.operations.reconcile`), whose breaker-routed probe uses
-    the same prompt through the ``operations._llm`` seam.
+    the same prompt through the ``operations._llm`` seam. The reply is a
+    reason line then a final verdict line, the shape the lint probe uses, so
+    :func:`_contradiction_verdict` never reads a verdict into a cut reply.
     """
     return (
-        "Do these two claims contradict each other? Answer with exactly one of:\n"
-        "- 'YES: <brief description>' if they directly disagree\n"
-        "- 'NO' if they agree, are about different things, are paraphrases,"
-        " or if one merely attributes / quotes / restates the other\n\n"
+        "Do these two claims contradict each other, so that both cannot be true "
+        "at once? Claims that agree, are about different things, are paraphrases, "
+        "or where one merely attributes, quotes, or restates the other do not "
+        "contradict.\n\n"
+        "Reply with exactly two lines and nothing else:\n"
+        "REASON: <one sentence of at most 25 words naming the conflicting detail, "
+        "or why there is none>\n"
+        "VERDICT: YES or VERDICT: NO\n\n"
         f"Claim A: {content_a}\n\nClaim B: {content_b}"
     )
+
+
+def contradiction_prompt_hash() -> str:
+    """The §6.6 contradiction probe's prompt version.
+
+    Rendered by :func:`_contradiction_prompt` itself over placeholder claims,
+    so the key a remembered verdict is filed under cannot drift from the text.
+    """
+    return prompt_hash(_contradiction_prompt("{claim_a}", "{claim_b}"))
+
+
+def _contradiction_verdict(reply: str) -> bool | None:
+    """The verdict on the reply's final line, or ``None`` when it has no clear one.
+
+    A reply cut at its budget has no verdict line, and a reply naming both
+    verdicts or none is off protocol. Either is ``None``: the probe did not
+    complete, and each caller applies its own fail-open or fail-closed rule.
+    """
+    lines = [line.strip() for line in reply.strip().splitlines() if line.strip()]
+    verdicts = {m.group(1).upper() for line in lines if (m := _VERDICT_LINE_RE.match(line))}
+    if len(verdicts) != 1 or not _VERDICT_LINE_RE.match(lines[-1]):
+        return None
+    return verdicts.pop() == "YES"
 
 
 async def _llm_confirms_contradiction(content_a: str, content_b: str) -> bool | None:
@@ -1393,8 +2106,9 @@ async def _llm_confirms_contradiction(content_a: str, content_b: str) -> bool | 
 
         # The reconcile-ladder contradiction check is part of the semantic-lint
         # purpose: it mirrors the L-SEM-01 lint prompt.
-        response = await complete("semantic_lint", prompt, max_tokens=120)
-        return response.upper().startswith("YES")
+        response = await complete(
+            "semantic_lint", prompt, max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS
+        )
     except Exception as exc:
         log.warning(
             "Contradiction confirmation LLM probe could not complete; "
@@ -1402,6 +2116,14 @@ async def _llm_confirms_contradiction(content_a: str, content_b: str) -> bool | 
             exc,
         )
         return None
+    verdict = _contradiction_verdict(response)
+    if verdict is None:
+        log.warning(
+            "Contradiction confirmation probe reply carried no usable verdict; "
+            "caller decides fail-open vs fail-closed: %r",
+            response[:200],
+        )
+    return verdict
 
 
 async def _has_contradiction_signal(content_a: str, content_b: str) -> bool | None:
@@ -1419,6 +2141,133 @@ async def _has_contradiction_signal(content_a: str, content_b: str) -> bool | No
     if _is_attribution_paraphrase(content_a, content_b):
         return False
     return await _llm_confirms_contradiction(content_a, content_b)
+
+
+def _update_prompt(earlier: str, later: str) -> str:
+    """The rung 2.5 update-probe prompt (one source of truth).
+
+    The contradiction probe asks whether two claims can both be true. Rung 2.5
+    needs a narrower answer before it retires anything on a date: whether the
+    later claim gives a new value for the **same slot** as the earlier one. The
+    2026-09-27 Delhi scenario is the case the two questions part on: "the user
+    has not yet found a regular place to eat" contradicts "Sandeep's Curry House
+    is the user's favourite place to eat" on a literal reading, but it is not a
+    new value for the favourite. Shared with the backlog sweep. The
+    labels and the final verdict line are the contradiction probe's, so the rot
+    oracle (``benchmark.rot.oracle``) answers both from one parser.
+
+    A same-slot verdict also names the slot's kind. Only a slot that
+    holds one value at a time and changes over time is updated by a later
+    value. A fixed fact stated twice with different values (the Kawai ES110 at
+    "$699 to $799" and then "$299"; "The Poison Tree" by Erin Kelly and then by
+    Barbara Hambly, re-measurement) is a contradiction the later
+    date does not settle. A claim that only records a past value gives the slot
+    no new current value.
+    """
+    return (
+        "Claim A was stated first and Claim B later, by the same source. Do the "
+        "two claims fill the same slot, meaning the same attribute of the same "
+        "subject, with Claim B giving a different value for it?\n\n"
+        "They do not when:\n"
+        "- the claims are about different attributes, even of the same subject;\n"
+        "- one states a lasting preference, evaluation or trait (a favourite, "
+        "the best, what someone prefers or likes) and the other is limited to a "
+        "period, place or situation (not yet, in a new city, this week, at the "
+        "moment);\n"
+        "- Claim B adds detail to Claim A, or narrows it, without giving a "
+        "different value;\n"
+        "- either claim only records a past value (was previously, used to, "
+        "formerly): a statement about the past gives the slot no new value.\n\n"
+        "A change of home, job, diet, favourite or any other value is a different "
+        "value for the same slot when Claim B states the new value. Words such as "
+        "'now' or 'these days' that mark the change do not limit Claim B to a "
+        "situation.\n\n"
+        "When they do fill the same slot, also say what kind of slot it is:\n"
+        "- CHANGES: the slot holds one value at a time and the value changes over "
+        "time, so the later value replaces the earlier one. Facts about a "
+        "person's own life are usually this kind: where they live or work, their "
+        "manager, diet, favourite, what they own, use, read or are working on, "
+        "what they pay for their own rent or subscription, a count or total of "
+        "their own that grows.\n"
+        "- FIXED: once true, the value stays true, so two different values cannot "
+        "both be right and the later statement is not more likely to be the right "
+        "one. Facts about the world are usually this kind: who wrote, directed or "
+        "narrated a work, when something was born, founded or released, what "
+        "something is made of, a product's price, specification, playtime or "
+        "capacity as stated, a rule or requirement as stated, whether something "
+        "exists.\n"
+        "If you cannot tell which kind it is, answer FIXED.\n\n"
+        "Reply with exactly three lines and nothing else:\n"
+        "REASON: <one sentence of at most 25 words naming the slot, or why the "
+        "claims fill different slots>\n"
+        f"{UPDATE_SLOT_REQUEST}, or SLOT: NONE when they fill different slots\n"
+        "VERDICT: YES or VERDICT: NO\n\n"
+        f"Claim A: {earlier}\n\nClaim B: {later}"
+    )
+
+
+def update_prompt_hash() -> str:
+    """The update-slot probe's prompt version, rendered by :func:`_update_prompt`."""
+    return prompt_hash(_update_prompt("{earlier}", "{later}"))
+
+
+def _slot_verdict(reply: str) -> SlotVerdict | None:
+    """The update probe's three-way verdict, or ``None`` when the reply has no clear one.
+
+    The final line is the verdict, read by :func:`_contradiction_verdict`. A
+    ``NO`` is :attr:`~SlotVerdict.DIFFERENT` whatever the slot line says. A
+    ``YES`` needs exactly one ``SLOT: CHANGES`` or ``SLOT: FIXED`` line: a
+    same-slot verdict whose kind is missing, ``NONE`` or contradictory is
+    off protocol, and reads as a probe that did not complete.
+    """
+    verdict = _contradiction_verdict(reply)
+    if verdict is None:
+        return None
+    if not verdict:
+        return SlotVerdict.DIFFERENT
+    kinds = {
+        m.group(1).upper()
+        for line in reply.splitlines()
+        if (m := _SLOT_LINE_RE.match(line.strip()))
+    }
+    if kinds == {"CHANGES"}:
+        return SlotVerdict.CHANGES
+    if kinds == {"FIXED"}:
+        return SlotVerdict.FIXED
+    return None
+
+
+async def _llm_slot_verdict(earlier: str, later: str) -> SlotVerdict | None:
+    """The update probe's verdict, or ``None`` when it cannot complete."""
+    try:
+        from particles.llm import complete
+
+        response = await complete(
+            "semantic_lint",
+            _update_prompt(earlier, later),
+            max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS,
+        )
+    except Exception as exc:
+        log.warning("Update probe could not complete; rung 2.5 does not fire: %s", exc)
+        return None
+    verdict = _slot_verdict(response)
+    if verdict is None:
+        log.warning(
+            "Update probe reply carried no usable verdict; rung 2.5 does not fire: %r",
+            response[:200],
+        )
+    return verdict
+
+
+async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
+    """The update probe's verdict on whether ``later`` updates ``earlier``.
+
+    Asked only of a pair the contradiction probe confirmed and rung 2.5 could
+    otherwise act on. ``None`` means the probe did not complete, which every
+    caller reads as no update: the rung retires a claim, and the safe direction
+    is to keep it.
+    """
+    return await _llm_slot_verdict(earlier, later)
 
 
 def _trigger_ref_for(particle: Particle) -> tuple[str, str, ProvenanceRefType]:
@@ -1559,9 +2408,11 @@ async def _resolve_conflict(
     trigger_ref_type: ProvenanceRefType = ProvenanceRefType.SOURCE,
     allow_update_supersession: bool = False,
     allow_own_assertion_supersession: bool = False,
+    slot: SlotVerdict | None = None,
     retired_out: set[str] | None = None,
     observer: ObserverGate | None = None,
     candidate_scope: BeliefScope | None = None,
+    reading: str | None = None,
 ) -> Particle | None:
     """Apply the §6.6 conflict-resolution ladder for one (existing, new) pair.
 
@@ -1597,6 +2448,11 @@ async def _resolve_conflict(
     ``allow_own_assertion_supersession`` is the assertion pathway's own,
     narrower door: an agent's newer assertion supersedes its own
     earlier one, and nothing else.
+    ``slot`` is the update probe's verdict on the pair. Neither
+    door opens unless it is :attr:`~SlotVerdict.CHANGES`: a confirmed
+    contradiction whose claims fill different slots is not an update, and one
+    that gives a fixed slot two values is a contradiction no date settles.
+    Both fall through to rung 3.
     ``retired_out`` (when given) collects the id of an existing particle this
     verdict demoted, so a caller reconciling several claims in one pass never
     offers — or demotes — it twice.
@@ -1609,6 +2465,9 @@ async def _resolve_conflict(
     project's candidate skips rung 2.5 and falls through to ``INCONSISTENT``.
     ``candidate_scope`` is the candidate's scope when the caller already has it
     (extraction: the entry's); otherwise it is read from the candidate's refs.
+    ``reading`` is the instruction a second reading confirmed ``probe`` under
+    (extraction only); a rung-3 record carries it as
+    ``conflict:reading``.
 
     Returns:
       - The winning Particle (inserted as ACTIVE) if trust resolution prefers
@@ -1660,6 +2519,7 @@ async def _resolve_conflict(
                 forced=forces_inconsistent(
                     probe, fail_closed=fail_closed, precondition=precondition
                 ),
+                slot=slot,
             ),
             effective_single=effective_single,
         )
@@ -1687,6 +2547,7 @@ async def _resolve_conflict(
             else (None, None)
         ),
         domain=domain,
+        reading=reading,
     )
     return await _apply_conflict_plan(
         session,
@@ -1850,11 +2711,13 @@ async def _gather_candidate_pairs(
             continue
         cand_emb = embeddings[i] if i < len(embeddings) else None
         holder = holder_from_properties(candidate.properties)
+        generic = is_generic_claim(candidate.content)
         nearest = _find_conflict(
             cand_emb,
             existing,
             existing_embs,
             candidate_stance_holder=holder,
+            candidate_generic=generic,
         )
         pool: list[Particle] = []
         if (
@@ -1864,7 +2727,12 @@ async def _gather_candidate_pairs(
             and candidate.assertion_modality == AssertionModality.FALSIFIABLE
         ):
             subject_ids = await _candidate_subject_ids_readonly(
-                session, candidate, about_ids, source_type=entry.source_type
+                session,
+                candidate,
+                about_ids,
+                source_type=entry.source_type,
+                source_tags=entry.tags,
+                qualified=qualified_contexts(candidate, entry.tags, entry.uri_r, entry.source_type),
             )
             if subject_ids:
                 pool = subject_index.candidates(
@@ -1873,6 +2741,7 @@ async def _gather_candidate_pairs(
                     floor=update_cfg.subject_floor,
                     limit=update_cfg.max_candidates,
                     skip_ids=() if nearest is None else (nearest.id,),
+                    generic=generic,
                 )
         found.append((nearest, pool))
 
@@ -1931,10 +2800,89 @@ async def _pair_can_update(
     """Whether rung 2.5 could act on this cross-entry pair.
 
     Asked only where the trust rung is off (a ``multi`` store), so a pair the
-    update rung cannot settle has no outcome but a review item. The candidate
-    is not a ``Particle`` yet, and only lineage and dates matter here, so the
-    check runs against a stand-in carrying the candidate's provenance.
-    ``entries`` caches the other side's entry, which the rung 2.5 extras reuse.
+    update rung cannot settle has no outcome but a review item.
+    """
+    order = await _pair_update_order(
+        session, entry, snapshot_id, candidate, other, entries, require_attribution=True
+    )
+    return order is not None
+
+
+async def _probe_update_slots(
+    session: AsyncSession,
+    entry: CorpusEntry,
+    snapshot_id: str,
+    candidate: CandidateParticle,
+    confirmed: Sequence[Particle],
+    entries: dict[str, CorpusEntry | None],
+    *,
+    require_attribution: bool,
+) -> dict[str, SlotVerdict]:
+    """Gather 3 of the §6.6 pair selection: the update probe on each datable pair.
+
+    ``confirmed`` is :func:`~particles.ingest.pair_selection.plan_update_probes`'
+    list. Each pair is dated first, as rung 2.5 would date it; a pair it cannot
+    order gets no verdict (rung 2.5 cannot fire on it anyway, so the question
+    would be pure spend). The rest are asked with the earlier claim first, so
+    the probe reads the direction the rung would retire in. Runs outside the
+    write lock, like the contradiction probe (F4.3). A pair whose probe did not
+    complete gets no verdict, which keeps rung 2.5 off it.
+    """
+    slots: dict[str, SlotVerdict] = {}
+    for other in confirmed:
+        order = await _pair_update_order(
+            session,
+            entry,
+            snapshot_id,
+            candidate,
+            other,
+            entries,
+            require_attribution=require_attribution,
+        )
+        # The dating read opened a transaction; end it before any LLM
+        # round-trip (this one, or the next candidate's probes) so the
+        # connection goes back to the pool.
+        await session.commit()
+        if order is None:
+            continue
+        earlier, later = (
+            (other.content, candidate.content) if order > 0 else (candidate.content, other.content)
+        )
+        verdict = await _has_update_signal(earlier, later)
+        if verdict is None:
+            continue
+        slots[other.id] = verdict
+        if verdict is SlotVerdict.DIFFERENT:
+            log.info(
+                "Update probe: %s and the candidate fill different slots; "
+                "rung 2.5 will not retire either",
+                other.id[:8],
+            )
+        elif verdict is SlotVerdict.FIXED:
+            log.info(
+                "Update probe: %s and the candidate give a fixed slot two "
+                "values; the pair goes to review, not to rung 2.5",
+                other.id[:8],
+            )
+    return slots
+
+
+async def _pair_update_order(
+    session: AsyncSession,
+    entry: CorpusEntry,
+    snapshot_id: str,
+    candidate: CandidateParticle,
+    other: Particle,
+    entries: dict[str, CorpusEntry | None],
+    *,
+    require_attribution: bool,
+) -> int | None:
+    """The rung 2.5 order of a candidate against a stored claim, before the write loop.
+
+    The candidate is not a ``Particle`` yet, and only lineage and dates matter
+    here, so the check runs against a stand-in carrying the candidate's
+    provenance. ``entries`` caches the other side's entry, which the rung 2.5
+    extras reuse.
     """
     stand_in = Particle(
         content=candidate.content,
@@ -1956,17 +2904,16 @@ async def _pair_can_update(
         if key not in entries:
             entries[key] = await get_entry(session, key)
         other_entry = entries[key]
-    order = update_order(
+    return update_order(
         stand_in,
         entry,
         snapshot_id,
         other,
         other_entry,
         other_ref.snapshot_id if other_ref is not None else None,
-        require_attribution=True,
+        require_attribution=require_attribution,
         existing_date=await latest_source_date(session, other),
     )
-    return order is not None
 
 
 async def _candidate_subject_ids_readonly(
@@ -1975,6 +2922,8 @@ async def _candidate_subject_ids_readonly(
     memo: dict[str, str | None],
     *,
     source_type: str | None = None,
+    source_tags: Collection[str] = (),
+    qualified: Mapping[str, RecognizeContext] | None = None,
 ) -> list[str]:
     """Resolve a candidate's subject names to *existing* Subject ids, read-only.
 
@@ -1985,8 +2934,8 @@ async def _candidate_subject_ids_readonly(
     question the subject-keyed search asks, memoised
     per pass.
 
-    ``source_type`` applies the same persona fold the write path applies.
-    Without it the two disagreed about the *name*, and the
+    ``source_type`` and ``source_tags`` apply the same persona fold the write
+    path applies. Without it the two disagreed about the *name*, and the
     disagreement silently disabled the whole rung: the write path stores a
     conversational persona under one canonical Subject ("the user"), while this
     lookup asked for the extractor's raw surface form ("user", the commonest
@@ -2003,10 +2952,23 @@ async def _candidate_subject_ids_readonly(
     """
     out: list[str] = []
     for raw in candidate_subject_names(candidate):
-        name = _persona_canonical(raw, source_type)
+        context = (qualified or {}).get(raw)
+        if context is not None:
+            # a qualified name is found by its scoped ref, never
+            # by the bare name, exactly as the write loop resolves it.
+            qkey = f"artifact:{context.namespace_key}:{raw.casefold()}"
+            if qkey not in memo:
+                found = await find_existing_qualified(session, raw, context)
+                memo[qkey] = found.id if found is not None else None
+            if (resolved_q := memo[qkey]) is not None and resolved_q not in out:
+                out.append(resolved_q)
+            continue
+        name = _persona_canonical(raw, source_type, source_tags)
         key = name.casefold()
         if key not in memo:
-            subject = await find_existing_subject(session, raw, source_type=source_type)
+            subject = await find_existing_subject(
+                session, raw, source_type=source_type, source_tags=source_tags
+            )
             memo[key] = subject.id if subject is not None else None
         resolved = memo[key]
         if resolved is not None and resolved not in out:
@@ -2024,6 +2986,7 @@ async def _apply_update_extras(
     *,
     entries: Mapping[str, CorpusEntry | None],
     precondition: Mapping[str, PairPrecondition],
+    updatable: frozenset[str],
 ) -> None:
     """Resolve further confirmed same-subject pairs by rung 2.5 alone.
 
@@ -2034,7 +2997,7 @@ async def _apply_update_extras(
     converges here; a pair that does not qualify is left as it was.
     """
     for loser_id in plan_update_extras(
-        winner, winner_entry, winner_snapshot_id, others, entries, precondition
+        winner, winner_entry, winner_snapshot_id, others, entries, precondition, updatable
     ):
         await update_particle_status(
             session, loser_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE

@@ -29,8 +29,10 @@ from particles.api.cli import app
 from particles.api.cli._claude_code import (
     distill_transcript,
     redact_secrets,
+    transcript_started_at,
     truncate_on_line_boundary,
 )
+from tests._claude_projects import bind_hooks_to_store
 
 # ---------------------------------------------------------------------------
 # fixtures + helpers
@@ -46,6 +48,9 @@ def runner() -> CliRunner:
 def hook_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point HOME at tmp_path so the hook log / state dir land in the sandbox."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # The hooks this fake home "installed" name the ``cli_db`` store, which is
+    # what lets the projection render into its fake ``~/.claude/projects``.
+    bind_hooks_to_store(tmp_path, f"sqlite+aiosqlite:///{tmp_path / 'cli.db'}")
     return tmp_path
 
 
@@ -94,6 +99,27 @@ async def _snapshot_count(entry_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Distillation (§3a) — deterministic, LLM-free
 # ---------------------------------------------------------------------------
+
+
+class TestTranscriptStart:
+    """use mining reads exposure as of the session's first timestamp."""
+
+    def test_first_parseable_timestamp_wins(self) -> None:
+        from datetime import UTC, datetime
+
+        jsonl = "\n".join(
+            [
+                "not json",
+                json.dumps({"type": "summary"}),
+                json.dumps({"type": "user", "timestamp": "garbage"}),
+                json.dumps({"type": "user", "timestamp": "2026-07-15T12:00:00.000Z"}),
+                json.dumps({"type": "assistant", "timestamp": "2026-07-15T12:05:00Z"}),
+            ]
+        )
+        assert transcript_started_at(jsonl) == datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+
+    def test_none_without_a_timestamp(self) -> None:
+        assert transcript_started_at(json.dumps({"type": "user"})) is None
 
 
 class TestDistillation:

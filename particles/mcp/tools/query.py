@@ -39,6 +39,7 @@ async def query(
     min_effective_confidence: float | None = None,
     list_predicates: bool = False,
     all_projects: bool = False,
+    grounded: bool | None = None,
 ) -> dict[str, Any]:
     """Run a tag-aware semantic query against the particle store.
 
@@ -94,6 +95,15 @@ async def query(
         all_projects: On a server bound to one project, read the whole
             store instead of that project's view. The result says so. No effect
             on an unbound server.
+        grounded: Compose a grounded answer: every sentence ends
+            with the ids of the retrieved particles it rests on (``[p-1a2b3c4d]``,
+            the form ``particle_show`` accepts), or with ``[inference]`` (the
+            model's own inference over cited claims) or ``[background]`` (from
+            nothing in the store). Cited ids are checked against the retrieved
+            set; a sentence with no valid citation and no label is
+            ``[unattributed]``. Nothing is dropped and nothing is stored.
+            ``answer_attribution`` carries the per-sentence labels and full
+            cited ids. Omit to use the server's ``query.grounded_answers``.
 
     Returns:
         The full ``QueryResponse`` as JSON — answer string plus the
@@ -155,6 +165,7 @@ async def query(
         min_effective_confidence=min_effective_confidence,
         list_predicates=list_predicates,
         observer_project=observer_for(all_projects),
+        grounded=grounded,
     )
     backend = get_backend()
     resp = await backend.query(req)

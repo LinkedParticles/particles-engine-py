@@ -177,6 +177,27 @@ def _is_trust_lens_definition(content: bytes, suffix: str) -> bool:
     return isinstance(data, dict) and data.get("kind") == "TrustLensDefinition"
 
 
+def _is_vocabulary_document(content: bytes, suffix: str) -> bool:
+    """Return True if ``content`` declares itself a vocabulary document.
+
+    Detection keys on the JSON-LD ``@type`` the document carries; full
+    validation happens when the vocabulary sink materialises it. Checked before
+    the RDF suffixes, so a ``.jsonld`` vocabulary is not read as an RDF graph.
+    """
+    if suffix not in (".json", ".jsonld"):
+        return False
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    types = data.get("@type")
+    if isinstance(types, str):
+        types = [types]
+    return isinstance(types, list) and "ppx:VocabularyDocument" in types
+
+
 # Leading Markdown heading / list / block-quote markers stripped before a line
 # is tested as a standalone date (so `# 2026-03-15` and `- 2026-03-15` match).
 _LEADING_MARKER_RE = re.compile(r"^[\s>#*\-+]+")
@@ -295,6 +316,8 @@ def _resolve_source_type(path: Path, content: bytes, override: str | None) -> st
     suffix = path.suffix.lower()
     if _is_trust_lens_definition(content, suffix):
         return SourceType.TRUST_LENS_DEFINITION
+    if _is_vocabulary_document(content, suffix):
+        return SourceType.VOCABULARY_DOCUMENT
     if _is_taxonomy_definition(content, suffix):
         return SourceType.TAXONOMY_DEFINITION
     mime, _ = mimetypes.guess_type(str(path))
@@ -1582,6 +1605,18 @@ def blob_exists(content_hash: str) -> bool:
         return blob_path(content_hash).exists()
     except ValueError:
         return False
+
+
+def blob_size(content_hash: str) -> int | None:
+    """A blob's size in bytes, or ``None`` when it is absent — no read, no raise.
+
+    The reindex work plan prices a re-extraction from it. A
+    malformed hash reports absent, as :func:`blob_exists` does.
+    """
+    try:
+        return blob_path(content_hash).stat().st_size
+    except (ValueError, OSError):
+        return None
 
 
 def load_blob(content_hash: str) -> bytes:

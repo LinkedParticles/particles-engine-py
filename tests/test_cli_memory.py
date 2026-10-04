@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from particles.api.cli import app
@@ -75,6 +76,43 @@ class TestExitCodes:
         assert result.exit_code == 0, result.output
         assert "already running — skipped" in result.output
         assert "Consolidated store" not in result.output  # one log line, no report
+
+    def test_long_hold_warns_on_stderr_and_exits_0(self, cli_db: Path) -> None:
+        consolidate = AsyncMock(
+            return_value=_report(
+                outcome="skipped",
+                skip_reason="consolidation already running (pid 4242) — skipped",
+                lock_warning="consolidation lock held for 8h 19m; if it is hung, stop pid 4242",
+            )
+        )
+        with patch("particles.operations.consolidation.run_consolidation", consolidate):
+            result = runner.invoke(app, ["memory", "consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "already running (pid 4242)" in result.stdout
+        assert "stop pid 4242" in result.stderr
+        assert "stop pid 4242" not in result.stdout
+
+    @pytest.mark.parametrize("flags", [[], ["--if-due"]])
+    def test_real_held_lock_skips_with_exit_0(
+        self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+    ) -> None:
+        # a second caller starts no cycle, exits 0, names the holder.
+        from particles.operations import consolidation as consolidation_mod
+
+        lock_path = tmp_path / "consolidate.lock"
+        monkeypatch.setattr(consolidation_mod, "cycle_lock_path", lambda: lock_path)
+        held = consolidation_mod.acquire_cycle_lock(lock_path, timeout_minutes=120)
+        assert isinstance(held, consolidation_mod.CycleLock)
+        held.set_pass("extract")
+        try:
+            result = runner.invoke(app, ["memory", "consolidate", *flags])
+        finally:
+            consolidation_mod.release_cycle_lock(held)
+        assert result.exit_code == 0, result.output
+        assert "consolidation already running (pid " in result.stdout
+        assert "pass extract since" in result.stdout
+        assert "Consolidated store" not in result.output
+        assert result.stderr == ""
 
     def test_failed_pass_exits_1(self, cli_db: Path) -> None:
         consolidate = AsyncMock(
@@ -140,6 +178,68 @@ class TestThreading:
         assert result.exit_code == 0, result.output
         assert out.is_file()
         assert "Consolidated store 'default'" in out.read_text()
+
+
+class TestDryRun:
+    """``--dry-run``: the plan, never the cycle."""
+
+    @staticmethod
+    def _plan() -> object:
+        from particles.operations.consolidation_plan import ConsolidationPlan, PlannedPass
+
+        return ConsolidationPlan(
+            passes=[
+                PlannedPass(
+                    name="extract",
+                    position=2,
+                    action="run",
+                    detail="would extract 3 of 3 pending snapshots",
+                    llm_priced=True,
+                    calls=4,
+                    estimate_usd=0.42,
+                )
+            ]
+        )
+
+    def test_dry_run_plans_and_never_runs_the_cycle(self, cli_db: Path) -> None:
+        plan = AsyncMock(return_value=self._plan())
+        consolidate = AsyncMock(return_value=_report())
+        with (
+            patch("particles.operations.consolidation_plan.plan_consolidation", plan),
+            patch("particles.operations.consolidation.run_consolidation", consolidate),
+        ):
+            result = runner.invoke(
+                app,
+                ["memory", "consolidate", "--dry-run", "--structural-only", "--scope", "store"],
+            )
+        assert result.exit_code == 0, result.output
+        consolidate.assert_not_awaited()
+        kwargs = plan.call_args.kwargs
+        assert (kwargs["structural_only"], kwargs["scope"], kwargs["store"]) == (
+            True,
+            "store",
+            "default",
+        )
+        assert "projection_skip_reason" in kwargs
+        assert "nothing written, no LLM call made" in result.stdout
+        assert "~4 LLM calls, ≈ $0.42" in result.stdout
+
+    def test_dry_run_json(self, cli_db: Path) -> None:
+        plan = AsyncMock(return_value=self._plan())
+        with patch("particles.operations.consolidation_plan.plan_consolidation", plan):
+            result = runner.invoke(app, ["memory", "consolidate", "--dry-run", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["passes"][0]["name"] == "extract"
+        assert (data["total_calls"], data["total_usd"]) == (4, 0.42)
+
+    def test_dry_run_with_if_due_exits_2(self, cli_db: Path) -> None:
+        plan = AsyncMock()
+        with patch("particles.operations.consolidation_plan.plan_consolidation", plan):
+            result = runner.invoke(app, ["memory", "consolidate", "--dry-run", "--if-due"])
+        assert result.exit_code == 2
+        assert "--dry-run and --if-due cannot be combined" in result.output
+        plan.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -348,3 +448,118 @@ class TestSweepRankLiftTargetResolution:
         assert mock_sweep.await_args.kwargs["head_sizes"] == [
             get_config().mcp.recall.digest_max_beliefs
         ]
+
+
+# ---------------------------------------------------------------------------
+# Progress on a terminal
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidateProgress:
+    """The status line and per-pass end lines; stdout and JSON never change."""
+
+    @staticmethod
+    def _events() -> list[object]:
+        from particles.core.progress import ProgressEvent
+        from particles.operations.consolidation import BatchWaiting, PassEnded
+
+        return [
+            ProgressEvent(phase="pass", done=2, total=11, label="extract"),
+            ProgressEvent(phase="extract", done=3, total=20, label="snapshots"),
+            BatchWaiting(
+                phase="batch_wait",
+                done=23 * 60,
+                total=60 * 60,
+                label="extract",
+                budget_left_seconds=37 * 60,
+                budget_seconds=60 * 60,
+            ),
+            PassEnded(
+                phase="pass_end",
+                done=2,
+                total=11,
+                label="extract",
+                outcome="degraded",
+                duration_seconds=58 * 60 + 12,
+                summary="0 of 20 extracted, 20 left for retry",
+            ),
+            PassEnded(
+                phase="pass_end",
+                done=3,
+                total=11,
+                label="reconcile",
+                outcome="skipped",
+                summary="replacement-signal probes are LLM-priced",
+            ),
+        ]
+
+    def _invoke(self, *flags: str) -> object:
+        events = self._events()
+
+        async def fake(*_args: object, **kwargs: object) -> ConsolidationReport:
+            on_progress = kwargs.get("on_progress")
+            if callable(on_progress):
+                for event in events:
+                    on_progress(event)
+            return _report(started_at=NOW)
+
+        with patch("particles.operations.consolidation.run_consolidation", side_effect=fake):
+            return runner.invoke(app, ["memory", "consolidate", *flags])
+
+    def test_the_status_line_names_the_pass_counter_and_batch_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import _output
+        from particles.api.cli.memory import consolidation_progress_renderer
+
+        statuses: list[str | None] = []
+        monkeypatch.setattr(
+            "particles.api.cli.memory.current_output",
+            lambda: _output.OutputSettings(progress=True),
+        )
+        monkeypatch.setattr("particles.api.cli.memory.set_heartbeat_status", statuses.append)
+        render = consolidation_progress_renderer()
+        assert render is not None
+        for event in self._events()[:3]:
+            render(event)  # type: ignore[arg-type]
+
+        assert statuses == [
+            "pass 2/11 extract",
+            "pass 2/11 extract · snapshots 3/20",
+            "pass 2/11 extract · snapshots 3/20 · batch waiting 23m of 60m · budget 37m left",
+        ]
+
+    def test_off_a_terminal_and_under_quiet_there_is_no_renderer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import _output
+        from particles.api.cli.memory import consolidation_progress_renderer
+
+        for settings in (
+            _output.OutputSettings(),
+            _output.OutputSettings(quiet=True, progress=True),
+        ):
+            monkeypatch.setattr("particles.api.cli.memory.current_output", lambda s=settings: s)
+            monkeypatch.setattr(_output.sys.stderr, "isatty", lambda: False, raising=False)
+            assert consolidation_progress_renderer() is None
+
+    def test_pass_end_lines_print_on_a_terminal(self, cli_db: Path) -> None:
+        result = self._invoke("--progress")
+        assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+        stderr = result.stderr  # type: ignore[attr-defined]
+        assert "  ! extract 58m12s (degraded): 0 of 20 extracted, 20 left for retry\n" in stderr
+        assert "  - reconcile skipped: replacement-signal probes are LLM-priced\n" in stderr
+
+    @pytest.mark.parametrize("flag", ["--no-progress", "--quiet"])
+    def test_nothing_extra_off_a_terminal_or_under_quiet(self, cli_db: Path, flag: str) -> None:
+        result = self._invoke(flag)
+        assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+        assert result.stderr == ""  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize("fmt", ["markdown", "json"])
+    def test_stdout_is_byte_identical_with_progress_on(self, cli_db: Path, fmt: str) -> None:
+        on = self._invoke("--progress", "--format", fmt)
+        off = self._invoke("--no-progress", "--format", fmt)
+        assert on.stdout == off.stdout  # type: ignore[attr-defined]
+        if fmt == "json":
+            json.loads(on.stdout)  # type: ignore[attr-defined]

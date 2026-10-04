@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic
@@ -151,7 +152,7 @@ class TestCompletionPort:
         llm.set_client(mock)
         asyncio.run(complete("synthesis", "p", max_tokens=8, temperature=0.0))
         kwargs = mock.messages.create.call_args.kwargs
-        assert kwargs["temperature"] == 0.0
+        assert kwargs["extra_body"] == {"temperature": 0.0}
         # system was not supplied → the Anthropic omit sentinel, not a value.
         assert kwargs["system"] is omit
 
@@ -228,6 +229,32 @@ class TestCompletionPort:
         message = caplog.records[0].getMessage()
         assert "truncated" in message
         assert "max_tokens=8192" in message
+        assert "extraction.max_tokens" in message
+
+    @pytest.mark.parametrize("purpose", ["semantic_lint", "abstraction"])
+    def test_truncation_warning_names_the_purpose_not_extraction(
+        self, purpose: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A truncated contradiction probe (``semantic_lint``, a budget fixed in
+        code) must not tell the operator to raise ``extraction.max_tokens``."""
+        from particles.llm import complete
+
+        block = MagicMock()
+        block.text = "YES: These claims contradict because the first says"
+        resp = MagicMock(spec=["content", "stop_reason"])
+        resp.content = [block]
+        resp.stop_reason = "max_tokens"
+        mock = MagicMock(spec=anthropic.Anthropic)
+        mock.messages = MagicMock()
+        mock.messages.create = MagicMock(return_value=resp)
+        llm.set_client(mock)
+
+        with caplog.at_level("WARNING", logger="particles.llm.adapters.anthropic"):
+            asyncio.run(complete(purpose, "p", max_tokens=100))  # type: ignore[arg-type]
+
+        message = caplog.records[0].getMessage()
+        assert f"llm purpose {purpose}" in message
+        assert "extraction.max_tokens" not in message
 
     def test_no_text_block_error_names_stop_reason(self) -> None:
         from particles.llm import CompletionError, complete
@@ -271,7 +298,7 @@ class TestDeprecatedTemperature:
         resp.stop_reason = "end_turn"
 
         def _create(**kwargs: object) -> object:
-            if kwargs.get("temperature") is not omit:
+            if kwargs.get("extra_body") is not None:
                 exc = RuntimeError("`temperature` is deprecated for this model.")
                 exc.status_code = 400  # type: ignore[attr-defined]
                 raise exc
@@ -292,8 +319,8 @@ class TestDeprecatedTemperature:
         assert out == "verdict"
         # One rejected attempt carrying the parameter, one retry without it.
         assert mock.messages.create.call_count == 2
-        assert mock.messages.create.call_args_list[0].kwargs["temperature"] == 0.0
-        assert mock.messages.create.call_args_list[1].kwargs["temperature"] is omit
+        assert mock.messages.create.call_args_list[0].kwargs["extra_body"] == {"temperature": 0.0}
+        assert mock.messages.create.call_args_list[1].kwargs["extra_body"] is None
 
     def test_subsequent_calls_skip_the_wasted_attempt(self) -> None:
         """The memo is what keeps the judge from paying a 400 per contested pair."""
@@ -306,7 +333,7 @@ class TestDeprecatedTemperature:
 
         asyncio.run(complete("extraction", "p2", max_tokens=8, temperature=0.0))
         assert mock.messages.create.call_count == 1
-        assert mock.messages.create.call_args.kwargs["temperature"] is omit
+        assert mock.messages.create.call_args.kwargs["extra_body"] is None
 
     def test_an_unrelated_400_is_not_masked(self) -> None:
         """Only a 400 naming the parameter downgrades; everything else raises.
@@ -593,3 +620,173 @@ class TestOverrideProviders:
                 assert get_provider("extraction").provider_model == "rot-refused:extraction"
             assert get_provider("extraction").provider_model != "rot-refused:extraction"
         assert get_provider("semantic_lint").provider_model == before
+
+
+class TestStreamingAboveTheSdkCeiling:
+    """A budget above the SDK's non-streaming ceiling is streamed.
+
+    The Anthropic SDK refuses a plain ``messages.create`` whose ``max_tokens``
+    implies more than ten minutes of output (about 21,333 tokens), so the
+    extraction budgets of 32,000 and 64,000 are sent through
+    ``messages.stream`` and read with ``get_final_message()``. Everything after
+    the call reads that message, so the two paths must agree on text, stop
+    reason, usage, refusal handling and the truncation warning.
+    """
+
+    @staticmethod
+    def _message(
+        text: str | None = "ok", *, stop_reason: str = "end_turn", output_tokens: int = 40
+    ) -> SimpleNamespace:
+        content = [SimpleNamespace(text=text)] if text is not None else []
+        return SimpleNamespace(
+            content=content,
+            stop_reason=stop_reason,
+            stop_details=None,
+            usage=SimpleNamespace(
+                input_tokens=1_000,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=100,
+                cache_read_input_tokens=500,
+            ),
+        )
+
+    @staticmethod
+    def _client(*messages: SimpleNamespace) -> MagicMock:
+        """A client answering both paths from one script, recording which was used."""
+        script = list(messages)
+
+        def _stream(**_: object) -> MagicMock:
+            manager = MagicMock()
+            manager.__enter__.return_value.get_final_message.return_value = script.pop(0)
+            manager.__exit__.return_value = False
+            return manager
+
+        client = MagicMock(spec=anthropic.Anthropic)
+        client.messages = MagicMock()
+        client.messages.create = MagicMock(side_effect=lambda **_: script.pop(0))
+        client.messages.stream = MagicMock(side_effect=_stream)
+        return client
+
+    def test_the_threshold_is_the_sdk_ceiling(self) -> None:
+        from particles.llm.adapters.anthropic import _NONSTREAMING_MAX_TOKENS
+
+        client = anthropic.Anthropic(api_key="sk-test")
+        client._calculate_nonstreaming_timeout(_NONSTREAMING_MAX_TOKENS, None)
+        with pytest.raises(ValueError, match="Streaming is required"):
+            client._calculate_nonstreaming_timeout(_NONSTREAMING_MAX_TOKENS + 1, None)
+
+    def test_streams_above_the_threshold_and_not_at_it(self) -> None:
+        from particles.llm.adapters.anthropic import _NONSTREAMING_MAX_TOKENS, AnthropicProvider
+
+        provider = AnthropicProvider(model="claude-sonnet-5")
+        client = self._client(self._message("plain"), self._message("streamed"))
+        llm.set_client(client)
+
+        at = asyncio.run(provider.complete("p", max_tokens=_NONSTREAMING_MAX_TOKENS, system="s"))
+        above = asyncio.run(
+            provider.complete("p", max_tokens=_NONSTREAMING_MAX_TOKENS + 1, system="s")
+        )
+
+        assert (at, above) == ("plain", "streamed")
+        assert client.messages.create.call_count == 1
+        assert client.messages.stream.call_count == 1
+        # The streamed request is the same request.
+        plain_kwargs = client.messages.create.call_args.kwargs
+        streamed_kwargs = client.messages.stream.call_args.kwargs
+        assert plain_kwargs.pop("max_tokens") + 1 == streamed_kwargs.pop("max_tokens")
+        assert plain_kwargs == streamed_kwargs
+
+    def test_usage_and_stop_reason_match_on_both_paths(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from particles.llm.adapters.anthropic import _NONSTREAMING_MAX_TOKENS, AnthropicProvider
+        from particles.llm.usage import track_usage
+
+        provider = AnthropicProvider(model="claude-sonnet-5")
+        snapshots = []
+        warnings = []
+        for budget in (_NONSTREAMING_MAX_TOKENS, _NONSTREAMING_MAX_TOKENS + 1):
+            cut = self._message("[{", stop_reason="max_tokens", output_tokens=budget)
+            llm.set_client(self._client(cut))
+            caplog.clear()
+            with (
+                track_usage() as usage,
+                caplog.at_level("WARNING", logger="particles.llm.adapters.anthropic"),
+            ):
+                assert asyncio.run(provider.complete("p", max_tokens=budget)) == "[{"
+            snapshots.append(usage.snapshot().rows[0])
+            warnings.append([r.getMessage() for r in caplog.records])
+
+        plain, streamed = snapshots
+        for row in (plain, streamed):
+            assert (row.calls, row.input_tokens, row.max_tokens_stops) == (1, 1_000, 1)
+            assert (row.cache_creation_tokens, row.cache_read_tokens) == (100, 500)
+        assert streamed.output_tokens == plain.output_tokens + 1
+        for budget, logged in zip(
+            (_NONSTREAMING_MAX_TOKENS, _NONSTREAMING_MAX_TOKENS + 1), warnings, strict=True
+        ):
+            assert any("truncated" in m and f"max_tokens={budget}" in m for m in logged)
+
+    def test_a_refusal_while_streaming_is_still_a_refusal(self) -> None:
+        from particles.llm import CompletionError
+        from particles.llm.adapters.anthropic import AnthropicProvider
+
+        refused = self._message(None, stop_reason="refusal")
+        refused.stop_details = SimpleNamespace(category="cyber")
+        llm.set_client(self._client(refused))
+        with pytest.raises(CompletionError, match=r"refusal.*cyber"):
+            asyncio.run(AnthropicProvider(model="claude-sonnet-5").complete("p", max_tokens=64000))
+
+    def test_an_empty_streamed_reply_names_the_budget(self) -> None:
+        from particles.llm import EmptyCompletionError
+        from particles.llm.adapters.anthropic import AnthropicProvider
+
+        llm.set_client(self._client(self._message(None, stop_reason="max_tokens")))
+        with pytest.raises(EmptyCompletionError, match="max_tokens=32000"):
+            asyncio.run(AnthropicProvider(model="claude-sonnet-5").complete("p", max_tokens=32000))
+
+    async def test_a_cut_streamed_extraction_reply_is_retried_at_the_larger_budget(self) -> None:
+        """A max_tokens stop while streaming is reported and retried like any other."""
+        from particles.extraction.general import _call_llm, tally_replies
+
+        cut = '[{"content": "Claim one.", "confidence_value": 0.9}, {"content": "Claim tw'
+        whole = (
+            '[{"content": "Claim one.", "confidence_value": 0.9}, '
+            '{"content": "Claim two.", "confidence_value": 0.9}]'
+        )
+        client = self._client(
+            self._message(cut, stop_reason="max_tokens", output_tokens=32000),
+            self._message(whole),
+        )
+        llm.set_client(client)
+        with tally_replies() as tally:
+            candidates, _notes, transient = await _call_llm("A long memory file.")
+
+        assert [c.content for c in candidates] == ["Claim one.", "Claim two."]
+        assert transient is False
+        assert (tally.retried, tally.truncated) == (1, 0)
+        budgets = [c.kwargs["max_tokens"] for c in client.messages.stream.call_args_list]
+        assert budgets == [32000, 64000]
+        client.messages.create.assert_not_called()
+
+    def test_temperature_rejection_is_retried_on_the_streaming_path(self) -> None:
+        from particles.llm.adapters import anthropic as adapter
+
+        adapter._TEMPERATURE_UNSUPPORTED.discard("claude-sonnet-5")
+        rejection = RuntimeError("`temperature` is deprecated for this model.")
+        rejection.status_code = 400  # type: ignore[attr-defined]
+        client = self._client(self._message("ok"))
+        streamed = client.messages.stream.side_effect
+        client.messages.stream.side_effect = [rejection, streamed()]
+        llm.set_client(client)
+        try:
+            out = asyncio.run(
+                adapter.AnthropicProvider(model="claude-sonnet-5").complete(
+                    "p", max_tokens=32000, temperature=0.0
+                )
+            )
+        finally:
+            adapter._TEMPERATURE_UNSUPPORTED.discard("claude-sonnet-5")
+        assert out == "ok"
+        bodies = [c.kwargs["extra_body"] for c in client.messages.stream.call_args_list]
+        assert bodies == [{"temperature": 0.0}, None]
