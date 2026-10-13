@@ -56,6 +56,7 @@ from particles.api.cli._output import (
     current_output,
 )
 from particles.api.cli._progress import (
+    confirm,
     format_elapsed,
     heartbeat_paused,
     progress_line,
@@ -129,16 +130,17 @@ async def _rebuild_utility(store: str, *, yes: bool, batch: bool) -> None:
         cost = f"≈ US{format_usd(estimate.usd)} at list price"
         if batch:
             cost += f", ≈ US{format_usd(estimate.usd * (1.0 - discount))} batched"
-    typer.echo(
-        f"Re-mining {len(plan.mines)} harvested session(s) for store {store!r}: "
-        f"{plan.calls} judge call(s), {cost}. Clears every utility event first."
-    )
-    if not get_config().utility.mining.behavioural_matching:
+    with heartbeat_paused():
         typer.echo(
-            "utility.mining.behavioural_matching is off: the judge will not run, so the "
-            "mined channel will be rebuilt empty."
+            f"Re-mining {len(plan.mines)} harvested session(s) for store {store!r}: "
+            f"{plan.calls} judge call(s), {cost}. Clears every utility event first."
         )
-    if not yes and not typer.confirm("Proceed?"):
+        if not get_config().utility.mining.behavioural_matching:
+            typer.echo(
+                "utility.mining.behavioural_matching is off: the judge will not run, so the "
+                "mined channel will be rebuilt empty."
+            )
+    if not yes and not confirm("Proceed?"):
         raise typer.Exit(1)
     result = await rebuild_store_utility(store, plan, latency_tolerant=batch)
     line = (

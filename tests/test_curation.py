@@ -1192,10 +1192,9 @@ class TestDuplicateVerdict:
         # clears the client again before the next test.
         llm.set_client(_mock_anthropic("NO"))
 
-        pair_key = f"{a.id[:8]}+{b.id[:8]}"
         with patch(
             "particles.operations._llm._llm_call",
-            return_value=f'{{"{pair_key}": "DISTINCT"}}',
+            return_value='{"p0": "DISTINCT"}',
         ):
             cards = await collect_cards(db_session, semantic=True)
 

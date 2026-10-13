@@ -235,3 +235,63 @@ async def test_the_projection_verdict_comes_from_the_surface(
     projection = _by_name(plan)["projection"]
     assert projection.action == "skip"
     assert projection.detail == "agent_memory.projection.enabled is false"
+
+
+@pytest.mark.asyncio
+async def test_the_plan_and_the_run_choose_the_same_priority_set(
+    db_session: AsyncSession, refusing_client: MagicMock
+) -> None:
+    """Acceptance 5: the preview shows the split the run takes.
+
+    The priority class is applied after the shared listing, so ``oldest waiting
+    since`` still names the longest-owed entry of any class: here the transcript
+    the cap leaves behind.
+    """
+    from datetime import timedelta
+
+    from particles.corpus.deposit import save_blob, sha256
+    from particles.corpus.store import (
+        CorpusEntryRow,
+        SnapshotRow,
+        list_pending_snapshots_for_catchup,
+    )
+    from particles.operations.consolidation import _extract_selection, _oldest_pending_at
+
+    now = datetime.now(UTC)
+    old = now - timedelta(days=30)
+    for name, tags, captured in (("chat", [], old), ("rules", ["rule-file"], now)):
+        content = f"{name}: run the gates before every commit. ".encode() * 20
+        digest = sha256(content)
+        save_blob(content, digest)
+        entry = CorpusEntry(
+            entry_id=name,
+            source_type="LOCAL_MARKDOWN",
+            uri_r=f"file:///tmp/{name}.md",
+            deposited_by="test",
+            tags=tags,
+        )
+        snap = Snapshot(
+            snapshot_id=f"{name}-snap",
+            captured_at=captured,
+            content_hash=digest,
+            archive_path=str(digest),
+            extraction_status=ExtractionStatus.PENDING,
+            warc_record_type=WarcRecordType.RESPONSE,
+        )
+        db_session.add(CorpusEntryRow.from_model(entry))
+        db_session.add(SnapshotRow.from_model(snap, entry.entry_id))
+    await db_session.commit()
+    get_config().consolidation.max_pending_entries = 1
+
+    plan = await plan_consolidation(db_session)
+    pending = await list_pending_snapshots_for_catchup(db_session)
+    chosen = _extract_selection(pending, batching=get_config().consolidation.extract_batching)
+    oldest = await _oldest_pending_at(db_session)
+
+    assert _by_name(plan)["extract"].detail.startswith(
+        "would extract 1 of 2 pending snapshots "
+        "(consolidation.max_pending_entries = 1, 1 from consolidation.priority_tags)"
+    )
+    assert chosen == [("rules", "rules-snap")]
+    assert oldest is not None
+    assert oldest.replace(tzinfo=None) == old.replace(tzinfo=None)

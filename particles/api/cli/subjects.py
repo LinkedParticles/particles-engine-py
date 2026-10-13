@@ -218,8 +218,18 @@ def subjects_cmd(
             typer.echo("  (no new aliases — all names already present)")
 
     elif action == "fix-labels":
-        fixed, skipped = run(_fix_subject_labels())
+        fixed, skipped, repaired, cleared = run(_fix_subject_labels())
         typer.echo(f"Fixed: {fixed}  Skipped (no label found): {skipped}")
+        typer.echo(
+            f"Label cache: {repaired} repaired, {cleared} cleared"
+            " (Wikidata unreachable; re-fetched on next use)"
+        )
+        if repaired or cleared:
+            typer.echo(
+                "Wikidata snapshots extracted while those labels were cached may have"
+                " dropped statements; re-extract them with"
+                " `particles reindex --extractor-id wikidata-extractor`."
+            )
 
     elif action == "relink-gated":
         if tier is not None and any(t not in (1, 2, 3) for t in tier):
@@ -559,21 +569,53 @@ async def _subject_particle_counts(subject_ids: list[str]) -> dict[str, int]:
         return {sid: await get_particle_count_for_subject(session, sid) for sid in subject_ids}
 
 
-async def _fix_subject_labels() -> tuple[int, int]:
-    """Find subjects whose canonical_name is a raw QID, fetch proper labels, update."""
+async def _fix_subject_labels() -> tuple[int, int, int, int]:
+    """Repair raw-id labels: subjects named by a QID, and poisoned cache rows.
+
+    A subject whose canonical_name is a raw QID gets its fetched label. A
+    ``wikidata_label_cache`` row whose label equals its own id (item or
+    property) may be an outage's fallback persisted before, so it is
+    re-fetched: a fetched label replaces it, and a failed fetch deletes it so
+    the next extraction asks again. A row Wikidata confirms (an entity with no
+    English label) is kept.
+
+    Returns:
+        (subjects fixed, subjects skipped, cache rows repaired, cache rows cleared).
+    """
     import re as _re
 
+    from sqlalchemy import delete as _delete
     from sqlalchemy import select as _select
 
-    from particles.http import get_capped, particles_client
+    from particles.extraction.wikidata import fetch_live_label
     from particles.store.subject_store import SubjectRow
-    from particles.store.wikidata_cache import get_label, set_label
+    from particles.store.wikidata_cache import WikidataLabelRow, get_label, set_label
 
     _QID_RE = _re.compile(r"^Q\d+$")
-    _WIKIDATA_REST = "https://www.wikidata.org/w/rest.php/wikibase/v1"
 
-    fixed = skipped = 0
+    # Refuse up front rather than report every row as "no label found".
+    from particles import egress
+
+    egress.check(*egress.WIKIDATA_HOST, "subjects fix-labels")
+
+    fixed = skipped = repaired = cleared = 0
     async with session_scope() as session:
+        # The label cache first, so a repaired item row serves the subjects below.
+        cached = await session.execute(
+            _select(WikidataLabelRow.qid).where(WikidataLabelRow.label == WikidataLabelRow.qid)
+        )
+        for entity_id in list(cached.scalars()):
+            fetched = await fetch_live_label(entity_id)
+            if fetched is None:
+                await session.execute(
+                    _delete(WikidataLabelRow).where(WikidataLabelRow.qid == entity_id)
+                )
+                cleared += 1
+            elif fetched != entity_id:
+                await set_label(session, entity_id, fetched)
+                repaired += 1
+                typer.echo(f"  cache {entity_id} → {fetched}")
+
         result = await session.execute(_select(SubjectRow))
         rows = [r for r in result.scalars() if _QID_RE.match(r.canonical_name)]
 
@@ -582,17 +624,8 @@ async def _fix_subject_labels() -> tuple[int, int]:
             # Check DB cache first
             label = await get_label(session, qid)
             if label is None or label == qid:
-                # Fetch from API
-                try:
-                    async with particles_client(timeout=10.0) as client:
-                        resp = await get_capped(client, f"{_WIKIDATA_REST}/entities/items/{qid}")
-                        resp.raise_for_status()
-                        data = resp.json()
-                        label = str(data.get("labels", {}).get("en", qid))
-                except Exception:
-                    label = qid
-
-                if label != qid:
+                label = await fetch_live_label(qid)
+                if label is not None and label != qid:
                     await set_label(session, qid, label)
 
             if label and label != qid:
@@ -603,7 +636,7 @@ async def _fix_subject_labels() -> tuple[int, int]:
                 skipped += 1
 
         await session.commit()
-    return fixed, skipped
+    return fixed, skipped, repaired, cleared
 
 
 async def _delete_subject(subject_id: str) -> int:

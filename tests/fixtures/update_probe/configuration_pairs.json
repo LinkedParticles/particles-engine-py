@@ -1,0 +1,24 @@
+{
+  "about": "acceptance item 2: pairs of claims about a project's or system's configuration, stated first (older) and later (newer) by the same source. 'expected' is 'changes' when the newer claim gives the configuration a new value (in either phrasing: 'uses B' or 'moved from A to B'), else 'not_changes' (coexisting tools, a vendor's price or a product's specification restated, history-only claims, added detail, a different attribute, a claim that relied on the old value). The bar: each row's label matched in at least two of three samples. Run with: uv run python scripts/replay_update_probe.py --set configuration",
+  "labelled_by": "proposed by the implementing session on 2026-10-04; the owner confirmed every label of the 18 the same day.",
+  "rows": [
+    {"id": "ledgerly-moved", "older": "Ledgerly uses PostgreSQL 16 as its database.", "newer": "Ledgerly was moved from PostgreSQL to SQLite in the week before 2026-09-20.", "expected": "changes"},
+    {"id": "kestrel-host-now", "older": "Kestrel is hosted on Heroku.", "newer": "Kestrel is hosted on Fly.io now.", "expected": "changes"},
+    {"id": "kestrel-host-migrated", "older": "Kestrel is hosted on Heroku.", "newer": "We migrated Kestrel from Heroku to Render last month.", "expected": "changes"},
+    {"id": "pelican-ci-uses", "older": "Pelican's CI runs on Jenkins.", "newer": "Pelican's CI runs on GitHub Actions.", "expected": "changes"},
+    {"id": "pelican-ci-switched", "older": "Pelican's CI runs on Jenkins.", "newer": "Pelican's CI was switched from Jenkins to Buildkite.", "expected": "changes"},
+    {"id": "brightline-mail-replaced", "older": "Brightline sends its email through Mailgun.", "newer": "Brightline replaced Mailgun with Postmark for sending email.", "expected": "changes"},
+    {"id": "quill-vite-upgraded", "older": "Quill's frontend is built with Vite 4.", "newer": "Quill's frontend was upgraded to Vite 5.", "expected": "changes"},
+    {"id": "tern-login-switched", "older": "Tern uses Auth0 for login.", "newer": "Tern switched its login from Auth0 to Clerk.", "expected": "changes"},
+    {"id": "team-tracker", "older": "The team tracks issues in Jira.", "newer": "The team tracks issues in Linear.", "expected": "changes"},
+    {"id": "ledgerly-cache-added", "older": "Ledgerly uses PostgreSQL 16 as its database.", "newer": "Ledgerly added Redis as a cache.", "expected": "not_changes"},
+    {"id": "mouse-price", "older": "The Logitech MX Master 3S costs $99.", "newer": "The Logitech MX Master 3S costs $79.", "expected": "not_changes"},
+    {"id": "pi-ram", "older": "The Raspberry Pi 5 has 8 GB of RAM.", "newer": "The Raspberry Pi 5 has 4 GB of RAM.", "expected": "not_changes"},
+    {"id": "orbit-history", "older": "Orbit deploys to a VM on DigitalOcean.", "newer": "Orbit previously ran on Heroku.", "expected": "not_changes"},
+    {"id": "pelican-ci-history", "older": "Pelican's CI previously ran on Travis.", "newer": "Pelican's CI previously ran on CircleCI.", "expected": "not_changes"},
+    {"id": "quill-bucket-detail", "older": "Quill stores its assets in S3.", "newer": "Quill stores its assets in the S3 bucket quill-assets in eu-west-1.", "expected": "not_changes"},
+    {"id": "tern-billing", "older": "Tern uses Auth0 for login.", "newer": "Tern uses Stripe for billing.", "expected": "not_changes"},
+    {"id": "quill-cache-step", "older": "To clear Quill's asset cache, invalidate the CloudFront distribution in front of the S3 bucket.", "newer": "Quill moved its assets from S3 to Cloudflare R2.", "expected": "not_changes"},
+    {"id": "pelican-gradle-pin", "older": "Pelican's Gradle wrapper is pinned to 7.6 because the CI build box only has Java 11.", "newer": "Pelican's CI was switched from the Jenkins build box to GitHub Actions.", "expected": "not_changes"}
+  ]
+}

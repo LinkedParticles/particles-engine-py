@@ -7,7 +7,9 @@
 Extract derives particles from a corpus snapshot. It is asynchronous and re-runnable.
 
 Conflict resolution ladder (normative, applied in order):
-  1. ALEATORY check — if either conflicting particle has ALEATORY uncertainty → INCONSISTENCY
+  1. ALEATORY check — if either conflicting particle has ALEATORY uncertainty, the
+     trust check is skipped; the same-lineage update rung reads only the newer
+     claim, so a settled report retires an earlier aleatory plan
   2. Source trust check; auto-resolves when |score_A - score_B| >= threshold
   3. Default → persist the losing candidate quarantined (PROVENANCE_STALE /
      CONFLICT_PENDING) and create an INCONSISTENCY particle
@@ -83,9 +85,14 @@ from particles.corpus.store import (
     update_extraction_status,
 )
 from particles.db import write_lock
+from particles.egress import EgressRefused, current_policy
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.append_delta import raw_offset_for
-from particles.extraction.calibration import scaler_for_record, version_mismatch_reason
+from particles.extraction.calibration import (
+    describe_calibration,
+    scaler_for_record,
+    version_mismatch_reason,
+)
 from particles.extraction.components import ComponentRecord, ComponentTally, tally_components
 from particles.extraction.general import (
     CandidateParticle,
@@ -114,8 +121,10 @@ from particles.ingest.authorities.registry import RecognizeContext
 from particles.ingest.candidate_dedup import dedupe_exact_candidates
 from particles.ingest.conflict_plan import (
     ConflictWritePlan,
+    PlannedEvent,
     plan_conflict_writes,
     plan_retired_hold,
+    plan_update_event,
 )
 from particles.ingest.duplicate_suppression import (
     DuplicateIndex,
@@ -138,13 +147,16 @@ from particles.ingest.pair_selection import (
     PairRole,
     PairSelection,
     ReadingTally,
+    admits_update_first,
     apply_readings,
     first_source_ref_entry_id,
     plan_probes,
     plan_readings,
     plan_update_extras,
+    plan_update_first,
     plan_update_probes,
     select_pairs,
+    write_order,
 )
 from particles.ingest.partial_read import (
     PartialKeep,
@@ -167,17 +179,33 @@ from particles.ingest.subject_resolver import (
     _persona_canonical,
     find_existing_qualified,
     find_existing_subject,
+    load_speaker_key,
     resolve_subjects,
 )
 from particles.ingest.update_supersession import (
+    SPEAKER_COMPONENT,
+    SPEAKER_EXCLUDED_SOURCE_TYPES,
+    SpeakerKey,
     SubjectIndex,
+    attach_speaker,
+    candidate_speaker_name,
     candidate_subject_names,
     latest_source_date,
     own_assertion_order,
     particle_subject_ids,
+    persona_names,
+    speaker_forms,
+    speaker_openers_digest,
     update_order,
 )
-from particles.llm import CompletionPool
+from particles.llm import CompletionPool, LLMPurpose
+from particles.llm.breaker import (
+    PROBE_MAX_TOKENS,
+    _llm_call,
+    llm_circuit_open,
+    record_unusable_reply,
+)
+from particles.llm.registry import PurposeRefused, purpose_allowed, purpose_endpoint
 from particles.store.event_store import record_event
 from particles.store.extractor_store import get_calibration
 from particles.store.particle_store import (
@@ -190,6 +218,7 @@ from particles.store.particle_store import (
     update_particle_status,
 )
 from particles.store.relation_store import create_relation
+from particles.store.subject_store import is_persona_source
 from particles.store.trust_store import get_layered_trust_rank, resolve_trust_score
 from particles.store.url_mention_store import build_deposited_url_map, record_url_mentions
 from particles.url_canonical import harvest_urls
@@ -283,6 +312,11 @@ class SnapshotOutcome:
         return "partial" if self.truncated_replies else "full"
 
 
+#: The provider prefix agent-side extraction stamps a session's model with
+#:.
+_CLAUDE_CODE_PREFIX = "claude-code:"
+
+
 def _current_extraction_provider_model() -> str:
     """``"<provider>:<model>"`` the extraction purpose resolves to right now."""
     sel = get_config().llm.for_purpose("extraction")
@@ -305,6 +339,8 @@ async def extract_snapshot(
     outcome_out: SnapshotOutcome | None = None,
     append_base: str | None = AUTO_BASE,
     ignore_partial: bool = False,
+    provider_model: str | None = None,
+    fail_closed_probes: bool = False,
 ) -> list[Particle]:
     """Run extraction for a single corpus snapshot.
 
@@ -344,6 +380,13 @@ async def extract_snapshot(
     ``ignore_partial`` is a reindex's: it plans as if the snapshot held no
     partial read of its own, skips the whole-read wait, and keeps nothing
     from a failed read, since the reindex is about to retire those claims.
+    ``provider_model`` names the pairing that produced the candidates when it
+    is not the configured ``extraction`` purpose's, which selects the
+    calibration; agent-side extraction passes the session's model.
+    ``fail_closed_probes`` makes an unverifiable contradiction
+    probe on a candidate's primary pair quarantine instead of read as no
+    contradiction, the rule; agent-side extraction passes it on an
+    install that cannot serve the ``semantic_lint`` purpose.
 
     Span-wrapped: the work runs under an ``extract.snapshot`` span so a
     request's time localizes across the embed / LLM / DB child spans, and the
@@ -368,6 +411,8 @@ async def extract_snapshot(
             outcome_out=outcome_out,
             append_base=append_base,
             ignore_partial=ignore_partial,
+            provider_model=provider_model,
+            fail_closed_probes=fail_closed_probes,
         )
         span.set_attribute("particles.extracted_count", len(written))
         _extracted_counter.add(len(written))
@@ -390,6 +435,8 @@ async def _extract_snapshot_impl(
     outcome_out: SnapshotOutcome | None = None,
     append_base: str | None = AUTO_BASE,
     ignore_partial: bool = False,
+    provider_model: str | None = None,
+    fail_closed_probes: bool = False,
 ) -> list[Particle]:
     """Body of :func:`extract_snapshot` (span-wrapped by the public function)."""
     # refuse to extract into a store with mismatched-schema
@@ -406,6 +453,13 @@ async def _extract_snapshot_impl(
     # Select extractor by registry priority — the routing every
     # other consumer reads back through select_extractor.
     if extractor is None:
+        # a routed extraction under a posture that refuses the
+        # extraction endpoint claims nothing, so the snapshot stays PENDING with
+        # its attempt count unchanged. A caller-supplied extractor (an agent's
+        # submitted candidates) makes no extraction call and is not gated.
+        if not purpose_allowed("extraction"):
+            host, port, _ = purpose_endpoint("extraction")
+            raise PurposeRefused("extraction", host, port, current_policy().posture)
         extractor = select_extractor(entry.source_type)
 
     snapshot = next((s for s in entry.snapshots if s.snapshot_id == snapshot_id), None)
@@ -519,6 +573,8 @@ async def _extract_snapshot_impl(
             append_base=append_base,
             ignore_partial=ignore_partial,
             partial_policy=partial_policy,
+            provider_model=provider_model,
+            fail_closed_probes=fail_closed_probes,
         )
     except BaseException:
         await _release_claim(session, snapshot_id)
@@ -595,6 +651,8 @@ async def _extract_claimed(
     append_base: str | None = AUTO_BASE,
     ignore_partial: bool = False,
     partial_policy: _PartialPolicy | None = None,
+    provider_model: str | None = None,
+    fail_closed_probes: bool = False,
 ) -> list[Particle]:
     """Everything :func:`_extract_snapshot_impl` does once it holds the claim."""
     entry_id = entry.entry_id
@@ -876,8 +934,12 @@ async def _extract_claimed(
     # the subject-keyed, cross-entry §6.6 candidate pool — every
     # ACTIVE reconcilable particle grouped by the entity it is about. Built from
     # the same load the same-entry search above already paid for.
+    # the persona key every reader of the about-subject key shares.
+    speaker = await load_speaker_key(session) if update_cfg.enabled else None
     subject_index: SubjectIndex | None = (
-        SubjectIndex.build(all_with_embs, exclude_ids=supersede_ids) if update_cfg.enabled else None
+        SubjectIndex.build(all_with_embs, speaker=speaker, exclude_ids=supersede_ids)
+        if update_cfg.enabled
+        else None
     )
     # with no global trust order (a ``multi`` store) rung 2 is off,
     # so a cross-entry pair the update rung cannot act on has exactly one
@@ -903,8 +965,16 @@ async def _extract_claimed(
     # carry calibration_source=EXTRACTOR_DIRECT — the unchanged fallback. Storing
     # per pairing means a swap back to a previously-calibrated model restores its
     # calibration without re-benchmarking.
-    current_model = _current_extraction_provider_model()
+    current_model = provider_model or _current_extraction_provider_model()
     calibration = await get_calibration(session, ext_agent, current_model)
+    # a session's model is stamped ``claude-code:<model>``, and its
+    # calibration is fitted by running the same model through the API, where
+    # the pairing is ``anthropic:<model>``. Same model, same prompt: read the
+    # API fit when the session pairing has none of its own.
+    if calibration is None and current_model.startswith(_CLAUDE_CODE_PREFIX):
+        calibration = await get_calibration(
+            session, ext_agent, "anthropic:" + current_model.removeprefix(_CLAUDE_CODE_PREFIX)
+        )
     # a record this SDK will not apply is dropped here rather than
     # inside candidate_to_particle, so the operator gets one warning per run
     # instead of one per particle, and everything downstream sees the single
@@ -960,12 +1030,12 @@ async def _extract_claimed(
         # longer has is at least *visible* in the extract log at the moment it
         # is applied, instead of silently scaling every confidence.
         log.info(
-            "Applying calibration for %s %s under %s: T=%.4f, fitted over %s "
+            "Applying calibration for %s %s under %s: %s, fitted over %s "
             "(`particles extractor calibrations %s` reports suite-set staleness).",
             ext_agent,
             calibration.extractor_version,
             current_model,
-            calibration.temperature,
+            describe_calibration(calibration),
             calibration.benchmark_suite_id,
             ext_agent,
         )
@@ -1057,6 +1127,13 @@ async def _extract_claimed(
                     ", ".join(f"{name!r} [{cls}]" for name, cls in suppressed),
                 )
 
+    # a first-person claim from a persona source carries the
+    # speaker. The extractor often leaves the speaker out of "subjects" for a
+    # claim like "The user is not going back to Delhi", and the persona fold
+    # can only fold a name it is given. Runs after the gate and
+    # before the §6.6 precompute and resolution, so both see the same name.
+    _attach_speaker_subjects(result, entry, component_tally)
+
     # F4.3: run the §6.6 contradiction-signal (LLM) checks up front — before the
     # write loop below opens its transaction — so the SQLite WAL write lock is
     # never held across these network round-trips. Commit first to flush any
@@ -1088,6 +1165,7 @@ async def _extract_claimed(
         existing,
         existing_embs,
         subject_index=subject_index,
+        speaker=speaker,
         gate=gate,
         candidate_scope=candidate_scope,
         entry=entry,
@@ -1100,20 +1178,51 @@ async def _extract_claimed(
     # run resumes many of these tasks at once).
     await session.commit()
     selections: list[PairSelection] = []
+    # the pairs whose probe could not complete, per candidate, so
+    # a fail-closed pass can quarantine its primary pair rather than read it
+    # as no contradiction. Empty unless ``fail_closed_probes``.
+    unverified: list[set[str]] = []
+    same_slot_admits = get_config().reconciliation.update_supersession.same_slot_admits
     for candidate, pairs in zip(result.candidates, candidate_pairs, strict=True):
-        probes = await _probe_pairs(candidate.content, plan_probes(pairs))
-        # a confirmed contradiction rung 2.5 could settle is asked the
-        # update question before it may retire anything on a date.
-        slots = await _probe_update_slots(
-            session,
-            entry,
-            snapshot_id,
-            candidate,
-            plan_update_probes(pairs, probes),
-            entries,
-            require_attribution=updates_only,
+        unprobed: set[str] = set()
+        # a pair rung 2.5 could act on is asked the update question
+        # first. Its settled answer decides rung 2.5; the contradiction probe
+        # then runs only where its answer can still change the outcome.
+        admitted: set[str] = set()
+        slots = (
+            await _probe_update_slots(
+                session,
+                entry,
+                snapshot_id,
+                candidate,
+                plan_update_first(pairs),
+                entries,
+                require_attribution=updates_only,
+                admitted_out=admitted,
+            )
+            if same_slot_admits
+            else {}
         )
-        selections.append(select_pairs(pairs, probes, slots))
+        probes = await _probe_pairs(
+            candidate.content,
+            plan_probes(pairs, slots, admitted),
+            unverified_out=unprobed if fail_closed_probes else None,
+        )
+        unverified.append(unprobed)
+        # a confirmed contradiction rung 2.5 could settle, not asked
+        # first, is asked the update question before it may retire anything.
+        slots.update(
+            await _probe_update_slots(
+                session,
+                entry,
+                snapshot_id,
+                candidate,
+                plan_update_probes(pairs, probes, asked=admitted),
+                entries,
+                require_attribution=updates_only,
+            )
+        )
+        selections.append(select_pairs(pairs, probes, slots, admitted))
     # the second reading, the fourth gather step. Every
     # probe-confirmed pair the pass would act on is read again with each
     # claim's source kind, name, time and passage; its verdict replaces the
@@ -1186,7 +1295,11 @@ async def _extract_claimed(
         # candidate index → the stored particle id that represents it,
         # so post-write edge creation can bind a stance to its (co-extracted) target.
         index_to_id: dict[int, str] = {}
-        for i, candidate in enumerate(result.candidates):
+        # A candidate that may retire a claim by update is written before its
+        # siblings, so a sibling that only contradicts that claim meets it
+        # retired whichever order the extractor emitted them in.
+        for i in write_order(selections):
+            candidate = result.candidates[i]
             # Resolve subject names/QIDs to Subject UUIDs
             subject_ids = await resolve_subjects(
                 session,
@@ -1314,16 +1427,21 @@ async def _extract_claimed(
                 # Conflict found — apply resolution ladder
                 # Returns None when trust resolution kept existing particle (new is dropped)
                 assert target is not None
+                # a fail-closed pass hands the ladder the tri-state
+                # for a primary pair whose probe never ran, so it quarantines.
+                fail_closed_pair = fail_closed_probes and target.id in unverified[i]
                 resolved = await _resolve_conflict(
                     session,
                     particle,
                     target,
                     entry_id,
                     snapshot_id,
-                    probe=selection.signal,
+                    probe=None if fail_closed_pair else selection.signal,
+                    fail_closed=fail_closed_pair,
                     new_embedding=emb,
                     allow_update_supersession=True,
                     slot=selection.slot_of(target.id),
+                    same_slot_update=selection.same_slot_update(target.id),
                     retired_out=retired,
                     observer=gate,
                     candidate_scope=candidate_scope,
@@ -1524,6 +1642,34 @@ def _extracted_through(content: bytes, result: ExtractionResult, source_type: st
     return raw_offset_for(
         content, result.read_through, is_markdown=is_markdown, mark_tools=mark_tools
     )
+
+
+def _attach_speaker_subjects(
+    result: ExtractionResult, entry: CorpusEntry, component_tally: ComponentTally
+) -> int:
+    """Give each first-person candidate of a persona source the speaker.
+
+    A candidate from a persona source (``is_persona_source``; never a JOURNAL
+    entry) whose content opens on a speaker reference and lists no name that
+    folds onto the persona gains that reference as a subject. Recorded as the
+    ``attach.speaker`` component, and the count is a quality note. Returns the
+    number of candidates that gained the speaker.
+    """
+    cfg = get_config().subjects
+    forms = speaker_forms(cfg)
+    if not forms:
+        return 0
+    component_tally.declare([SPEAKER_COMPONENT])
+    if entry.source_type in SPEAKER_EXCLUDED_SOURCE_TYPES or not is_persona_source(
+        entry.source_type, entry.tags
+    ):
+        return 0
+    component_tally.add(SPEAKER_COMPONENT, speaker_openers_digest(forms))
+    names = persona_names(cfg)
+    attached = sum(attach_speaker(c, forms, names) is not None for c in result.candidates)
+    if attached:
+        result.quality_notes.append(f"speaker subject attached to {attached} first-person claim(s)")
+    return attached
 
 
 async def _record_divergences(
@@ -1877,10 +2023,11 @@ async def reconcile_and_insert(
         # agent's "the user lives in Denver" scores ~0.70 against its own
         # earlier "…Boston" and never cleared the 0.80 gate either.
         update_cfg = get_config().reconciliation.update_supersession
-        if update_cfg.enabled and particle_subject_ids(particle):
-            index = SubjectIndex.build(pairs)
+        speaker = await load_speaker_key(session) if update_cfg.enabled else None
+        if update_cfg.enabled and particle_subject_ids(particle, speaker=speaker):
+            index = SubjectIndex.build(pairs, speaker=speaker)
             nearest = index.candidates(
-                particle_subject_ids(particle),
+                particle_subject_ids(particle, speaker=speaker),
                 emb,
                 floor=update_cfg.subject_floor,
                 limit=1,
@@ -1892,18 +2039,31 @@ async def reconcile_and_insert(
     # ladder applies it) and no lineage filter. The probe keeps its tri-state for
     # the ladder, where ``fail_closed`` reads an incomplete probe as a signal.
     candidacy = CandidatePairs(nearest=conflict)
+    # an agent's own earlier claim is asked the update question first,
+    # as on every rung 2.5 route, unless that claim records a past value.
+    slots: dict[str, SlotVerdict] = {}
+    admitted: set[str] = set()
+    if get_config().reconciliation.update_supersession.same_slot_admits:
+        for other in plan_update_first(candidacy):
+            if own_assertion_order(particle, other) is not None and admits_update_first(
+                other.content
+            ):
+                admitted.add(other.id)
+                verdict = await _has_update_signal(other.content, particle.content)
+                if verdict is not None:
+                    slots[other.id] = verdict
     probe_results: dict[str, bool | None] = {}
-    for other, _role in plan_probes(candidacy):
+    for other, _role in plan_probes(candidacy, slots, admitted):
         probe_results[other.id] = await _has_contradiction_signal(particle.content, other.content)
     # an agent revising its own belief goes through rung 2.5 too, so
     # the pair is asked the update question when the carve-out could order it.
-    slots: dict[str, SlotVerdict] = {}
-    for other in plan_update_probes(candidacy, {pid: bool(p) for pid, p in probe_results.items()}):
+    confirmed = {pid: bool(p) for pid, p in probe_results.items()}
+    for other in plan_update_probes(candidacy, confirmed, asked=admitted):
         if own_assertion_order(particle, other) is not None:
             verdict = await _has_update_signal(other.content, particle.content)
             if verdict is not None:
                 slots[other.id] = verdict
-    selection = select_pairs(candidacy, {pid: bool(p) for pid, p in probe_results.items()}, slots)
+    selection = select_pairs(candidacy, confirmed, slots, admitted)
     route, target = route_particle(
         particle,
         duplicates=duplicates,
@@ -1926,7 +2086,9 @@ async def reconcile_and_insert(
         target,
         corpus_entry_id,
         snapshot_id,
-        probe=probe_results[target.id],
+        # A pair the update answer settled was not probed: no
+        # contradiction signal, and rung 2.5 acts on the answer.
+        probe=probe_results.get(target.id, False),
         candidate_cache=candidate_cache,
         new_embedding=emb,
         single_trust_order=single_trust_order,
@@ -1934,6 +2096,7 @@ async def reconcile_and_insert(
         trigger_ref_type=trigger_ref_type,
         allow_own_assertion_supersession=True,
         slot=selection.slot_of(target.id),
+        same_slot_update=selection.same_slot_update(target.id),
         observer=await ObserverGate.open(session),
     )
 
@@ -2034,10 +2197,12 @@ def _is_attribution_paraphrase(content_a: str, content_b: str) -> bool:
 
 
 #: The §6.6 probe's output budget. The reply is a one-sentence reason and a
-#: verdict line (~60 tokens). At 120, with the verdict first, claude-haiku-4-5
-#: still cut a reply in the 2026-09-25 audit. The verdict now comes last, so a
-#: reply cut at this budget has none and reads as a probe that did not complete.
-_CONTRADICTION_PROBE_MAX_TOKENS = 250
+#: verdict line (~60 tokens), but a thinking model spends its thinking from the
+#: same budget: at 250, claude-haiku-5-5 returned no text at all on 2026-10-11
+#: (see :data:`particles.llm.breaker.PROBE_MAX_TOKENS`). The verdict comes last,
+#: so a reply cut at this budget has none and reads as a probe that did not
+#: complete.
+_CONTRADICTION_PROBE_MAX_TOKENS = PROBE_MAX_TOKENS
 
 _VERDICT_LINE_RE = re.compile(r"^\W*VERDICT\W*:\W*(YES|NO)\W*$", re.IGNORECASE)
 #: The update probe's request for a slot line. A scripted probe
@@ -2109,6 +2274,12 @@ async def _llm_confirms_contradiction(content_a: str, content_b: str) -> bool | 
         response = await complete(
             "semantic_lint", prompt, max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS
         )
+    except EgressRefused as exc:
+        # A standing policy, not a failure: the caller's
+        # fail-open / fail-closed rule applies as for any unverifiable pair, and
+        # the posture report already says contradiction detection is off.
+        log.debug("Contradiction probe not run: %s", exc)
+        return None
     except Exception as exc:
         log.warning(
             "Contradiction confirmation LLM probe could not complete; "
@@ -2143,7 +2314,14 @@ async def _has_contradiction_signal(content_a: str, content_b: str) -> bool | No
     return await _llm_confirms_contradiction(content_a, content_b)
 
 
-def _update_prompt(earlier: str, later: str) -> str:
+def _update_prompt(
+    earlier: str,
+    later: str,
+    *,
+    reported_change: bool = True,
+    configuration: bool = False,
+    bounded_lasting: bool = True,
+) -> str:
     """The rung 2.5 update-probe prompt (one source of truth).
 
     The contradiction probe asks whether two claims can both be true. Rung 2.5
@@ -2163,7 +2341,79 @@ def _update_prompt(earlier: str, later: str) -> str:
     Barbara Hambly, re-measurement) is a contradiction the later
     date does not settle. A claim that only records a past value gives the slot
     no new current value.
+
+    Two clarifications ride on keywords, so the acceptance replay can
+    measure each alone: ``reported_change`` says a claim
+    reporting a change from one value to another gives the slot the new value
+    whatever its tense, and ``configuration`` names a project's or system's
+    current configuration as a slot that changes, keeping a product's stated
+    price or specification fixed. Production calls take the defaults: the
+    reported-change rule and the bounded-stay clarification on and the
+    configuration family off, since the
+    acceptance replays measured it lowering real updates and pulling claims
+    that relied on an old setting into its slot.
+
+    ``bounded_lasting`` says a claim limited to a period is replaced
+    by a later claim reporting that the same place or arrangement has become
+    lasting, once the change has happened, and that a decision or plan is not
+    the change. On ``claude-sonnet-5-5`` a completed move read as no new value
+    for the week-long trip it ended (0 of 12), because the
+    lasting-against-period rule above separated the two. Shipped on by default
+    after its acceptance replay (1.185.0).
     """
+    past_value = (
+        "- either claim only records a past value and no current one (was "
+        "previously, used to, formerly): a statement about the past gives the "
+        "slot no new value;\n"
+        "- Claim A describes something that relied on the earlier value rather "
+        "than stating the value itself (a setup step, a requirement, a limitation "
+        "or a consequence of it): a change of the value is not a new value for "
+        "it, even when Claim A names the earlier value.\n\n"
+        "A claim that reports a change from one value to another (moved from A "
+        "to B, switched from A to B, migrated to B, replaced A with B) gives the "
+        "slot the new value B, whatever its tense: 'The user's manager was "
+        "previously Tomasz' gives no new value, and 'The project was moved from "
+        "MySQL to SQLite' gives the new value SQLite. It fills only the slot that "
+        "states the value: 'The project was moved from Heroku to Fly.io' fills "
+        "'The project is hosted on Heroku', and not 'Deploy the project with git "
+        "push heroku main' or 'The project's logs are in the Heroku dashboard', "
+        "which relied on the old host.\n\n"
+        if reported_change
+        else "- either claim only records a past value (was previously, used to, "
+        "formerly): a statement about the past gives the slot no new value.\n\n"
+    )
+    configuration_changes = (
+        " The current configuration of a project, service or system, as its own "
+        "people choose and change it, is this kind too: which database, host, "
+        "provider, CI system, framework or language version it uses, where it is "
+        "deployed, which tools its team works with."
+        if configuration
+        else ""
+    )
+    stated_fixed = (
+        " A product's price or specification as a vendor or reviewer states it is "
+        "this kind even though the vendor can change it: a later statement of it "
+        "is a second report, not a new choice."
+        if configuration
+        else ""
+    )
+    bounded_stay = (
+        "A claim limited to a period (a trip, a visit, a contract, an interim role) "
+        "says where someone is, or on what terms, for that period. When Claim A is "
+        "limited to a period and Claim B reports that the same place or arrangement "
+        "has become lasting, and the move or change has already happened, Claim B "
+        "gives Claim A's slot a new value even though the place or party is the "
+        "same. Living at the place of a stay replaces the stay: 'staying at a "
+        "friend's flat in Lisbon for the summer' and then 'now rents their own flat "
+        "in Lisbon'; 'covering the night shift this week' and then 'was moved to the "
+        "night shift permanently'. A decision, acceptance or plan is not the change, "
+        "since the stay may still be under way: 'has decided to settle in Lisbon' "
+        "gives no new value. The reverse is not an update: a Claim B limited to a "
+        "period never gives a new value for a lasting Claim A ('lives in Porto' and "
+        "then 'is in Lisbon for a month').\n\n"
+        if bounded_lasting
+        else ""
+    )
     return (
         "Claim A was stated first and Claim B later, by the same source. Do the "
         "two claims fill the same slot, meaning the same attribute of the same "
@@ -2176,26 +2426,26 @@ def _update_prompt(earlier: str, later: str) -> str:
         "moment);\n"
         "- Claim B adds detail to Claim A, or narrows it, without giving a "
         "different value;\n"
-        "- either claim only records a past value (was previously, used to, "
-        "formerly): a statement about the past gives the slot no new value.\n\n"
-        "A change of home, job, diet, favourite or any other value is a different "
+        + past_value
+        + "A change of home, job, diet, favourite or any other value is a different "
         "value for the same slot when Claim B states the new value. Words such as "
         "'now' or 'these days' that mark the change do not limit Claim B to a "
         "situation.\n\n"
-        "When they do fill the same slot, also say what kind of slot it is:\n"
+        + bounded_stay
+        + "When they do fill the same slot, also say what kind of slot it is:\n"
         "- CHANGES: the slot holds one value at a time and the value changes over "
         "time, so the later value replaces the earlier one. Facts about a "
         "person's own life are usually this kind: where they live or work, their "
         "manager, diet, favourite, what they own, use, read or are working on, "
         "what they pay for their own rent or subscription, a count or total of "
-        "their own that grows.\n"
+        "their own that grows." + configuration_changes + "\n"
         "- FIXED: once true, the value stays true, so two different values cannot "
         "both be right and the later statement is not more likely to be the right "
         "one. Facts about the world are usually this kind: who wrote, directed or "
         "narrated a work, when something was born, founded or released, what "
         "something is made of, a product's price, specification, playtime or "
         "capacity as stated, a rule or requirement as stated, whether something "
-        "exists.\n"
+        "exists." + stated_fixed + "\n"
         "If you cannot tell which kind it is, answer FIXED.\n\n"
         "Reply with exactly three lines and nothing else:\n"
         "REASON: <one sentence of at most 25 words naming the slot, or why the "
@@ -2206,9 +2456,14 @@ def _update_prompt(earlier: str, later: str) -> str:
     )
 
 
+#: Folded into the update-slot prompt hash: a verdict settled by two readings
+#: is never confused with one cached under a single reading.
+UPDATE_SLOT_PROTOCOL = "second-reading:verification"
+
+
 def update_prompt_hash() -> str:
-    """The update-slot probe's prompt version, rendered by :func:`_update_prompt`."""
-    return prompt_hash(_update_prompt("{earlier}", "{later}"))
+    """The update-slot probe's version: its prompt and its reading protocol."""
+    return prompt_hash(_update_prompt("{earlier}", "{later}"), UPDATE_SLOT_PROTOCOL)
 
 
 def _slot_verdict(reply: str) -> SlotVerdict | None:
@@ -2237,37 +2492,108 @@ def _slot_verdict(reply: str) -> SlotVerdict | None:
     return None
 
 
-async def _llm_slot_verdict(earlier: str, later: str) -> SlotVerdict | None:
-    """The update probe's verdict, or ``None`` when it cannot complete."""
-    try:
-        from particles.llm import complete
+@dataclass(frozen=True)
+class SlotReading:
+    """The update probe's settled verdict, and the reading that decided it."""
 
-        response = await complete(
-            "semantic_lint",
-            _update_prompt(earlier, later),
-            max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS,
+    verdict: SlotVerdict | None
+    """``None`` when the deciding reading could not complete: no update."""
+    purpose: LLMPurpose
+    """``semantic_lint`` when the first reading decided, ``verification`` when
+    the second did. The update-slot ledger records the deciding model."""
+
+
+async def _slot_call(prompt: str, purpose: LLMPurpose, budgets: list[int]) -> SlotVerdict | None:
+    """One reading of the slot question through the breaker seam.
+
+    A reply with no usable verdict (cut at the budget, empty because a thinking
+    model spent it all, or off protocol) is re-issued at the next budget, if
+    any. A failed call (breaker open, network, refusal) is not retried.
+    """
+    response = ""
+    for attempt, max_tokens in enumerate(budgets):
+        if attempt:
+            if llm_circuit_open():
+                break
+            log.warning(
+                "Update probe (%s) at max_tokens=%d carried no usable verdict; "
+                "retrying once at %d (audit.verify_retry_max_tokens)",
+                purpose,
+                budgets[0],
+                max_tokens,
+            )
+        reply = await _llm_call(
+            prompt,
+            max_tokens=max_tokens,
+            purpose=purpose,
+            empty_reply_as_text=len(budgets) > 1,
         )
-    except Exception as exc:
-        log.warning("Update probe could not complete; rung 2.5 does not fire: %s", exc)
-        return None
-    verdict = _slot_verdict(response)
-    if verdict is None:
-        log.warning(
-            "Update probe reply carried no usable verdict; rung 2.5 does not fire: %r",
-            response[:200],
+        if reply is None:
+            return None
+        response = reply
+        verdict = _slot_verdict(response)
+        if verdict is not None:
+            return verdict
+    record_unusable_reply(f"update probe ({purpose})", response)
+    return None
+
+
+async def _llm_slot_verdict(earlier: str, later: str) -> SlotVerdict | None:
+    """The update probe's first reading, on ``semantic_lint``.
+
+    A reply cut off at the probe budget is asked once more at
+    ``audit.verify_retry_max_tokens`` when that is the larger budget, as the
+    second reading is: a model that writes a reason before its verdict
+    (claude-haiku-5-5 did, on 2026-10-10, at 250 tokens) otherwise returns no
+    verdict at all, which every route reads as no update. At the default
+    budgets the probe's own (``PROBE_MAX_TOKENS``) already gives that room, and
+    no retry is made.
+    """
+    budgets = [_CONTRADICTION_PROBE_MAX_TOKENS]
+    retry = get_config().audit.verify_retry_max_tokens
+    if retry > _CONTRADICTION_PROBE_MAX_TOKENS:
+        budgets.append(retry)
+    return await _slot_call(_update_prompt(earlier, later), "semantic_lint", budgets)
+
+
+async def read_update_slot(earlier: str, later: str) -> SlotReading:
+    """The one update probe every rung 2.5 route asks.
+
+    A first ``CHANGES`` is read a second time on the ``verification`` purpose,
+    at ``audit.verify_max_tokens`` with one retry at
+    ``audit.verify_retry_max_tokens`` (an adaptive-thinking model spends its
+    thinking from that budget), and the second reading's verdict replaces the
+    first, as reading replaces the contradiction probe's. Rung 2.5
+    therefore retires only on two ``CHANGES``. A first ``FIXED``,
+    ``DIFFERENT`` or failed reading stands, with no second call. Extraction,
+    the assertion door and the nightly sweep all come here.
+    """
+    first = await _llm_slot_verdict(earlier, later)
+    if first is not SlotVerdict.CHANGES:
+        return SlotReading(first, "semantic_lint")
+    cfg = get_config().audit
+    budgets = [cfg.verify_max_tokens]
+    if cfg.verify_retry_max_tokens > cfg.verify_max_tokens:
+        budgets.append(cfg.verify_retry_max_tokens)
+    second = await _slot_call(_update_prompt(earlier, later), "verification", budgets)
+    if second is not SlotVerdict.CHANGES:
+        log.info(
+            "Update probe: the second reading answered %s where the first said CHANGES; "
+            "rung 2.5 does not retire",
+            "no verdict" if second is None else second.value,
         )
-    return verdict
+    return SlotReading(second, "verification")
 
 
 async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
-    """The update probe's verdict on whether ``later`` updates ``earlier``.
+    """The update probe's settled verdict on whether ``later`` updates ``earlier``.
 
     Asked only of a pair the contradiction probe confirmed and rung 2.5 could
-    otherwise act on. ``None`` means the probe did not complete, which every
-    caller reads as no update: the rung retires a claim, and the safe direction
-    is to keep it.
+    otherwise act on. ``None`` means the deciding reading did not complete,
+    which every caller reads as no update: the rung retires a claim, and the
+    safe direction is to keep it. See :func:`read_update_slot`.
     """
-    return await _llm_slot_verdict(earlier, later)
+    return (await read_update_slot(earlier, later)).verdict
 
 
 def _trigger_ref_for(particle: Particle) -> tuple[str, str, ProvenanceRefType]:
@@ -2337,6 +2663,18 @@ async def _hold_retired_reassertion(
     return held
 
 
+async def _record_planned(session: AsyncSession, event: PlannedEvent) -> None:
+    """Record one :class:`~particles.ingest.conflict_plan.PlannedEvent`."""
+    await record_event(
+        session,
+        actor=event.actor,
+        event_type=event.event_type,
+        reason=event.reason,
+        refs=list(event.refs),
+        payload=dict(event.payload),
+    )
+
+
 async def _apply_conflict_plan(
     session: AsyncSession,
     plan: ConflictWritePlan,
@@ -2364,16 +2702,9 @@ async def _apply_conflict_plan(
     if plan.wrapper is not None:
         validate_transition(None, Status.INCONSISTENCY)
         await insert_particle(session, plan.wrapper, domain_hint=plan.wrapper_domain_hint)
-    if plan.dropped_event is not None:
-        event = plan.dropped_event
-        await record_event(
-            session,
-            actor=event.actor,
-            event_type=event.event_type,
-            reason=event.reason,
-            refs=list(event.refs),
-            payload=dict(event.payload),
-        )
+    for event in (plan.update_event, plan.dropped_event):
+        if event is not None:
+            await _record_planned(session, event)
     if plan.record_divergence and observer is not None and plan.insert is not None:
         await observer.record(session, plan.insert.id, [existing])
     if plan.cache_drop_existing:
@@ -2409,6 +2740,7 @@ async def _resolve_conflict(
     allow_update_supersession: bool = False,
     allow_own_assertion_supersession: bool = False,
     slot: SlotVerdict | None = None,
+    same_slot_update: bool = False,
     retired_out: set[str] | None = None,
     observer: ObserverGate | None = None,
     candidate_scope: BeliefScope | None = None,
@@ -2453,6 +2785,9 @@ async def _resolve_conflict(
     contradiction whose claims fill different slots is not an update, and one
     that gives a fixed slot two values is a contradiction no date settles.
     Both fall through to rung 3.
+    ``same_slot_update`` says the pair was asked the update question first and
+    it settled ``CHANGES``: rung 2.5 may then act with no
+    contradiction signal, since its evidence is the same-slot check.
     ``retired_out`` (when given) collects the id of an existing particle this
     verdict demoted, so a caller reconciling several claims in one pass never
     offers — or demotes — it twice.
@@ -2505,7 +2840,15 @@ async def _resolve_conflict(
     # Extension B cascade).
     domain: str | None = None
     rung_inputs: RungInputs | None = None
-    if needs_rung_inputs(probe, fail_closed=fail_closed, precondition=precondition):
+    # an update answer acts alone only on a pair the precondition
+    # reconciles; a declined or contested pair is decided as before.
+    same_slot_update = same_slot_update and precondition is PairPrecondition.RECONCILE
+    if needs_rung_inputs(
+        probe,
+        fail_closed=fail_closed,
+        precondition=precondition,
+        same_slot_update=same_slot_update,
+    ):
         rung_inputs, domain = await _gather_rung_inputs(
             session,
             new_particle,
@@ -2533,6 +2876,7 @@ async def _resolve_conflict(
         rung_inputs=rung_inputs,
         single_trust_order=effective_single,
         trust_differential_threshold=get_config().trust.differential_threshold,
+        same_slot_update=same_slot_update,
     )
     plan = plan_conflict_writes(
         outcome,
@@ -2614,7 +2958,8 @@ async def _gather_rung_inputs(
     # Trust scores are only consulted if neither particle is ALEATORY,
     # but resolving them unconditionally keeps the call shape simple and
     # the result is just dropped on the ALEATORY path inside
-    # resolve_conflict().
+    # resolve_conflict(). The update order below is gathered either way:
+    # rung 2.5 reads the newer side only.
     score_new, score_existing = await _resolve_trust_scores(
         session,
         domain,
@@ -2680,6 +3025,7 @@ async def _gather_candidate_pairs(
     existing_embs: Sequence[np.ndarray[Any, np.dtype[np.float32]] | None],
     *,
     subject_index: SubjectIndex | None,
+    speaker: SpeakerKey | None,
     gate: ObserverGate,
     candidate_scope: BeliefScope | None,
     entry: CorpusEntry,
@@ -2733,6 +3079,7 @@ async def _gather_candidate_pairs(
                 source_type=entry.source_type,
                 source_tags=entry.tags,
                 qualified=qualified_contexts(candidate, entry.tags, entry.uri_r, entry.source_type),
+                speaker=speaker,
             )
             if subject_ids:
                 pool = subject_index.candidates(
@@ -2775,17 +3122,25 @@ async def _gather_candidate_pairs(
 
 
 async def _probe_pairs(
-    content: str, planned: Sequence[tuple[Particle, PairRole]]
+    content: str,
+    planned: Sequence[tuple[Particle, PairRole]],
+    *,
+    unverified_out: set[str] | None = None,
 ) -> dict[str, bool]:
     """Gather 2 of the §6.6 pair selection: exactly the probes ``plan_probes`` named.
 
     Extraction is fail-open: a probe that could not complete (``None``) reads
     as no contradiction. The assertion pathway fails closed instead,
-    and keeps the tri-state (``reconcile_and_insert``).
+    and keeps the tri-state (``reconcile_and_insert``). ``unverified_out``
+    collects the ids whose probe could not complete, for a fail-closed
+    extraction; the returned map is unchanged either way.
     """
     results: dict[str, bool] = {}
     for other, _role in planned:
-        results[other.id] = bool(await _has_contradiction_signal(content, other.content))
+        verdict = await _has_contradiction_signal(content, other.content)
+        if verdict is None and unverified_out is not None:
+            unverified_out.add(other.id)
+        results[other.id] = bool(verdict)
     return results
 
 
@@ -2817,11 +3172,17 @@ async def _probe_update_slots(
     entries: dict[str, CorpusEntry | None],
     *,
     require_attribution: bool,
+    admitted_out: set[str] | None = None,
 ) -> dict[str, SlotVerdict]:
     """Gather 3 of the §6.6 pair selection: the update probe on each datable pair.
 
     ``confirmed`` is :func:`~particles.ingest.pair_selection.plan_update_probes`'
-    list. Each pair is dated first, as rung 2.5 would date it; a pair it cannot
+    list, or, with ``admitted_out``, :func:`~particles.ingest.pair_selection.plan_update_first`'s:
+    then a pair whose earlier claim records a past value is not
+    asked (:func:`~particles.ingest.pair_selection.admits_update_first`), and
+    the id of every pair asked goes into ``admitted_out``.
+
+    Each pair is dated first, as rung 2.5 would date it; a pair it cannot
     order gets no verdict (rung 2.5 cannot fire on it anyway, so the question
     would be pure spend). The rest are asked with the earlier claim first, so
     the probe reads the direction the rung would retire in. Runs outside the
@@ -2848,6 +3209,10 @@ async def _probe_update_slots(
         earlier, later = (
             (other.content, candidate.content) if order > 0 else (candidate.content, other.content)
         )
+        if admitted_out is not None:
+            if not admits_update_first(earlier):
+                continue
+            admitted_out.add(other.id)
         verdict = await _has_update_signal(earlier, later)
         if verdict is None:
             continue
@@ -2924,6 +3289,7 @@ async def _candidate_subject_ids_readonly(
     source_type: str | None = None,
     source_tags: Collection[str] = (),
     qualified: Mapping[str, RecognizeContext] | None = None,
+    speaker: SpeakerKey | None = None,
 ) -> list[str]:
     """Resolve a candidate's subject names to *existing* Subject ids, read-only.
 
@@ -2949,6 +3315,11 @@ async def _candidate_subject_ids_readonly(
     the write path either: a web page naming "I" finds no key here, exactly as
     the write loop will mint a Subject for it rather than bind it to the
     persona.
+
+    ``speaker`` adds the persona Subject for a speaker-anchored candidate,
+    only when the candidate's speaker name resolves to it, so a
+    candidate is keyed on the persona exactly when the stored claim it becomes
+    would be.
     """
     out: list[str] = []
     for raw in candidate_subject_names(candidate):
@@ -2973,6 +3344,15 @@ async def _candidate_subject_ids_readonly(
         resolved = memo[key]
         if resolved is not None and resolved not in out:
             out.append(resolved)
+    spoken = candidate_speaker_name(candidate, speaker)
+    if spoken is not None and speaker is not None and speaker.subject_id not in out:
+        # Keyed only as the persona: "the user" outside a persona source
+        # resolves elsewhere (persona_alias_guard) and is no speaker key.
+        found = await find_existing_subject(
+            session, spoken, source_type=source_type, source_tags=source_tags
+        )
+        if found is not None and found.id == speaker.subject_id:
+            out.append(speaker.subject_id)
     return out
 
 
@@ -2996,12 +3376,13 @@ async def _apply_update_extras(
     carries several stale values (every store written before)
     converges here; a pair that does not qualify is left as it was.
     """
-    for loser_id in plan_update_extras(
+    for loser_id, by_id in plan_update_extras(
         winner, winner_entry, winner_snapshot_id, others, entries, precondition, updatable
     ):
         await update_particle_status(
             session, loser_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
         )
+        await _record_planned(session, plan_update_event(loser_id, by_id, route="extra"))
         retired.add(loser_id)
         if loser_id == winner.id:
             log.info(

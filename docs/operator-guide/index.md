@@ -18,6 +18,7 @@ hygiene, tuning, and the things that go wrong.
 | [Store consolidation](store-consolidation.md) | Merging two divergent local stores into one canonical archive (multi-machine) |
 | [Schema migration](schema-migration.md) | `SCHEMA_VERSION` major bumps, `db init --force`, what survives |
 | [Observability](observability.md) | OpenTelemetry traces, metrics, and the Grafana dashboard |
+| [Running with no egress](no-egress.md) | `network.egress`: refuse every outbound connection, or all but named hosts, and see what that switches off |
 | [Tuning](tuning.md) | Trust weights, calibration, trust lenses, `min_particle_confidence`, age decay |
 | [Troubleshooting](troubleshooting.md) | Database locked, tables not found, fetch failures, follow-edges |
 

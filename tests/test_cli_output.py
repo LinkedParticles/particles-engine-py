@@ -113,6 +113,47 @@ class TestHeartbeatHonoursSettings:
         # Reset on exit so one verb's last status can't bleed into the next.
         assert _progress._status is None
 
+    def test_a_confirmation_prompt_is_never_painted_over(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A prompt waits with the heartbeat held off, so the question stays visible.
+
+        Unpaused, the ticker repainted "working (…elapsed)" over ``rebuild-utility``'s
+        "Proceed?" and the verb sat on a hidden prompt for almost three hours.
+        """
+        sink = io.StringIO()
+        monkeypatch.setattr("sys.stderr", sink)
+        monkeypatch.setattr(_progress, "get_config", lambda: _cfg(0.01))
+        configure_output(progress=True)
+        seen: dict[str, str] = {}
+
+        def slow_answer(text: str, **_kwargs: object) -> bool:
+            seen["at_prompt"] = sink.getvalue()
+            time.sleep(0.1)  # ten heartbeat intervals
+            seen["at_answer"] = sink.getvalue()
+            return True
+
+        monkeypatch.setattr(_progress.typer, "confirm", slow_answer)
+        with _progress.heartbeat("memory"):
+            time.sleep(0.05)
+            assert _progress.confirm("Proceed?") is True
+        assert seen["at_prompt"].endswith(_progress._CLEAR_LINE)
+        assert seen["at_answer"] == seen["at_prompt"]
+
+
+def test_no_cli_verb_prompts_around_the_heartbeat() -> None:
+    """Every confirmation goes through ``_progress.confirm``, which pauses the heartbeat."""
+    from pathlib import Path
+
+    import particles.api.cli as cli
+
+    offenders = [
+        path.name
+        for path in Path(cli.__file__).parent.glob("*.py")
+        if path.name != "_progress.py" and "typer.confirm(" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
 
 def _cfg(seconds: float) -> SimpleNamespace:
     return SimpleNamespace(cli=SimpleNamespace(heartbeat_seconds=seconds))

@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.db import create_tables, session_scope
 from particles.ingest.importers.registry import ensure_extractor_records
 from particles.store.session_exposure_store import PRESERVED_TABLES
@@ -39,7 +40,7 @@ def db_cmd(
     """Manage the database."""
     if action == "init":
         if force:
-            typer.confirm(
+            confirm(
                 "This drops the entire particle store (subjects, particles, "
                 "trust, taxonomies, caches). The corpus and blob store are "
                 "preserved; snapshots become PENDING for re-extraction. "

@@ -43,6 +43,8 @@ from particles.operations.audit import (
     build_buckets,
     cost_summary,
     estimate_extraction,
+    extraction_chars,
+    plan_extraction,
     price_range,
     render_audit_report,
     render_cost,
@@ -168,12 +170,14 @@ class TestEstimatePricing:
         assert price_range(probe_input_tokens=0, probe_output_tokens=0, **kwargs) is not None
 
     def test_ceiling_is_calls_times_max_tokens_plus_the_expected_retries(self) -> None:
-        # One small entry (1 call) + one 40k-char entry (3 calls) = 4 calls.
+        # Four short entries, none near the first budget: the retry rate alone
+        # is the floor, so one retry rides on the ceiling at its own budget.
         get_config().audit.estimate_extraction_retry_rate = 0.25
-        est = estimate_extraction([100, 40_000])
+        est = estimate_extraction([100] * 4)
         extraction = get_config().extraction
         assert est.estimated_llm_calls == 4
         assert est.expected_retries == pytest.approx(1.0)
+        assert est.ceiling_retries == 1
         assert est.output_tokens_ceiling == 4 * extraction.max_tokens + extraction.retry_max_tokens
         assert est.output_tokens_low <= est.output_tokens_high <= est.output_tokens_ceiling
 
@@ -186,34 +190,92 @@ class TestEstimatePricing:
         assert est.output_tokens_ceiling == 20 * extraction.max_tokens
         assert "retr" not in render_estimate(est).split("Contradiction")[0]
 
-    def test_expected_output_is_clipped_at_each_calls_budget(self) -> None:
-        get_config().audit.estimate_output_tokens_per_extraction_call = 10**9
-        est = estimate_extraction([100])
-        assert est.output_tokens_per_call == get_config().extraction.max_tokens
+    def test_output_scales_with_the_characters_each_call_reads(self) -> None:
+        audit = get_config().audit
+        audit.estimate_output_tokens_per_call_base = 1000
+        audit.estimate_output_tokens_per_source_char = 2.0
+        audit.estimate_output_spread = 0.0
+        audit.estimate_extraction_retry_rate = 0.0
+        assert estimate_extraction([2_000]).output_tokens_expected == 1000 + 4_000
+        # Ten times the text is ten times the per-character part, not one more
+        # flat call: 15,000 characters is still one chunk and one call.
+        est = estimate_extraction([15_000])
+        assert est.estimated_llm_calls == 1
+        assert est.output_tokens_expected == 1000 + 30_000
 
-    def test_per_model_output_figure_wins_over_the_scalar(self) -> None:
+    def test_a_call_past_the_first_budget_bills_it_and_retries(self) -> None:
+        extraction = get_config().extraction
+        audit = get_config().audit
+        audit.estimate_output_tokens_per_call_base = 0
+        audit.estimate_output_tokens_per_source_char = 4.0
+        audit.estimate_output_spread = 0.0
+        audit.estimate_extraction_retry_rate = 0.0
+        # 10,000 characters want 40,000 tokens: the reply is cut at 32,000 and
+        # billed, and the retry at 64,000 writes the call again.
+        est = estimate_extraction([10_000])
+        assert est.expected_retries == pytest.approx(1.0)
+        assert est.output_tokens_expected == extraction.max_tokens + 40_000
+        assert est.output_tokens_high == extraction.max_tokens + 40_000
+        assert est.retry_input_tokens == 2_500 + extraction.estimate_prompt_overhead_tokens
+        assert est.output_tokens_ceiling == extraction.max_tokens + extraction.retry_max_tokens
+        assert est.calls_at_risk_of_truncation == 0
+
+    def test_a_call_past_both_budgets_is_disclosed_as_at_risk_of_truncation(self) -> None:
+        extraction = get_config().extraction
+        get_config().audit.estimate_output_tokens_per_source_char = 10.0
+        est = estimate_extraction([15_000])
+        assert est.calls_at_risk_of_truncation == 1
+        # Neither attempt can bill more than its budget.
+        assert est.output_tokens_high == extraction.max_tokens + extraction.retry_max_tokens
+        assert "1 call(s) may be cut even at extraction.retry_max_tokens" in render_estimate(est)
+
+    def test_retry_disabled_bills_the_cut_reply_only(self) -> None:
+        extraction = get_config().extraction
+        extraction.retry_max_tokens = 0
+        get_config().audit.estimate_output_tokens_per_source_char = 10.0
+        est = estimate_extraction([15_000])
+        assert est.expected_retries == 0.0
+        assert est.output_tokens_expected == est.output_tokens_high == extraction.max_tokens
+        assert est.calls_at_risk_of_truncation == 1
+
+    def test_text_past_the_call_cap_is_not_read_and_is_disclosed(self) -> None:
+        # max_llm_calls_per_source 8 × html_chunk_size 15,000 = 120,000 read.
+        est = estimate_extraction([200_000])
+        assert est.total_chars == 120_000
+        assert est.unread_chars == 80_000
+        assert est.estimated_tokens == 30_000
+        assert "80,000 characters past extraction.max_llm_calls_per_source" in (
+            render_estimate(est)
+        )
+
+    def test_per_model_scale_multiplies_both_figures(self) -> None:
         get_config().llm.extraction = ProviderSelection(model="claude-haiku-4-5")
-        get_config().audit.estimate_output_tokens_per_extraction_call_by_model = {
-            "claude-haiku-4-5": 3600
-        }
+        get_config().audit.estimate_output_scale_by_model = {"claude-haiku-4-5": 0.5}
         est = estimate_extraction([100])
-        assert est.output_tokens_per_call == 3600
-        assert est.output_tokens_per_call_source == (
-            "audit.estimate_output_tokens_per_extraction_call_by_model[claude-haiku-4-5]"
+        audit = get_config().audit
+        assert est.output_tokens_per_call_base == audit.estimate_output_tokens_per_call_base // 2
+        assert est.output_tokens_per_source_char == pytest.approx(
+            audit.estimate_output_tokens_per_source_char / 2
         )
-        assert "~3,600 per call for claude-haiku-4-5" in render_estimate(est)
+        assert "×0.5 by audit.estimate_output_scale_by_model[claude-haiku-4-5]" in (
+            est.output_basis
+        )
+        assert "for claude-haiku-4-5" in render_estimate(est)
         get_config().llm.extraction = ProviderSelection(model="claude-sonnet-5")
-        assert estimate_extraction([100]).output_tokens_per_call_source == (
-            "audit.estimate_output_tokens_per_extraction_call"
-        )
+        assert "estimate_output_scale_by_model" not in estimate_extraction([100]).output_basis
+
+    def test_render_discloses_the_assumed_density(self) -> None:
+        line = render_estimate(estimate_extraction([4_000]))
+        assert "~2.0 output tokens per source character plus ~1,600 per call" in line
+        assert "audit.estimate_output_tokens_per_source_char" in line
 
     def test_reproduces_the_measured_2026_09_25_run(self) -> None:
         """96 memory files, ~53k source tokens, sonnet-5 extraction, haiku-4-5 probes.
 
         The run billed $7.97 over 104 extraction calls (8 retried) and 374
         semantic-lint calls, in 96 minutes. The estimate printed before it said
-        $1.92-3.57: 2.2 to 4.2 times low. The re-based range has to contain what
-        the account was charged, and the time has to be in the right hour.
+        $1.92-3.57: 2.2 to 4.2 times low. The range has to contain what the
+        account was charged, and the time has to be in the right hour.
         """
         config = get_config()
         config.llm.extraction = ProviderSelection(model="claude-sonnet-5")
@@ -241,13 +303,52 @@ class TestEstimatePricing:
         assert est.input_tokens == 293_198
         assert round(est.expected_retries) == 8
         assert est.probe_cap + est.reconcile_probes == pytest.approx(374, abs=5)
-        assert est.cost is not None
+        # A memory note is short, so the flat ~7,000 a call still holds for it.
+        assert est.output_tokens_expected / 96 == pytest.approx(6_500, rel=0.1)
         assert est.cost.expected_low_usd < 7.97 < est.cost.expected_high_usd
         assert 7.97 < est.cost.ceiling_usd <= 20.0
         assert 80 * 60 <= est.wall_seconds <= 110 * 60
         summary = cost_summary(est)
-        assert summary is not None and summary.startswith("≈ $5.63–10.33 expected")
-        assert "Time: about 1.6 h, ~60 s per file." in render_estimate(est)
+        assert summary is not None and summary.startswith("≈ $4.93–9.07 expected")
+        assert "Time: about 1.5 h, ~58 s per file." in render_estimate(est)
+
+    def test_reproduces_the_measured_2026_10_04_design_documents(self) -> None:
+        """Six active ADRs, 13-22k characters each, at today's budgets.
+
+        Measured 2026-10-04: 13 extraction calls (11 chunks, 2 retried after a
+        reply hit 32,000), 71k input and 317k output tokens, 776 claims, about
+        $3.31 of extraction at claude-sonnet-5 list price. The flat 7,000 a
+        call the estimate used before priced the 11 calls at 77k output, about
+        a quarter of it. The range has to contain the measurement and the
+        middle has to be near it.
+        """
+        config = get_config()
+        config.llm.extraction = ProviderSelection(model="claude-sonnet-5")
+        config.audit.max_contradiction_probes = 0  # extraction alone
+        config.audit.estimate_reconcile_probes_per_extraction_call = 0
+        config.audit.verify_contradictions = False
+        est = estimate_extraction([13_400, 20_700, 19_000, 16_800, 21_900, 22_400])
+        assert est.estimated_llm_calls == 11
+        assert est.output_tokens_low < 317_000 < est.output_tokens_high
+        assert est.output_tokens_expected == pytest.approx(317_000, rel=0.1)
+        # The full 15,000-character chunks sit near the first budget; about two
+        # or three of the eleven calls are expected to retry.
+        assert 2 <= est.expected_retries <= 3
+        assert est.cost is not None
+        assert est.cost.expected_low_usd < 3.31 < est.cost.expected_high_usd
+        assert est.cost.expected_high_usd < est.cost.ceiling_usd
+
+    def test_a_dense_document_costs_its_length_not_a_flat_call(self) -> None:
+        """The case that undershot: one 20k-character design document.
+
+        It is two calls, and at about 7 claims per 1,000 characters it writes
+        some 140 claims, far past two memory notes' worth of output.
+        """
+        note = estimate_extraction([2_000])
+        doc = estimate_extraction([20_000])
+        assert doc.estimated_llm_calls == 2
+        assert doc.output_tokens_expected > 6 * note.output_tokens_expected
+        assert doc.output_tokens_expected > 40_000
 
     def test_input_adds_the_prompt_overhead_per_call(self) -> None:
         est = estimate_extraction([40_000])
@@ -295,6 +396,104 @@ class TestEstimatePricing:
         assert est.cost is not None
         assert est.cost.ceiling_usd == 0.0
         assert "($0/$0 per MTok)" in render_cost(est)
+
+
+class TestPlanExtraction:
+    """Only what the run will extract is priced (``plan_extraction``)."""
+
+    async def _deposit(
+        self,
+        session: AsyncSession,
+        uri: str,
+        text: str,
+        *,
+        mutability: Mutability = Mutability.MUTABLE,
+        status: ExtractionStatus | None = None,
+    ) -> str:
+        from particles.corpus.store import update_extraction_status
+        from particles.operations.deposit import deposit_text_versioned
+
+        _entry, snapshot, _ = await deposit_text_versioned(
+            session,
+            text=text,
+            uri_r=uri,
+            source_type="LOCAL_MARKDOWN",
+            mutability=mutability,
+            deposited_by="audit",
+        )
+        if status is not None:
+            await update_extraction_status(session, snapshot, status)
+        await session.commit()
+        return snapshot
+
+    def test_new_source_is_read_whole(self) -> None:
+        assert extraction_chars("abc", None) == 3
+
+    async def test_already_complete_files_are_skipped_and_counted(
+        self, db_session: AsyncSession
+    ) -> None:
+        # 14 files, 8 of them already extracted and unchanged: the estimate
+        # prices the other 6 and says so.
+        texts = {f"file:///mem/{i}.md": f"note {i} " * 200 for i in range(14)}
+        for i, (uri, text) in enumerate(texts.items()):
+            if i < 8:
+                await self._deposit(db_session, uri, text, status=ExtractionStatus.COMPLETE)
+        plan = await plan_extraction(db_session, list(texts.items()))
+        assert plan.already_captured == 8
+        assert len(plan.char_counts) == 6
+
+        est = estimate_extraction(plan.char_counts, already_captured=plan.already_captured)
+        assert est.entries == 6
+        assert est.estimated_llm_calls == 6
+        assert est.already_captured == 8
+        assert render_estimate(est).startswith(
+            "Estimate: 6 entries to extract (8 entries already captured, skipped) → ~6 "
+        )
+        assert est.input_tokens < estimate_extraction([len(t) for t in texts.values()]).input_tokens
+
+    async def test_everything_captured_estimates_nothing(self, db_session: AsyncSession) -> None:
+        await self._deposit(
+            db_session, "file:///m/a.md", "a" * 500, status=ExtractionStatus.COMPLETE
+        )
+        plan = await plan_extraction(db_session, [("file:///m/a.md", "a" * 500)])
+        est = estimate_extraction(plan.char_counts, already_captured=plan.already_captured)
+        assert est.estimated_llm_calls == 0
+        assert est.cost is not None and est.cost.ceiling_usd == 0.0
+
+    async def test_unchanged_but_still_pending_is_extracted(self, db_session: AsyncSession) -> None:
+        await self._deposit(db_session, "file:///m/a.md", "a" * 500)
+        plan = await plan_extraction(db_session, [("file:///m/a.md", "a" * 500)])
+        assert plan.char_counts == [500]
+        assert plan.already_captured == 0
+
+    async def test_unchanged_but_failed_is_skipped(self, db_session: AsyncSession) -> None:
+        # The audit extracts PENDING snapshots only; a FAILED one waits for
+        # `particles extract` and costs this run nothing.
+        await self._deposit(db_session, "file:///m/a.md", "a" * 500, status=ExtractionStatus.FAILED)
+        plan = await plan_extraction(db_session, [("file:///m/a.md", "a" * 500)])
+        assert plan.already_captured == 1
+
+    async def test_changed_file_is_read_whole(self, db_session: AsyncSession) -> None:
+        await self._deposit(
+            db_session, "file:///m/a.md", "a" * 500, status=ExtractionStatus.COMPLETE
+        )
+        plan = await plan_extraction(db_session, [("file:///m/a.md", "b" * 700)])
+        assert plan.char_counts == [700]
+
+    async def test_grown_append_only_source_is_read_as_its_tail(
+        self, db_session: AsyncSession
+    ) -> None:
+        uri = "claude-code://session/s1"
+        await self._deposit(
+            db_session,
+            uri,
+            "turn one\n" * 50,
+            mutability=Mutability.APPEND_ONLY,
+            status=ExtractionStatus.COMPLETE,
+        )
+        grown = "turn one\n" * 50 + "turn two\n" * 10
+        plan = await plan_extraction(db_session, [(uri, grown)])
+        assert plan.char_counts == [len("turn two\n" * 10)]
 
 
 # ---------------------------------------------------------------------------
@@ -1515,12 +1714,16 @@ class TestExtractionDisclosure:
         assert "INCOMPLETE: 8 files not extracted" in text
 
 
-def test_probe_cost_estimate_bounds_the_probe_budget() -> None:
-    """The estimate prices each probe at the probe call's own ``max_tokens``."""
+def test_probe_cost_estimate_is_an_expectation_within_the_probe_budget() -> None:
+    """The estimate prices a probe's expected reply, not its thinking headroom.
+
+    The batch-chunk estimator takes the smaller of this figure and the call's
+    ``max_tokens``, so an estimate above the budget would be silently capped.
+    """
     from particles.config import get_config
     from particles.operations.lint.contradictions import _PROBE_MAX_TOKENS
 
-    assert get_config().audit.estimate_probe_output_tokens >= _PROBE_MAX_TOKENS
+    assert 0 < get_config().audit.estimate_probe_output_tokens <= _PROBE_MAX_TOKENS
 
 
 class TestContradictionVerificationReport:

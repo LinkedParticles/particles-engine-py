@@ -1,0 +1,2147 @@
+{
+ "about": "Measurement of 2026-10-11: the production update probe, particles.ingest.pipeline.read_update_slot with its reported-change rule and its second reading, over tests/fixtures/update_probe/stay_pairs.json, 3 samples per row, with llm.semantic_lint and llm.verification both pinned to the named model (anthropic provider), default probe budgets. 'verdict' is the deciding reading's (changes, different, fixed, or null for no usable verdict); 'reasons' are the REASON lines of each reading in order (a reply that revised itself carries two). Measured list-price spend US$0.50.",
+ "relabelled": "2026-10-12, after the review brief on PR #815: trip-for-good and visiting-mit were relabelled not_changes (class decided-not-ended) and trip-back-home made report-only. The 'expected' and 'matched' fields below are as measured under the 2026-10-11 labels; tests/fixtures/update_probe/stay_pairs.json carries the current labels and six rows added after this run. The owner confirmed the revised labels on 2026-10-12 and renamed the class temporary-elsewhere to lasting-then-temporary, moving resident-this-week into it; the class fields below keep the names of the run.",
+ "engine": "main at 6725e815 plus PR #801 (1.183.0); the probe prompt is unchanged by PR #801",
+ "runs": [
+  {
+   "model": "claude-sonnet-5-5",
+   "rows": [
+    {
+     "id": "trip-move-run2",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary one-week work-trip location, while Claim B gives a new home city. These are different attributes, and both name Mumbai anyway."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary one-week work trip to Mumbai, while Claim B states a permanent move there; the first is limited to a period, so they differ in slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary work-trip location and Claim B gives a new home. These are different attributes, and both name Mumbai, so there is no different value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-move-short",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary, week-long work stay in Mumbai, while Claim B states a change of home; a trip is not the same attribute as residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary one-week work stay, not the user's residence, and both claims name Mumbai, so Claim B gives no different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary one-week work location, while Claim B gives a home. Both name Mumbai, so Claim B does not give a different value for the same slot."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-for-good",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is a temporary one-week work stay, while Claim B is a permanent move of home. These are different attributes, and neither gives a different city value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is a temporary one-week work stay in Mumbai, while Claim B states a permanent move there; these are different attributes (temporary presence vs. permanent residence), not competing values for one slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is a temporary one-week work stay, while Claim B is a lasting decision about where the user lives, so they don't give different values for one slot."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sister-pune",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary stay in Pune, while Claim B gives a residence; both name Pune, so Claim B offers no different value for the same slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims place the user in Pune, so Claim B gives no different value; A is a temporary stay, B a residence, and neither contradicts the other."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary stay in Pune, not the user's home. Claim B gives Pune as home, and it is not a different value for the same slot."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sublet-berlin",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": null,
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern where the user lives; A gives a temporary summer sublet in Berlin, B a permanent move there, which is a new value for the residence slot.",
+          "Both place the user in Berlin; the sublet for the summer and the permanent move do not give different residence values, and B only extends the duration."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both state where the user lives; A is a temporary summer sublet, B a permanent move, but B states a new residence value, not a situation-limited one.",
+          "Both place the user in Berlin; B only adds that the stay is permanent, rather than giving a different value for where they live."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern where the user lives; A gives a temporary summer sublet in Berlin, while B gives a permanent move there, a different value (permanent vs temporary residence)."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "contract-acme",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both state the user's employment arrangement at Acme (contract vs full-time employee), and Claim B gives a different, later value; a person's own job status changes over time."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims state the user's employment status at Acme (contract vs full-time employee), so Claim B gives a different value for the same slot, and a person's job status changes over time."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both state the user's employment status at Acme (contract versus full-time employee), so Claim B gives a different value, replacing the earlier one over time."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both state the user's employment arrangement at Acme (contract vs full-time employee); Claim B gives a different current value, replacing the contract status."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both describe the user's employment status at Acme (contract vs full-time), a different value for the same slot; the claim of joining full-time states a new current status."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims state the user's employment status at Acme (contract vs. full-time employee), and the later claim gives a different current value that replaces the earlier one."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "foster-biscuit",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit (fostering vs. adopted), a status that changed; Claim B gives a new current value, replacing fostering with ownership."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit (fostering, then adopting), so the slot is the user's status with the dog, and B gives a new value replacing A's."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit (fostering versus adopting), and the later claim gives a new status, replacing temporary fostering with permanent adoption."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit (fostering, then adopting), so the slot is the user's status with the dog, and Claim B gives a new value, adopted."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit (fostering, then adopting), which is the same attribute, and the later claim gives a new status that replaces the earlier one."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims concern the user's relationship to Biscuit, and adoption replaces fostering as the current status, so Claim B gives a new value for the same slot."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "visiting-mit",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 2,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's position at MIT, but A is limited to the spring semester while B states a permanent role, so B does not replace the temporary status."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both describe the user's position at MIT; A is a temporary visiting role, B a permanent faculty post, a different value, and job status is a personal fact that changes."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both describe the user's position at MIT; the visiting researcher role is a temporary status and the permanent faculty position replaces it, giving a new value for the user's job."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's position at MIT; the later one gives a permanent faculty post in place of a temporary visiting role, so the job/role slot has a new value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both describe the user's position at MIT; the later claim gives a new permanent faculty role in place of the temporary visiting researcher role, a change in the user's job."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interim-lead",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both state the user's role as team lead; interim (while Priya is on leave) is replaced by permanent, a new value for the same slot, and a person's job role changes over time."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both state the user's role as team lead; \"permanent lead\" replaces the temporary \"interim lead\" value, and a person's own job role changes over time."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both state who leads the team; interim lead during leave is replaced by permanent lead, a different value for the user's role, which changes over time."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both state the user's role as the team's lead; the later claim gives permanent lead in place of interim, and a person's job role changes over time."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both give the user's role as team lead; interim (temporary, during Priya's leave) is replaced by permanent, so B gives a different current value for the same role slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both give the user's role as team lead; \"interim while Priya is on leave\" is replaced by \"permanent lead,\" a different value for the same role slot, which changes over time."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-hotel-detail",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives the length and purpose of the Mumbai trip; Claim B gives where the user is staying (a hotel in Bandra). These are different attributes, and B adds detail without a conflicting value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives the length and purpose of the stay in Mumbai; Claim B gives the accommodation location. These are different attributes, and B adds detail without giving a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives the duration and purpose of the Mumbai trip; Claim B gives the user's accommodation, which is a different attribute, and adds detail without a conflicting value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-restated",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims describe the user's temporary location on the same Mumbai work trip; Claim B only extends or confirms it, giving no different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims describe the user's temporary location on the same work trip; Claim B adds detail (still there, as of a date) without giving a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims describe the user's temporary location on the same Mumbai work trip; Claim B only extends or updates the duration and gives no different value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-enjoys",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary location for the user's trip, while Claim B states a preference about Mumbai street food, so they concern different attributes with no differing values."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A concerns a temporary stay in Mumbai, while Claim B concerns the user's liking for Mumbai street food; these are different attributes, so B gives no new value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A concerns the user's temporary location (a week-long work trip), while Claim B concerns the user's enjoyment of Mumbai street food, so they cover different attributes."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "resident-this-week",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a lasting residence, while Claim B only describes a temporary situation this week at the Bandra office, so it gives no new value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a lasting residence, while Claim B only describes a temporary situation this week at the Bandra office, so it gives no new value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states where the user lives lastingly; Claim B only gives a temporary location this week for work, which does not give a new value for residence."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sister-lives",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives where the user is staying temporarily; Claim B gives where the sister lives. These are different attributes, and B is consistent with A rather than a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives where the user is temporarily staying; Claim B gives where the user's sister lives. These are different attributes, and B is consistent with A, not a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives the user's temporary stay with their sister in Pune; Claim B gives where the sister lives. These are different attributes, and B does not change A's value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "contract-start",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives the contract's length (three months) and Claim B gives its start date, so they are different attributes and B adds detail without a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's workplace and contract length; Claim B gives the contract's start date, which is a different attribute and adds detail without a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the contract's length (three months), while Claim B states its start date; these are different attributes, and B adds detail without giving a different value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "foster-age",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's fostering arrangement for Biscuit, while Claim B states Biscuit's age; these are different attributes and B gives no different value for A's slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's fostering arrangement for Biscuit, while Claim B gives Biscuit's age; these are different attributes, and B adds detail without giving a new value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's fostering arrangement for Biscuit; Claim B gives Biscuit's age, which is a different attribute and adds detail without a new value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "move-detail",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B restates the move to Mumbai and adds detail (date, neighbourhood), but gives no different value for the user's city of residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B repeats the move to Mumbai and adds detail (date, Bandra neighbourhood) without giving a different value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B repeats the move to Mumbai and adds when and the neighbourhood (Bandra); this is added detail, not a different value for the user's residence."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-trip",
+     "class": "temporary-elsewhere",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's home city, while Claim B describes a temporary one-week work stay in Mumbai, which is limited to a period and situation and gives no new residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's lasting home city, while Claim B describes a temporary one-week work stay in Mumbai, which is limited to a period and situation and gives no new residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's lasting home city, while Claim B describes a temporary one-week work stay in Mumbai, which is limited to a period and situation and gives no new residence."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-diwali",
+     "class": "temporary-elsewhere",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's home; Claim B describes a temporary visit to Chennai over Diwali, which is limited to a period and place and gives no new residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's home; Claim B describes a temporary visit over Diwali, limited to a period and place, giving no new residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the user's home; Claim B only describes a temporary visit over Diwali in Chennai, a limited situation, not a new residence."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-moved",
+     "class": "anchor-update",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims give the user's current city of residence; moving to Mumbai replaces Delhi as the value, and where a person lives changes over time."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims state the user's current city of residence; Claim B gives a new value, Mumbai, replacing Delhi, and a person's home changes over time."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims state the user's current city of residence; moving to Mumbai gives a new value (Mumbai) replacing Delhi, a fact about the user's own life."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims state the user's current city of residence; Claim B gives a new value, Mumbai, replacing Delhi, and where a person lives changes over time."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims state where the user lives; moving to Mumbai gives a new residence value, replacing Delhi."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims state the user's city of residence; Claim B gives a new value, Mumbai, replacing Delhi, and where a person lives changes over time."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-back-home",
+     "class": "temporary-ended",
+     "expected": "changes",
+     "matched": 1,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary location (in Mumbai for a week), while Claim B says the user is back in Delhi; this is a trip ending, not a changed lasting home, so different slots."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary location (in Mumbai for a week); Claim B gives the location after the trip ended, back home in Delhi, so they could be the same slot of current location.",
+          "Both give the user's current location; Mumbai during the work trip is replaced by Delhi after returning, a different value for the same slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A gives a temporary location (a week in Mumbai); Claim B gives the user's current location as back in Delhi, so the later location replaces the earlier one."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": null,
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A gives a temporary location (in Mumbai for a week), while Claim B says the user is back in Delhi, their home; these are different attributes, a situational stay versus a home.",
+          "Both claims give the user's current location: Mumbai in Claim A, then back in Delhi in Claim B, so the later value replaces the earlier one."
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-6",
+   "rows": [
+    {
+     "id": "trip-move-run2",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A describes a temporary work trip, while Claim B states a permanent relocation \u2014 the slot for where the user lives now changes."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits presence in Mumbai to a temporary work trip, while Claim B states a permanent move, giving a new value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary work trip to Mumbai, while Claim B states the user moved (permanently) to Mumbai \u2014 same location slot, new lasting value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A describes a temporary work trip, while Claim B states the user's home location changed permanently to Mumbai."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A describes a temporary work trip, while Claim B states the user moved to Mumbai, giving a new permanent-residence value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A is a temporary work trip, but Claim B states a permanent relocation\u2014filling the user's home city slot with Mumbai."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-move-short",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary work visit, while Claim B states a permanent relocation, filling the user's home/residence slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits presence to a temporary work trip; Claim B states a permanent relocation, filling the user's home/residence slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A limits presence in Mumbai to a temporary work trip; Claim B states a permanent relocation, giving a new home-location value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A is limited to a temporary work trip, while Claim B states a permanent relocation, filling the user's home/residence slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A limits presence in Mumbai to a temporary work trip; Claim B states a permanent relocation, giving a new value for where the user lives."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits presence in Mumbai to a temporary work trip; Claim B states a permanent relocation, giving the home-location slot a new value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-for-good",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary work trip, while Claim B states a permanent relocation, filling the same home/residence slot with a new lasting value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits the user's presence in Mumbai to a temporary work trip; Claim B states a permanent relocation, giving a new home-location value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A reports a temporary work visit; Claim B states a permanent relocation, giving the user's home location a new lasting value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits presence in Mumbai to a temporary work trip; Claim B states a permanent relocation, giving the user's home location a new lasting value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary work trip, while Claim B states a permanent relocation, filling the user's home/residence slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits presence to a temporary work trip; Claim B states a permanent relocation, giving a new lasting home value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sister-pune",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A limits the stay to a temporary situation; Claim B states a lasting residence, filling a different slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is a temporary stay limited to a period, while Claim B states a lasting residence value for the same location."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A limits the stay to a temporary period, while Claim B states a lasting current residence, filling the same \"where the user lives\" slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A is a temporary stay limited to a period, while Claim B states a lasting residence, so they fill different slots."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sublet-berlin",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary summer situation, while Claim B states a permanent residence change filling the same home slot."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the \"where the user lives\" slot, but Claim A is limited to a temporary situation while Claim B states a permanent new value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary summer situation, while Claim B states a permanent relocation, giving the user's home location a new lasting value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits residence to a summer sublet situation, while Claim B states a permanent move, giving a new lasting value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a summer situation, while Claim B states a permanent relocation, filling the same residence slot with a new lasting value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Claim A limits residence to a temporary summer sublet, while Claim B states a permanent move to Berlin, filling the same \"where the user lives\" slot with a new value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "contract-acme",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's employment status/type at Acme, with B giving a new value (full-time employee) replacing the contract role."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the same slot: the user's employment status/role at Acme, changing from contract to full-time employee."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the same slot: the user's employment status/role at Acme, with B giving a new value (full-time employee) replacing the contract."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's employment status/arrangement at Acme, with B giving a new value (full-time employee) replacing the contract."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's employment status/type at Acme, with B giving a new value (full-time employee) replacing the contract role."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the same slot: the user's employment status at Acme, with the value changing from contractor to full-time employee."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "foster-biscuit",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's relationship/status with Biscuit, changing from foster to owner."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's relationship/status with Biscuit, changing from fostering to adopted owner."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims concern the user's relationship/role with Biscuit, but Claim B reports a change from fostering to adopting, giving the slot a new value."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's relationship/ownership status with Biscuit, changing from fostering to adopting."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's relationship to Biscuit, changing from foster to permanent owner."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the same slot: the user's relationship/status with Biscuit, changing from fostering to adopted owner."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "visiting-mit",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a period (spring semester), while Claim B states a lasting role; they describe different attributes."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A limits the user's MIT role to a semester; Claim B states a new lasting role, so they fill different slots."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is limited to a temporary period (spring semester), while Claim B states a lasting permanent role, so they describe different attributes."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "interim-lead",
+     "class": "temporary-to-permanent",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's role as team lead, with B giving the new permanent value replacing the interim one."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's role as team lead, with B giving a new permanent value replacing the interim one."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the same slot: the user's role as team lead, with B giving the new permanent value replacing the interim one."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's role as team lead, with B giving a new permanent value replacing the interim one."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of the user's role as team lead, with B giving a new permanent value replacing the interim one."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot of the user's role as team lead, with B giving the new permanent value replacing the interim one."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-hotel-detail",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is situational (for a week), and Claim B adds detail about location within Mumbai, not a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary work visit; Claim B adds location detail within Mumbai, narrowing rather than contradicting it."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary work trip; Claim B adds detail about accommodation location, narrowing without giving a different value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-restated",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a time update to the same temporary situation, narrowing it rather than giving a different value for a lasting home or location slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a time-stamp detail to the same ongoing work trip in Mumbai, narrowing without giving a different value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a date detail to the same temporary situation described in Claim A, narrowing it without giving a different value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-enjoys",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary location situation; Claim B states an enjoyment/preference, which is a different attribute."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary location, while Claim B states an enjoyment/preference, which are different attributes."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary location; Claim B states an enjoyment/preference, which is a different attribute."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "resident-this-week",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B limits the user's presence in Mumbai to a specific week and place, not stating a new lasting residence value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B limits the user's presence in Mumbai to this week, not stating a lasting change of residence."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B limits the user's presence in Mumbai to a specific week and location, adding situational detail rather than stating a lasting residence value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "sister-lives",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is about a temporary stay, while Claim B is about where the sister permanently lives \u2014 different attributes."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A describes a temporary stay situation; Claim B states a lasting attribute (where the sister lives), a different slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is about the user's temporary stay, while Claim B is about the sister's permanent residence \u2014 different attributes."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "contract-start",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a start-date detail to the same contract; it does not give a different value for any slot Claim A fills."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a detail (start date) to the contract mentioned in Claim A, without giving a different value for any shared slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds a start date detail to the contract mentioned in Claim A, not a different value for the same attribute."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "foster-age",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is about the fostering arrangement; Claim B is about Biscuit's age, a different attribute."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states the fostering situation; Claim B states Biscuit's age, a different attribute."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is about the fostering situation; Claim B is about Biscuit's age, a different attribute."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "move-detail",
+     "class": "same-place-non-update",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds detail (timing and neighbourhood) to Claim A without giving a different value for where the user lives."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds detail (timing and neighbourhood) to Claim A without giving a different value for the user's location."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B adds detail (timing and neighbourhood) to Claim A without giving a different value for the user's location."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-trip",
+     "class": "temporary-elsewhere",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B describes a temporary work trip, not a change of residence, so it does not replace the user's home location slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B is limited to a temporary work situation, not a new lasting home value."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B is limited to a temporary situation (a week for work), not a new permanent home value."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-diwali",
+     "class": "temporary-elsewhere",
+     "expected": "not_changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B describes a temporary visit, not a change of residence, so it does not replace the user's home location slot."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a lasting residence, while Claim B describes a temporary visit to a different place, not a change of home."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim B describes a temporary visit during Diwali, not a change of residence, so it does not fill the same \"where the user lives\" slot."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "home-moved",
+     "class": "anchor-update",
+     "expected": "changes",
+     "matched": 3,
+     "samples": [
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot for where the user lives; Claim B gives the new value Mumbai."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot for where the user lives; Claim B gives the new value Mumbai."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot for where the user lives, with Claim B giving the new value Mumbai."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot for where the user lives, with Claim B giving the new value Mumbai."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "changes",
+       "decided_by": "verification",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Both claims fill the slot of where the user lives, with Claim B giving the new value Mumbai."
+         ]
+        },
+        {
+         "purpose": "verification",
+         "reason": [
+          "Both claims fill the slot for where the user lives; Claim B gives the new value Mumbai."
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "trip-back-home",
+     "class": "temporary-ended",
+     "expected": "changes",
+     "matched": 0,
+     "samples": [
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary work trip, not a lasting home location; Claim B confirms Delhi as home after returning."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A is a temporary situational location, and Claim B states the user's lasting home location, which is a different attribute."
+         ]
+        }
+       ]
+      },
+      {
+       "verdict": "different",
+       "decided_by": "semantic_lint",
+       "reasons": [
+        {
+         "purpose": "semantic_lint",
+         "reason": [
+          "Claim A states a temporary work situation in Mumbai, not the user's home location; Claim B states the user's home is Delhi."
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": [
+  {
+   "purpose": "semantic_lint",
+   "model": "claude-sonnet-4-6",
+   "calls": 63,
+   "input_tokens": 49074,
+   "output_tokens": 2787,
+   "max_tokens_stops": 0,
+   "cost_usd": 0.189027
+  },
+  {
+   "purpose": "semantic_lint",
+   "model": "claude-sonnet-5-5",
+   "calls": 63,
+   "input_tokens": 63423,
+   "output_tokens": 6924,
+   "max_tokens_stops": 0,
+   "cost_usd": 0.196086
+  },
+  {
+   "purpose": "verification",
+   "model": "claude-sonnet-4-6",
+   "calls": 25,
+   "input_tokens": 19477,
+   "output_tokens": 1133,
+   "max_tokens_stops": 0,
+   "cost_usd": 0.075426
+  },
+  {
+   "purpose": "verification",
+   "model": "claude-sonnet-5-5",
+   "calls": 15,
+   "input_tokens": 15080,
+   "output_tokens": 1140,
+   "max_tokens_stops": 0,
+   "cost_usd": 0.04156
+  }
+ ]
+}

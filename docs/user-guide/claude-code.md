@@ -115,6 +115,41 @@ what steps 3 and 5 read (see
 `--command <path>` overrides the hook executable for non-standard installs ·
 `--json` prints a machine-readable result instead of prose.
 
+### Running from a source checkout
+
+If you develop Particles and also use it as your own agent's memory, do not
+point the hooks or the MCP server at the checkout you work in. Each Claude Code
+session starts one `particles mcp serve` process and keeps it for the life of
+the session. The server imports some modules only when a tool is first called,
+so pulling new code under a running server mixes old and new modules, and a
+tool call fails with an `ImportError`.
+
+Run them from a separate, pinned copy instead, such as a detached worktree at a
+release tag with its own environment:
+
+```bash
+git worktree add --detach ../particles-runtime v1.180.0
+uv sync --project ../particles-runtime --frozen --no-dev
+```
+
+Then run `particles init claude-code` with that copy's
+`../particles-runtime/.venv/bin/particles`, which bakes its absolute path into
+the hooks, and register the MCP server with the same executable. To take a
+newer release, check the pinned worktree out at the new tag, run the same
+`uv sync`, and reopen your sessions. The hooks and the MCP registration name
+the path, not the version, so neither needs editing. Keep the pin current when
+your working checkout shares a store with it: a newer checkout can migrate the
+store's schema past what the pinned copy knows.
+
+`particles hook doctor` reports all of this on its `install:` and `schema:`
+lines. Run it with the same executable and environment the hooks use. It names
+the install the hooks and the MCP server run and warns when the two differ,
+when that install is a working checkout on a branch, or when it is pinned to a
+tag older than the newest one the checkout has fetched, in which case it prints
+the commands to advance it. It reads local tags only, so fetch first. Its
+`schema:` line warns when the store was migrated by a newer release than the
+one running.
+
 ### Letting the agent install it
 
 `--json` exists so an agent can run the installer itself and *report* the
@@ -384,6 +419,41 @@ sources](../operator-guide/mutable-local-sources.md#only-the-newest-pending-vers
 Session transcripts are the larger share of the bill, and a long transcript
 that grew is re-extracted only from where it changed.
 
+**Extraction without an API key.** A Claude Code session can extract its own
+transcript instead. Set `claude_code.agent_extraction.mode` to
+`on` and re-run `particles init claude-code`, which then also installs a
+`Stop` hook. At the end of a turn, once the session has grown by
+`min_new_chars` (default 8000) past what was extracted and at least
+`min_interval_seconds` (default 600) after its last ask, the hook deposits
+the transcript and asks the agent, in one extra turn you can see, to record
+that stretch through the `extraction_submit` tool. Your Claude plan pays for
+that turn, and Particles makes no extraction call.
+
+Every claim the agent submits must quote the deposited transcript verbatim.
+Tool results and model reasoning are not in the deposit, so a claim drawn
+from them is dropped, and so is a claim whose only quote is a tool-call line.
+The resulting beliefs carry their own extractor id, `claude-code-agent`, and
+the session's model, and their confidence is mapped through a calibration
+fitted for that model when one exists. The background extractor then reads
+only what the agent did not cover. Three settings need care:
+
+- The store must be write-enabled (`mcp.write.enabled_stores`), or the
+  `extraction_submit` tool is not offered.
+- The hook asks only in a session that has the Particles MCP server. A server
+  registered in one repository's `.mcp.json` covers sessions there only, so
+  register it at user scope (`claude mcp add --scope user`) to cover every
+  project.
+- `mode: shadow` asks and verifies but writes nothing, which is how to see
+  what the agent would record before turning it on. Each stretch is asked
+  about once: after an answer, the next ask starts where the answered one
+  ended, while the background extractor still reads the whole transcript.
+- Without an API key, the contradiction check on a near-duplicate claim
+  cannot run, so such a pair is held for review in `particles review` rather
+  than merged or kept silently.
+
+`particles hook doctor` reports whether the Stop hook, the write store and
+the mode line up, and counts recent asks.
+
 ## The MEMORY.md projection
 
 With the hooks installed, `MEMORY.md` stops being an append-only scratch file:
@@ -555,19 +625,29 @@ What to know before running it:
   snapshots.
 - **The cost estimate always prints first.** It gives the extraction call
   count, the token projection, a dollar range at the configured model's list
-  price, and the expected wall time, for example `Cost: ≈ $5.63–10.33
-  expected, $19 ceiling at claude-sonnet-5 list price ($2/$10 per MTok)` and
-  `Time: about 1.6 h, ~60 s per file`. The expected range takes a per-call
-  output figure for the extraction model
-  (`audit.estimate_output_tokens_per_extraction_call`, with a per-model
-  override) within `audit.estimate_output_spread`, adds the expected retries at
-  `extraction.retry_max_tokens`, and spans zero to every contradiction probe:
-  the `audit.max_contradiction_probes` cap plus the probes extraction makes
-  while it reconciles new beliefs, and to every second reading of a flagged
-  pair (`audit.max_contradiction_verifications`). The ceiling is every call
-  spending its full `extraction.max_tokens`, the expected retries at their
-  budget, and every probe and second reading. The defaults come from a measured run of 96 memory files that billed
-  $7.97 and took 96 minutes. The figure is priced from `llm.price_per_mtok`,
+  price, and the expected wall time, for example `Cost: ≈ $4.93–9.07
+  expected, $37 ceiling at claude-sonnet-5 list price ($2/$10 per MTok)` and
+  `Time: about 1.5 h, ~58 s per file`. It counts only the files the run will
+  extract: a file already extracted and unchanged since is skipped, and the
+  estimate says how many it skipped. Each call's output is a fixed part plus a
+  part proportional to the characters it reads
+  (`audit.estimate_output_tokens_per_call_base`,
+  `audit.estimate_output_tokens_per_source_char`, with a per-model scale), so a
+  long design document is priced by its length rather than as one more memory
+  note, and the estimate prints the density it assumed. The expected range
+  takes every call within `audit.estimate_output_spread` of its figure; a call
+  whose output would pass `extraction.max_tokens` is billed that whole budget
+  plus a retry at `extraction.retry_max_tokens`, and one that would pass both
+  budgets is named as at risk of losing the claims past the cut. The range
+  spans zero to every contradiction probe: the
+  `audit.max_contradiction_probes` cap plus the probes extraction makes while
+  it reconciles new beliefs, and to every second reading of a flagged pair
+  (`audit.max_contradiction_verifications`). The ceiling is every call
+  spending its full `extraction.max_tokens`, the high end's retries at their
+  budget, and every probe and second reading. The defaults are fitted to two
+  measured runs: 96 memory files that billed $7.97 and took 96 minutes, and 6
+  design documents whose 317k output tokens the old flat per-call figure
+  priced at about a quarter. The figure is priced from `llm.price_per_mtok`,
   which ships with the Anthropic list prices; prompt-cache and batch discounts
   are not applied, so it leans high.
   A model with no price entry (an OpenAI-compatible endpoint, for example)
@@ -665,7 +745,10 @@ anything itself.
   uses the remote digest freely (read-only), but `session-end` **refuses to
   ship transcripts off-machine** unless you set
   `claude_code.harvest.allow_remote: true`; refusals are logged and the
-  catch-up sweep back-fills once enabled.
+  catch-up sweep back-fills once enabled. The MEMORY.md re-render, utility
+  mining and the Stop-hook extraction ask need the store on the same machine
+  and are skipped against a remote engine; see
+  [Remote engine](../operator-guide/remote-engine.md#claude-code-hooks-against-a-remote-engine).
 - **Distill-then-redact.** Only the distilled rendering is deposited; tool
   results never are. The pattern redaction is best-effort defence in depth,
   **not a guarantee**: review what scrolls through your sessions.

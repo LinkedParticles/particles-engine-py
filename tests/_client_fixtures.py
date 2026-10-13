@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 import httpx
 import pytest
+from hypothesis import HealthCheck, settings
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -75,6 +76,17 @@ def pytest_configure(config: pytest.Config) -> None:
         "BENCHMARK_RUNS_DIR",
         f"/tmp/particles_test_benchmark_runs{('_' + worker) if worker else ''}",
     )
+    # Hypothesis's too_slow health check times input generation, and the first
+    # integer draw in a process also pays Hypothesis's one-off harvest of
+    # literal constants: it AST-parses every local module in ``sys.modules``
+    # (hundreds of ``particles`` and ``tests`` files once collection has run).
+    # That cost lands on whichever ``@given`` test draws first in each xdist
+    # worker, not on any strategy, and a loaded host stretches it past the
+    # check's budget: ``test_a_derived_belief_is_never_in_view_where_a_premise_is_not``
+    # failed with one 4.5 s draw from two trivial ``st.builds`` at load ~45.
+    # No strategy in the suite filters or is costly, so the check is noise here.
+    settings.register_profile("particles", suppress_health_check=[HealthCheck.too_slow])
+    settings.load_profile("particles")
 
 
 @pytest.fixture(autouse=True)

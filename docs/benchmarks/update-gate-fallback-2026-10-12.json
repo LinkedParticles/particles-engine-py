@@ -1,0 +1,1176 @@
+{
+ "about": "Third-revision acceptance: the past-marker held-out set (registered in 1d3d3669) with the shipped prompt, both purposes pinned, 3 samples, scored under the proposed, fallback and shipped gates; and the re-score of the first two rounds' shipped-prompt samples under the fallback gate with the marker as committed in e852aa24.",
+ "spend_usd": {
+  "claude-sonnet-5-5": 0.3419,
+  "claude-sonnet-4-6": 0.3594
+ },
+ "past_marker": {
+  "claude-sonnet-5-5": {
+   "rows": [
+    {
+     "id": "ferry",
+     "class": "past-marked",
+     "older": "Until 2024 the user commuted by ferry.",
+     "newer": "The user cycles to work, per a note from 2026-05-03.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "rowing-club",
+     "class": "past-marked",
+     "older": "The user was formerly a member of the Riverside rowing club.",
+     "newer": "The user rows with the Harbour Rowing Club (noted 2026-04-11).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bees",
+     "class": "past-marked",
+     "older": "The user no longer keeps bees.",
+     "newer": "The user keeps chickens, as of 2026-06-01.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bare-metal",
+     "class": "past-marked",
+     "older": "Back in 2022 the project was deployed on bare-metal servers.",
+     "newer": "The project runs on Kubernetes (noted 2026-03-14).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "porto-alegre",
+     "class": "past-marked",
+     "older": "The user had been renting in Porto Alegre before moving abroad.",
+     "newer": "The user rents a flat in Montevideo, per a note from 2026-07-20.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "night-shifts",
+     "class": "past-marked",
+     "older": "As of 2025-11-03, when the user worked night shifts, the user slept until noon.",
+     "newer": "The user works day shifts at the depot (noted 2026-02-09).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "panda",
+     "class": "past-marked",
+     "older": "The user previously drove a Fiat Panda.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "on-call",
+     "class": "past-marked",
+     "older": "Before 2025 the team's on-call rota was weekly.",
+     "newer": "The team's on-call rota is fortnightly, per a note from 2026-04-02.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": null
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "piano",
+     "class": "past-marked",
+     "older": "The user used to teach piano on weekends.",
+     "newer": "The user tutors maths on Saturdays (noted 2026-03-21).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-room",
+     "class": "present-dated",
+     "older": "The user is staying in a rented room in Cork until the end of June (noted 2026-03-01).",
+     "newer": "The user signed a permanent lease in Cork on 2026-07-02 and lives there now.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "broadband",
+     "class": "present-dated",
+     "older": "The user's internet plan is 100 Mbps, as of 2026-01-10.",
+     "newer": "The user upgraded their internet plan to 500 Mbps on 2026-05-05.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "planning-tool",
+     "class": "present-dated",
+     "older": "The team uses Trello for planning (noted 2026-02-02).",
+     "newer": "The team moved its planning from Trello to Asana on 2026-06-18.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "dentist",
+     "class": "present-dated",
+     "older": "The user's dentist is Dr. Byrne, per a note from 2026-01-25.",
+     "newer": "The user switched to Dr. Okafor as their dentist on 2026-04-30.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "galway",
+     "class": "present-dated",
+     "older": "The user lives in Galway (noted 2026-02-14).",
+     "newer": "Since July 2026 the user has lived in Limerick.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "rent-in-2023",
+     "class": "past-unmarked",
+     "older": "In 2023 the user's rent was 640 euros a month.",
+     "newer": "The user's rent is 720 euros a month (noted 2026-06-12).",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "first-car",
+     "class": "past-unmarked",
+     "older": "The user's first car was a Renault Clio.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-gp",
+     "class": "past-unmarked",
+     "older": "When the user lived in Cork, their GP was Dr. Walsh.",
+     "newer": "The user lives in Limerick, as of 2026-04-15.",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "proposed": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "5/27",
+     "false_rows": [
+      "bare-metal",
+      "on-call"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "0/27",
+     "false_rows": [],
+     "ok": true
+    },
+    "shipped": {
+     "positives_retired": "0/5",
+     "positive_misses": [
+      "cork-room",
+      "broadband",
+      "planning-tool",
+      "dentist",
+      "galway"
+     ],
+     "false_retirements": "0/27",
+     "false_rows": [],
+     "ok": false
+    },
+    "case": {}
+   }
+  },
+  "claude-sonnet-4-6": {
+   "rows": [
+    {
+     "id": "ferry",
+     "class": "past-marked",
+     "older": "Until 2024 the user commuted by ferry.",
+     "newer": "The user cycles to work, per a note from 2026-05-03.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "rowing-club",
+     "class": "past-marked",
+     "older": "The user was formerly a member of the Riverside rowing club.",
+     "newer": "The user rows with the Harbour Rowing Club (noted 2026-04-11).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bees",
+     "class": "past-marked",
+     "older": "The user no longer keeps bees.",
+     "newer": "The user keeps chickens, as of 2026-06-01.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bare-metal",
+     "class": "past-marked",
+     "older": "Back in 2022 the project was deployed on bare-metal servers.",
+     "newer": "The project runs on Kubernetes (noted 2026-03-14).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "porto-alegre",
+     "class": "past-marked",
+     "older": "The user had been renting in Porto Alegre before moving abroad.",
+     "newer": "The user rents a flat in Montevideo, per a note from 2026-07-20.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "night-shifts",
+     "class": "past-marked",
+     "older": "As of 2025-11-03, when the user worked night shifts, the user slept until noon.",
+     "newer": "The user works day shifts at the depot (noted 2026-02-09).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "panda",
+     "class": "past-marked",
+     "older": "The user previously drove a Fiat Panda.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "on-call",
+     "class": "past-marked",
+     "older": "Before 2025 the team's on-call rota was weekly.",
+     "newer": "The team's on-call rota is fortnightly, per a note from 2026-04-02.",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "piano",
+     "class": "past-marked",
+     "older": "The user used to teach piano on weekends.",
+     "newer": "The user tutors maths on Saturdays (noted 2026-03-21).",
+     "expected": "not_changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-room",
+     "class": "present-dated",
+     "older": "The user is staying in a rented room in Cork until the end of June (noted 2026-03-01).",
+     "newer": "The user signed a permanent lease in Cork on 2026-07-02 and lives there now.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "broadband",
+     "class": "present-dated",
+     "older": "The user's internet plan is 100 Mbps, as of 2026-01-10.",
+     "newer": "The user upgraded their internet plan to 500 Mbps on 2026-05-05.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "planning-tool",
+     "class": "present-dated",
+     "older": "The team uses Trello for planning (noted 2026-02-02).",
+     "newer": "The team moved its planning from Trello to Asana on 2026-06-18.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "dentist",
+     "class": "present-dated",
+     "older": "The user's dentist is Dr. Byrne, per a note from 2026-01-25.",
+     "newer": "The user switched to Dr. Okafor as their dentist on 2026-04-30.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "galway",
+     "class": "present-dated",
+     "older": "The user lives in Galway (noted 2026-02-14).",
+     "newer": "Since July 2026 the user has lived in Limerick.",
+     "expected": "changes",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "rent-in-2023",
+     "class": "past-unmarked",
+     "older": "In 2023 the user's rent was 640 euros a month.",
+     "newer": "The user's rent is 720 euros a month (noted 2026-06-12).",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "first-car",
+     "class": "past-unmarked",
+     "older": "The user's first car was a Renault Clio.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-gp",
+     "class": "past-unmarked",
+     "older": "When the user lived in Cork, their GP was Dr. Walsh.",
+     "newer": "The user lives in Limerick, as of 2026-04-15.",
+     "expected": "report",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "proposed": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "11/27",
+     "false_rows": [
+      "ferry",
+      "rowing-club",
+      "bare-metal",
+      "night-shifts",
+      "panda"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "2/27",
+     "false_rows": [
+      "night-shifts"
+     ],
+     "ok": false
+    },
+    "shipped": {
+     "positives_retired": "3/5",
+     "positive_misses": [
+      "broadband",
+      "planning-tool"
+     ],
+     "false_retirements": "2/27",
+     "false_rows": [
+      "night-shifts"
+     ],
+     "ok": false
+    },
+    "case": {}
+   }
+  }
+ },
+ "rescore": {
+  "claude-sonnet-5-5": {
+   "gate": {
+    "proposed": {
+     "positives_retired": "10/10",
+     "positive_misses": [],
+     "false_retirements": "2/57",
+     "false_rows": [
+      "lived-until"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "10/10",
+     "positive_misses": [],
+     "false_retirements": "0/57",
+     "false_rows": [],
+     "ok": true
+    },
+    "shipped": {
+     "positives_retired": "1/10",
+     "positive_misses": [
+      "res-dated-newer",
+      "res-dated-both",
+      "employer-dated",
+      "manager-dated",
+      "phone-dated",
+      "host-dated",
+      "count-dated",
+      "stay-to-home-dated",
+      "gym-dated"
+     ],
+     "false_retirements": "0/57",
+     "false_rows": [],
+     "ok": false
+    },
+    "case": {
+     "case-trip-5-5-r2": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-trip-5-5-r1": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-residence-5-5-r2": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 1,
+      "of": 3
+     },
+     "case-residence-5-5-r1": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 1,
+      "of": 3
+     },
+     "case-home-5-5": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 1,
+      "of": 3
+     },
+     "case-trip-4-6": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-trip-alone": {
+      "expected": "not_changes",
+      "proposed": 0,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-flight": {
+      "expected": "report",
+      "proposed": 0,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-hotel": {
+      "expected": "report",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     }
+    }
+   },
+   "gate-heldout": {
+    "proposed": {
+     "positives_retired": "8/8",
+     "positive_misses": [],
+     "false_retirements": "0/33",
+     "false_rows": [],
+     "ok": true
+    },
+    "fallback": {
+     "positives_retired": "8/8",
+     "positive_misses": [],
+     "false_retirements": "0/33",
+     "false_rows": [],
+     "ok": true
+    },
+    "shipped": {
+     "positives_retired": "1/8",
+     "positive_misses": [
+      "tartu-tallinn",
+      "car",
+      "isp",
+      "laptop",
+      "rent",
+      "krakow-let",
+      "ci"
+     ],
+     "false_retirements": "0/33",
+     "false_rows": [],
+     "ok": false
+    },
+    "case": {}
+   },
+   "past": {
+    "proposed": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "9/24",
+     "false_rows": [
+      "worked-until",
+      "back-in-2023",
+      "restated-rent"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "0/24",
+     "false_rows": [],
+     "ok": true
+    },
+    "shipped": {
+     "positives_retired": "0/5",
+     "positive_misses": [
+      "lives-dated",
+      "works-noted",
+      "course-to-home",
+      "tracker-noted",
+      "phone-plan"
+     ],
+     "false_retirements": "0/24",
+     "false_rows": [],
+     "ok": false
+    },
+    "case": {
+     "case-restated-flight": {
+      "expected": "not_changes",
+      "proposed": 0,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-restated-hotel": {
+      "expected": "not_changes",
+      "proposed": 3,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     }
+    }
+   }
+  },
+  "claude-sonnet-4-6": {
+   "gate": {
+    "proposed": {
+     "positives_retired": "10/10",
+     "positive_misses": [],
+     "false_retirements": "5/57",
+     "false_rows": [
+      "lived-until",
+      "manager-previously",
+      "dated-history"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "10/10",
+     "positive_misses": [],
+     "false_retirements": "0/57",
+     "false_rows": [],
+     "ok": true
+    },
+    "shipped": {
+     "positives_retired": "4/10",
+     "positive_misses": [
+      "res-dated-both",
+      "employer-dated",
+      "manager-dated",
+      "host-dated",
+      "count-dated",
+      "gym-dated"
+     ],
+     "false_retirements": "0/57",
+     "false_rows": [],
+     "ok": false
+    },
+    "case": {
+     "case-trip-5-5-r2": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-trip-5-5-r1": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-residence-5-5-r2": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-residence-5-5-r1": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-home-5-5": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-trip-4-6": {
+      "expected": "changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-trip-alone": {
+      "expected": "not_changes",
+      "proposed": 0,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-flight": {
+      "expected": "report",
+      "proposed": 0,
+      "fallback": 0,
+      "shipped": 0,
+      "of": 3
+     },
+     "case-hotel": {
+      "expected": "report",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 0,
+      "of": 3
+     }
+    }
+   },
+   "gate-heldout": {
+    "proposed": {
+     "positives_retired": "8/8",
+     "positive_misses": [],
+     "false_retirements": "3/33",
+     "false_rows": [
+      "town-hall-walk"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "8/8",
+     "positive_misses": [],
+     "false_retirements": "3/33",
+     "false_rows": [
+      "town-hall-walk"
+     ],
+     "ok": false
+    },
+    "shipped": {
+     "positives_retired": "5/8",
+     "positive_misses": [
+      "tartu-tallinn",
+      "laptop",
+      "krakow-let"
+     ],
+     "false_retirements": "3/33",
+     "false_rows": [
+      "town-hall-walk"
+     ],
+     "ok": false
+    },
+    "case": {}
+   },
+   "past": {
+    "proposed": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "11/24",
+     "false_rows": [
+      "worked-until",
+      "before-2024",
+      "back-in-2023",
+      "had-been",
+      "restated-rent"
+     ],
+     "ok": false
+    },
+    "fallback": {
+     "positives_retired": "5/5",
+     "positive_misses": [],
+     "false_retirements": "1/24",
+     "false_rows": [
+      "restated-rent"
+     ],
+     "ok": false
+    },
+    "shipped": {
+     "positives_retired": "0/5",
+     "positive_misses": [
+      "lives-dated",
+      "works-noted",
+      "course-to-home",
+      "tracker-noted",
+      "phone-plan"
+     ],
+     "false_retirements": "1/24",
+     "false_rows": [
+      "restated-rent"
+     ],
+     "ok": false
+    },
+    "case": {
+     "case-restated-flight": {
+      "expected": "not_changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     },
+     "case-restated-hotel": {
+      "expected": "not_changes",
+      "proposed": 3,
+      "fallback": 3,
+      "shipped": 3,
+      "of": 3
+     }
+    }
+   }
+  }
+ }
+}

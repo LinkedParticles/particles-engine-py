@@ -53,22 +53,25 @@ async def set_label(session: AsyncSession, qid: str, label: str) -> None:
 
 async def _persistent_label_cache(
     entity_id: str,
-    fetch_live: Callable[[], Awaitable[str]],
+    fetch_live: Callable[[], Awaitable[str | None]],
     session: AsyncSession | None,
-) -> str:
+) -> str | None:
     """L2 persistent label cache.
 
     On a DB miss, runs the Client-supplied ``fetch_live`` (the L3 REST call) and
-    persists the result. Manages its own session when the caller passes none —
-    preserving the prior ``_fetch_label`` behaviour, now Engine-side.
+    persists the result. A failed fetch returns None, which is passed through
+    and never persisted, so an outage does not become the entity's cached label.
+    Manages its own session when the caller passes none, preserving
+    the prior ``_fetch_label`` behaviour, now Engine-side.
     """
 
-    async def _lookup(sess: AsyncSession) -> str:
+    async def _lookup(sess: AsyncSession) -> str | None:
         db_label = await get_label(sess, entity_id)
         if db_label is not None:
             return db_label
         label = await fetch_live()
-        await set_label(sess, entity_id, label)
+        if label is not None:
+            await set_label(sess, entity_id, label)
         return label
 
     if session is not None:

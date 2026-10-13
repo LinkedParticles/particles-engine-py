@@ -2,7 +2,7 @@
  "prompt": "pipeline._update_prompt as shipped in this change",
  "model": "anthropic:claude-haiku-4-5",
  "samples_per_pair": 3,
- "source": "the 33 SUPERSEDED_BY_UPDATE retirements in the kept s150-update-probe-2026-09-30 stores, plus 16 hand pairs",
+ "source": "32 of the 33 SUPERSEDED_BY_UPDATE retirements in the kept s150-update-probe-2026-09-30 stores (one of the four abstention pairs was never replayed), plus 16 hand pairs: 48 pairs",
  "rows": [
   {
    "id": 3,

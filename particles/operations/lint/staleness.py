@@ -132,11 +132,16 @@ async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> lis
 
 
 async def _check_corpus_link_integrity(session: AsyncSession, fix: bool) -> list[LintFinding]:
-    """Find ACTIVE particles pointing to snapshots that no longer exist."""
+    """Find ACTIVE particles pointing to snapshots that no longer exist.
+
+    A ``PARTICLE`` ref is skipped: its ``snapshot_id`` carries the premise's
+    particle id, not a corpus snapshot, and the premise is
+    followed by ``_check_retraction_propagation`` instead.
+    """
     findings: list[LintFinding] = []
     for p in await get_active_particles(session):
         for ref in p.provenance:
-            if not ref.snapshot_id:
+            if ref.type is ProvenanceRefType.PARTICLE or not ref.snapshot_id:
                 continue
             if await get_snapshot(session, ref.snapshot_id) is None:
                 if fix:

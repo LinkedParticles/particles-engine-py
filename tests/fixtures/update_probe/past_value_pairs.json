@@ -1,0 +1,24 @@
+{
+  "about": "Held-out pairs for the past-value guard of the rung 2.5 admission rule, registered before any run: no model has been asked any of these rows. The 2026-10-12 replay found the proposed gate retiring an older claim that records only a past value ('lived in Utrecht until 2025', a dated re-anchor restatement), which the contradiction probe had kept. These rows test the amended past-value rule in both directions, worded apart from gate_pairs.json, gate_pairs_heldout.json and the prompt's examples, in other places and domains: 'past-ended' rows (an older claim with a stated end, in the past tense, or in a restatement's 'As of <date>, when ...' shape) must not be retired; 'present-dated' rows (an older present-tense claim carrying a date, as claude-sonnet-5-5's extractor writes them) must still be. Class 'past-then-past' is the rot benchmark's history pair. Class 'case' holds the trip case's own restatement shape, reported apart. Bars, from the acceptance plan (item 3b): on each model, proposed gate with the amended prompt, every 'present-dated' row retired in at least two of three samples, and no retirement in any 'past-ended' or 'past-then-past' sample.",
+  "labelled_by": "proposed and registered on 2026-10-12 by the session that revised the record, before any run. Labels to be confirmed by the owner before the record activates; a label the owner changes after the run is reported under both labellings.",
+  "rows": [
+    {"id": "worked-until", "class": "past-ended", "older": "The user worked at Lindqvist & Berg until March 2025.", "newer": "The user works at Ostrava Robotics, per a note from 2026-06-02.", "expected": "not_changes"},
+    {"id": "before-2024", "class": "past-ended", "older": "Before 2024 the user's team used Jira.", "newer": "The team tracks its work in Linear (noted 2026-04-18).", "expected": "not_changes"},
+    {"id": "restated-pool", "class": "past-ended", "older": "As of 2026-02-10, when the user lived in Bremen, the user swam at the Sudbad pool.", "newer": "Since May 2026 the user has lived in Hanover.", "expected": "not_changes"},
+    {"id": "back-in-2023", "class": "past-ended", "older": "Back in 2023 the user drove a Volvo V60.", "newer": "The user drives a Tesla Model 3 (noted 2026-07-01).", "expected": "not_changes"},
+    {"id": "had-been", "class": "past-ended", "older": "The user had been vegetarian for ten years until 2025.", "newer": "The user eats fish, per a note from 2026-03-09.", "expected": "not_changes"},
+    {"id": "restated-backups", "class": "past-ended", "older": "As of 2026-04-01, when the project used MySQL, backups ran nightly with mysqldump.", "newer": "On 2026-06-10 the project moved its database to PostgreSQL.", "expected": "not_changes"},
+    {"id": "restated-rent", "class": "past-ended", "older": "As of 2026-01-20, when the user rented in Bremen, the user's rent was 780 euros a month.", "newer": "The user's rent is 910 euros a month (noted 2026-08-14).", "expected": "not_changes"},
+
+    {"id": "lives-dated", "class": "present-dated", "older": "The user lives in Bremen, as of 2026-02-10.", "newer": "Since May 2026 the user has lived in Hanover.", "expected": "changes"},
+    {"id": "works-noted", "class": "present-dated", "older": "The user is working at Lindqvist & Berg (noted 2026-01-05).", "newer": "The user joined Ostrava Robotics on 2026-05-20.", "expected": "changes"},
+    {"id": "course-to-home", "class": "present-dated", "older": "The user is in Lyon for a three-week course, as of 2026-03-02.", "newer": "The user signed a lease in Lyon on 2026-04-01 and lives there now.", "expected": "changes"},
+    {"id": "tracker-noted", "class": "present-dated", "older": "The team tracks its work in Jira, per a note from 2026-01-12.", "newer": "The team switched from Jira to Linear on 2026-04-18.", "expected": "changes"},
+    {"id": "phone-plan", "class": "present-dated", "older": "The user's phone plan is with Vodafone, as of 2026-02-01.", "newer": "The user moved their phone plan to Lebara on 2026-06-03.", "expected": "changes"},
+
+    {"id": "manager-history", "class": "past-then-past", "older": "The user's manager was previously Henrik.", "newer": "The user's manager was previously Sofia.", "expected": "not_changes"},
+
+    {"id": "case-restated-flight", "class": "case", "older": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was due to fly back home to Delhi on Thursday 2026-10-15.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "not_changes"},
+    {"id": "case-restated-hotel", "class": "case", "older": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was staying at a hotel in Bandra, Mumbai.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "not_changes"}
+  ]
+}

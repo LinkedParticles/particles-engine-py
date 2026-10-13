@@ -95,6 +95,7 @@ from particles.ingest.second_reading import (
     second_reading_prompt_hash,
     source_kind,
 )
+from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.operations._llm import (
     _llm_call,
     _llm_call_many,
@@ -634,9 +635,11 @@ async def _verify_flagged(
 
 #: The probe's output budget. The reply is a one-sentence reason and a verdict
 #: line (~60 tokens); 100 cut replies from claude-haiku-4-5 mid-sentence more
-#: than 40 times in one audit because the model wrote paragraphs. The verdict
-#: comes last, so a reply cut at this budget has none and is never counted.
-_PROBE_MAX_TOKENS = 250
+#: than 40 times in one audit because the model wrote paragraphs, and a model
+#: that thinks by default spends its thinking from the same budget
+#: (:data:`particles.llm.breaker.PROBE_MAX_TOKENS`). The verdict comes last, so
+#: a reply cut at this budget has none and is never counted.
+_PROBE_MAX_TOKENS = PROBE_MAX_TOKENS
 
 #: The probe samples at temperature 0 so one store gives one verdict set: at
 #: the provider default the same 200 pairs flagged 13 to 18 contradictions

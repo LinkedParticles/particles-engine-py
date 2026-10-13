@@ -195,6 +195,9 @@ async def _extract_all_pending(agent_id: str, *, tag: str | None = None) -> None
     from particles.operations.extract import collapse_superseded_pending, extract_snapshot
     from particles.operations.version_guard import assert_store_schema_current
 
+    # a refused extraction endpoint claims nothing, so every
+    # snapshot stays PENDING with its attempt count unchanged.
+    _refuse_if_extraction_refused()
     # Fail fast if ANTHROPIC_API_KEY is unset — otherwise we'd run through every
     # pending snapshot reporting the same auth error.
     try:
@@ -504,6 +507,22 @@ async def _resolve_local(entry_id: str, snapshot_id: str | None) -> tuple[str, s
     return entry_id, snapshot_id
 
 
+def _refuse_if_extraction_refused() -> None:
+    """Raise before any snapshot is claimed when the extraction endpoint is refused.
+
+    The engine's own posture governs a remote run, so this is a local-mode
+    check only. ``run()`` prints the refusal as one line.
+    """
+    from particles.llm import PurposeRefused, purpose_allowed
+    from particles.llm.registry import purpose_endpoint
+
+    if not purpose_allowed("extraction"):
+        from particles.egress import current_policy
+
+        host, port, _ = purpose_endpoint("extraction")
+        raise PurposeRefused("extraction", host, port, current_policy().posture)
+
+
 async def _extract(
     entry_id: str, snapshot_id: str | None, agent_id: str
 ) -> tuple[str, list[Particle], list[Any], list[str], list[str], LLMUsage | None]:
@@ -520,6 +539,7 @@ async def _extract(
             raise typer.Exit(1)
         resolved_snapshot = snapshot_id
     else:
+        _refuse_if_extraction_refused()
         entry_id, resolved_snapshot = await _resolve_local(entry_id, snapshot_id)
 
     outcome = await backend.extract(entry_id, resolved_snapshot, agent_id=agent_id)

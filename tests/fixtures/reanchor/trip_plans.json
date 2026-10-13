@@ -1,0 +1,193 @@
+{
+  "about": "Measurement set for the end of a retired stay (proposed): plans tied to a bounded stay, leave or freeze that an update retired, beside non-dependent controls. Same shape as cases.json, so the re-anchor probe and second reading run over it unchanged. 'expected' is DEPENDS when the claim, read as a statement about now, relied on the retired circumstance being current, else HOLDS. Each candidate's 'form' names what it measures. end-of-stay: the claim states how the retired circumstance ends (a return, a last day, a check-out, the departure or reopening that ends it), with no relative or possessive reference and no definite description of the retired thing, which is the form the current rubric does not name. kind-a / kind-b: a reference the current rubric already names, so these pin that the new rule does not regress them. control-*: a HOLDS claim built to tempt an over-broad reading of the end-of-stay form (plan-at-origin: a plan at the place the stay returns to; plan-during: a plan at the stay's place within it; other-person: someone else's travel; later-visit: a later trip that uses the word 'back'; stay-start or past-event: a dated event that already happened; world-knowledge: a plan a reader would expect to change with the circumstance though nothing in the claim or passage ties it to the end; pegged-event: the event the circumstance is pegged to, not its end; lasting / place / residence / dated-request as in cases.json). 'retired_by' is the update that retired the claim, for the labeller only: the probe is never shown it. 'restates_limit' marks an end-of-stay candidate that restates the limit the retired claim itself states (its last day, its end date), which the paraphrase route may retire by update before the re-anchor pass sees it. Either route passes (owner's ruling), and results are reported for these apart. The baseline under the current prompts is recorded with the proposal. The runner reads cases.json only, so until it takes a fixture path, run this file by pointing scripts/reanchor_fixture.py's FIXTURE at it from a scratch wrapper (one probe per case, one reading per DEPENDS verdict).",
+  "labelled_by": "proposed by the drafting session. The owner confirmed every label as proposed on 2026-10-11, after the baseline and the review brief (the dentist appointment, the brief's boundary case, stays HOLDS). The trip-return-flight case uses the claims and passage of tests/fixtures/trip_vs_move/ session 11: the first candidate is the phrasing extracted on the 2026-10-10 acceptance run, which the probe judged HOLDS, the second the 1.178.1 phrasing, which the 2026-10-09 replay judged DEPENDS 2 of 2, and the hotel claim was re-anchored on 1.178.1.",
+  "cases": [
+    {
+      "id": "trip-return-flight",
+      "date": "2026-10-08",
+      "passage": "Session 11 (2026-10-08): work trip\n\nUser: I'm in Mumbai for a week for work, staying at a hotel in Bandra. I fly back home to Delhi next Thursday.\n\nUser: Somewhere vegetarian for dinner tonight would be great.",
+      "retired": "The user is in Mumbai for a week for work.",
+      "retired_by": "The user moved to Mumbai.",
+      "candidates": [
+        {
+          "claim": "The user flies back to Delhi on Thursday, 2026-10-15.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay"
+        },
+        {
+          "claim": "The user flies back home to Delhi on Thursday, 2026-10-15.",
+          "expected": "DEPENDS",
+          "form": "kind-a"
+        },
+        {
+          "claim": "The user is staying at a hotel in Bandra, Mumbai.",
+          "expected": "DEPENDS",
+          "form": "kind-a"
+        },
+        {
+          "claim": "The user's home is in Delhi.",
+          "expected": "HOLDS",
+          "form": "control-residence"
+        },
+        {
+          "claim": "The user wants a vegetarian restaurant for dinner on the evening of 2026-10-08.",
+          "expected": "HOLDS",
+          "form": "control-dated-request"
+        }
+      ]
+    },
+    {
+      "id": "conference-return",
+      "date": "2026-03-18",
+      "passage": "Session, 18 March 2026\n\nUser: I'm at KubeCon in Paris this week. I flew in from London on Monday, and I'm on the Eurostar back to London on Friday at 6pm. My colleague Ana flies back to Lisbon tomorrow. I've got a dentist appointment in London next Monday, 23 March.",
+      "retired": "The user is at KubeCon in Paris this week.",
+      "retired_by": "The user has decided to stay on in Paris for another month.",
+      "candidates": [
+        {
+          "claim": "The user takes the Eurostar back to London on Friday, 2026-03-20, at 6pm.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay"
+        },
+        {
+          "claim": "The user has a dentist appointment in London on Monday, 2026-03-23.",
+          "expected": "HOLDS",
+          "form": "control-plan-at-origin"
+        },
+        {
+          "claim": "The user's colleague Ana flies back to Lisbon on 2026-03-19.",
+          "expected": "HOLDS",
+          "form": "control-other-person"
+        },
+        {
+          "claim": "The user flew from London to Paris on Monday, 2026-03-16.",
+          "expected": "HOLDS",
+          "form": "control-stay-start"
+        }
+      ]
+    },
+    {
+      "id": "kyoto-checkout",
+      "date": "2026-11-03",
+      "passage": "Session, 3 November 2026\n\nUser: I'm staying at an Airbnb in Kyoto this week. I check out on Sunday at 11am and get the train to Tokyo that afternoon. I went to Fushimi Inari yesterday, it was packed. I'd love to come back to Kyoto in the spring.",
+      "retired": "The user is staying at an Airbnb in Kyoto this week.",
+      "retired_by": "The user has extended their stay in Kyoto to the end of the month.",
+      "candidates": [
+        {
+          "claim": "The user checks out on Sunday, 2026-11-08, at 11am.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay",
+          "restates_limit": true
+        },
+        {
+          "claim": "The user takes the train from Kyoto to Tokyo on the afternoon of 2026-11-08.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay"
+        },
+        {
+          "claim": "The user visited Fushimi Inari on 2026-11-02.",
+          "expected": "HOLDS",
+          "form": "control-past-event"
+        },
+        {
+          "claim": "The user would like to come back to Kyoto in the spring.",
+          "expected": "HOLDS",
+          "form": "control-later-visit"
+        }
+      ]
+    },
+    {
+      "id": "parental-leave",
+      "date": "2026-01-10",
+      "passage": "Journal, 10 January 2026\n\nI'm on parental leave from Hooli until March. I go back to work on 2 March. Hooli's planning offsite is in April. Our daughter starts nursery in September.",
+      "retired": "The user is on parental leave from Hooli until March 2026.",
+      "retired_by": "The user has extended their parental leave to June.",
+      "candidates": [
+        {
+          "claim": "The user goes back to work at Hooli on 2026-03-02.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay",
+          "restates_limit": true
+        },
+        {
+          "claim": "Hooli's planning offsite is in April 2026.",
+          "expected": "HOLDS",
+          "form": "control-plan-at-origin"
+        },
+        {
+          "claim": "The user's daughter starts nursery in September 2026.",
+          "expected": "HOLDS",
+          "form": "control-world-knowledge"
+        }
+      ]
+    },
+    {
+      "id": "summer-with-grandparents",
+      "date": "2026-07-02",
+      "passage": "Session, 2 July 2026\n\nUser: My son is staying with his grandparents in Pune for the summer. He comes back to Bangalore on 20 August, the week before school starts. He's going into Year 4. My parents live in Koregaon Park.",
+      "retired": "The user's son is staying with his grandparents in Pune for the summer.",
+      "retired_by": "The user's son will stay in Pune with his grandparents and go to school there.",
+      "candidates": [
+        {
+          "claim": "The user's son comes back to Bangalore on 2026-08-20.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay"
+        },
+        {
+          "claim": "The user's son is going into Year 4.",
+          "expected": "HOLDS",
+          "form": "control-world-knowledge"
+        },
+        {
+          "claim": "The user's parents live in Koregaon Park, Pune.",
+          "expected": "HOLDS",
+          "form": "control-place"
+        }
+      ]
+    },
+    {
+      "id": "porto-month",
+      "date": "2026-06-03",
+      "passage": "Session, 3 June 2026\n\nUser: I'm staying in Porto this month. My last day in Porto is 30 June. I've booked a fado show for 12 June.",
+      "retired": "The user is staying in Porto this month.",
+      "retired_by": "The user has decided to live in Porto for good.",
+      "candidates": [
+        {
+          "claim": "The user's last day in Porto is 2026-06-30.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay",
+          "restates_limit": true
+        },
+        {
+          "claim": "The user has booked a fado show in Porto for 2026-06-12.",
+          "expected": "HOLDS",
+          "form": "control-plan-during"
+        }
+      ]
+    },
+    {
+      "id": "orbit-freeze",
+      "date": "2026-04-14",
+      "passage": "Orbit standup notes, 14 April 2026\n\nOrbit's main branch is frozen until the 1.0 release. Merges reopen on 1 May. The 1.0 release is planned for 30 April. Orbit's changelog is generated by git-cliff.",
+      "retired": "Orbit's main branch is frozen until the 1.0 release.",
+      "retired_by": "The freeze on Orbit's main branch was lifted on 2026-04-20.",
+      "candidates": [
+        {
+          "claim": "Orbit's main branch reopens for merges on 2026-05-01.",
+          "expected": "DEPENDS",
+          "form": "end-of-stay",
+          "restates_limit": true
+        },
+        {
+          "claim": "Orbit's 1.0 release is planned for 2026-04-30.",
+          "expected": "HOLDS",
+          "form": "control-pegged-event"
+        },
+        {
+          "claim": "Orbit's changelog is generated by git-cliff.",
+          "expected": "HOLDS",
+          "form": "control-lasting"
+        }
+      ]
+    }
+  ]
+}

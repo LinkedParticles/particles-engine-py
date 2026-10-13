@@ -56,17 +56,22 @@ def _resolved_inbox_or_exit() -> Any:
 
 def _print_summary(summary: dict[str, list[str]]) -> None:
     """Format ``process_inbox`` summary for the operator."""
-    total = len(summary["processed"]) + len(summary["failed"])
+    refused = summary.get("refused", [])
+    total = len(summary["processed"]) + len(summary["failed"]) + len(refused)
     if total == 0:
         typer.echo("Inbox empty — nothing to process.")
         return
+    refused_note = f", {len(refused)} refused by network.egress" if refused else ""
     typer.echo(
-        f"Processed {len(summary['processed'])} / {total} URL(s) ({len(summary['failed'])} failed)."
+        f"Processed {len(summary['processed'])} / {total} URL(s) "
+        f"({len(summary['failed'])} failed{refused_note})."
     )
     for url in summary["processed"]:
         typer.echo(f"  + {url}")
     for url in summary["failed"]:
         typer.echo(f"  x {url}")
+    for url in refused:
+        typer.echo(f"  - {url} (refused: network.egress)")
 
 
 @inbox_app.command("process")

@@ -37,6 +37,7 @@ from particles.ingest.pair_selection import (
     plan_update_extras,
     plan_update_probes,
     select_pairs,
+    write_order,
 )
 
 T0 = datetime(2026, 6, 1, tzinfo=UTC)
@@ -44,7 +45,12 @@ DECLINE = PairPrecondition.DECLINE
 REVIEW = PairPrecondition.REVIEW
 
 
-def _p(content: str, *, entry: CorpusEntry | None = None) -> Particle:
+def _p(
+    content: str,
+    *,
+    entry: CorpusEntry | None = None,
+    nature: UncertaintyNature = UncertaintyNature.EPISTEMIC,
+) -> Particle:
     provenance = (
         [
             ProvenanceRef(
@@ -60,7 +66,7 @@ def _p(content: str, *, entry: CorpusEntry | None = None) -> Particle:
         id=str(uuid.uuid4()),
         content=content,
         confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
-        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        uncertainty_nature=nature,
         asserted_by="general-extractor",
         asserted_at=T0,
         subject_ids=["u"],
@@ -307,6 +313,21 @@ class TestSlotRule:
         assert sel.updatable == frozenset({A.id})
 
 
+class TestWriteOrder:
+    def test_a_candidate_that_may_update_is_written_first(self) -> None:
+        # The Ledgerly pass: a sibling that only contradicts the old claim
+        # (a fixed slot) came before the claim that updates it.
+        plain = PairSelection()
+        contradicts = PairSelection(primary=A, signal=True, slots={A.id: FIXED})
+        updates = PairSelection(primary=A, signal=True, slots={A.id: CHANGES})
+        assert write_order([plain, contradicts, updates, plain]) == [2, 0, 1, 3]
+
+    def test_the_extractor_order_is_kept_within_each_group(self) -> None:
+        updates = PairSelection(primary=A, signal=True, slots={A.id: CHANGES})
+        assert write_order([updates, PairSelection(), updates]) == [0, 2, 1]
+        assert write_order([]) == []
+
+
 # ---------------------------------------------------------------------------
 # plan_update_extras
 # ---------------------------------------------------------------------------
@@ -335,6 +356,16 @@ def _plan(
     precondition: dict[str, PairPrecondition] | None = None,
     updatable: set[str] | None = None,
 ) -> list[str]:
+    return [loser for loser, _ in _pairs(winner, others, entries, precondition, updatable)]
+
+
+def _pairs(
+    winner: Particle,
+    others: list[Particle],
+    entries: list[CorpusEntry],
+    precondition: dict[str, PairPrecondition] | None = None,
+    updatable: set[str] | None = None,
+) -> list[tuple[str, str]]:
     return plan_update_extras(
         winner,
         WINNER_ENTRY,
@@ -392,3 +423,148 @@ class TestPlanUpdateExtras:
 
     def test_no_extras_demotes_nothing(self) -> None:
         assert _plan(_winner(), [], []) == []
+
+    def test_each_retirement_names_the_claim_that_retired_it(self) -> None:
+        older, newer = _entry(T0), _entry(T0 + timedelta(days=20))
+        winner, o1, o2 = _winner(), _p("o1", entry=older), _p("o2", entry=newer)
+        # o1 falls to the winner; the winner then falls to the newer o2.
+        assert _pairs(winner, [o1, o2], [older, newer]) == [
+            (o1.id, winner.id),
+            (winner.id, o2.id),
+        ]
+
+    def test_an_older_aleatory_extra_is_retired_by_a_settled_winner(self) -> None:
+        # the extras read ALEATORY on the newer claim only, through
+        # the ladder's own function. An earlier plan falls to a settled report.
+        e1, e2 = _entry(T0), _entry(T0 + timedelta(days=1))
+        winner = _winner()
+        plan = _p("plan", entry=e1, nature=UncertaintyNature.ALEATORY)
+        settled = _p("settled", entry=e2)
+        assert _pairs(winner, [plan, settled], [e1, e2]) == [
+            (plan.id, winner.id),
+            (settled.id, winner.id),
+        ]
+
+    def test_an_aleatory_winner_retires_no_extra(self) -> None:
+        e1 = _entry(T0)
+        forecast = _p("forecast", entry=WINNER_ENTRY, nature=UncertaintyNature.ALEATORY)
+        assert _plan(forecast, [_p("settled", entry=e1)], [e1]) == []
+
+    def test_a_newer_aleatory_extra_does_not_retire_the_winner(self) -> None:
+        # The -1 direction: the extra is the newer claim, and it is a forecast,
+        # so it settles nothing and the run carries on past it.
+        older, newer = _entry(T0), _entry(T0 + timedelta(days=20))
+        winner = _winner()
+        o1 = _p("o1", entry=older)
+        forecast = _p("forecast", entry=newer, nature=UncertaintyNature.ALEATORY)
+        assert _pairs(winner, [forecast, o1], [older, newer]) == [(o1.id, winner.id)]
+
+    def test_a_newer_settled_extra_retires_an_aleatory_winner(self) -> None:
+        # The -1 mirror of the first case: the winner is the earlier plan.
+        newer = _entry(T0 + timedelta(days=20))
+        plan = _p("plan", entry=WINNER_ENTRY, nature=UncertaintyNature.ALEATORY)
+        settled = _p("settled", entry=newer)
+        assert _pairs(plan, [settled], [newer]) == [(plan.id, settled.id)]
+
+
+# ---------------------------------------------------------------------------
+# the update question first
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateFirst:
+    """Rung 2.5 rests on the same-slot check; the contradiction probe runs only where it matters."""
+
+    def test_only_pairs_the_precondition_reconciles_are_asked_first(self) -> None:
+        from particles.ingest.pair_selection import plan_update_first
+
+        near, a, b, c = _p("near"), _p("a"), _p("b"), _p("c")
+        pairs = CandidatePairs(
+            nearest=near,
+            subject_pool=(a, b, c),
+            precondition={b.id: DECLINE, c.id: REVIEW},
+        )
+        assert plan_update_first(pairs) == [near, a]
+        # A contested nearest claim goes to review whatever the answer.
+        contested = CandidatePairs(nearest=near, precondition={near.id: REVIEW})
+        assert plan_update_first(contested) == []
+
+    def test_a_marked_past_value_is_not_asked_first(self) -> None:
+        from particles.ingest.pair_selection import admits_update_first
+
+        assert admits_update_first("The user lives in a city.")
+        assert not admits_update_first("The user lived in a city until 2024.")
+        assert not admits_update_first("As of 2026-01-01, when the user lived there, it rained.")
+
+    def test_a_settled_answer_skips_the_contradiction_probe(self) -> None:
+        near, a, b, c = _p("near"), _p("a"), _p("b"), _p("c")
+        pairs = CandidatePairs(nearest=near, subject_pool=(a, b, c))
+        slots = {
+            near.id: SlotVerdict.CHANGES,
+            a.id: SlotVerdict.DIFFERENT,
+            b.id: SlotVerdict.FIXED,
+        }
+        admitted = {near.id, a.id, b.id}
+        planned = [p.id for p, _ in plan_probes(pairs, slots, admitted)]
+        # CHANGES and a different-slot pool member are settled; FIXED and an
+        # unasked member (c) still take the probe.
+        assert planned == [b.id, c.id]
+        # A nearest claim in a different slot still takes the probe: its pair
+        # reaches the ladder, where a contradiction is rung 3's.
+        nearest_only = CandidatePairs(nearest=near)
+        assert [
+            p.id for p, _ in plan_probes(nearest_only, {near.id: SlotVerdict.DIFFERENT}, {near.id})
+        ] == [near.id]
+
+    def test_a_pair_asked_first_is_not_asked_again(self) -> None:
+        near, a = _p("near"), _p("a")
+        pairs = CandidatePairs(nearest=near, subject_pool=(a,))
+        probes = {near.id: True, a.id: True}
+        assert plan_update_probes(pairs, probes, asked={near.id}) == [a]
+
+    def test_a_settled_update_is_offered_without_a_signal(self) -> None:
+        near, a = _p("near"), _p("a")
+        pairs = CandidatePairs(nearest=near, subject_pool=(a,))
+        # The nearest claim is unrelated (probe NO); the pool member is an update
+        # the contradiction probe was never asked about.
+        sel = select_pairs(pairs, {near.id: False}, {a.id: SlotVerdict.CHANGES}, {a.id})
+        assert sel.primary is a and sel.signal is False
+        assert sel.same_slot_update(a.id) and a.id in sel.updatable
+
+    def test_an_answer_alone_offers_nothing_unless_admitted(self) -> None:
+        near, a = _p("near"), _p("a")
+        pairs = CandidatePairs(nearest=near, subject_pool=(a,))
+        # Asked only after a probe YES (today's path), CHANGES with no probe
+        # result does not offer the member.
+        sel = select_pairs(pairs, {near.id: False}, {a.id: SlotVerdict.CHANGES})
+        assert sel.primary is near and sel.same_slot == frozenset()
+
+    def test_a_settled_nearest_update_stays_primary(self) -> None:
+        near, a = _p("near"), _p("a")
+        pairs = CandidatePairs(nearest=near, subject_pool=(a,))
+        sel = select_pairs(
+            pairs,
+            {a.id: True},
+            {near.id: SlotVerdict.CHANGES, a.id: SlotVerdict.CHANGES},
+            {near.id},
+        )
+        assert sel.primary is near and sel.same_slot_update(near.id)
+        assert sel.extras == (a,)
+
+    def test_the_signal_is_always_the_probes_own(self) -> None:
+        """No rung that picks between sources runs on an update answer."""
+        near, a = _p("near"), _p("a")
+        pairs = CandidatePairs(subject_pool=(near, a))
+        sel = select_pairs(
+            pairs,
+            {a.id: True},
+            {near.id: SlotVerdict.CHANGES, a.id: SlotVerdict.CHANGES},
+            {near.id},
+        )
+        assert sel.primary is near and sel.signal is False
+        sel = select_pairs(
+            pairs,
+            {near.id: True, a.id: True},
+            {near.id: SlotVerdict.CHANGES, a.id: SlotVerdict.CHANGES},
+        )
+        assert sel.primary is near and sel.signal is True

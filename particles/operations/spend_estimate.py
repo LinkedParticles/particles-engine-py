@@ -29,8 +29,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from particles.config import ProviderSelection, TokenPrice, get_config, lookup_by_model
-from particles.operations.audit import estimate_extraction
+from particles.config import ProviderSelection, TokenPrice, get_config
+from particles.operations.audit import estimate_extraction, extraction_output_model
 
 if TYPE_CHECKING:
     from particles.llm.registry import CompletionRequest
@@ -106,8 +106,9 @@ def extraction_estimate(source_chars: Sequence[int]) -> PassEstimate:
     """Extracting sources of these sizes, with the §6.6 probes extraction makes.
 
     Reuses the audit's estimate (``audit.estimate_extraction``): its chunking
-    rule, its per-call output figure and retry rate, and its expected
-    reconcile probes per call. The audit's own census probes are left out;
+    rule, its output model (a per-call base plus a rate per source character,
+    with the retries a call near ``extraction.max_tokens`` makes), and its
+    expected reconcile probes per call. The audit's own census probes are left out;
     the consolidation census is estimated as its own pass.
     """
     estimate = estimate_extraction(source_chars)
@@ -133,7 +134,7 @@ def extraction_estimate(source_chars: Sequence[int]) -> PassEstimate:
         calls=estimate.estimated_llm_calls + round(estimate.expected_retries),
         usd=usd,
         basis=(
-            f"{estimate.output_tokens_per_call_source}, "
+            f"{estimate.output_basis}, "
             "extraction.estimate_prompt_overhead_tokens, "
             "audit.estimate_extraction_retry_rate, "
             "audit.estimate_reconcile_probes_per_extraction_call"
@@ -141,19 +142,18 @@ def extraction_estimate(source_chars: Sequence[int]) -> PassEstimate:
     )
 
 
-def _output_tokens_per_request(purpose: str | None, provider: str, model: str, cap: int) -> int:
-    """The expected output of one request on ``purpose``, never above its ``max_tokens``."""
+def _output_tokens_per_request(
+    purpose: str | None, provider: str, model: str, cap: int, prompt_chars: int
+) -> int:
+    """The expected output of one request on ``purpose``, never above its ``max_tokens``.
+
+    An extraction request's output scales with the source it carries; its
+    prompt's length stands in for that, instructions included, so it leans high.
+    """
     audit = get_config().audit
     match purpose:
         case "extraction":
-            per_call, _ = lookup_by_model(
-                audit.estimate_output_tokens_per_extraction_call_by_model, provider, model
-            )
-            figure = (
-                per_call
-                if per_call is not None
-                else audit.estimate_output_tokens_per_extraction_call
-            )
+            figure = round(extraction_output_model(provider, model).expected(prompt_chars))
         case "semantic_lint" | "use_judge":
             figure = audit.estimate_probe_output_tokens
         case "verification":
@@ -181,7 +181,10 @@ def estimate_batch_chunk(
     if price is None:
         return None
     chars = sum(len(r.prompt) + len(r.system or "") + len(r.cache_prefix or "") for r in requests)
-    output = len(requests) * _output_tokens_per_request(purpose, provider, model, max_tokens)
+    output = sum(
+        _output_tokens_per_request(purpose, provider, model, max_tokens, len(r.prompt))
+        for r in requests
+    )
     cost = _price(price, chars / _CHARS_PER_TOKEN, output)
     return None if cost is None else cost * (1.0 - llm.batch_discount)
 
@@ -201,9 +204,14 @@ def requests_estimate(
     selection = llm.for_purpose(purpose)
     price = llm.price_for(selection)
     chars = sum(len(r.prompt) + len(r.system or "") + len(r.cache_prefix or "") for r in requests)
-    per_call = _output_tokens_per_request(purpose, selection.provider, selection.model, max_tokens)
+    output = sum(
+        _output_tokens_per_request(
+            purpose, selection.provider, selection.model, max_tokens, len(r.prompt)
+        )
+        for r in requests
+    )
     return PassEstimate(
         calls=len(requests),
-        usd=_price(price, chars / _CHARS_PER_TOKEN, len(requests) * per_call),
+        usd=_price(price, chars / _CHARS_PER_TOKEN, output),
         basis="prompt size at ~4 chars per token; audit.estimate_probe_output_tokens",
     )

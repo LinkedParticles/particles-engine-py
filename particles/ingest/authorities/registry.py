@@ -28,6 +28,14 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+class AuthorityUnreachable(Exception):
+    """A live authority lookup failed before the authority could answer.
+
+    Distinct from an empty answer: "no such entity" is worth remembering, "could
+    not ask" is not.
+    """
+
+
 @dataclass
 class AuthorityResolution:
     """Neutral result of a live authority lookup.
@@ -43,10 +51,18 @@ class AuthorityResolution:
     resolver treats it as the abstention: no ref is attached, the
     next authority is tried, and no negative cache is recorded, because the
     judgement depends on the claim.
+
+    ``unreachable`` is the fourth: the lookup could not be made (a network
+    error, a timeout, an error status), so the authority does not know whether
+    it holds the name. The resolver tries the next authority and records no
+    negative cache entry, so an outage is never remembered as a miss.
+    An authority raises :class:`AuthorityUnreachable` internally
+    and reports it here.
     """
 
     existing: Subject | None = None
     abstained: bool = False
+    unreachable: bool = False
     external_ref: ExternalRef | None = None
     canonical_name: str | None = None
     aliases: list[str] = field(default_factory=list)

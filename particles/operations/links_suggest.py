@@ -70,6 +70,7 @@ from particles.core.schema import (
 from particles.core.stance import stance_holder
 from particles.core.status import Status, StatusReason
 from particles.extraction.polarity import is_non_asserted
+from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.operations._scope import pair_scope_tier
 from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
 
@@ -96,14 +97,41 @@ class ApplyConfirmationRequired(Exception):
         )
 
 
-def _pair_key(a: str, b: str) -> str:
-    """Short id-pair key used in the batch prompt and verdict mapping."""
-    return f"{a[:8]}+{b[:8]}"
+# The judge's reply budget, per pair and per call. A pair is keyed by its batch
+# position (``p0``, ``p1``, …), mapped back locally, so a reply entry is
+# ``"p24": "PARAPHRASE",`` whatever the tokenizer. The budget covers a reply
+# that spends one token per byte, indented and fenced, with headroom; the
+# test pins that bound. Keying by ``a8+b8`` particle-id prefixes cost
+# ``claude-haiku-5-5`` about 57 tokens an entry, so a 25-pair batch ran out of
+# a 40-per-pair budget, the truncated JSON parsed to nothing, and every pair
+# read UNSURE.
+_JUDGE_TOKENS_PER_PAIR = 48
+_JUDGE_TOKENS_BASE = 64
+_JUDGE_MIN_TOKENS = 200
 
 
-def _normalise_key(key: str) -> frozenset[str]:
-    """Order- and format-tolerant lookup key from an ``a8+b8`` string."""
-    return frozenset(part.strip() for part in key.split("+") if part.strip())
+def _judge_max_tokens(pair_count: int) -> int:
+    """The output budget for one judge call over ``pair_count`` pairs.
+
+    The reply's own size, plus the room a model that thinks before it answers
+    spends first (``PROBE_MAX_TOKENS``): its thinking counts against the same
+    budget, so a budget sized to the reply alone can return no text.
+    """
+    reply = max(_JUDGE_MIN_TOKENS, _JUDGE_TOKENS_BASE + _JUDGE_TOKENS_PER_PAIR * pair_count)
+    return PROBE_MAX_TOKENS + reply
+
+
+def _judge_key(index: int) -> str:
+    """The prompt key for the pair at ``index`` in its batch."""
+    return f"p{index}"
+
+
+def _key_index(key: str) -> int | None:
+    """The batch position a reply key names, tolerating case and brackets."""
+    text = key.strip().strip("[]").strip().lower()
+    if not text.startswith("p") or not text[1:].isdigit():
+        return None
+    return int(text[1:])
 
 
 async def suggest_co_evidential(
@@ -429,11 +457,6 @@ async def _judge_cluster(
             f"(max_cluster_size={max_cluster_size})."
         )
 
-    # Index candidates by their order-insensitive prefix key for verdict mapping.
-    by_key: dict[frozenset[str], CoEvidentialCandidate] = {
-        _normalise_key(_pair_key(c.particle_a, c.particle_b)): c for c in cluster.candidates
-    }
-
     judged = 0
     for batch in batches:
         batch_candidates = [
@@ -442,9 +465,8 @@ async def _judge_cluster(
         if not batch_candidates:
             continue
         verdicts = await _judge_batch(batch_candidates, content_for)
-        for raw_key, verdict in verdicts.items():
-            candidate = by_key.get(_normalise_key(raw_key))
-            if candidate is not None and candidate.verdict is None:
+        for candidate, verdict in zip(batch_candidates, verdicts, strict=False):
+            if verdict is not None and candidate.verdict is None:
                 candidate.verdict = verdict
         # Any candidate the LLM didn't return a verdict for defaults to UNSURE.
         for c in batch_candidates:
@@ -456,34 +478,34 @@ async def _judge_cluster(
 
 async def _judge_batch(
     candidates: list[CoEvidentialCandidate], content_for: dict[str, str]
-) -> dict[str, JudgeVerdictKind]:
-    """Send one batch of candidate pairs to the LLM and parse the verdicts.
+) -> list[JudgeVerdictKind | None]:
+    """Send one batch of candidate pairs to the LLM; one verdict per candidate.
 
-    Returns a mapping of ``a8+b8`` pair key → verdict. Pairs the LLM omits or
-    returns unparseably are left out of the map (the caller defaults them to
-    UNSURE).
+    The list is aligned with ``candidates``. A pair the LLM omits or answers
+    unparseably is ``None`` (the caller defaults it to UNSURE).
     """
-    keyed = [
-        (
-            _pair_key(c.particle_a, c.particle_b),
-            content_for.get(c.particle_a, "(content unavailable)"),
-            content_for.get(c.particle_b, "(content unavailable)"),
-        )
-        for c in candidates
-    ]
-    return await _judge_keyed(keyed)
+    return await _judge_pairs(
+        [
+            (
+                content_for.get(c.particle_a, "(content unavailable)"),
+                content_for.get(c.particle_b, "(content unavailable)"),
+            )
+            for c in candidates
+        ]
+    )
 
 
-async def _judge_keyed(keyed: Sequence[tuple[str, str, str]]) -> dict[str, JudgeVerdictKind]:
-    """One judge call over ``(key, claim_a, claim_b)`` triples; key to verdict.
+async def _judge_pairs(pairs: Sequence[tuple[str, str]]) -> list[JudgeVerdictKind | None]:
+    """One judge call over ``(claim_a, claim_b)`` pairs; a verdict per pair, in order.
 
     The equivalence judge itself: the curation duplicate cards, the
     ``LLM_JUDGE`` mode, and ``reindex --estimate`` (:func:`judge_claim_pairs`)
-    all ask it the same question in the same words.
+    all ask it the same question in the same words. A pair the model omits or
+    answers unparseably is ``None``.
     """
     from particles.operations._llm import _llm_call
 
-    lines = [f"[{key}]\nA: {a}\nB: {b}" for key, a, b in keyed]
+    lines = [f"[{_judge_key(i)}]\nA: {a}\nB: {b}" for i, (a, b) in enumerate(pairs)]
     prompt = (
         "You are curating an epistemic knowledge base. Below are candidate "
         "pairs of claims that may assert the SAME underlying fact (a "
@@ -493,12 +515,15 @@ async def _judge_keyed(keyed: Sequence[tuple[str, str, str]]) -> dict[str, Judge
         "- DISTINCT: the two claims assert different facts\n"
         "- UNSURE: you cannot tell\n\n"
         "Return ONLY a JSON object mapping each bracketed pair key to its "
-        'verdict, e.g. {"c42e15ba+cdcaa152": "PARAPHRASE"}. No prose.\n\n' + "\n\n".join(lines)
+        'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.\n\n' + "\n\n".join(lines)
     )
-    # ~24 tokens per verdict entry is generous; scale with the batch size.
-    max_tokens = max(200, 40 * len(keyed))
-    response = await _llm_call(prompt, max_tokens=max_tokens)
-    return _parse_verdicts(response)
+    response = await _llm_call(prompt, max_tokens=_judge_max_tokens(len(pairs)))
+    verdicts: list[JudgeVerdictKind | None] = [None] * len(pairs)
+    for key, verdict in _parse_verdicts(response).items():
+        index = _key_index(key)
+        if index is not None and index < len(pairs) and verdicts[index] is None:
+            verdicts[index] = verdict
+    return verdicts
 
 
 async def judge_claim_pairs(
@@ -513,12 +538,8 @@ async def judge_claim_pairs(
     """
     verdicts: list[JudgeVerdictKind] = []
     for start in range(0, len(pairs), batch_size):
-        batch = pairs[start : start + batch_size]
-        keys = [f"{start + i:08x}+{start + i:08x}" for i in range(len(batch))]
-        answered = await _judge_keyed(
-            [(key, a, b) for key, (a, b) in zip(keys, batch, strict=True)]
-        )
-        verdicts.extend(answered.get(key, JudgeVerdictKind.UNSURE) for key in keys)
+        answered = await _judge_pairs(pairs[start : start + batch_size])
+        verdicts.extend(v if v is not None else JudgeVerdictKind.UNSURE for v in answered)
     return verdicts
 
 

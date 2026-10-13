@@ -83,6 +83,12 @@ def lint_cmd(
         )
     else:
         typer.echo(_lint_summary_text(report, fix_applied=fix))
+    if report.semantic_skipped:
+        reason = {
+            "egress": "network.egress does not allow the semantic_lint endpoint",
+            "llm_unavailable": "the LLM is unavailable (circuit breaker open)",
+        }.get(report.semantic_skipped_reason or "", "the LLM was unavailable")
+        typer.echo(f"Semantic checks skipped: {reason}. This is not a clean bill.", err=True)
 
 
 def _filter_report_by_category(report: LintReport, category: str) -> LintReport:

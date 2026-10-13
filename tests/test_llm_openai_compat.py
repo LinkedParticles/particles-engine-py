@@ -241,6 +241,17 @@ def test_max_tokens_param_knob(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "max_tokens" not in body
 
 
+def test_reasoning_effort_is_sent_only_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _mock_client([_ok_response("ok"), _ok_response("ok")])
+    _install_client(monkeypatch, client)
+    _configure(monkeypatch)
+    asyncio.run(OpenAICompatProvider(name="local", model="m").complete("p", max_tokens=8))
+    assert "reasoning_effort" not in client.post.call_args.kwargs["json"]
+    _configure(monkeypatch, reasoning_effort="none")
+    asyncio.run(OpenAICompatProvider(name="local", model="m").complete("p", max_tokens=8))
+    assert client.post.call_args.kwargs["json"]["reasoning_effort"] == "none"
+
+
 def test_send_temperature_false_drops_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure(monkeypatch, name="openai", send_temperature=False)
     client = _mock_client([_ok_response("ok")])

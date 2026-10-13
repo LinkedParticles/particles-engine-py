@@ -73,6 +73,8 @@ class ConflictWritePlan:
     """The Extension B ``domain_hint`` the wrapper is inserted with."""
     dropped_event: PlannedEvent | None = None
     """The audited drop of a candidate trust resolution ruled redundant."""
+    update_event: PlannedEvent | None = None
+    """The rung 2.5 retirement's record of its winner (:func:`plan_update_event`)."""
     record_divergence: bool = False
     """Record the inserted row and ``existing`` as an observer divergence."""
     cache_drop_existing: bool = False
@@ -84,6 +86,21 @@ class ConflictWritePlan:
     log_message: str | None = None
     """The info line the apply logs, ``%``-style, with :attr:`log_args`."""
     log_args: tuple[object, ...] = field(default_factory=tuple)
+
+
+def plan_update_event(retired_id: str, winner_id: str, *, route: str) -> PlannedEvent:
+    """The ``UPDATE_SUPERSESSION`` event of one rung 2.5 retirement.
+
+    ``route`` names where the retirement was decided: ``ladder`` (extraction
+    or the assertion door), ``extra`` (a further same-subject pair)
+    or ``sweep``.
+    """
+    return PlannedEvent(
+        event_type=OperatorEventType.UPDATE_SUPERSESSION,
+        reason=f"Rung 2.5 ({route}): {retired_id[:8]} superseded by {winner_id[:8]}",
+        refs=((EventRefKind.PARTICLE, retired_id), (EventRefKind.PARTICLE, winner_id)),
+        payload={"retired_id": retired_id, "winner_id": winner_id, "route": route},
+    )
 
 
 def _score(value: float | None) -> float:
@@ -306,6 +323,7 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=minted,
                 demote=(existing.id, StatusReason.SUPERSEDED_BY_UPDATE),
+                update_event=plan_update_event(existing.id, minted.id, route="ladder"),
                 cache_drop_existing=True,
                 cache_add_new=True,
                 result=minted,
@@ -318,6 +336,7 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=new,
                 demote=(new.id, StatusReason.SUPERSEDED_BY_UPDATE),
+                update_event=plan_update_event(new.id, existing.id, route="ladder"),
                 result=_demoted(new, StatusReason.SUPERSEDED_BY_UPDATE),
                 log_message=(
                     "Update supersession (rung 2.5): existing %s is newer than new %s"

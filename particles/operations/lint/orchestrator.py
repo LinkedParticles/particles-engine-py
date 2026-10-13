@@ -42,6 +42,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import FIX_CAPABLE_CATEGORIES, LintFinding, LintReport
+from particles.llm import purpose_allowed
 from particles.observability import traced
 from particles.operations._llm import llm_circuit_open
 from particles.store.particle_store import get_inconsistency_particles
@@ -146,7 +147,10 @@ async def run_lint(
     findings += await _check_recorded_contradictions(session)
 
     # --- Semantic checks (LLM-assisted) ---
-    if semantic:
+    # A refused semantic_lint endpoint skips the pass with its own
+    # reason; it never reaches the breaker, whose reason stays distinct.
+    semantic_refused = semantic and not purpose_allowed("semantic_lint")
+    if semantic and not semantic_refused:
         findings += await _check_contradictions(session, fix, control=contradiction_probe)
         if granularity_probe:
             findings += await _check_granularity_violations(session)
@@ -167,7 +171,13 @@ async def run_lint(
         findings=findings,
         summary=summary,
         fixed_counts=fixed_counts,
-        # Account-level LLM failure during the semantic pass tripped the breaker:
-        # report that semantic checks were skipped, not clean.
-        semantic_skipped=semantic and llm_circuit_open(),
+        # Account-level LLM failure during the semantic pass tripped the breaker,
+        # or the posture refused the endpoint: report that
+        # semantic checks were skipped, not clean, and say which.
+        semantic_skipped=semantic_refused or (semantic and llm_circuit_open()),
+        semantic_skipped_reason=(
+            "egress"
+            if semantic_refused
+            else ("llm_unavailable" if semantic and llm_circuit_open() else None)
+        ),
     )

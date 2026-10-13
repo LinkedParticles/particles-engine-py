@@ -19,6 +19,11 @@ verdict, persisted at extract time born ``PROVENANCE_STALE`` with
   (see ``core/status.py``) — promotion never reactivates a stale particle.
   The minted particle is asserted at promotion time, as every successor is:
   the store did not hold the claim before.
+
+The two closures that free a held claim with no review, the extraction-record
+withdrawal and the held-claim release, share one
+further move, :func:`restore_held_claim`: fold the claim into an ACTIVE twin
+that already states it, or else promote it.
 """
 
 from __future__ import annotations
@@ -32,7 +37,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.conflict_review import Demotion, is_quarantined
 from particles.core.schema import Particle, UncertaintyNature
 from particles.core.status import Status, StatusReason, validate_transition
+from particles.ingest.duplicate_suppression import build_duplicate_index
 from particles.store.particle_store import (
+    append_provenance_ref,
     copy_modality_stamp,
     copy_particle_embedding,
     insert_particle,
@@ -40,7 +47,7 @@ from particles.store.particle_store import (
     update_status_reason,
 )
 
-__all__ = ["apply_demotion", "is_quarantined", "promote_quarantined"]
+__all__ = ["apply_demotion", "is_quarantined", "promote_quarantined", "restore_held_claim"]
 
 log = logging.getLogger(__name__)
 
@@ -125,3 +132,31 @@ async def promote_quarantined(
         minted.id[:8],
     )
     return minted
+
+
+async def restore_held_claim(session: AsyncSession, held: Particle) -> tuple[str, str]:
+    """Return a held claim to the store once its record closed without a review.
+
+    The shape the withdrawal and the release both close
+    a record in. A claim an ACTIVE particle already states verbatim with the
+    same subjects (the exact-duplicate index) has its provenance
+    folded into that particle, and the held row moves to ``SUPERSEDED`` /
+    ``CONFLICT_RESOLVED``; otherwise :func:`promote_quarantined` mints a
+    successor, which enters without a §6.6 check, and leaves the held row in
+    the same state. The caller has checked that ``held`` is quarantined and
+    commits.
+
+    Returns:
+        ``("folded_into", twin id)`` or ``("successor", minted id)``, the key
+        and value the closing event's payload records.
+    """
+    twin = (await build_duplicate_index(session, [held.content])).find(held)
+    if twin is not None:
+        for ref in held.provenance:
+            await append_provenance_ref(session, twin.id, ref)
+        await update_particle_status(
+            session, held.id, Status.SUPERSEDED, StatusReason.CONFLICT_RESOLVED
+        )
+        return "folded_into", twin.id
+    successor = await promote_quarantined(session, held)
+    return "successor", successor.id

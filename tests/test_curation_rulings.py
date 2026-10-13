@@ -132,6 +132,34 @@ class TestRecordedDemotions:
         await _demote(db_session, cascade.id, StatusReason.RETRACTED_DEPENDENCY)
         assert await get_recorded_demotions(db_session) == []
 
+    async def test_a_winner_named_only_by_its_event_is_listed(
+        self, db_session: AsyncSession
+    ) -> None:
+        # The winner's ``supersedes`` already names another claim, so only the
+        # UPDATE_SUPERSESSION event says what retired this one.
+        from particles.ingest.conflict_plan import plan_update_event
+        from particles.store.event_store import record_event
+
+        subject = Subject(canonical_name="Kawai ES110", asserted_by="test")
+        await insert_subject(db_session, subject)
+        first = _particle("Another phrasing of the old price.", subject_id=subject.id)
+        second = _particle(_OLD, subject_id=subject.id)
+        winner = _particle(_NEW, subject_id=subject.id, supersedes=first.id)
+        for p in (first, second, winner):
+            await insert_particle(db_session, p)
+        for retired in (first, second):
+            await _demote(db_session, retired.id, StatusReason.SUPERSEDED_BY_UPDATE)
+        event = plan_update_event(second.id, winner.id, route="extra")
+        await record_event(
+            db_session,
+            actor=event.actor,
+            event_type=event.event_type,
+            refs=list(event.refs),
+            payload=dict(event.payload),
+        )
+        pairs = {(r.id, w.id) for r, w in await get_recorded_demotions(db_session)}
+        assert pairs == {(first.id, winner.id), (second.id, winner.id)}
+
 
 class TestDemotionCard:
     async def test_the_queue_carries_the_pair_retired_first(self, db_session: AsyncSession) -> None:

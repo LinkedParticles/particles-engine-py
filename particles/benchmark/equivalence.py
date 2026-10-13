@@ -30,6 +30,7 @@ from enum import StrEnum
 
 from particles.benchmark.schema import ExpectedParticle
 from particles.core.schema import Particle
+from particles.llm.breaker import PROBE_MAX_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -330,12 +331,20 @@ async def _llm_pair_aligned(emitted_text: str, expected: ExpectedParticle) -> bo
     ``False``); the Anthropic adapter now retries once without it and remembers,
     so the request no longer fails and determinism is preserved wherever the
     model still supports it.
+
+    The budget is the shared probe budget, not one sized to the one-word
+    answer: ``benchmark`` falls back to ``llm.default``, which can route to a
+    model that thinks by default, and thinking spends from ``max_tokens``. At
+    the old 16 tokens such a model returns no text, the call raises, and every
+    contested pair is labelled not-aligned, the same silent bias as above.
     """
     from particles.llm import complete
 
     prompt = _JUDGE_PROMPT.format(emitted=emitted_text, expected=expected.content)
     try:
-        verdict = (await complete("benchmark", prompt, max_tokens=16, temperature=0.0)).lower()
+        verdict = (
+            await complete("benchmark", prompt, max_tokens=PROBE_MAX_TOKENS, temperature=0.0)
+        ).lower()
     except Exception as exc:
         log.warning("LLM judge call failed for pair (labelled not-aligned): %s", exc)
         return False

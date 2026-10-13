@@ -1,0 +1,1089 @@
+{
+ "about": "Measurement of 2026-10-12: how the query path answers episodic window questions today, before any design. tests/fixtures/trip_vs_move/ sessions 04, 11, 12-moved and 13 to 17 were deposited with `particles audit` into a fresh scratch store, then `particles memory consolidate --scope store`; scripts/episodic_window_probe.py then asked tests/fixtures/trip_vs_move/window_questions.json through the MCP query tool (all_projects=true) and the query operation. Arms: 'today' is the default call (top_k 40); 'as_of', 'include_non_asserted', 'recency_window_days_7' and 'subject_mumbai' are the existing knobs; 'agent_two_step' asks the anchor question first and re-asks with the dates spelled out; 'top_k_10' and 'top_k_10_rewritten' repeat the plain and rewritten questions with retrieval limited to 10, because the store holds 30 ACTIVE beliefs, fewer than the default top_k, so the default arm hands the answer model the whole store. 'retrieval_ranks' places each question's gold claims in the full ranking (retrieve_ranked, top_k 200, no answer model). Verdicts are graded by the drafting session against the labels in window_questions.json; the owner confirmed the labels and the verdicts as proposed on 2026-10-12. Measured list-price spend US$0.60.",
+ "engine": "main at 93f60a57 (1.185.0) plus the fixture and harness commits on claude/episodic-window-measure; no engine change",
+ "model": "claude-sonnet-5-5 for every purpose (the owner's config with semantic_lint moved off claude-haiku-5-5, the trip case's one-model setup); the model rejected the temperature parameter and sampled at its default",
+ "cost_usd": {
+  "audit": 0.22,
+  "consolidate": 0.07,
+  "questions": 0.249,
+  "ranks_and_top_k_10": 0.063,
+  "total": 0.6
+ },
+ "store": {
+  "beliefs": 33,
+  "active": 30,
+  "asserted_at": "every belief carries the run instant (2026-10-12T20:14 to 20:17 UTC), not its session's date; the session dates survive only inside claim prose and as each snapshot's content_published_at",
+  "retired": [
+   "PROVENANCE_STALE (SUPERSEDED_BY_UPDATE): The user lives in Lajpat Nagar, Delhi.",
+   "SUPERSEDED (SUPERSEDED_BY_REANCHOR): Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "PROVENANCE_STALE (SUPERSEDED_BY_UPDATE): The user lives in Delhi."
+  ],
+  "trip_not_retired": "The move retired the Delhi residence but not the trip, the hotel or the return flight, the outcome already recorded for this model. The 'retired claim hidden from a window' case was therefore exercised only by the Delhi residence (w5), not by the trip (w2).",
+  "particles": [
+   "PROVENANCE_STALE: The user lives in Lajpat Nagar, Delhi.",
+   "SUPERSEDED: Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "ACTIVE: Sandeep's Curry House is in or near Lajpat Nagar, Delhi.",
+   "ACTIVE: Sandeep's Curry House is the user's favourite place to eat.",
+   "ACTIVE: The paneer tikka at Sandeep's Curry House is the best the user has had.",
+   "ACTIVE: The user is vegetarian.",
+   "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+   "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+   "PROVENANCE_STALE: The user lives in Delhi.",
+   "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+   "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+   "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+   "ACTIVE: The user's new flat is in Pali Hill.",
+   "ACTIVE: Pali Hill is in Bandra.",
+   "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+   "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+   "ACTIVE: Gauri's Thali is located on Hill Road.",
+   "ACTIVE: Gauri's Thali is an all-vegetarian restaurant.",
+   "ACTIVE: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road.",
+   "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+   "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel.",
+   "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+   "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+   "ACTIVE: Kamala Mills is a long way from Pali Hill.",
+   "ACTIVE: Ananya is the user's sister.",
+   "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+   "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+   "ACTIVE: The user spent six months in Powai in 2019 as an intern.",
+   "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+   "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+   "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+   "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04."
+  ]
+ },
+ "anchor_step": {
+  "question": "When did the user move to Mumbai?",
+  "answer": "The particles don't give one clean move date, and they point in slightly different directions.\n\n- A session dated 2026-10-09 states that the user moved to Mumbai.\n- As of 2026-10-08, the user was in Mumbai for about a week for work, staying at a hotel in Bandra.\n- On 2026-10-10, the user checked out of the hotel and picked up the keys to the new flat in Pali Hill, Bandra.\n- The user's first day at the Mumbai office was 2026-10-12.\n- Movers delivered the user's belongings from Delhi on 2026-10-15.\n\nThe most direct answer is that the move happened around 2026-10-09 to 2026-10-10. The 10-09 session is the only explicit statement of the move, and the user took the keys to the new flat on 10-10. However, the user was already in Mumbai on a work trip by 10-08. Their belongings only arrived on 10-15, and one particle says they were scheduled to fly back to Delhi on 10-15. So the move may have been a gradual transition across roughly 2026-10-08 to 2026-10-15 rather than a single day.\n\nThe particles don't say exactly which day counts as \"the move.\" The 10-09 session date is the best-supported answer, but it is the date the move was mentioned, which may not be the actual moving date."
+ },
+ "summary_by_shape": {
+  "window": {
+   "today": {
+    "correct": 6
+   },
+   "as_of": {
+    "rejected": 3,
+    "no_answer": 3
+   },
+   "include_non_asserted": {
+    "correct": 6
+   },
+   "recency_window_days_7": {
+    "correct": 6
+   },
+   "subject_mumbai": {
+    "wrong": 4,
+    "correct": 1,
+    "partial": 1
+   },
+   "agent_two_step": {
+    "correct": 6
+   },
+   "top_k_10": {
+    "partial": 3,
+    "wrong": 1,
+    "correct": 2
+   },
+   "top_k_10_rewritten": {
+    "correct": 5,
+    "partial": 1
+   }
+  },
+  "current_state": {
+   "today": {
+    "correct": 1
+   }
+  },
+  "lookup": {
+   "today": {
+    "correct": 2
+   }
+  },
+  "relationship": {
+   "today": {
+    "correct": 1
+   }
+  },
+  "exact_term": {
+   "today": {
+    "correct": 2
+   }
+  }
+ },
+ "results": [
+  {
+   "id": "w1-week-after-move",
+   "shape": "window",
+   "question": "What happened in the week after the user moved to Mumbai?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "All five events, correctly dated; Powai not presented as in the window. Hedges about the unretired trip and its 2026-10-15 flight.",
+     "answer": "The records suggest the following sequence in the week after the move. Some details are a little inconsistent (see the end).\n\n- **2026-10-10:** The user checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** The user walked the whole of Carter Road in the evening. On the way back they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n- **2026-10-12:** This was the user's first day at the Mumbai office in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** The user's sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi, and the user spent the evening unpacking books.\n\n**Uncertainties:**\n- One record says the user was in Mumbai for about a week for work and was staying at a Bandra hotel. It also says they were scheduled to fly back to Delhi on Thursday, 2026-10-15. That conflicts with the idea of a permanent move, and the records don't explain it.\n- The records say the user spent the evening of 2026-10-15 unpacking in Mumbai, so the planned flight may not have happened, or it may have been at a different time.\n- Nothing is recorded for 2026-10-13.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "as_of": {
+     "verdict": "rejected",
+     "note": "2026-10-16 is after the run instant; as_of only accepts a past assertion time.",
+     "as_of": "2026-10-16",
+     "error": "Value error, as_of must not be in the future: the as-of lens answers what the store believed at a past instant (got 2026-10-16T00:00:00+00:00). [type=value_error, input_value={'question': 'What happen... None, 'grounded': None}, input_type=dict]"
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same candidate set as today: the store holds no non-asserted claim.",
+     "answer": "The particles give a fairly detailed timeline for the week after the move, though a few details are inconsistent or unclear.\n\n- **2026-10-10:** The user checked out of their hotel in Bandra in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** In the evening the user walked the whole of Carter Road. On the way back, they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n- **2026-10-12:** This was the user's first day at the Mumbai office, which is in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** The user's sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi, and the user spent the evening unpacking books.\n\n**Inconsistencies and gaps:**\n- One particle says the user was in Mumbai for about a week for work, staying at a hotel, and was scheduled to fly back to Delhi on Thursday, 2026-10-15. This sits oddly with the other particles about the move, the new flat and the delivery of belongings, so it is unclear whether the stay was a work trip or a permanent move. It is also unclear whether the user actually took that flight.\n- Nothing is recorded for 2026-10-13.\n- The particles do not say exactly which day counts as \"the move\".",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect: every belief was asserted at the run instant, inside any window ending now.",
+     "answer": "The particles suggest a fairly busy week, though the sequence is partly pieced together and some details conflict.\n\n**Timeline of events**\n- **2026-10-10:** The user checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** The user walked the whole of Carter Road in the evening. On the way back they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n- **2026-10-12:** This was the user's first day at the Mumbai office, in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** The user's sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi. The user spent the evening unpacking books.\n\n**Conflicting details**\n- One particle says the user was in Mumbai for about a week for work, staying at a hotel in Bandra. Another says they were scheduled to fly back to Delhi on Thursday, 2026-10-15. Yet the user was also picking up keys to a new flat and receiving movers that same day. So it is unclear whether the move was permanent or a work trip, or whether the flight actually happened.\n- The particles don't say what happened on 2026-10-13.\n\nThe answer may be incomplete, since the particles don't cover every day.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "wrong",
+     "note": "4 hits (trip, hotel, flight, move): says no events are recorded. The week's events are linked to Pali Hill, Gauri's Thali and the office, not to Mumbai.",
+     "answer": "The knowledge base has only limited information about that week, and it doesn't describe specific events. Here is what it does say:\n\n- A session dated 2026-10-09 states that the user moved to Mumbai.\n- As of 2026-10-08, the user was in Mumbai for about a week for work.\n- During this work trip, the user was staying at a hotel in Bandra, Mumbai.\n- The user was scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.\n\nThese particles may conflict. One says the user \"moved\" to Mumbai, while the others describe a roughly week-long work trip with a return flight to Delhi. The \"move\" may really have been a temporary work stay, but I can't confirm that from the information provided.\n\nThe particles give no account of what the user did or experienced during the week, so this answer is likely incomplete. They only outline the stay: a hotel in Bandra, work, and a planned return to Delhi on October 15.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Rewritten with explicit dates; all five events.",
+     "question_asked": "What did the user do between 2026-10-10 and 2026-10-16?",
+     "answer": "Based on the particles, here is what the user likely did from 2026-10-10 to 2026-10-16:\n\n- **2026-10-10:** They checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** In the evening they walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n- **2026-10-12:** It was their first day at the Mumbai office in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** Their sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered their belongings from Delhi, and they spent the evening unpacking books.\n- **2026-10-13 and 2026-10-16:** The knowledge base has nothing on these days.\n\nOne conflict: a particle says the user was scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15. That sits awkwardly with the movers' delivery and the unpacking the same day. Other particles say the user moved to Mumbai, and that the stay was initially for about a week of work as of 2026-10-08. The flight may reflect the earlier trip plan, but I can't tell from these particles whether it happened.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "partial",
+     "note": "3 of 5 events: keys to Pali Hill, Carter Road and Gauri's Thali missing. The question's words rank first-day and visit claims above the weekend.",
+     "answer": "The particles give a partial timeline for the week after the move, and some of them conflict, so treat this as uncertain.\n\n**What the particles say happened:**\n- A session dated 2026-10-09 states that the user moved to Mumbai.\n- On the morning of 2026-10-10, the user checked out of their hotel.\n- On 2026-10-12, the user's first day at the Mumbai office, colleague Ritika showed them around and took them to lunch.\n- On 2026-10-14, Ananya travelled from Pune to visit the user.\n- On 2026-10-15, movers delivered the user's belongings from Delhi.\n\n**Conflicts and gaps:**\n- One particle says the user was in Mumbai for only about a week for work, as of 2026-10-08, and was staying at a hotel in Bandra. That sounds like a temporary work trip rather than a permanent move.\n- Another says the user was scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15. That is the same day the movers delivered belongings from Delhi.\n- It's unclear whether this was a permanent relocation or a work trip. I also can't tell where the user stayed after checking out of the hotel on 10-10, or whether the 10-15 flight actually happened."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "correct",
+     "note": "All five events (Gauri's appears as the dinner venue; the 10-11 find is missing).",
+     "question_asked": "What did the user do between 2026-10-10 and 2026-10-16?",
+     "answer": "Based on the knowledge base, here is what the user did from 2026-10-10 to 2026-10-16, in date order. The particles don't mention 2026-10-13 or 2026-10-16, so the account may be incomplete.\n\n- **2026-10-10:** The user checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** The user walked the whole of Carter Road in the evening.\n- **2026-10-12:** This was the user's first day at the Mumbai office. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** Ananya travelled from Pune to visit the user, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi. The user spent the evening unpacking books."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "3: The user's first day at the Mumbai office was on 2026-10-12.",
+      "7: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "8: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "13: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "15: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "17: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "19: The user's new flat is in Pali Hill.",
+      "20: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road.",
+      "27: Pali Hill is in Bandra.",
+      "30: Kamala Mills is a long way from Pali Hill."
+     ],
+     "out_of_window": [
+      "18: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "4: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "5: The user's first day at the Mumbai office was on 2026-10-12.",
+      "7: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "9: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "10: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "15: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road.",
+      "17: The user's new flat is in Pali Hill.",
+      "18: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "28: Pali Hill is in Bandra.",
+      "30: Kamala Mills is a long way from Pali Hill."
+     ],
+     "out_of_window": [
+      "12: The user spent six months in Powai in 2019 as an intern."
+     ]
+    }
+   }
+  },
+  {
+   "id": "w2-staying-on-1008",
+   "shape": "window",
+   "question": "Where was the user staying on 2026-10-08?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Hotel in Bandra, from the trip claim still ACTIVE (the move did not retire it on this model).",
+     "answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. The particles say they were in Mumbai for about a week for work as of that date and were staying at a hotel in Bandra during the trip. They checked out of that hotel on the morning of 2026-10-10, and picked up the keys to their new flat in Pali Hill, Bandra the same day.\n\nThe particles don't name the hotel. They also don't give a dated statement that places the user at the hotel on exactly 2026-10-08, so this is an inference from the trip details and the checkout date.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15."
+     ]
+    },
+    "as_of": {
+     "verdict": "no_answer",
+     "note": "The store held nothing as of 2026-10-08: as_of is assertion time and the store was written on 2026-10-12.",
+     "as_of": "2026-10-08T00:00:00Z",
+     "answer": "The store held no beliefs matching this question as of 2026-10-08T00:00:00+00:00.",
+     "hits": []
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same as today.",
+     "answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. They were in Mumbai for about a week on a work trip as of that date, and they were staying at a hotel in Bandra during the trip. The user checked out of that hotel on the morning of 2026-10-10. They then picked up the keys to their new flat in Pali Hill, Bandra, that same day.\n\nThe particles do not name the hotel. They also don't say explicitly which night the user stayed there. The answer is inferred from the work-trip and hotel details and the 2026-10-10 checkout.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect.",
+     "answer": "On 2026-10-08 the user was most likely staying at a hotel in Bandra, Mumbai. As of that date they were in Mumbai for about a week on a work trip, and the particles say they were staying at a hotel in Bandra during the trip. They checked out on the morning of 2026-10-10 and picked up the keys to their new flat in Pali Hill that day.\n\nThe particles don't name the hotel.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "correct",
+     "note": "Hotel in Bandra; hedges that the move may be the trip.",
+     "answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. They were in Mumbai for about a week of work, with a flight back to Delhi scheduled for Thursday, 2026-10-15.\n\nOne particle, from a session dated 2026-10-09, says the user \"moved to Mumbai.\" That sits oddly with the others, which describe a temporary work trip with a return flight to Delhi. The work-trip reading is better supported, but the \"moved\" wording leaves some uncertainty. Also, these particles are uncalibrated, so treat the details as provisional.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Hotel in Bandra.",
+     "question_asked": "Where was the user staying as of 2026-10-08, on the work trip?",
+     "answer": "As of 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai, while in the city for about a week of work. The particles say this directly: the user is staying at a hotel in Bandra during the work trip.\n\nThe timeline shows this hotel stay was temporary. The user checked out on the morning of 2026-10-10 and picked up the keys to a new flat in Pali Hill, Bandra, that same day. The particles don't name the hotel.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "partial",
+     "note": "The hotel claim ranks 16th of 30, so the answer says 'a hotel, probably in Mumbai' with no location.",
+     "answer": "The knowledge base doesn't say directly where the user was on 2026-10-08, but it points to a likely answer.\n\n- The user checked out of their hotel on the morning of 2026-10-10, so they were probably staying in a hotel in the days before that, which would include 2026-10-08.\n- A session dated 2026-10-09 states that the user had moved to Mumbai. That suggests the hotel was probably in Mumbai, though no particle gives its location or name.\n- The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10. So the flat was not yet their home on 2026-10-08.\n\nMy best inference is that the user was in a hotel, probably in Mumbai, on 2026-10-08. The hotel's name and location are not given, and no particle states where the user was on that date."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "correct",
+     "note": "Hotel claim ranks 3rd once the work trip is named.",
+     "question_asked": "Where was the user staying as of 2026-10-08, on the work trip?",
+     "answer": "As of 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai, while in the city for about a week on the work trip.\n\nThe particles are a little inconsistent about the timeline. One says the user \"moved to Mumbai\" in a session dated 2026-10-09, and another says the user checked out of the hotel on the morning of 2026-10-10. Another mentions a new flat in Pali Hill, about fifteen minutes from the hotel, which suggests the hotel stay was temporary. None of this changes where the user was staying on 2026-10-08, which was the Bandra hotel."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "16: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ],
+     "out_of_window": []
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "3: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ],
+     "out_of_window": []
+    }
+   }
+  },
+  {
+   "id": "w3-first-weekend",
+   "shape": "window",
+   "question": "What did the user do on their first weekend in Mumbai?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Resolved the weekend to 10-11 October from the dates in the claims; keys, Carter Road, Gauri's Thali.",
+     "answer": "The user's first weekend in Mumbai was 10–11 October 2026, and the particles point to the following:\n\n- **Saturday, 10 October:** The user checked out of their hotel in the morning. They also picked up the keys to their new flat in Pali Hill, Bandra.\n- **Sunday, 11 October:** In the evening the user walked the whole of Carter Road. On the way back they found Gauri's Thali, an all-vegetarian restaurant on Hill Road.\n\nThe particles don't say what the user did during the rest of the weekend, such as where they stayed on Saturday night or whether they moved into the flat then. The user's first day at the Mumbai office was Monday, 12 October, so these two days came before work started.",
+     "hits": [
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "as_of": {
+     "verdict": "no_answer",
+     "note": "Nothing held as of 2026-10-11 (assertion time).",
+     "as_of": "2026-10-11T00:00:00Z",
+     "answer": "The store held no beliefs matching this question as of 2026-10-11T00:00:00+00:00.",
+     "hits": []
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same as today.",
+     "answer": "Going by the dates, the first weekend was probably Saturday 2026-10-10 and Sunday 2026-10-11, since the user's first day at the Mumbai office was Monday 2026-10-12.\n\n- **Saturday, 10 October:** The user checked out of their hotel in the morning. They also picked up the keys to their new flat in Pali Hill, Bandra.\n- **Sunday, 11 October:** In the evening the user walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n\nThe particles don't say what else the user did over the weekend, so this may not be the full picture. The weekday labels are my inference from the dates, not something stated directly.",
+     "hits": [
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect.",
+     "answer": "On the weekend of 10–11 October 2026, just before the user's first day at the Mumbai office on Monday the 12th, the user did the following:\n\n- **Saturday, 10 October:** They checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **Sunday, 11 October:** In the evening they walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road, an all-vegetarian restaurant.\n\nThe particles don't say what else the user did on those two days. Treating 10–11 October as the \"first weekend\" is my own inference from the dates, since none of the particles states it directly.",
+     "hits": [
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "wrong",
+     "note": "Says nothing is recorded about the weekend.",
+     "answer": "The knowledge base holds nothing about what the user did on their first weekend in Mumbai. The particles only say that the user is in Mumbai for about a week of work, is staying at a hotel in Bandra, and is scheduled to fly back to Delhi on Thursday, 2026-10-15. One particle also says they moved to Mumbai, which conflicts with the work-trip framing. None of them describe weekend activities.",
+     "hits": [
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Asked as 2026-10-10 and 2026-10-11; all three events.",
+     "question_asked": "What did the user do on 2026-10-10 and 2026-10-11?",
+     "answer": "Based on the particles, here is what the user did on those two days:\n\n**2026-10-10**\n- In the morning, the user checked out of their hotel.\n- The user picked up the keys to their new flat in Pali Hill, Bandra (which is about fifteen minutes from the hotel where they had been staying).\n\n**2026-10-11**\n- In the evening, the user walked the whole of Carter Road.\n- On the way back from that walk, the user found Gauri's Thali, an all-vegetarian restaurant on Hill Road.\n\nThe particles don't say what the user did during the rest of either day, so this account may be incomplete.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "wrong",
+     "note": "'The knowledge base doesn't say.' The first-day-at-office claim ranks 1st ('first' matches); the weekend claims rank 11, 19 and 21.",
+     "answer": "The knowledge base doesn't say what the user did on their first weekend in Mumbai, so I can't answer that directly.\n\nThe particles give some surrounding timeline:\n- As of 2026-10-08, the user was in Mumbai for about a week for work, staying at a hotel in Bandra.\n- On the morning of 2026-10-10 (a Saturday), the user checked out of their hotel.\n- A session dated 2026-10-09 says the user moved to Mumbai. This sits oddly with the work-trip framing and the scheduled flight back to Delhi on 2026-10-15, so the particles may conflict about whether this was a move or a trip.\n- The user's first day at the Mumbai office was Monday, 2026-10-12, when the colleague Ritika showed them around and took them to lunch.\n\nNone of these describes weekend activities (2026-10-10 and 2026-10-11) beyond the hotel checkout. Any account of what the user did that weekend would be speculation."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "partial",
+     "note": "Keys and Carter Road; Gauri's Thali (rank 13) missing.",
+     "question_asked": "What did the user do on 2026-10-10 and 2026-10-11?",
+     "answer": "The knowledge base has only a few entries for those two dates.\n\n**2026-10-10:**\n- In the morning, the user checked out of their hotel.\n- The user picked up the keys to their new flat in Pali Hill, Bandra.\n\n**2026-10-11:**\n- In the evening, the user walked the whole of Carter Road.\n\nThe particles say nothing else about what the user did on either day, so this may not be the full picture."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "11: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "19: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "21: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road."
+     ],
+     "out_of_window": [
+      "1: The user's first day at the Mumbai office was on 2026-10-12.",
+      "14: Ananya travelled from Pune to visit the user on 2026-10-14."
+     ]
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "3: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "6: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "13: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road."
+     ],
+     "out_of_window": [
+      "5: The user's first day at the Mumbai office was on 2026-10-12.",
+      "9: Ananya travelled from Pune to visit the user on 2026-10-14."
+     ]
+    }
+   }
+  },
+  {
+   "id": "w4-visitor-first-week",
+   "shape": "window",
+   "question": "Who visited the user during their first week in Mumbai?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Ananya, 2026-10-14; Ritika correctly not counted as a visitor.",
+     "answer": "The knowledge base points to Ananya, the user's sister. She travelled from Pune to visit the user on 2026-10-14, and the two had dinner at Gauri's that evening.\n\nRitika, a colleague, also spent time with the user on the first day at the Mumbai office (2026-10-12). She showed the user around the office and took them to lunch. That was a work-related outing at the office rather than a visit to the user.\n\nThe particles are inconsistent on timing. One says the user moved to Mumbai in a session dated 2026-10-09. Another says the user was in Mumbai for about a week for work as of 2026-10-08. Either way, the 2026-10-14 visit falls within the first week.",
+     "hits": [
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14."
+     ]
+    },
+    "as_of": {
+     "verdict": "rejected",
+     "note": "2026-10-16 is after the run instant.",
+     "as_of": "2026-10-16",
+     "error": "Value error, as_of must not be in the future: the as-of lens answers what the store believed at a past instant (got 2026-10-16T00:00:00+00:00). [type=value_error, input_value={'question': 'Who visited... None, 'grounded': None}, input_type=dict]"
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same as today.",
+     "answer": "The knowledge base points to the user's sister, Ananya, as the visitor. She travelled from Pune to see the user on 2026-10-14, and the two had dinner at Gauri's that day. That falls within the user's first week in Mumbai, which began with their first day at the office on 2026-10-12.\n\nRitika, a colleague, showed the user around the Mumbai office and took them to lunch on 2026-10-12. That was a work meeting at the office, not a visit to the user, so she probably doesn't count as a visitor.\n\nThe particles don't mention any other visitors. The movers who delivered the user's belongings from Delhi on 2026-10-15 are also not described as visitors.",
+     "hits": [
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect.",
+     "answer": "The knowledge base points to Ananya, the user's sister, as a visitor. She travelled from Pune to visit the user on 2026-10-14, and the two had dinner at Gauri's that day.\n\nThe user's first day at the Mumbai office was 2026-10-12. Their colleague Ritika showed them around the office and took them to lunch that day. That was a work interaction at the office, so it isn't clearly a visit to the user.\n\nThe particles don't mention any other visitors. The timeline is also somewhat inconsistent. One particle says the user moved to Mumbai, while others describe a work trip of about a week. The knowledge base may therefore not cover every visitor.",
+     "hits": [
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "wrong",
+     "note": "Says no visitor is recorded.",
+     "answer": "The knowledge base holds nothing about who visited the user during their first week in Mumbai. The particles only cover the trip itself: the user is in Mumbai for about a week for work, staying at a hotel in Bandra, and is scheduled to fly back to Delhi on Thursday, 2026-10-15. One particle also says the user moved to Mumbai, which conflicts somewhat with the work-trip framing. None of them mention any visitors.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Ananya.",
+     "question_asked": "Who visited the user between 2026-10-10 and 2026-10-16?",
+     "answer": "Based on the particles, the user's sister, Ananya, travelled from Pune to visit them on 2026-10-14, and they had dinner together at Gauri's that day.\n\nRitika, a colleague, showed the user around the Mumbai office and took them to lunch on 2026-10-12. This was the user's first day at the office, so it was a work meeting rather than a visit to the user. Movers also delivered the user's belongings from Delhi on 2026-10-15, but that was a delivery, not a visit.\n\nAnanya is therefore the only person described as visiting the user in that window.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "correct",
+     "note": "Ananya (rank 5).",
+     "answer": "The particles point to one visitor: Ananya, who travelled from Pune to visit the user on 2026-10-14.\n\nRitika, a colleague, showed the user around the Mumbai office and took them to lunch on 2026-10-12, the user's first day at the office. She was a colleague at the workplace rather than someone who visited the user, so she probably doesn't count as a visitor.\n\nThe particles are somewhat inconsistent about the timeline. One says the user moved to Mumbai, while others describe a roughly week-long work trip with a hotel stay in Bandra and a flight back to Delhi on 2026-10-15. Because of this, it's unclear exactly when the \"first week\" began. Ananya's visit on 2026-10-14 falls within the span of dates covered either way. The particles don't say whether anyone else visited."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "correct",
+     "note": "Ananya.",
+     "question_asked": "Who visited the user between 2026-10-10 and 2026-10-16?",
+     "answer": "Based on the particles, Ananya is the only person who visited the user in that period. She travelled from Pune to visit the user on 2026-10-14, and the two had dinner at Gauri's that day.\n\nRitika, a colleague, showed the user around the Mumbai office and took them to lunch on 2026-10-12. Those events happened at the user's workplace, so they were not visits to the user. The particles don't mention any other visitors, so the list may be incomplete."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "5: Ananya travelled from Pune to visit the user on 2026-10-14."
+     ],
+     "out_of_window": []
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "4: Ananya travelled from Pune to visit the user on 2026-10-14."
+     ],
+     "out_of_window": []
+    }
+   }
+  },
+  {
+   "id": "w5-living-on-1001",
+   "shape": "window",
+   "question": "Where was the user living on 2026-10-01?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Delhi, Lajpat Nagar. The residence claims are retired (SUPERSEDED_BY_UPDATE) and hidden; the answer rests on the re-anchor restatement 'as of 2026-09-04' and the movers' Delhi origin.",
+     "answer": "On 2026-10-01 the user was most likely living in Delhi, in a flat in Lajpat Nagar. The knowledge base says they lived there as of 2026-09-04, and that Sandeep's Curry House was a ten-minute walk away. No particle says they left before October.\n\nThe move to Mumbai appears to have happened later. A session dated 2026-10-09 states that the user moved to Mumbai. On 2026-10-10 they picked up the keys to a new flat in Pali Hill, Bandra. Before that, as of 2026-10-08, they were in Mumbai for about a week of work, staying at a hotel in Bandra. Movers delivered their belongings from Delhi on 2026-10-15, which also points to Delhi as their home until then.\n\nOne caveat is that there is no particle that directly states where the user lived on 2026-10-01. The Delhi answer is inferred from the 2026-09-04 statement and the later timeline. It is also unclear whether the Mumbai work trip began before or after 2026-10-01. If the \"about a week\" trip, reported on 2026-10-08, started around 2026-10-01, the user could have been in the Bandra hotel then. That would still have been a temporary stay, not a residence.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books."
+     ]
+    },
+    "as_of": {
+     "verdict": "no_answer",
+     "note": "Nothing held as of 2026-10-01 (assertion time).",
+     "as_of": "2026-10-01T00:00:00Z",
+     "answer": "The store held no beliefs matching this question as of 2026-10-01T00:00:00+00:00.",
+     "hits": []
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same as today; retired claims stay hidden under this knob.",
+     "answer": "On 2026-10-01, the user was most likely living in Delhi, in a flat in Lajpat Nagar.\n\n- As of 2026-09-04, the user lived in a flat in Lajpat Nagar, Delhi, a ten-minute walk from Sandeep's Curry House.\n- The user only moved to Mumbai in the days around 2026-10-09. They were on a work trip to Mumbai, staying at a hotel in Bandra, and picked up the keys to a new flat in Pali Hill on 2026-10-10.\n- Movers delivered the user's belongings from Delhi on 2026-10-15, which suggests the Delhi home was still the user's base until then.\n\nOne caveat: the particles don't state the user's address on 2026-10-01 directly. This answer is an inference from the September Delhi residence and the October move to Mumbai.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect.",
+     "answer": "On 2026-10-01, the user was most likely living in Delhi. A particle places them in a flat in Lajpat Nagar, Delhi, as of 2026-09-04. The move to Mumbai was stated in a session dated 2026-10-09, and the new Pali Hill flat's keys were picked up on 2026-10-10. Movers brought the user's belongings from Delhi on 2026-10-15. As late as 2026-10-08 the user was described as being in Mumbai for only about a week for work, which suggests they were visiting rather than yet living there.\n\nNo particle states the user's address on 2026-10-01 itself, so this is an inference. It rests on the Lajpat Nagar flat, which is dated about four weeks earlier, and on the later timeline of the move. It is possible the user changed residence between 2026-09-04 and 2026-10-01, but nothing here suggests that.",
+     "hits": [
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "partial",
+     "note": "Delhi by inference from the return flight; no Lajpat Nagar.",
+     "answer": "The particles don't settle this, but they point toward Delhi as the most likely answer.\n\n- As of 2026-10-08, the user was in Mumbai for about a week on a work trip, staying at a hotel in Bandra.\n- They were scheduled to fly back from Mumbai to Delhi on 2026-10-15. That suggests Delhi was their home base, and Mumbai was a temporary stop.\n- One particle, from a session dated 2026-10-09, says the user \"moved to Mumbai.\" That conflicts with the work-trip details and may be a misreading of the trip. I can't tell whether it describes a real relocation.\n\nNone of the particles gives the user's location on 2026-10-01 itself. The work trip was described as lasting about a week as of 2026-10-08, so it probably began around then, after the 1st. On that reading, the user was likely living in Delhi on 2026-10-01. This is an inference, and the \"moved to Mumbai\" statement leaves some uncertainty.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Delhi, Lajpat Nagar.",
+     "question_asked": "Where was the user's home before they moved to Mumbai?",
+     "answer": "The user's home before Mumbai was most likely Delhi. Several particles point to this:\n\n- The user had a flat in Lajpat Nagar, Delhi, as of 2026-09-04.\n- Movers delivered the user's belongings from Delhi on 2026-10-15.\n- The user was scheduled to fly from Mumbai back to Delhi on 2026-10-15.\n\nOne thing is unclear. The particles don't state outright that Delhi was the user's home before the move. They also don't settle how the 2026-10-15 flight back to Delhi fits with the belongings arriving in Mumbai that same day. Even so, the Lajpat Nagar flat and the movers shipping from Delhi suggest the previous home was the Lajpat Nagar flat in Delhi.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "partial",
+     "note": "Delhi by inference from the movers; the Lajpat Nagar restatement ranks 20th.",
+     "answer": "The particles don't state directly where the user lived on 2026-10-01, but they offer some clues.\n\n- A session dated 2026-10-09 says the user moved to Mumbai.\n- On 2026-10-10 the user checked out of a hotel and picked up keys to a new flat in Pali Hill, Bandra.\n- Movers delivered the user's belongings from Delhi on 2026-10-15.\n\nTaken together, the user was probably living in Delhi before the move, so Delhi is the most likely answer for 2026-10-01. That is an inference, though. No particle says the user's home on that date was in Delhi. The belongings may simply have been stored or shipped from there, and the user may have been somewhere else before relocating.\n\nThe answer is therefore uncertain. The best-supported guess is Delhi, and the user was not yet in their new Bandra flat on that date."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "correct",
+     "note": "Delhi, Lajpat Nagar.",
+     "question_asked": "Where was the user's home before they moved to Mumbai?",
+     "answer": "Before moving to Mumbai, the user's home was most likely in Delhi. The particles place them in a flat in Lajpat Nagar, Delhi, as of early September 2026. Movers also delivered their belongings from Delhi on 2026-10-15, and the user was scheduled to fly from Mumbai back to Delhi on 2026-10-15.\n\nThe particles are somewhat mixed on the move itself. Some describe a roughly week-long work trip with a hotel stay in Bandra, while others say the user moved to Mumbai and started at the Mumbai office. Even so, Delhi, specifically Lajpat Nagar, is the best-supported answer for where they lived beforehand."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "20: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "27: Sandeep's Curry House is in or near Lajpat Nagar, Delhi."
+     ],
+     "out_of_window": []
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "6: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "16: Sandeep's Curry House is in or near Lajpat Nagar, Delhi."
+     ],
+     "out_of_window": []
+    }
+   }
+  },
+  {
+   "id": "w6-oct-12-to-14",
+   "shape": "window",
+   "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "First day at Kamala Mills, dinner with Ananya; 10-15 events named as outside the window.",
+     "answer": "Based on the particles, here is what the user did from 2026-10-12 to 2026-10-14:\n\n**2026-10-12:**\n- It was the user's first day at the Mumbai office, which is in Kamala Mills, Lower Parel.\n- Their colleague Ritika showed them around the office and took them to lunch.\n\n**2026-10-13:**\n- The particles do not say what the user did on this day.\n\n**2026-10-14:**\n- The user's sister Ananya travelled from Pune to visit.\n- The two had dinner at Gauri's (Gauri's Thali, an all-vegetarian restaurant on Hill Road).\n\n**Caveats:** The knowledge base has nothing on 2026-10-13, so this account is incomplete. Some events fall just outside the window. Movers delivered the user's belongings from Delhi on 2026-10-15, and the user spent that evening unpacking books. A flight from Mumbai back to Delhi was also scheduled for 2026-10-15.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "as_of": {
+     "verdict": "rejected",
+     "note": "2026-10-14 is after the run instant.",
+     "as_of": "2026-10-14",
+     "error": "Value error, as_of must not be in the future: the as-of lens answers what the store believed at a past instant (got 2026-10-14T00:00:00+00:00). [type=value_error, input_value={'question': 'What did th... None, 'grounded': None}, input_type=dict]"
+    },
+    "include_non_asserted": {
+     "verdict": "correct",
+     "note": "Same as today.",
+     "answer": "The knowledge base only covers some of this window, so the picture is partial.\n\n**2026-10-12:** This was the user's first day at the Mumbai office in Kamala Mills, Lower Parel. Their colleague Ritika showed them around the office and took them to lunch.\n\n**2026-10-13:** The particles contain nothing about this day.\n\n**2026-10-14:** Ananya, the user's sister, travelled from Pune to visit. The two of them had dinner at Gauri's.\n\nSome nearby context may help, though it falls outside the requested dates. On 2026-10-11 the user walked Carter Road and found Gauri's Thali on Hill Road on the way back. Movers delivered the user's belongings from Delhi on 2026-10-15, and the user was scheduled to fly back to Delhi that day.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "recency_window_days_7": {
+     "verdict": "correct",
+     "note": "No effect.",
+     "answer": "Based on the particles, here is what the user did between 2026-10-12 and 2026-10-14:\n\n**2026-10-12 (first day at the Mumbai office)**\n- The user started at the Mumbai office, which is in Kamala Mills, Lower Parel.\n- Their colleague Ritika showed them around the office.\n- Ritika also took the user to lunch.\n\n**2026-10-13**\n- The particles don't say what the user did on this day.\n\n**2026-10-14**\n- The user's sister Ananya travelled from Pune to visit.\n- The two had dinner at Gauri's (Gauri's Thali, an all-vegetarian restaurant on Hill Road).\n\nThe knowledge base doesn't cover the daytime activities on the 13th or 14th. The events just before this window (picking up the keys to the Pali Hill flat on 10-10, walking Carter Road on 10-11) and just after it (movers on 10-15, the planned flight to Delhi on 10-15) are outside the requested range. This account may be incomplete.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "subject_mumbai": {
+     "verdict": "wrong",
+     "note": "Infers the user was at the hotel working; no event named.",
+     "answer": "The knowledge base doesn't say exactly what the user did on 2026-10-12 through 2026-10-14, but it does give some context for that period.\n\n- As of 2026-10-08, the user was in Mumbai for about a week for work.\n- The user was staying at a hotel in Bandra, Mumbai, during this work trip.\n- The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.\n\nThose dates suggest the user was probably still in Mumbai on 2026-10-12 to 2026-10-14, likely working and staying at the Bandra hotel. This is an inference, and no particle describes specific activities on those days.\n\nOne particle also says the user \"moved to Mumbai\" in a session dated 2026-10-09. That conflicts somewhat with the \"about a week for work\" and return-flight details, which suggest a temporary trip. It may be a loose paraphrase of the trip, but I can't tell from the particles.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip."
+     ]
+    },
+    "agent_two_step": {
+     "verdict": "correct",
+     "note": "Both events.",
+     "question_asked": "What did the user do on 2026-10-12, 2026-10-13 and 2026-10-14?",
+     "answer": "Based on the particles, here is what the user did on those dates:\n\n**2026-10-12:** This was the user's first day at the Mumbai office, located in Kamala Mills in Lower Parel. Their colleague Ritika showed them around the office and took them to lunch.\n\n**2026-10-13:** The knowledge base has nothing about what the user did on this date.\n\n**2026-10-14:** The user's sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's. Gauri's Thali is an all-vegetarian restaurant on Hill Road, which fits with the user being vegetarian.\n\nThis answer may be incomplete, especially for 2026-10-13, where no relevant information was found.",
+     "hits": [
+      "ACTIVE: The user spent the evening of 2026-10-15 unpacking books.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+     ]
+    },
+    "top_k_10": {
+     "verdict": "correct",
+     "note": "Both events (ranks 4 and 8).",
+     "answer": "Based on the available particles, here is what the user did between 2026-10-12 and 2026-10-14:\n\n- **2026-10-12:** This was the user's first day at the Mumbai office. Their colleague Ritika showed them around the office and took them to lunch.\n- **2026-10-14:** Ananya travelled from Pune to visit the user, and the two had dinner at Gauri's.\n\nNothing is recorded for 2026-10-13, so the knowledge base doesn't say what the user did that day. The account for the other days may also be incomplete.\n\nOther events fall outside this window and so don't count. The user picked up their flat keys on 10-10, walked Carter Road on 10-11, and had their belongings delivered by movers on 10-15, when they also unpacked books in the evening."
+    },
+    "top_k_10_rewritten": {
+     "verdict": "correct",
+     "note": "Both events.",
+     "question_asked": "What did the user do on 2026-10-12, 2026-10-13 and 2026-10-14?",
+     "answer": "The knowledge base has details for 2026-10-12 and 2026-10-14, but nothing for 2026-10-13.\n\n**2026-10-12:** This was the user's first day at the Mumbai office. Their colleague Ritika showed them around the office and took them to lunch.\n\n**2026-10-13:** The particles don't say what the user did on this day.\n\n**2026-10-14:** Ananya travelled from Pune to visit the user, and the two had dinner at Gauri's.\n\nFor context, the user picked up the keys to their new flat in Pali Hill, Bandra on 2026-10-10 and walked Carter Road on the evening of 2026-10-11. Movers delivered their belongings from Delhi on 2026-10-15."
+    }
+   },
+   "retrieval_ranks": {
+    "ranks": {
+     "candidates": 30,
+     "gold": [
+      "4: The user's first day at the Mumbai office was on 2026-10-12.",
+      "8: The user and Ananya had dinner at Gauri's on 2026-10-14."
+     ],
+     "out_of_window": [
+      "7: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "10: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "14: The user spent six months in Powai in 2019 as an intern."
+     ]
+    },
+    "ranks_rewritten": {
+     "candidates": 30,
+     "gold": [
+      "4: The user's first day at the Mumbai office was on 2026-10-12.",
+      "8: The user and Ananya had dinner at Gauri's on 2026-10-14."
+     ],
+     "out_of_window": [
+      "7: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "10: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "15: The user spent six months in Powai in 2019 as an intern."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c1-lives-now",
+   "shape": "current_state",
+   "question": "Where does the user live now?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Mumbai, Pali Hill, Bandra; hedges over the unretired trip and flight.",
+     "answer": "The user most likely lives in Mumbai now, in a new flat in Pali Hill, Bandra. They picked up the keys on 2026-10-10 and checked out of their hotel that morning. Movers delivered their belongings from Delhi on 2026-10-15, and they spent that evening unpacking books.\n\nSome of the particles are inconsistent, so there is some uncertainty:\n- One particle says the user was in Mumbai for about a week for work, and another says they were scheduled to fly back to Delhi on 2026-10-15. That fits a work trip, but it sits oddly with the move and the delivery of belongings on the same day.\n- Another says the user moved to Mumbai in a session dated 2026-10-09.\n- Until at least 2026-09-04, the user lived in Lajpat Nagar, Delhi.\n\nThe knowledge base also says the current place is somewhere the user has lived before. That fits Mumbai, since the user spent six months in Powai in 2019 as an intern. It does not name the place explicitly, though.\n\nOverall, the evidence points to a new home in Pali Hill, Bandra, Mumbai. The earlier hotel stay and the planned Delhi flight look like part of the transition.",
+     "hits": [
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's new flat is in Pali Hill.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user walked the whole of Carter Road on the evening of 2026-10-11.",
+      "ACTIVE: The user is vegetarian."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c2-diet",
+   "shape": "lookup",
+   "question": "Does the user have any dietary restrictions?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Vegetarian.",
+     "answer": "Yes. The user is vegetarian, which is a dietary restriction.\n\nOther details fit with that. Gauri's Thali is an all-vegetarian restaurant, and the user found it on Hill Road and had dinner there with their sister Ananya on 2026-10-14. The user also holds Sandeep's Curry House in Delhi as a favourite place to eat, and thinks its paneer tikka is the best they've had. Paneer is a vegetarian dish.\n\nThe particles don't mention any other restrictions, such as allergies or religious dietary rules. I can't say whether any exist beyond vegetarianism.",
+     "hits": [
+      "ACTIVE: The user is vegetarian.",
+      "ACTIVE: Gauri's Thali is an all-vegetarian restaurant.",
+      "ACTIVE: Sandeep's Curry House is the user's favourite place to eat.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user's new flat is in Pali Hill."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c3-powai",
+   "shape": "lookup",
+   "question": "Has the user lived in Mumbai before?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Powai, 2019, intern; dated to 2019, not to the session that said it.",
+     "answer": "Yes, probably, in a limited way. The user spent six months in Powai (a Mumbai neighbourhood) in 2019 as an intern, so they have likely lived in Mumbai before, though only for a short stint.\n\nAnother particle says the place where the user currently lives, which the source doesn't name, is somewhere they've lived before and not their first time living there. The user did move to Mumbai (a session dated 2026-10-09) and has a new flat in Pali Hill, Bandra. Together with the Powai stint, this suggests the unnamed place could be Mumbai, but the particles don't confirm that link.\n\nThe user's recent home before the move was a flat in Lajpat Nagar, Delhi, so Mumbai is a return rather than a first stay.",
+     "hits": [
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The place where the user currently lives (not named explicitly in the source) is somewhere the user has lived before; this is not the user's first time living there.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c4-ananya",
+   "shape": "relationship",
+   "question": "Who is Ananya to the user?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Sister; Pune.",
+     "answer": "Ananya is the user's sister. She travelled from Pune to visit the user on 2026-10-14, and the two of them had dinner at Gauri's that day.",
+     "hits": [
+      "ACTIVE: Ananya is the user's sister.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user and Ananya had dinner at Gauri's on 2026-10-14.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: Ritika, the user's colleague, took the user to lunch on 2026-10-12.",
+      "ACTIVE: The user is vegetarian.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's new flat is in Pali Hill.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user spent six months in Powai in 2019 as an intern.",
+      "ACTIVE: On the morning of 2026-10-10, the user checked out of their hotel."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c5-office",
+   "shape": "exact_term",
+   "question": "In which building complex is the user's Mumbai office?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Kamala Mills, Lower Parel.",
+     "answer": "The user's Mumbai office is in Kamala Mills, in Lower Parel.",
+     "hits": [
+      "ACTIVE: The Mumbai office is located in Kamala Mills in Lower Parel.",
+      "ACTIVE: The user is in Mumbai for about a week for work, as of 2026-10-08.",
+      "ACTIVE: The user's first day at the Mumbai office was on 2026-10-12.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+      "ACTIVE: The user is staying at a hotel in Bandra, Mumbai, during the work trip.",
+      "ACTIVE: The user is scheduled to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: Movers delivered the user's belongings from Delhi on 2026-10-15.",
+      "ACTIVE: Ananya travelled from Pune to visit the user on 2026-10-14.",
+      "ACTIVE: The user's new flat is in Pali Hill.",
+      "ACTIVE: Sandeep's Curry House is in or near Lajpat Nagar, Delhi."
+     ]
+    }
+   }
+  },
+  {
+   "id": "c6-favourite",
+   "shape": "exact_term",
+   "question": "What is the name of the vegetarian thali place the user found near their new flat?",
+   "arms": {
+    "today": {
+     "verdict": "correct",
+     "note": "Gauri's Thali, Hill Road.",
+     "answer": "The vegetarian thali place is called **Gauri's Thali**. It is an all-vegetarian restaurant on Hill Road. The user found it on 2026-10-11 while walking back from Carter Road, a short distance from their new flat in Pali Hill, Bandra. Later, on 2026-10-14, the user and their sister Ananya had dinner at \"Gauri's\", which is probably the same place.",
+     "hits": [
+      "ACTIVE: Gauri's Thali is an all-vegetarian restaurant.",
+      "ACTIVE: The user is vegetarian.",
+      "ACTIVE: The user's new flat is in Pali Hill.",
+      "ACTIVE: The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road.",
+      "ACTIVE: The user's new flat in Pali Hill is about fifteen minutes from the hotel where the user had been staying.",
+      "ACTIVE: Gauri's Thali is located on Hill Road.",
+      "ACTIVE: Sandeep's Curry House is the user's favourite place to eat.",
+      "ACTIVE: On 2026-10-10, the user picked up the keys to their new flat in Pali Hill, Bandra.",
+      "ACTIVE: Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+      "ACTIVE: Pali Hill is in Bandra.",
+      "ACTIVE: The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+      "ACTIVE: The paneer tikka at Sandeep's Curry House is the best the user has had."
+     ]
+    }
+   }
+  }
+ ]
+}

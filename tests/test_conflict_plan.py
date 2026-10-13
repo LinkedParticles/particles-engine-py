@@ -75,6 +75,17 @@ def _no_side_writes(plan: ConflictWritePlan) -> None:
     assert not plan.record_divergence
 
 
+def _records_winner(plan: ConflictWritePlan, retired: Particle, winner: Particle) -> None:
+    event = plan.update_event
+    assert event is not None
+    assert event.event_type is OperatorEventType.UPDATE_SUPERSESSION
+    assert event.payload == {"retired_id": retired.id, "winner_id": winner.id, "route": "ladder"}
+    assert set(event.refs) == {
+        (EventRefKind.PARTICLE, retired.id),
+        (EventRefKind.PARTICLE, winner.id),
+    }
+
+
 class TestInsertActiveOnly:
     @pytest.mark.parametrize("verdict", [ConflictVerdict.CORROBORATES, ConflictVerdict.NO_CONFLICT])
     def test_new_written_active_beside_existing(self, verdict: ConflictVerdict) -> None:
@@ -127,6 +138,7 @@ class TestNewWins:
         assert plan.result is plan.insert
         assert NEW.supersedes is None  # the input is not mutated
         _no_side_writes(plan)
+        _records_winner(plan, EXISTING, NEW)
 
     def test_update_supersedes_keeps_a_set_supersedes(self) -> None:
         # Write-once (D1): an already-set pointer is never overwritten.
@@ -134,6 +146,24 @@ class TestNewWins:
         plan = _plan(ConflictVerdict.UPDATE_SUPERSEDES, new=preset)
         assert plan.insert is preset
         assert plan.result is preset
+        # The pointer is taken, so the event is the only record of this winner.
+        _records_winner(plan, EXISTING, preset)
+
+    def test_the_mirror_records_the_existing_claim_as_winner(self) -> None:
+        plan = _plan(ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING)
+        _records_winner(plan, NEW, EXISTING)
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            ConflictVerdict.CORROBORATES,
+            ConflictVerdict.SUPERSEDES,
+            ConflictVerdict.DOCUMENT_SUPERSEDES,
+            ConflictVerdict.INCONSISTENT,
+        ],
+    )
+    def test_only_rung_2_5_records_a_winner(self, verdict: ConflictVerdict) -> None:
+        assert _plan(verdict).update_event is None
 
 
 class TestExistingWins:

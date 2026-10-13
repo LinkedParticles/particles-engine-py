@@ -78,7 +78,6 @@ from particles.core.status import Status, StatusReason, validate_transition
 from particles.corpus.store import get_entry, get_entry_currency, get_snapshot
 from particles.db import write_lock
 from particles.extraction.registry import infer_domain
-from particles.ingest.duplicate_suppression import build_duplicate_index
 from particles.ingest.second_reading import (
     ClaimContext,
     claim_context,
@@ -87,7 +86,7 @@ from particles.ingest.second_reading import (
     snapshot_claim_context,
 )
 from particles.llm.breaker import llm_circuit_open
-from particles.operations._quarantine import promote_quarantined
+from particles.operations._quarantine import restore_held_claim
 from particles.operations.lint.contradictions import RereadOutcome, reread_stale_pairs
 from particles.operations.lint.open_inconsistency import record_sides
 from particles.store.event_store import (
@@ -100,7 +99,6 @@ from particles.store.event_store import (
 from particles.store.observer_scope_join import SourceRef, attests, lens_may_engage, load_scopes
 from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
-    append_provenance_ref,
     get_census_records,
     get_inconsistency_particles,
     get_particle,
@@ -686,19 +684,9 @@ async def _apply_extract_reading(
     restored: dict[str, Any] = {}
     refs: list[str] = [r.a.id, r.b.id]
     if newcomer is not None and is_quarantined(newcomer):
-        twin = (await build_duplicate_index(session, [newcomer.content])).find(newcomer)
-        if twin is not None:
-            for ref in newcomer.provenance:
-                await append_provenance_ref(session, twin.id, ref)
-            await update_particle_status(
-                session, newcomer.id, Status.SUPERSEDED, StatusReason.CONFLICT_RESOLVED
-            )
-            restored = {"folded_into": twin.id}
-            refs.append(twin.id)
-        else:
-            successor = await promote_quarantined(session, newcomer)
-            restored = {"successor": successor.id}
-            refs.append(successor.id)
+        key, landed = await restore_held_claim(session, newcomer)
+        restored = {key: landed}
+        refs.append(landed)
     payload: dict[str, Any] = {
         "record_id": record.id,
         "cause": CloseCause.WITHDRAWN.value,

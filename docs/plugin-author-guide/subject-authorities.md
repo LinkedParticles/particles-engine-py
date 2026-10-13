@@ -104,6 +104,16 @@ from an authority.
   instead when the lookup found nothing. The Wikidata authority abstains when
   `subjects.wikidata_candidate_selection` is `llm_judge` and the judge answers
   that none of a name's candidates is meant.
+- **Report an outage as unreachable, never as a miss**, by returning
+  `AuthorityResolution(unreachable=True)` and nothing else when the lookup
+  could not be made (a network error, a timeout, an error status). Returning
+  `None` there tells the resolver the name is unknown, and the resolver
+  remembers a miss for `subjects.wikidata_cache_ttl_seconds`, so a short outage
+  would stop every later resolution of that name from asking you. On an
+  unreachable result the resolver tries the next authority and records no
+  miss. `AuthorityUnreachable` (exported beside `AuthorityResolution`) is
+  available for raising inside your own lookup code; the Wikidata authority
+  raises it from its search and turns it into this result.
 - **`canonical_name_for(session, external_id)`** is optional enrichment:
   return a better display name for an id you recognised (Wikidata uses its
   label cache), or `None`.

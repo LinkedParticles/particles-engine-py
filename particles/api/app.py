@@ -64,6 +64,7 @@ from particles.db import (
     get_write_session,
     session_scope,
 )
+from particles.egress import EgressRefused, ensure_backstop
 from particles.http import SourceFetchError
 from particles.operations._llm import llm_circuit_open
 from particles.operations.agent_write import (
@@ -131,6 +132,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # app starts (middleware cannot be added once serving has begun).
     from particles.observability import setup_observability
 
+    # Arm the no-egress backstop before anything can connect.
+    ensure_backstop()
     setup_observability()
     await create_tables()
     # Resident daemon mode — opt-in, off by default. Started after
@@ -214,6 +217,28 @@ async def _write_lock_timeout_handler(_request: Request, exc: WriteLockTimeout) 
 
     log.warning("write-lock timeout: %s", exc)
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(EgressRefused)
+async def _egress_refused_handler(_request: Request, exc: EgressRefused) -> Response:
+    """Translate a no-egress refusal into a 403 that names the destination.
+
+    Distinct from the SSRF 400 and the upstream 502: the request was well-formed
+    and the origin may be up, but this engine's ``network.egress`` posture does
+    not allow the connection.
+    """
+    from fastapi.responses import JSONResponse
+
+    log.info("egress refused: %s", exc)
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": str(exc),
+            "error": "egress_refused",
+            "host": exc.host,
+            "port": exc.port,
+        },
+    )
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -823,6 +848,8 @@ async def corpus_deposit_url(
         # well-formed; the upstream is the problem).
         log.warning("deposit_url: upstream fetch failed for %r: %s", req.url, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except EgressRefused:
+        raise  # a policy, mapped to 403 by the app-level handler
     except Exception as exc:
         log.warning("deposit_url failed for %r: %s", req.url, exc, exc_info=True)
         raise HTTPException(status_code=400, detail="Could not deposit the provided URL") from exc

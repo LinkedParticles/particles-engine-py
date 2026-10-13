@@ -65,6 +65,7 @@ from particles.core.schema import (
     SuggestReport,
     TaxonomyDefinition,
 )
+from particles.http import egress_client
 from particles.secrets import get_engine_token_optional
 
 if TYPE_CHECKING:
@@ -184,7 +185,8 @@ class HttpBackend:
         token = get_engine_token_optional()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         _maybe_warn_plaintext_token(engine.base_url, has_token=bool(token))
-        async with httpx.AsyncClient(
+        async with egress_client(
+            purpose="remote engine",
             base_url=engine.base_url,
             timeout=engine.timeout_seconds,
             headers=headers,
