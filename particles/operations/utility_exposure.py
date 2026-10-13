@@ -21,11 +21,16 @@ session's start**, never as of the mining run:
    that a ``Read`` action line names, which covers memory topic files.
 
 For sets 2 and 3, "stated by" is the as-of form of the currently-stated test:
-the belief was believed at the session's start, by the as-of
-visibility predicate, and its own provenance names a snapshot of
-the source that was current then.
-For a ``MUTABLE`` source that is the latest extracted generation captured by
-that instant; for any other source, any extracted snapshot captured by then.
+the belief's own provenance names a snapshot of the source that
+was current at the session's start. For a ``MUTABLE`` source that is the latest
+extracted generation captured by that instant; for any other source, any
+extracted snapshot captured by then. When the store extracted the belief does
+not matter: a generation captured before the session but extracted
+after it still states what the session read. The belief must not be born
+retired, out of validity, or retired by the start (the rest of the as-of
+predicate), and its claim must not have been explicitly retracted
+by then (a ``PARTICLE_RETRACTED`` event on any belief with the same normalized
+content).
 
 Gather / decide: the path rules are pure functions over strings;
 :class:`ExposureReader` does the reads, once per run for what does not vary by
@@ -39,7 +44,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -48,6 +53,7 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.core.duplicate_key import content_hash
 from particles.core.observer_scope import project_keys
 from particles.core.schema import ExtractionStatus, Mutability, ProvenanceRefType, WarcRecordType
 from particles.corpus.rule_sources import RULE_SOURCE_TAG
@@ -57,6 +63,12 @@ from particles.operations.query.as_of import (
     RetirementIndex,
     ensure_utc,
     load_retirement_index,
+)
+from particles.store.event_store import (
+    EventRefKind,
+    OperatorEventRefRow,
+    OperatorEventRow,
+    OperatorEventType,
 )
 from particles.store.particle_store import ParticleRow, ProvenanceEdgeRow
 from particles.store.session_exposure_store import session_exposures_for
@@ -232,6 +244,8 @@ class ExposureReader:
     rule_files: dict[str | None, list[RuleFile]]
     #: Project key → the entries the harness loads whole at session start.
     session_start_files: dict[str, list[str]] = field(default_factory=dict)
+    #: Normalized-content key → the first explicit retraction of that claim.
+    retracted: dict[str, datetime] = field(default_factory=dict)
 
     @classmethod
     async def load(cls, session: AsyncSession) -> ExposureReader:
@@ -262,6 +276,7 @@ class ExposureReader:
             files=files,
             rule_files=dict(rule_files),
             session_start_files=dict(start_files),
+            retracted=await load_explicit_retractions(session),
         )
 
     def rule_file_entries(self, frame: SessionFrame, action_lines: Sequence[str]) -> set[str]:
@@ -287,6 +302,7 @@ class ExposureReader:
             session,
             rule_entries | read_entries,
             AsOfView(as_of=ensure_utc(frame.started_at), index=self.index),
+            self.retracted,
         )
         return Exposure(
             recorded=frame.recorded,
@@ -295,17 +311,50 @@ class ExposureReader:
         )
 
 
+async def load_explicit_retractions(session: AsyncSession) -> dict[str, datetime]:
+    """Normalized-content key → the earliest ``PARTICLE_RETRACTED`` event naming that claim.
+
+    An explicit retraction is a judgment about the claim, so it reaches every
+    copy with the same normalized content (condition 5). Cascade
+    retirements (``SOURCE_RETRACTED``, ``RETRACTED_DEPENDENCY``) and
+    supersessions are not judgments about the claim and are not read here.
+    """
+    rows = await session.execute(
+        select(ParticleRow.content, OperatorEventRow.occurred_at)
+        .join(OperatorEventRefRow, OperatorEventRefRow.event_id == OperatorEventRow.event_id)
+        .join(ParticleRow, ParticleRow.id == OperatorEventRefRow.ref_id)
+        .where(
+            OperatorEventRow.event_type == OperatorEventType.PARTICLE_RETRACTED.value,
+            OperatorEventRefRow.ref_kind == EventRefKind.PARTICLE.value,
+        )
+    )
+    first: dict[str, datetime] = {}
+    for content, occurred_at in rows.all():
+        key = content_hash(content)
+        at = ensure_utc(occurred_at)
+        if key not in first or at < first[key]:
+            first[key] = at
+    return first
+
+
 async def stated_by(
-    session: AsyncSession, entry_ids: Collection[str], view: AsOfView
+    session: AsyncSession,
+    entry_ids: Collection[str],
+    view: AsOfView,
+    retracted: Mapping[str, datetime] | None = None,
 ) -> dict[str, set[str]]:
     """Beliefs the entries stated at ``view.as_of`` → the entries that stated each.
 
-    A belief counts when it was believed at that instant and one
-    of its own non-derivation provenance refs names a snapshot of the entry
-    current then: for a ``MUTABLE`` entry the latest extracted generation
-    captured by that instant, otherwise any extracted snapshot captured by it.
-    A ref without a snapshot id counts when the entry had any. An entry with
-    no extracted snapshot by then stated nothing.
+    A belief counts when one of its own non-derivation provenance refs names a
+    snapshot of the entry current at that instant: for a ``MUTABLE`` entry the
+    latest extracted generation captured by then, otherwise any extracted
+    snapshot captured by it. A ref without a snapshot id counts when the entry
+    had any. An entry with no extracted snapshot by then stated nothing.
+
+    When the belief was extracted does not matter. It must be in
+    force at the instant (:meth:`AsOfView.in_force`: not born retired, valid,
+    not retired by then), and its claim must not have an explicit retraction
+    at or before it in ``retracted`` (:func:`load_explicit_retractions`).
     """
     ids = list(entry_ids)
     if not ids:
@@ -368,8 +417,12 @@ async def stated_by(
         )
         for row in particle_rows.scalars():
             particle = row.to_model()
-            if not view.evaluate(particle, row.retired_at).visible:
+            if not view.in_force(particle, row.retired_at):
                 continue
+            if retracted:
+                retracted_at = retracted.get(content_hash(particle.content))
+                if retracted_at is not None and retracted_at <= as_of:
+                    continue
             by: set[str] = set()
             for ref in particle.provenance:
                 if ref.type is ProvenanceRefType.PARTICLE:

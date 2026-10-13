@@ -150,3 +150,24 @@ async def test_empty_reply_as_text_returns_empty_string_uncounted(
     assert await seam._llm_call("x") is None
     assert seam.llm_failure_count() == before + 1
     assert seam.llm_circuit_open() is False
+
+
+def test_unusable_reply_is_counted_and_logged_with_its_tail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A long unusable reply's warning shows its end, where malformed JSON goes wrong."""
+    before = seam.llm_failure_count()
+    reply = '{"reason": "' + "x" * 1000 + " TAIL-MARKER.}"
+
+    with caplog.at_level("WARNING"):
+        seam.record_unusable_reply("re-anchor second reading", reply)
+
+    assert seam.llm_failure_count() == before + 1
+    message = caplog.records[-1].getMessage()
+    assert f"({len(reply)} chars)" in message
+    assert '{"reason": "xxx' in message
+    assert "TAIL-MARKER.}" in message
+    assert "x" * 700 not in message
+
+    seam.record_unusable_reply("probe", "short reply")
+    assert caplog.records[-1].getMessage().endswith("'short reply'")

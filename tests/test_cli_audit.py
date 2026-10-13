@@ -124,10 +124,47 @@ class TestEstimateGate:
         extraction = get_config().extraction
         assert payload["output_tokens_ceiling"] == (
             payload["estimated_llm_calls"] * extraction.max_tokens
-            + math.ceil(payload["expected_retries"]) * extraction.retry_max_tokens
+            + payload["ceiling_retries"] * extraction.retry_max_tokens
         )
+        assert payload["ceiling_retries"] >= math.ceil(payload["expected_retries"])
         assert payload["wall_seconds"] > 0
         deposit.assert_not_called()
+
+    def test_estimate_skips_files_already_extracted(
+        self, cli_db: Path, mem_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-run over a directory partly extracted prices only the rest."""
+        import asyncio
+
+        from particles.core.schema import ExtractionStatus, Mutability
+        from particles.corpus.store import update_extraction_status
+        from particles.db import session_scope
+        from particles.operations.deposit import deposit_text_versioned
+
+        plan = audit_mod.build_harvest_plan([mem_dir], None, None)
+        assert len(plan.deposits) == 2
+
+        async def _capture_first() -> None:
+            first = plan.deposits[0]
+            async with session_scope(write=True) as session:
+                _entry, snapshot, _ = await deposit_text_versioned(
+                    session,
+                    text=first.text,
+                    uri_r=first.uri_r,
+                    source_type=first.source_type,
+                    mutability=Mutability(first.mutability),
+                    tags=first.tags,
+                    deposited_by="audit",
+                )
+                await update_extraction_status(session, snapshot, ExtractionStatus.COMPLETE)
+                await session.commit()
+
+        asyncio.run(_capture_first())
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        result = runner.invoke(app, ["audit", str(mem_dir), "--estimate"])
+        assert result.exit_code == 0, result.output
+        assert "Estimate: 1 entry to extract (1 entry already captured, skipped)" in result.output
+        assert "~1 extraction LLM call(s)" in result.output
 
     def test_estimate_for_an_unpriced_model_prints_tokens_and_the_fix(
         self, cli_db: Path, mem_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -379,6 +416,25 @@ class TestHarvestPlan:
         published = plan.deposits[0].content_published_at
         assert published is not None
         assert (published.year, published.month, published.day) == (2024, 3, 2)
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="a dated heading is not read at deposit (declined)",
+    )
+    def test_audit_dates_a_note_by_its_dated_heading(self, tmp_path: Path) -> None:
+        # item 4: "# Session 11 (2026-10-08): work trip" is not wholly a
+        # date, so the ladder fell to the mtime a checkout set, the day of the run.
+        import os
+        from datetime import UTC, datetime
+
+        f = tmp_path / "session-11.md"
+        f.write_text((Path(__file__).parent / "fixtures/trip_vs_move/session-11.md").read_text())
+        run_day = datetime(2026, 10, 11, 22, 54, tzinfo=UTC).timestamp()
+        os.utime(f, (run_day, run_day))
+        published = audit_mod.build_harvest_plan([f], None, None).deposits[0].content_published_at
+        assert published is not None
+        assert published.date().isoformat() == "2026-10-08"
 
     def test_max_entries_caps_memory_files(self, mem_dir: Path) -> None:
         plan = audit_mod.build_harvest_plan([mem_dir], None, max_entries=1)

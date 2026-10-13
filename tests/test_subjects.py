@@ -550,6 +550,26 @@ class TestLiveLookupSkipAndNegativeCache:
         assert subject_cache.negative_get("Nonexistent Widget QQQ") is True
 
     @pytest.mark.asyncio
+    async def test_unreachable_authority_records_no_negative(self, db_session: object) -> None:
+        # An outage is not a miss: the name resolves bare-local for
+        # now, and no negative entry stops a later resolution of the same name
+        # (in this or another store) from asking Wikidata again.
+        from particles.ingest.authorities.registry import AuthorityUnreachable
+        from particles.ingest.subject_resolver import resolve_subject
+        from particles.store import subject_cache
+
+        session = db_session  # type: ignore[assignment]
+        with patch(
+            "particles.ingest.authorities.wikidata._wikidata_candidates",
+            new_callable=AsyncMock,
+            side_effect=AuthorityUnreachable("offline"),
+        ) as mock_search:
+            subject = await resolve_subject(session, "Outage Widget QQQ")  # type: ignore[arg-type]
+        mock_search.assert_called_once()
+        assert subject.external_ids == []
+        assert subject_cache.negative_get("Outage Widget QQQ") is False
+
+    @pytest.mark.asyncio
     async def test_cached_negative_skips_live_lookup(self, db_session: object) -> None:
         # With a negative pre-seeded and no local Subject to shadow the name,
         # the live authority is skipped and a bare local Subject is created.

@@ -7,6 +7,7 @@
 Public surface: the :class:`SubjectAuthority` Protocol and its additive
 :class:`ContextualRecognizer` form, the
 :class:`AuthorityResolution` and :class:`RecognizeContext` types, the
+:class:`AuthorityUnreachable` signal, the
 registry accessors, and the built-in authority classes.
 """
 
@@ -16,6 +17,7 @@ from particles.ingest.authorities._shared import PatternAuthority
 from particles.ingest.authorities.artifact import ArtifactAuthority
 from particles.ingest.authorities.registry import (
     AuthorityResolution,
+    AuthorityUnreachable,
     ContextualRecognizer,
     RecognizeContext,
     SubjectAuthority,
@@ -28,6 +30,7 @@ from particles.ingest.authorities.wikidata import WikidataAuthority
 __all__ = [
     "ArtifactAuthority",
     "AuthorityResolution",
+    "AuthorityUnreachable",
     "ContextualRecognizer",
     "PatternAuthority",
     "RecognizeContext",

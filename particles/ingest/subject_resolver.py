@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import egress
 from particles.config import get_config
 from particles.core.schema import ExternalRef, Subject
 from particles.extraction.registry import infer_domain
@@ -35,6 +36,7 @@ from particles.ingest.authorities import (
     get_authorities,
     is_applicable,
 )
+from particles.ingest.update_supersession import SpeakerKey, persona_names, speaker_forms
 from particles.store import subject_cache
 from particles.store.subject_cache import CacheEntry
 from particles.store.subject_store import (
@@ -185,6 +187,24 @@ async def find_existing_subject(
     return await _find_local(session, folded, source_type, source_tags)
 
 
+async def load_speaker_key(session: AsyncSession) -> SpeakerKey | None:
+    """The persona key every reader of the about-subject key shares.
+
+    ``None`` when ``subjects.persona_openers`` is empty (off) or the
+    store holds no persona Subject yet, in which case no stored claim can be
+    keyed on it either. The persona Subject is the one named
+    ``persona_canonical_name``, the Subject the fold resolves the speaker to.
+    """
+    cfg = get_config().subjects
+    forms = speaker_forms(cfg)
+    if not forms:
+        return None
+    persona = await find_by_name(session, cfg.persona_canonical_name)
+    if persona is None:
+        return None
+    return SpeakerKey(subject_id=persona.id, forms=forms, names=persona_names(cfg))
+
+
 async def _record_persona_alias(session: AsyncSession, subject: Subject, form: str) -> Subject:
     """Record a folded surface form as an alias of the persona Subject.
 
@@ -260,6 +280,31 @@ async def resolve_subject(
 
 # Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
 # next substantive change here (D2).
+_egress_skip_logged: set[str] = set()
+
+
+def _live_authority_allowed(auth: SubjectAuthority) -> bool:
+    """Whether ``network.egress`` lets a live authority reach its host.
+
+    An authority names its destination as ``EGRESS_HOST`` (``(host, port)``);
+    one that names none is left to the transport gate. Logged once per
+    authority per process.
+    """
+    host = getattr(auth, "EGRESS_HOST", None)
+    if host is None or egress.allows(*host):
+        return True
+    namespace = str(getattr(auth, "NAMESPACE", type(auth).__name__))
+    if namespace not in _egress_skip_logged:
+        _egress_skip_logged.add(namespace)
+        log.info(
+            "Live authority %s skipped: network.egress does not allow %s:%s; "
+            "subjects resolve locally",
+            namespace,
+            *host,
+        )
+    return False
+
+
 async def _resolve(
     session: AsyncSession,
     name: str,
@@ -324,6 +369,10 @@ async def _resolve(
         for auth in authorities:
             if not auth.LIVE or not is_applicable(auth, domain):
                 continue
+            if not _live_authority_allowed(auth):
+                # Refused by network.egress: not asked, so not a
+                # miss. ``searched_live`` stays False and nothing is negative-cached.
+                continue
             searched_live = True
             res = await auth.resolve(
                 session, name, particle_content=particle_content, domain=domain
@@ -339,6 +388,11 @@ async def _resolve(
                 # The authority judged every candidate wrong for this claim.
                 # Treated as an abstention: no ref, and no negative
                 # cache entry, since ``all_missed`` is already False.
+                continue
+            if res.unreachable:
+                # The authority could not be asked. Not a miss: no
+                # negative cache entry, since ``all_missed`` is already False,
+                # so the next resolution of this name asks again.
                 continue
             # Build a new Subject from the authority's resolution.
             assert res.external_ref is not None  # resolve() contract: existing xor new
@@ -404,7 +458,8 @@ async def _resolve(
         # expires. Guard on ``searched_live`` so a domain that gates every live
         # authority out (``is_applicable`` False) is never mistaken for a real
         # miss, and skip recording after an abstention (``all_missed`` False),
-        # which is content-dependent and may link on a different particle.
+        # which is content-dependent and may link on a different particle, or
+        # after an unreachable authority, which answered nothing.
         if searched_live and all_missed:
             subject_cache.negative_set(name)
 
@@ -572,6 +627,9 @@ async def split_subject_resolving(
         if existing is not None:
             new_subject = existing
         elif ns == "wikidata":
+            # A refusal here would otherwise mint a Subject named by its raw QID
+            # (the alias helper returns [] on any failure); refuse instead.
+            egress.check(*egress.WIKIDATA_HOST, "subjects split (wikidata labels)")
             # Fetch labels + aliases directly from Wikidata by QID.
             aliases = await _wikidata_aliases(ext_id)
             canonical = aliases[0] if aliases else ext_id

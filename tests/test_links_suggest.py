@@ -218,7 +218,7 @@ async def test_unknown_subject_yields_warning(db_session: AsyncSession) -> None:
 async def test_llm_judge_assigns_verdicts(db_session: AsyncSession) -> None:
     """LLM_JUDGE maps the model's JSON verdict onto each candidate; no mutation."""
     subj = await _seed_pair(db_session)
-    key = f"{_PID_A[:8]}+{_PID_B[:8]}"
+    key = "p0"
 
     # Patch the shared LLM seam where links_suggest defers its import.
     with patch(
@@ -253,7 +253,7 @@ async def test_llm_judge_unreturned_pair_defaults_unsure(db_session: AsyncSessio
 async def test_apply_links_paraphrase_pairs(db_session: AsyncSession) -> None:
     """APPLY links PARAPHRASE pairs via a CO_EVIDENTIAL relation (created_by=LLM_JUDGE)."""
     subj = await _seed_pair(db_session)
-    key = f"{_PID_A[:8]}+{_PID_B[:8]}"
+    key = "p0"
 
     with patch(
         "particles.operations._llm._llm_call",
@@ -275,7 +275,7 @@ async def test_apply_links_paraphrase_pairs(db_session: AsyncSession) -> None:
 async def test_apply_skips_non_paraphrase(db_session: AsyncSession) -> None:
     """DISTINCT / UNSURE verdicts are never auto-linked."""
     subj = await _seed_pair(db_session)
-    key = f"{_PID_A[:8]}+{_PID_B[:8]}"
+    key = "p0"
 
     with patch(
         "particles.operations._llm._llm_call",
@@ -297,7 +297,7 @@ async def test_apply_confirm_threshold_guard(db_session: AsyncSession) -> None:
     get_config().links_suggest.apply_confirm_threshold = 0
 
     subj = await _seed_pair(db_session)
-    key = f"{_PID_A[:8]}+{_PID_B[:8]}"
+    key = "p0"
 
     with patch(
         "particles.operations._llm._llm_call",
@@ -367,7 +367,7 @@ async def test_scope_particle_ids_bounds_judge_to_in_scope_pairs(
 
     # Patch the LLM batch call to a no-op verdict map; judged candidates then
     # default to UNSURE, so a non-None verdict marks "was judged".
-    with patch("particles.operations.links_suggest._judge_batch", return_value={}):
+    with patch("particles.operations.links_suggest._judge_batch", return_value=[]):
         report = await suggest_co_evidential(
             db_session,
             mode=SuggestMode.LLM_JUDGE,
@@ -420,9 +420,9 @@ async def test_scope_judge_order_is_intra_scope_pairs_first(
 
     batches: list[list[frozenset[str]]] = []
 
-    def _record_batch(batch_candidates: list, content_for: dict) -> dict:  # type: ignore[type-arg]
+    def _record_batch(batch_candidates: list, content_for: dict) -> list:  # type: ignore[type-arg]
         batches.append([frozenset({c.particle_a, c.particle_b}) for c in batch_candidates])
-        return {}
+        return []
 
     with patch("particles.operations.links_suggest._judge_batch", side_effect=_record_batch):
         report = await suggest_co_evidential(
@@ -539,3 +539,102 @@ async def test_judge_claim_pairs_batches_and_keeps_order() -> None:
         JudgeVerdictKind.UNSURE,
         JudgeVerdictKind.UNSURE,
     ]
+
+
+# --------------------------------------------------------------------------- #
+# positional judge keys and a budget a verbose tokenizer cannot    #
+# outrun                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _worst_case_reply(pair_count: int) -> str:
+    """The longest reply the judge plausibly writes: fenced, indented, all PARAPHRASE."""
+    import json as _json
+
+    from particles.operations.links_suggest import _judge_key
+
+    body = _json.dumps({_judge_key(i): "PARAPHRASE" for i in range(pair_count)}, indent=2)
+    return f"```json\n{body}\n```"
+
+
+@pytest.mark.parametrize("pair_count", [1, 4, 25, 50, 100, 250])
+def test_judge_budget_covers_a_token_per_byte_reply(pair_count: int) -> None:
+    """The budget outlasts a reply that spends one token on every byte.
+
+    A byte-level tokenizer never spends more than one token per ASCII byte, so
+    this is the ceiling no model's tokenizer can outrun. The old ``a8+b8`` keys
+    cost ``claude-haiku-5-5`` about 57 tokens an entry against a 40-per-pair
+    budget; a 25-pair batch truncated and every verdict read UNSURE.
+    """
+    from particles.operations.links_suggest import _judge_max_tokens
+
+    reply = _worst_case_reply(pair_count)
+    assert len(reply.encode()) <= _judge_max_tokens(pair_count)
+
+
+def test_judge_budget_beats_the_measured_haiku_rate_per_entry() -> None:
+    """Pinned against the measurement that found the bug (phase 2).
+
+    Haiku spent about 57 output tokens on an entry whose key was 17 characters
+    of hex and a plus sign. A positional key is at most four characters below
+    a thousand pairs, so a generous upper bound on the same tokenizer is the
+    measured rate less the 13 key characters saved at one token each, which
+    the per-pair allowance must still clear.
+    """
+    from particles.operations.links_suggest import _JUDGE_TOKENS_PER_PAIR
+
+    measured_hex_entry = 57
+    saved_key_chars = len("c42e15ba+cdcaa152") - len("p999")
+    assert measured_hex_entry - saved_key_chars <= _JUDGE_TOKENS_PER_PAIR
+
+
+@pytest.mark.parametrize(
+    ("key", "index"),
+    [("p0", 0), ("p24", 24), ("P7", 7), ("[p3]", 3), (" p1 ", 1), ("x1", None), ("p", None)],
+)
+def test_key_index_tolerates_case_and_brackets(key: str, index: int | None) -> None:
+    from particles.operations.links_suggest import _key_index
+
+    assert _key_index(key) == index
+
+
+@pytest.mark.asyncio
+async def test_judge_pairs_maps_positional_keys_back_in_order() -> None:
+    """Reply keys map back to their pair by position; strays and gaps are None."""
+    import json as _json
+
+    from particles.operations.links_suggest import _judge_max_tokens, _judge_pairs
+
+    reply = (
+        "```json\n"
+        + _json.dumps({"p2": "distinct", "P0": "PARAPHRASE", "p9": "PARAPHRASE", "p1": "maybe"})
+        + "\n```"
+    )
+    budgets: list[int] = []
+
+    async def fake_call(prompt: str, *, max_tokens: int, **_: object) -> str:
+        budgets.append(max_tokens)
+        assert "[p0]\nA: a0\nB: b0" in prompt
+        assert "[p3]\nA: a3\nB: b3" in prompt
+        return reply
+
+    pairs = [(f"a{i}", f"b{i}") for i in range(4)]
+    with patch("particles.operations._llm._llm_call", side_effect=fake_call):
+        verdicts = await _judge_pairs(pairs)
+    assert verdicts == [JudgeVerdictKind.PARAPHRASE, None, JudgeVerdictKind.DISTINCT, None]
+    assert budgets == [_judge_max_tokens(4)]
+
+
+@pytest.mark.asyncio
+async def test_judge_pairs_full_batch_survives_a_verbose_reply() -> None:
+    """A 25-pair batch, the ``reindex --estimate`` default, parses every verdict."""
+    from particles.operations.links_suggest import _judge_pairs
+
+    async def fake_call(prompt: str, *, max_tokens: int, **_: object) -> str:
+        reply = _worst_case_reply(25)
+        # Truncate as the adapter would if the budget ran out at a byte a token.
+        return reply[:max_tokens]
+
+    with patch("particles.operations._llm._llm_call", side_effect=fake_call):
+        verdicts = await _judge_pairs([(f"a{i}", f"b{i}") for i in range(25)])
+    assert verdicts == [JudgeVerdictKind.PARAPHRASE] * 25

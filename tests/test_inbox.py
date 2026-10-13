@@ -107,14 +107,14 @@ class TestProcessInbox:
         path = tmp_path / "no-such-inbox.txt"
         # Session is unused on this code path; pass a dummy.
         result = await process_inbox(session=AsyncMock(), inbox_path=path)
-        assert result == {"processed": [], "failed": [], "skipped": []}
+        assert result == {"processed": [], "failed": [], "refused": [], "skipped": []}
 
     @pytest.mark.asyncio
     async def test_empty_file_returns_empty_summary(self, tmp_path: Path) -> None:
         path = tmp_path / "inbox.txt"
         path.write_text("")
         result = await process_inbox(session=AsyncMock(), inbox_path=path)
-        assert result == {"processed": [], "failed": [], "skipped": []}
+        assert result == {"processed": [], "failed": [], "refused": [], "skipped": []}
 
     @pytest.mark.asyncio
     async def test_processes_pending_url_and_rewrites_marker(self, tmp_path: Path) -> None:
@@ -172,7 +172,7 @@ class TestProcessInbox:
         deposit_mock = AsyncMock(return_value=("nope", "nope"))
         with patch("particles.corpus.deposit.deposit_url", new=deposit_mock):
             result = await process_inbox(session=AsyncMock(), inbox_path=path)
-        assert result == {"processed": [], "failed": [], "skipped": []}
+        assert result == {"processed": [], "failed": [], "refused": [], "skipped": []}
         deposit_mock.assert_not_awaited()
 
     @pytest.mark.asyncio

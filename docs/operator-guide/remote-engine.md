@@ -67,9 +67,16 @@ endpoint:
   `engine.base_url=http://localhost:8000`. The engine binds loopback on its host;
   nothing is exposed publicly.
 
-Both keep the engine off the public internet and sidestep reverse-proxy
-client-identification (the per-request loopback gate is not proxy-aware,
-which is deferred work). A public TLS endpoint is out of scope for the MVP.
+Both keep the engine off the public internet with no reverse proxy in front
+of it, so the per-request loopback gate sees the real peer. If you do put the
+engine behind a proxy, list it in `api.trusted_proxies` so the gate reads
+`X-Forwarded-For` from that hop only. A public TLS endpoint is out of
+scope.
+
+The SSH forward has one further property: an engine bound to loopback with no
+`PARTICLES_API_KEY` runs with the development-key skip, and every tunnelled
+request arrives from loopback, so the client needs no token at all. Use it only
+when you are the sole user of the engine host.
 
 ## What is not remoted yet
 
@@ -133,3 +140,28 @@ Other deliberately-local surfaces (§ Deferred):
   blocks of `particle show` and `corpus show` are shown in local mode only. The
   routed MCP `particle_show` / `subjects_show` likewise degrade their enrichment
   (subject names, provenance URIs) over a remote engine.
+
+## Claude Code hooks against a remote engine
+
+The hooks installed by `particles init claude-code` follow `engine.base_url` as
+well, with three surfaces that still need the store on the same machine:
+
+| Hook step | With an engine configured |
+|---|---|
+| SessionStart digest | Served by the engine (`GET /digest/{store}`). The freshness check is skipped, so every session receives the full digest |
+| SessionEnd harvest | Refused unless `claude_code.harvest.allow_remote: true`, because transcripts are the most sensitive material the SDK handles. With it, the distilled, redacted transcript and the memory files are deposited on the engine, and the engine's own consolidation extracts them |
+| SessionEnd MEMORY.md re-render | Skipped. The projected region keeps its last local render |
+| SessionEnd utility mining | Skipped |
+| Stop hook (agent-side extraction ask) | Skipped, and the MCP `extraction_submit` tool refuses a remote engine |
+
+Every hook still fails open: an unreachable engine, a refused token or a slow
+link ends the hook with exit 0 and no output, inside the
+`claude_code.hook_deadline_seconds` budget (10 s by default), and the reason is
+written to the local hook log (`particles hook log`). `particles hook doctor`
+checks only a local store today, so on a thin client read the hook log
+instead.
+
+Claude Code starts hooks and MCP servers with the environment their settings
+entries declare. A `PARTICLES_ENGINE_TOKEN` for a non-loopback engine therefore
+has to be written into those entries, in plaintext; the SSH forward described
+above avoids that.

@@ -127,6 +127,7 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     from particles.api.client.http import EngineHttpError
     from particles.core.schema import SchemaVersionMismatchError
     from particles.db import StoreDirectoryError, WriteLockTimeout
+    from particles.egress import EgressRefused, ensure_backstop
     from particles.llm import AccountLevelLLMError
 
     # Bootstrap observability once per CLI process. A no-op unless
@@ -135,6 +136,8 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     # time is visible across the engine boundary.
     from particles.observability import setup_observability
 
+    # Arm the no-egress backstop before anything can connect.
+    ensure_backstop()
     setup_observability()
 
     # Open a root span around the command. Without it every
@@ -214,6 +217,17 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
             "interrupted snapshot is reset to PENDING.",
             err=True,
         )
+        raise typer.Exit(1) from exc
+    except EgressRefused as exc:
+        # The no-egress posture refused a connection. A policy, not
+        # an outage: one line naming the destination and the knob, no traceback.
+        typer.echo(f"Error: {exc}", err=True)
+        if exc.purpose == "fetch":
+            typer.echo(
+                "To add the source without fetching it, deposit a saved copy: "
+                '"particles deposit <file>".',
+                err=True,
+            )
         raise typer.Exit(1) from exc
     except WriteLockTimeout as exc:
         # a writer could not acquire the cross-process write lock in

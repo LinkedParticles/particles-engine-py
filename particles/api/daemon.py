@@ -333,8 +333,14 @@ def _make_inbox_tick(path: Path) -> Work:
         # trigger an immediate second pass (the `inbox watch` behaviour).
         state["last_mtime"] = _mtime_or_none(path)
         processed, failed = len(summary["processed"]), len(summary["failed"])
-        log.info("daemon inbox: processed %d URL(s), %d failed", processed, failed)
-        return f"processed {processed}, failed {failed}"
+        refused = len(summary["refused"])
+        log.info(
+            "daemon inbox: processed %d URL(s), %d failed, %d refused by network.egress",
+            processed,
+            failed,
+            refused,
+        )
+        return f"processed {processed}, failed {failed}, refused {refused}"
 
     return _tick
 

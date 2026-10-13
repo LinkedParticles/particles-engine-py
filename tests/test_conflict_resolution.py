@@ -20,6 +20,7 @@ import pytest
 from particles.core.conflict_resolution import (
     ConflictVerdict,
     build_inconsistency_particle,
+    newer_is_settled,
     resolve_conflict,
 )
 from particles.core.schema import (
@@ -140,7 +141,7 @@ class TestResolveConflictGate:
 
 
 class TestResolveConflictAleatory:
-    """Step 1 — ALEATORY on either side forces INCONSISTENT."""
+    """Step 1 — ALEATORY on either side keeps rungs 1.5 and 2 off the pair."""
 
     def test_aleatory_existing_skips_trust(self) -> None:
         existing = _particle(uncertainty_nature=UncertaintyNature.ALEATORY)
@@ -173,6 +174,82 @@ class TestResolveConflictAleatory:
             resolve_conflict(existing, new, has_contradiction_signal=True)
             is ConflictVerdict.INCONSISTENT
         )
+
+
+ALEATORY = UncertaintyNature.ALEATORY
+EPISTEMIC = UncertaintyNature.EPISTEMIC
+
+
+class TestUpdateRungReadsTheNewerClaim:
+    """Rung 2.5 reads ALEATORY on the newer claim only."""
+
+    @pytest.mark.parametrize(
+        ("existing_nature", "new_nature", "order", "expected"),
+        [
+            # update_order +1: the new claim is the newer one.
+            (ALEATORY, EPISTEMIC, 1, ConflictVerdict.UPDATE_SUPERSEDES),
+            (EPISTEMIC, ALEATORY, 1, ConflictVerdict.INCONSISTENT),
+            (ALEATORY, ALEATORY, 1, ConflictVerdict.INCONSISTENT),
+            # update_order -1: the existing claim is the newer one.
+            (EPISTEMIC, ALEATORY, -1, ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING),
+            (ALEATORY, EPISTEMIC, -1, ConflictVerdict.INCONSISTENT),
+            (ALEATORY, ALEATORY, -1, ConflictVerdict.INCONSISTENT),
+        ],
+    )
+    def test_the_newer_side_decides(
+        self,
+        existing_nature: UncertaintyNature,
+        new_nature: UncertaintyNature,
+        order: int,
+        expected: ConflictVerdict,
+    ) -> None:
+        verdict = resolve_conflict(
+            _particle(uncertainty_nature=existing_nature),
+            _particle(uncertainty_nature=new_nature),
+            has_contradiction_signal=True,
+            update_order=order,
+        )
+        assert verdict is expected
+
+    def test_the_predicate_follows_the_sign(self) -> None:
+        plan = _particle(uncertainty_nature=ALEATORY)
+        report = _particle()
+        assert newer_is_settled(plan, report, 1)
+        assert not newer_is_settled(plan, report, -1)
+        assert newer_is_settled(report, plan, -1)
+        assert not newer_is_settled(report, plan, 1)
+
+    def test_trust_still_skips_an_older_aleatory_side(self) -> None:
+        # Rung 2 keeps the exclusion on either side: the trust gap is ignored,
+        # and the pair is settled by rung 2.5 instead of by trust.
+        verdict = resolve_conflict(
+            _particle(uncertainty_nature=ALEATORY),
+            _particle(),
+            has_contradiction_signal=True,
+            trust_score_existing=0.99,
+            trust_score_new=0.1,
+            update_order=1,
+        )
+        assert verdict is ConflictVerdict.UPDATE_SUPERSEDES
+
+    def test_supersession_still_skips_an_older_aleatory_side(self) -> None:
+        # Rung 1.5 keeps the exclusion on either side: no DOCUMENT_SUPERSEDES.
+        verdict = resolve_conflict(
+            _particle(uncertainty_nature=ALEATORY),
+            _particle(),
+            has_contradiction_signal=True,
+            new_supersedes_existing=True,
+        )
+        assert verdict is ConflictVerdict.INCONSISTENT
+
+    def test_no_signal_still_corroborates(self) -> None:
+        verdict = resolve_conflict(
+            _particle(uncertainty_nature=ALEATORY),
+            _particle(),
+            has_contradiction_signal=False,
+            update_order=1,
+        )
+        assert verdict is ConflictVerdict.CORROBORATES
 
 
 class TestResolveConflictDocumentSupersession:

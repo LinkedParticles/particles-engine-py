@@ -21,3 +21,7 @@
 mkdocs==1.6.1
 mkdocs-material==9.7.7
 mkdocstrings[python]==1.0.4
+# pymdown-extensions is pinned because no pin above bounds it, and 12.x breaks
+# mkdocstrings 1.0.4: its highlight filter builds pymdownx's Highlight without
+# the `md` argument 12.x requires, so the strict build crashes with a TypeError.
+pymdown-extensions==11.0.1

@@ -381,15 +381,49 @@ class TestSharedEstimateKeys:
         cfg = ParticlesConfig.model_validate(raw)
         assert cfg.extraction.estimate_prompt_overhead_tokens == 1234
 
-    def test_audit_per_model_output_figure_must_be_a_token_count(self) -> None:
+    def test_audit_per_model_output_scale_must_be_non_negative(self) -> None:
         from pydantic import ValidationError
 
         from particles.config import AuditConfig
 
         with pytest.raises(ValidationError):
-            AuditConfig(estimate_output_tokens_per_extraction_call_by_model={"claude-sonnet-5": -1})
+            AuditConfig(estimate_output_scale_by_model={"claude-sonnet-5": -1})
         with pytest.raises(ValidationError):
             AuditConfig(estimate_output_spread=1.0)
+        with pytest.raises(ValidationError):
+            AuditConfig(estimate_extraction_output_tokens_per_second=0)
+
+    def test_audit_per_call_output_entries_carry_over_as_scales(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+        raw: dict[str, object] = {
+            "audit": {
+                "estimate_output_tokens_per_extraction_call": 7000,
+                "estimate_output_tokens_per_extraction_call_by_model": {
+                    "claude-haiku-4-5": 3500,
+                    "m-kept": 1,
+                },
+                "estimate_output_scale_by_model": {"m-kept": 0.9},
+                "estimate_seconds_per_extraction_call": 50,
+            }
+        }
+        with caplog.at_level("WARNING", logger="particles.config"):
+            _migrate_legacy_keys(raw)
+        audit = raw["audit"]
+        assert isinstance(audit, dict)
+        assert "estimate_output_tokens_per_extraction_call" not in audit
+        assert "estimate_seconds_per_extraction_call" not in audit
+        cfg = ParticlesConfig.model_validate(raw)
+        # A ratio against the old flat 7,000; an entry already under the new
+        # key wins.
+        assert cfg.audit.estimate_output_scale_by_model == {
+            "claude-haiku-4-5": 0.5,
+            "m-kept": 0.9,
+        }
+        assert "estimate_output_scale_by_model" in caplog.text
+        assert "no longer read" in caplog.text
 
 
 class TestSubjectLinkThresholds:

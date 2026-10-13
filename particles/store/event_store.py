@@ -118,8 +118,12 @@ class OperatorEventType(StrEnum):
     # one event per census INCONSISTENCY record the nightly
     # disclosure pass closes without a review — ``cause`` is ``lapsed`` (a side
     # has no stated member left) or ``regrouped`` (replaced by a record for the
-    # changed group, whose id the payload names). System-emitted, like
-    # CONFLICT_CANDIDATE_DROPPED and DUPLICATES_MERGED:
+    # changed group, whose id the payload names). A record extraction opened
+    # closes here too, with ``origin: extraction``: ``cause: withdrawn`` when a
+    # second reading no longer confirms it, ``cause:
+    # partner_retired`` when the release pass frees its held claim.
+    # System-emitted, like CONFLICT_CANDIDATE_DROPPED and
+    # DUPLICATES_MERGED:
     # the status change alone does not record which member stopped being
     # stated, or by which snapshot, and the coverage rule reads the cause back
     # from here. The record rides as a PARTICLE ref, then each dropped member.
@@ -134,6 +138,26 @@ class OperatorEventType(StrEnum):
     # Refs: the claim, the retired state claim, then the other claim when there
     # is one (the match, or the belief a restatement would have contradicted).
     DEPENDENT_CLAIM_EXAMINED = "DEPENDENT_CLAIM_EXAMINED"
+    # One event per claim a rung 2.5 route retires SUPERSEDED_BY_UPDATE (ADR
+    # 0268): the extraction ladder, its extras, the assertion door and the
+    # backlog sweep. The winner's ``supersedes`` holds one id, so a winner that
+    # retires a second claim (an extra, or a sweep pair once the pointer is
+    # taken) left no record of what retired it, and the demotion card showed
+    # nothing. Payload: ``retired_id``, ``winner_id`` and ``route``; refs: both
+    # claims. System-emitted, like DEPENDENT_CLAIM_EXAMINED.
+    UPDATE_SUPERSESSION = "UPDATE_SUPERSESSION"
+    # one event per examination by the nightly release pass of a
+    # write-time record whose stored side an autonomous pass retired, when an
+    # ACTIVE claim still contradicts the held one, so nothing was written to
+    # any claim. Payload: ``record_id``, ``partner_id`` (the retired side),
+    # ``held_id``, ``retired_by`` (the claim that retired the partner, when one
+    # is on record) and ``blocking_ids``. The event is the pass's memory: a
+    # record is examined again only once a blocking claim has left ACTIVE, and
+    # the record's curation card reads its line from here. A release writes an
+    # INCONSISTENCY_CLOSED with ``cause: partner_retired`` instead. Refs: the
+    # record, the partner, the held claim, then each blocking claim.
+    # System-emitted, like DEPENDENT_CLAIM_EXAMINED.
+    HELD_CLAIM_EXAMINED = "HELD_CLAIM_EXAMINED"
     # one event per propose-mode abstraction candidate. The
     # payload is the full candidate (claim, rationale, premise ids, subject
     # ids, derived confidence) — the event log is the candidate's persistence,
@@ -216,6 +240,18 @@ class OperatorEventType(StrEnum):
     # ruled. Lint reads it back as MODALITY_GRANT_PENDING until an operator
     # verdict, a later value, or a rule change settles it.
     MODALITY_GRANT_QUEUED = "MODALITY_GRANT_QUEUED"
+    # agent-side extraction. A Stop hook asked the session's agent to
+    # extract a span of its deposited transcript (ASKED; the CORPUS_ENTRY ref
+    # names the transcript entry and the payload fixes the snapshot, the span,
+    # the model and the expiry, so no trust-bearing field is a tool argument).
+    # The continuation Stop recorded where the agent's answering turn ended
+    # (CONTINUED), which is what keeps the ask and the answer out of later
+    # snapshots. The agent's submission was verified and, unless in shadow
+    # mode, applied (SUBMITTED; counts only, never claim text). The ask's
+    # event id is the ask id the agent submits with.
+    AGENT_EXTRACTION_ASKED = "AGENT_EXTRACTION_ASKED"
+    AGENT_EXTRACTION_CONTINUED = "AGENT_EXTRACTION_CONTINUED"
+    AGENT_EXTRACTION_SUBMITTED = "AGENT_EXTRACTION_SUBMITTED"
 
 
 class EventRefKind(StrEnum):

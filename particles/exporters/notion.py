@@ -55,6 +55,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import egress
 from particles.core.schema import Particle, Subject
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.status import Status
@@ -328,6 +329,10 @@ class NotionExporter:
         http_cfg = get_config().http
 
         dry_run = bool(options.get("dry_run", False))
+        if not dry_run:
+            # Refuse before the first page is written, so a refusing posture never
+            # leaves a partial sync.
+            egress.check(*egress.NOTION_HOST, "notion export")
         update_blocks = not bool(options.get("no_update_blocks", False))
         min_particles = int(options.get("min_particles", 0))  # type: ignore[call-overload]
         raw_mpc = options.get("min_particle_confidence")

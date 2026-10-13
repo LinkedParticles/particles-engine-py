@@ -24,6 +24,7 @@ from pathlib import Path
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 
 benchmark_app = typer.Typer(
     help="Whole-pipeline system benchmarks, distinct from the "
@@ -53,6 +54,12 @@ class _Variant(StrEnum):
 class _Format(StrEnum):
     table = "table"
     json = "json"
+
+
+class _Replay(StrEnum):
+    off = "off"
+    record = "record"
+    replay = "replay"
 
 
 class _Memory(StrEnum):
@@ -218,6 +225,23 @@ def benchmark_memory_cmd(  # noqa: PLR0913 — CLI option list is the API
         "--no-baselines is for a comparator run reusing the particles run's "
         "baseline columns (same tuple ⇒ same calls); they render `not run`.",
     ),
+    llm_replay: _Replay = typer.Option(
+        _Replay.off,
+        "--llm-replay",
+        help="Record or replay this run's LLM completions. record "
+        "writes every reply to the replay cache; replay answers each "
+        "byte-identical request from it and calls the provider only on a miss, "
+        "which it records. For ablations that change ranking, decay or top-k "
+        "and would otherwise pay again for the same extraction and answer "
+        "calls. Combine with --fresh, since a completed run's checkpoint "
+        "replays without reaching the LLM at all.",
+    ),
+    llm_replay_dir: Path | None = typer.Option(
+        None,
+        "--llm-replay-dir",
+        help="Directory of the replay cache (default ~/.particles/llm-replay/). "
+        "Never inside a store; deleting it loses nothing but the saving.",
+    ),
 ) -> None:
     """Run the LongMemEval agent-memory benchmark.
 
@@ -274,6 +298,8 @@ def benchmark_memory_cmd(  # noqa: PLR0913 — CLI option list is the API
                 batch_qa=batch_qa,
                 memory=memory.value,
                 baselines=baselines,
+                llm_replay=llm_replay.value,
+                llm_replay_dir=llm_replay_dir,
             )
         )
     except KeyboardInterrupt:
@@ -318,6 +344,8 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
     batch_qa: bool,
     memory: str = "particles",
     baselines: bool = True,
+    llm_replay: str = "off",
+    llm_replay_dir: Path | None = None,
 ) -> None:
     from particles.benchmark.memory import (
         ContextWindowExceeded,
@@ -334,6 +362,13 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
     )
     from particles.benchmark.memory.runner import prepared_question_ids
     from particles.config import get_config
+    from particles.llm import (
+        ReplayMode,
+        render_replay_line,
+        render_usage_line,
+        replay_scope,
+        track_usage,
+    )
 
     cfg = get_config().benchmark_memory
     effective_variant = variant.value if variant is not None else cfg.variant
@@ -414,7 +449,7 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
         dollars = (
             f" (~US${cost.estimated_cost_usd:,.2f})" if cost.estimated_cost_usd is not None else ""
         )
-        if not typer.confirm(f"Proceed with ~{cost.estimated_llm_calls} LLM calls{dollars}?"):
+        if not confirm(f"Proceed with ~{cost.estimated_llm_calls} LLM calls{dollars}?"):
             typer.echo("Aborted.")
             raise typer.Exit(1)
 
@@ -432,37 +467,47 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
         f"checkpoints per question and resumes if interrupted."
     )
 
-    try:
-        report = await run_memory_benchmark(
-            questions,
-            variant=effective_variant,
-            top_k=top_k,
-            dataset_revision=cfg.dataset_revision,
-            selection_seed=cfg.sample_seed,
-            selection_limit=effective_limit,
-            selection_types=selected_types,
-            questions_total=questions_total,
-            work_dir=store_dir,
-            keep_stores=store_dir is not None,
-            context_budget=context_budget,
-            abstraction=abstraction,
-            qa=qa,
-            consolidation=consolidation,
-            dedup_judge=dedup_judge,
-            reuse_stores=reuse_stores,
-            progress=_progress_line,
-            concurrency=concurrency,
-            checkpoint_dir=_checkpoint_dir(),
-            fresh=fresh,
-            heartbeat_seconds=30,
-            pooled=pooled,
-            batch_qa=batch_qa,
-            memory=memory,
-            baselines=baselines,
+    replay_mode = ReplayMode(llm_replay)
+    if replay_mode is ReplayMode.REPLAY:
+        _progress_line(
+            "LLM replay is on: the estimate above is the cost of a cold run; "
+            "recorded calls are served from the cache and cost nothing."
         )
+    try:
+        with replay_scope(replay_mode, llm_replay_dir) as replay, track_usage() as usage:
+            report = await run_memory_benchmark(
+                questions,
+                variant=effective_variant,
+                top_k=top_k,
+                dataset_revision=cfg.dataset_revision,
+                selection_seed=cfg.sample_seed,
+                selection_limit=effective_limit,
+                selection_types=selected_types,
+                questions_total=questions_total,
+                work_dir=store_dir,
+                keep_stores=store_dir is not None,
+                context_budget=context_budget,
+                abstraction=abstraction,
+                qa=qa,
+                consolidation=consolidation,
+                dedup_judge=dedup_judge,
+                reuse_stores=reuse_stores,
+                progress=_progress_line,
+                concurrency=concurrency,
+                checkpoint_dir=_checkpoint_dir(),
+                fresh=fresh,
+                heartbeat_seconds=30,
+                pooled=pooled,
+                batch_qa=batch_qa,
+                memory=memory,
+                baselines=baselines,
+            )
     except ContextWindowExceeded as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+    _progress_line(render_usage_line(usage.snapshot()))
+    if replay_mode is not ReplayMode.OFF:
+        _progress_line(render_replay_line(replay))
 
     if output_format is _Format.json:
         rendered = report.model_dump_json(indent=2)
@@ -592,7 +637,7 @@ async def _rejudge_report(
                 err=True,
             )
             raise typer.Exit(1)
-        if not typer.confirm(f"Proceed with ~{calls} LLM calls?"):
+        if not confirm(f"Proceed with ~{calls} LLM calls?"):
             typer.echo("Aborted.")
             raise typer.Exit(1)
 
@@ -923,7 +968,7 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
             )
             raise typer.Exit(1)
         dollars = f" (~US${est.cost_usd:,.2f})" if est.cost_usd is not None else ""
-        if not typer.confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
+        if not confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
             typer.echo("Aborted.")
             raise typer.Exit(1)
     if arm == "live":
@@ -1346,7 +1391,7 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
                         )
                         raise typer.Exit(1)
                     dollars = f" (~US${est.cost_usd:,.2f})" if est.cost_usd is not None else ""
-                    if not typer.confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
+                    if not confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
                         typer.echo("Aborted.")
                         raise typer.Exit(1)
                 _refuse_without_key(purposes=("query_response", "benchmark"))
@@ -1562,7 +1607,7 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
                 )
                 raise typer.Exit(1)
             dollars = f" (~US${est.cost_usd:,.2f})" if est.cost_usd is not None else ""
-            if not typer.confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
+            if not confirm(f"Proceed with ~{est.llm_calls} LLM calls{dollars}?"):
                 typer.echo("Aborted.")
                 raise typer.Exit(1)
         _refuse_without_key(purposes=("query_response", "benchmark"))

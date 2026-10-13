@@ -413,6 +413,12 @@ class TestCrossEntry:
     async def test_a_failed_reading_drops_the_signal_and_writes_nothing(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The contradiction gate in front of rung 2.5 (``same_slot_admits`` off)."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(
+            get_config().reconciliation.update_supersession, "same_slot_admits", False
+        )
         _reading(monkeypatch, None)
         outcome = await _two_sessions(db_session)
         [boston], [denver] = (
@@ -423,6 +429,17 @@ class TestCrossEntry:
         assert (boston.status, denver.status) == (Status.ACTIVE, Status.ACTIVE)
         assert await _records(db_session) == []
         assert outcome.conflict_unread == 1
+
+    async def test_an_update_is_not_read_as_a_contradiction(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """rung 2.5 rests on the update answer, so no reading can stop it."""
+        _reading(monkeypatch, None)
+        outcome = await _two_sessions(db_session)
+        [boston] = await _by_content(db_session, BOSTON)
+        assert boston.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        assert await _records(db_session) == []
+        assert outcome.conflict_unread == 0
 
     async def test_confirmed_acts_as_today(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch

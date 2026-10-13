@@ -8,9 +8,10 @@ Runs the §6.6 rung-1.5 document-supersession prior over already-extracted
 ACTIVE particles, demoting superseded claims that the intra-entry extract path
 never reconciles. ``--updates`` selects the second mode: the
 same-subject update sweep, which retires a value a later claim from the same
-source lineage replaced. ``--dependents`` selects the third: claims
-that relied on a state an update retired are restated, anchored to that state.
-Further reconciliation modes (corpus-wide
+source lineage replaced, then the paraphrases pass, which retires the
+other phrasings of each value an update replaced. ``--dependents`` selects the
+third: claims that relied on a state an update retired are restated,
+anchored to that state. Further reconciliation modes (corpus-wide
 corroboration / contradiction) extend this verb rather than adding
 new ones.
 """
@@ -36,7 +37,9 @@ def reconcile_cmd(
         "--updates",
         help="Run the same-subject update sweep instead of the "
         "document-supersession sweep: retire a value when a later claim from the "
-        "same source lineage gives a new value for the same attribute.",
+        "same source lineage gives a new value for the same attribute. The "
+        "paraphrases pass follows it, retiring the other phrasings of "
+        "each replaced value, from the nightly cycle's position without moving it.",
     ),
     dependents: bool = typer.Option(
         False,
@@ -90,8 +93,31 @@ async def _reconcile(
         if dependents:
             return await _reanchor(session, dry_run=dry_run, scope=scope, progress=progress)
         if updates:
-            return await reconcile_updates(session, dry_run=dry_run, progress=progress)
+            summary = await reconcile_updates(session, dry_run=dry_run, progress=progress)
+            summary["paraphrases"] = await _paraphrases(session, dry_run=dry_run, progress=progress)
+            return summary
         return await reconcile_supersession(session, dry_run=dry_run, progress=progress)
+
+
+async def _paraphrases(
+    session: AsyncSession,
+    *,
+    dry_run: bool,
+    progress: Callable[[str], None] | None,
+) -> dict[str, object]:
+    """Run the paraphrases pass after the sweep. The nightly position is read, never moved.
+
+    A dry run gathers its candidates and asks nothing, since the sweep's dry
+    run retired nothing for it to follow.
+    """
+    from particles.operations.paraphrases import run_paraphrases
+    from particles.operations.reanchor import prior_cursor
+
+    cursor = await prior_cursor(session, "memory-consolidate", "paraphrases")
+    report = await run_paraphrases(session, cursor=cursor, dry_run=dry_run, progress=progress)
+    if not dry_run:
+        await session.commit()
+    return report.model_dump(mode="json")
 
 
 async def _reanchor(

@@ -1,0 +1,123 @@
+{
+ "about": "Labelled question set for the episodic-window measurement of 2026-10-12. Run over a store holding sessions 04, 11, 12-moved and 13 to 17 of this directory (session-12.md is the alternative move note and is not part of this set). Each question carries one retrieval shape: 'window' asks what held or happened in a world-time interval; 'lookup' asks a stable fact; 'current_state' asks the present value of a slot that changed; 'relationship' asks how two entities relate; 'exact_term' turns on a proper name a paraphrase would lose. 'expected' is the gold answer; 'must_include' are the facts a correct answer states; 'must_exclude' are facts a correct answer must not present as in scope (for a window question, an event outside the window, including one said inside it). The non-window questions are controls, so a failure on a window question can be told apart from a retrieval-quality failure.",
+ "labelled_by": "proposed by the drafting session, 2026-10-12; confirmed by the owner as proposed on 2026-10-12",
+ "anchors": {
+  "move": {"date": "2026-10-09", "weekday": "Friday", "source": "session-12-moved.md"},
+  "week_after_move": {"from": "2026-10-10", "to": "2026-10-16"},
+  "first_weekend": {"from": "2026-10-10", "to": "2026-10-11"}
+ },
+ "said_vs_happened": [
+  {"source": "session-16.md", "said": "2026-10-14", "happened": "2019", "fact": "six months in Powai as an intern"},
+  {"source": "session-17.md", "said": "2026-10-16", "happened": "2026-10-15", "fact": "the movers delivered the user's things from Delhi"}
+ ],
+ "questions": [
+  {
+   "id": "w1-week-after-move",
+   "shape": "window",
+   "question": "What happened in the week after the user moved to Mumbai?",
+   "expected": "Picked up the keys to a flat in Pali Hill, Bandra and left the hotel (2026-10-10); walked Carter Road and found Gauri's Thali on Hill Road (2026-10-11); first day at the Mumbai office in Kamala Mills, Lower Parel, with colleague Ritika (2026-10-12); sister Ananya visited from Pune, dinner at Gauri's (2026-10-14); the movers delivered the user's things from Delhi (2026-10-15).",
+   "must_include": ["Pali Hill flat", "Gauri's Thali", "first day at Kamala Mills office", "Ananya visited", "movers delivered"],
+   "must_exclude": ["Powai internship (2019) as a week-after event", "Bandra hotel stay as a week-after event"],
+   "needs": ["resolve the move date", "world-time interval over event dates"]
+  },
+  {
+   "id": "w2-staying-on-1008",
+   "shape": "window",
+   "question": "Where was the user staying on 2026-10-08?",
+   "expected": "At a hotel in Bandra, Mumbai, on a week-long work trip.",
+   "must_include": ["hotel in Bandra"],
+   "must_exclude": ["Pali Hill flat", "Lajpat Nagar as where they were that night"],
+   "needs": ["a claim that may be retired by the move", "world-time point"]
+  },
+  {
+   "id": "w3-first-weekend",
+   "shape": "window",
+   "question": "What did the user do on their first weekend in Mumbai?",
+   "expected": "Saturday 2026-10-10: checked out of the hotel and picked up the keys to the Pali Hill flat. Sunday 2026-10-11: walked Carter Road and found Gauri's Thali on Hill Road.",
+   "must_include": ["keys to the Pali Hill flat", "Carter Road walk", "Gauri's Thali"],
+   "must_exclude": ["first day at the office", "Ananya's visit"],
+   "needs": ["resolve the move date", "weekday arithmetic", "world-time interval"]
+  },
+  {
+   "id": "w4-visitor-first-week",
+   "shape": "window",
+   "question": "Who visited the user during their first week in Mumbai?",
+   "expected": "Their sister Ananya, from Pune, on 2026-10-14.",
+   "must_include": ["Ananya"],
+   "must_exclude": [],
+   "needs": ["resolve the move date", "world-time interval"]
+  },
+  {
+   "id": "w5-living-on-1001",
+   "shape": "window",
+   "question": "Where was the user living on 2026-10-01?",
+   "expected": "In Delhi, in Lajpat Nagar.",
+   "must_include": ["Delhi", "Lajpat Nagar"],
+   "must_exclude": ["Mumbai as home on that date"],
+   "needs": ["a claim that may be retired by the move", "world-time point before the store existed"]
+  },
+  {
+   "id": "w6-oct-12-to-14",
+   "shape": "window",
+   "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+   "expected": "Started at the Mumbai office in Kamala Mills, Lower Parel (2026-10-12); had dinner at Gauri's with their sister Ananya, visiting from Pune (2026-10-14).",
+   "must_include": ["first day at Kamala Mills office", "dinner with Ananya"],
+   "must_exclude": ["Powai internship (2019)", "movers delivered (2026-10-15)", "Pali Hill keys (2026-10-10)"],
+   "needs": ["world-time interval with explicit dates", "said-then vs happened-then"]
+  },
+  {
+   "id": "c1-lives-now",
+   "shape": "current_state",
+   "question": "Where does the user live now?",
+   "expected": "In Mumbai, in a flat in Pali Hill, Bandra.",
+   "must_include": ["Mumbai", "Pali Hill"],
+   "must_exclude": ["Delhi as current home", "hotel as current lodging"],
+   "needs": ["current value of a changed slot"]
+  },
+  {
+   "id": "c2-diet",
+   "shape": "lookup",
+   "question": "Does the user have any dietary restrictions?",
+   "expected": "The user is vegetarian.",
+   "must_include": ["vegetarian"],
+   "must_exclude": [],
+   "needs": []
+  },
+  {
+   "id": "c3-powai",
+   "shape": "lookup",
+   "question": "Has the user lived in Mumbai before?",
+   "expected": "Yes, for six months in Powai in 2019, as an intern.",
+   "must_include": ["Powai", "2019", "intern"],
+   "must_exclude": [],
+   "needs": ["a fact said in 2026-10 about 2019"]
+  },
+  {
+   "id": "c4-ananya",
+   "shape": "relationship",
+   "question": "Who is Ananya to the user?",
+   "expected": "The user's sister; she lives in Pune.",
+   "must_include": ["sister"],
+   "must_exclude": [],
+   "needs": []
+  },
+  {
+   "id": "c5-office",
+   "shape": "exact_term",
+   "question": "In which building complex is the user's Mumbai office?",
+   "expected": "Kamala Mills, in Lower Parel.",
+   "must_include": ["Kamala Mills"],
+   "must_exclude": [],
+   "needs": []
+  },
+  {
+   "id": "c6-favourite",
+   "shape": "exact_term",
+   "question": "What is the name of the vegetarian thali place the user found near their new flat?",
+   "expected": "Gauri's Thali, on Hill Road.",
+   "must_include": ["Gauri's Thali"],
+   "must_exclude": ["Sandeep's Curry House"],
+   "needs": []
+  }
+ ]
+}

@@ -29,6 +29,7 @@ from particles.corpus.deposit import (
     _segment_by_date_lines,
     deposit_file,
     split_file_by_date,
+    stated_date_line,
 )
 from particles.corpus.store import get_entry, get_snapshot
 
@@ -225,6 +226,39 @@ class TestParseDateLine:
         assert _parse_date_line("2026-03-15") == datetime(2026, 3, 15, tzinfo=UTC)
         # ...while _detect_leading_date stays gated.
         assert _detect_leading_date(b"2026-03-15\n") is None
+
+
+# ---------------------------------------------------------------------------
+# stated_date_line (a whole-line date, or a heading with one date)
+# ---------------------------------------------------------------------------
+
+
+class TestStatedDateLine:
+    def test_a_whole_line_date_states_it(self) -> None:
+        assert stated_date_line("2026-10-08") == datetime(2026, 10, 8, tzinfo=UTC)
+
+    def test_a_heading_with_one_date_states_it(self) -> None:
+        line = "# Session 11 (2026-10-08): work trip"
+        assert stated_date_line(line) == datetime(2026, 10, 8, tzinfo=UTC)
+        assert stated_date_line("### Notes 2026/02/03") == datetime(2026, 2, 3, tzinfo=UTC)
+
+    def test_a_number_that_is_not_a_date_does_not_count_as_a_second_date(self) -> None:
+        # "11" is a token but parses against no format, so one date remains.
+        assert stated_date_line("## Week 11, 2026-03-15") == datetime(2026, 3, 15, tzinfo=UTC)
+
+    def test_a_heading_with_two_dates_states_none(self) -> None:
+        assert stated_date_line("# Trip, 2026-10-08 to 2026-10-15") is None
+
+    def test_a_first_line_that_is_not_a_heading_states_none(self) -> None:
+        # Only headings count, not prose first lines (the owner's ruling).
+        assert stated_date_line("Notes, 2026-02-03") is None
+        assert stated_date_line("Owner correction 2026-09-26: the gate takes 8 minutes") is None
+
+    def test_a_date_in_body_prose_states_none(self) -> None:
+        assert stated_date_line("Met the team on 2026-03-15 to plan.") is None
+
+    def test_a_hash_without_a_space_is_not_a_heading(self) -> None:
+        assert stated_date_line("#tag 2026-03-15") is None
 
 
 # ---------------------------------------------------------------------------

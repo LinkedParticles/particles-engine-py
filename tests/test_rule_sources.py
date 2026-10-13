@@ -716,7 +716,8 @@ class TestRulesCli:
         synced = runner.invoke(app, ["rules", "sync", str(rules)])
         assert synced.exit_code == 0, synced.output
         assert "1 new/changed" in synced.output
-        assert "extract --all-pending" in synced.output
+        # Scoped to rule files: the unscoped command extracts the whole backlog.
+        assert "extract --all-pending --tag rule-file" in synced.output
 
         get_config().rule_sources.paths = [str(rules)]
         report = runner.invoke(app, ["rules"])

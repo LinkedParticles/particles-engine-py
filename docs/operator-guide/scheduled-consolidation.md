@@ -7,9 +7,9 @@ verbs an operator has to remember to run.
 
 The pass list, in order:
 
-1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, least-tried
-   first and then oldest first, capped at `consolidation.max_pending_entries`
-   per run. A capped run discloses the remainder and how long it has waited
+1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, rule and memory
+   files first, then least-tried and longest-waiting first, capped at
+   `consolidation.max_pending_entries` per run. A capped run discloses the remainder and how long it has waited
    (`12 remain, oldest waiting since 2026-07-19; the next run continues`).
    See [When the backlog outgrows the cap](#when-the-backlog-outgrows-the-cap).
 2. **Reconcile** *(LLM, capped)*: the cross-entry document-supersession
@@ -17,6 +17,39 @@ The pass list, in order:
    replacement-signal probe, spent highest-similarity-first under
    `consolidation.max_reconcile_probes`; a truncated run discloses
    "probed X of Y candidate pairs". Skipped (disclosed) on degraded runs.
+
+   **Updates** *(LLM, capped)*: the same-subject update sweep (`particles
+   reconcile --updates`) asks each qualifying pair, highest similarity first
+   under `consolidation.max_update_probes`, whether the newer claim gives the
+   older one's attribute a new value, and retires the older claim when both
+   readings say it does. A pair is asked that question first, because two
+   successive values of one attribute ("lives in Delhi", "moved to Mumbai,
+   as stated in a session dated 2026-10-09") can both be true at their own
+   times and so never read as a contradiction. A pair whose older
+   claim records only a past value ("lived in Utrecht until 2025", "used to")
+   also needs the contradiction probe to agree. Setting
+   `reconciliation.update_supersession.same_slot_admits: false` restores the
+   contradiction probe in front of every pair, the behaviour before 1.187.0.
+
+   **Paraphrases** *(LLM, capped)*: one value is often stated more than once
+   ("the user lives in Delhi, in Lajpat Nagar" and "the user's home is in
+   Delhi"). When an update retires one phrasing, this pass finds the others:
+   ACTIVE claims about the same subject and from the same source lineage at a
+   cosine of `reconciliation.update_supersession.paraphrase_floor` (default
+   0.70) or above to the retired claim, older than the claim that replaced it.
+   At most `max_paraphrases` (default 3) per retirement are put to the update
+   probe against the replacing claim, and one is retired `PROVENANCE_STALE` /
+   `SUPERSEDED_BY_UPDATE` only when both readings say its value changed.
+   A claim the probe places in another slot, or in a slot whose
+   value never changes, is left as it was, and the verdict is kept in the
+   probe-verdict ledger so the pair is not asked again. A claim that only
+   relied on the old value ("near my flat") is left for re-anchoring, which
+   runs next. The pass walks every update retirement in the store from the
+   oldest, so a long history takes several runs; at most
+   `consolidation.max_paraphrase_probes` (default 30) probes a night, and a
+   capped run resumes at the next retirement. `particles reconcile --updates`
+   runs it after its sweep. `max_paraphrases: 0` turns it off. Skipped
+   (disclosed) on degraded runs.
 
    **Pass 2c, re-anchor** *(LLM, capped)*: when an update retires a claim
    about the user's circumstances ("the user lives in Delhi, in Lajpat
@@ -30,7 +63,9 @@ The pass list, in order:
    2026-09-04"). The
    original is kept, `SUPERSEDED` with reason `SUPERSEDED_BY_REANCHOR`.
    A restatement never changes another belief: one that would
-   contradict a standing claim, or whose checks could not run, is not written,
+   contradict a standing claim, or whose checks could not run, is not written
+   (the claim whose update retired the old state is not counted against it,
+   when the restatement is dated before that claim),
    and the claim becomes a `stale_basis` card in the curation queue instead
    (affirm keeps it, supersede or retract replaces it). The pass resumes from
    where the last run stopped, at most
@@ -60,7 +95,12 @@ The pass list, in order:
    The report discloses the saving, for example
    `contradiction probe: 812 pair(s) skipped as previously cleared`. The
    same ledger serves the update sweep (`particles reconcile --updates`), whose
-   report gains a `previously_cleared` count.
+   report gains a `previously_cleared` count. The update sweep probes its
+   qualifying pairs by content cosine, highest first, under
+   `consolidation.max_update_probes`. When the cap stops it, the report says
+   so on one line, for example `update probe: 100 of 1,002 pairs probed; cap
+   100 reached`, and the run record carries the same counts, the order, and a
+   pointer to the ledger rows that hold each probed pair's verdict.
 
    **Pass 3b, disclosure** *(zero-LLM)*: a contradiction the second reading
    confirmed between claims from two different sources becomes one open
@@ -637,9 +677,11 @@ consolidation:
   min_interval_hours: 20    # --if-due threshold
   extract_pending: true     # pass 1 on/off
   max_pending_entries: 20   # pass 1 per-run cap
+  priority_tags: [rule-file, memory-file]  # pass 1 takes these entries first
   extract_batching: true    # pass 1 pooled half-price batching
   semantic: true            # LLM passes on scheduled runs
   max_reconcile_probes: 50  # pass 2 per-run probe cap (highest-similarity-first)
+  max_paraphrase_probes: 30 # paraphrases per-run update-probe cap
   lock_timeout_minutes: 120 # warn that a holder may be hung
   lock_heartbeat_seconds: 60        # holder heartbeat interval
   lock_heartbeat_stale_minutes: 10  # another host's holder is stopped after this
@@ -768,6 +810,21 @@ material simply waits. The report line and the run record are where it shows:
 ```text
   pending          extracted 13, 2 left for retry (296 remain, oldest waiting since 2026-07-19; the next run continues)
 ```
+
+Two rules decide what the cap reaches first:
+
+- **Rule and memory files go first.** Entries carrying a tag in
+  `consolidation.priority_tags` (default `rule-file` and `memory-file`) take
+  the cap's slots before anything else, so a file edited during the day is
+  extracted that night, after the refresh pass has noticed the edit.
+  Transcripts fill the slots that remain. The cap and the nightly spend are
+  unchanged. Set the list to `[]` to drop the class.
+- **An entry waits from its first unread edit.** A file edited five times
+  between runs holds one pending snapshot, the newest (the other four are
+  skipped as superseded). The queue orders that entry by when the first of
+  those edits was captured, not by the newest one, so editing a file again
+  does not send it to the back. `oldest waiting since` reads the same time,
+  for the longest-waiting entry of any kind.
 
 Four behaviours keep one bad snapshot from holding the queue:
 

@@ -380,13 +380,14 @@ def engine(cli_db: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[list[str]
     real_async_client = httpx.AsyncClient
 
     def _asgi_client(
-        *, base_url: str, timeout: float, headers: dict[str, str]
+        *, base_url: str, timeout: float, headers: dict[str, str], purpose: str = ""
     ) -> httpx.AsyncClient:
         return real_async_client(
             transport=httpx.ASGITransport(app=_recorder), base_url=base_url, headers=headers
         )
 
-    monkeypatch.setattr(httpx, "AsyncClient", _asgi_client)
+    # HttpBackend builds its client through egress_client.
+    monkeypatch.setattr("particles.api.client.http.egress_client", _asgi_client)
     yield recorded
 
 

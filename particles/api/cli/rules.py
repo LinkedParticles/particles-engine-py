@@ -248,7 +248,11 @@ async def _restamp(session: Any, files: list[Path]) -> tuple[int, int]:
 
 async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only: bool) -> None:
     from particles.api.cli._remote import ensure_local
-    from particles.corpus.rule_sources import RuleSyncReport, resolve_rule_sources
+    from particles.corpus.rule_sources import (
+        RULE_SOURCE_TAG,
+        RuleSyncReport,
+        resolve_rule_sources,
+    )
     from particles.corpus.rule_sources import sync_rule_sources as _sync_rule_sources
 
     if not _enabled_or_report():
@@ -314,8 +318,10 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
     )
     if report.changed:
         typer.echo(
-            "Run `particles extract --all-pending` to turn the new snapshots into beliefs "
-            "(tonight's `particles memory consolidate` would do it too)."
+            # Scoped to the rule files: an unscoped --all-pending extracts the whole
+            # PENDING backlog, transcripts included.
+            f"Run `particles extract --all-pending --tag {RULE_SOURCE_TAG}` to turn the new "
+            "snapshots into beliefs (tonight's `particles memory consolidate` would do it too)."
         )
     else:
         typer.echo("All tracked and enrolled in the refresh loop.")

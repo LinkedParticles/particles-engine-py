@@ -43,6 +43,7 @@ from pydantic import AnyUrl
 
 from particles import __version__
 from particles.db import DEFAULT_STORE
+from particles.egress import ensure_backstop
 from particles.mcp.memory_compat import ops
 
 log = logging.getLogger(__name__)
@@ -591,6 +592,8 @@ def main(store: str | None = None) -> None:
 
     from particles.observability import setup_observability
 
+    # Arm the no-egress backstop before anything can connect.
+    ensure_backstop()
     setup_observability()
     server = build_server(store)
 

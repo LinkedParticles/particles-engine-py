@@ -75,6 +75,7 @@ from particles.core.status import Status, StatusReason
 from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.polarity import is_non_asserted
+from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.llm.registry import LLMPurpose
 from particles.operations._llm import _llm_call
 from particles.operations.entailment import (
@@ -154,7 +155,10 @@ _ENTAILMENT_SCHEMA: dict[str, Any] = _ENTAILMENT_RUBRIC.schema
 
 #: Reply budget for the entailment judge. Reason-first replies run longer than
 #: verdict-first ones, and a reply cut off before ``entailed`` has no verdict.
-_ENTAILMENT_MAX_TOKENS = 600
+#: The answer fits in 600, but ``abstraction`` can route to a model that thinks
+#: by default, whose thinking spends from the same budget, so the judge takes
+#: the shared probe budget.
+_ENTAILMENT_MAX_TOKENS = PROBE_MAX_TOKENS
 
 _PARAPHRASE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -266,9 +270,12 @@ async def _synthesize_claim(premise_contents: list[str]) -> tuple[str, str] | No
         f"Claim {i + 1}:\n{fence(content, nonce, label=f'claim_{i + 1}')}"
         for i, content in enumerate(premise_contents)
     )
+    # A claim and a one-sentence rationale, but a thinking model spends its
+    # thinking from the same budget (400 could leave no text), so this takes
+    # the shared probe budget too.
     response = await _llm_call(
         user,
-        max_tokens=400,
+        max_tokens=PROBE_MAX_TOKENS,
         system=system,
         response_schema=_SYNTHESIS_SCHEMA,
         purpose="abstraction",
@@ -320,7 +327,7 @@ async def _paraphrase_verdict(
     )
     response = await _llm_call(
         user,
-        max_tokens=100,
+        max_tokens=PROBE_MAX_TOKENS,
         system=system,
         response_schema=_PARAPHRASE_SCHEMA,
         purpose=purpose,

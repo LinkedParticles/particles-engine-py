@@ -14,6 +14,7 @@ import typer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.core.schema import RelationType
 from particles.db import session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
@@ -516,7 +517,7 @@ async def _links_unmerge(
         # Narration on stderr so `--output-format json` still
         # emits a clean artifact on stdout when the operator confirms.
         typer.echo(_render_unmerge_markdown(plan, limit), err=True)
-        typer.confirm(
+        confirm(
             f"\nRestore {plan.restored_particles} superseded copy/copies "
             f"across {len(plan.groups)} group(s)?",
             abort=True,

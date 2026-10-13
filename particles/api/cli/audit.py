@@ -46,7 +46,12 @@ from particles.api.cli._claude_code import (
 )
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._output import current_output
-from particles.api.cli._progress import heartbeat_paused, progress_line, set_heartbeat_status
+from particles.api.cli._progress import (
+    confirm,
+    heartbeat_paused,
+    progress_line,
+    set_heartbeat_status,
+)
 from particles.config import get_config
 from particles.core.observer_scope import project_tag
 from particles.db import session_scope
@@ -579,6 +584,7 @@ async def _audit_impl(
     from particles.operations.audit import (
         cost_summary,
         estimate_extraction,
+        plan_extraction,
         render_audit_report,
         render_estimate,
         run_memory_audit,
@@ -605,8 +611,11 @@ async def _audit_impl(
             typer.echo("No auditable content found (no non-empty *.md or *.jsonl files).")
             raise typer.Exit(EXIT_NOT_STARTED)
 
-        # §4: estimate ALWAYS printed before extraction.
-        cost = estimate_extraction([len(d.text) for d in plan.deposits])
+        # §4: estimate ALWAYS printed before extraction. Only what the run will
+        # extract is priced: an unchanged file already extracted is skipped.
+        async with session_scope(store) as session:
+            sized = await plan_extraction(session, [(d.uri_r, d.text) for d in plan.deposits])
+        cost = estimate_extraction(sized.char_counts, already_captured=sized.already_captured)
         if estimate_only and fmt == "json":
             # stdout stays one parseable document; the note goes to stderr.
             typer.echo(cost.model_dump_json(indent=2))
@@ -630,7 +639,7 @@ async def _audit_impl(
             duration = time_summary(cost)
             if duration is not None:
                 dollars += f", {duration}"
-            if not typer.confirm(
+            if not confirm(
                 f"Proceed with ~{cost.estimated_llm_calls} extraction LLM calls ({dollars})?"
             ):
                 typer.echo("Aborted — nothing was deposited.")

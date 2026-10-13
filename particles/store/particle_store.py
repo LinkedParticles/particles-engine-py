@@ -58,6 +58,7 @@ from particles.core.status import Status, StatusReason
 from particles.db import Base
 from particles.embeddings import EmbeddingProfile, get_embedding_model_id, get_embedding_profile
 from particles.extraction.incremental import register_carry_forward_lookup
+from particles.store.event_store import OperatorEventRow, OperatorEventType
 
 log = logging.getLogger(__name__)
 
@@ -1861,9 +1862,11 @@ async def get_recorded_demotions(session: AsyncSession) -> list[tuple[Particle, 
 
     Returns ``(retired, replacement)`` pairs: ``retired`` carries one of
     :data:`REPLACEMENT_DEMOTIONS` and is no longer ACTIVE, and ``replacement``
-    is the ACTIVE claim whose ``supersedes`` names it. A demotion that left no
-    such link (an out-of-order older claim stored already retired, a document
-    sweep demotion) has no pair to show and is not returned.
+    is the ACTIVE claim whose ``supersedes`` names it, or, when none does, the
+    winner an ``UPDATE_SUPERSESSION`` event records (a second claim one winner
+    retired by update, whose ``supersedes`` already named another). A demotion
+    that left neither (a document sweep demotion, an update retirement written
+    before the event existed) has no pair to show and is not returned.
     """
     replacement = aliased(ParticleRow)
     query = (
@@ -1877,12 +1880,63 @@ async def get_recorded_demotions(session: AsyncSession) -> list[tuple[Particle, 
         .order_by(ParticleRow.retired_at.desc(), ParticleRow.id)
     )
     seen: set[str] = set()
-    out: list[tuple[Particle, Particle]] = []
+    found: list[tuple[ParticleRow, ParticleRow]] = []
     for retired_row, replacement_row in (await session.execute(query)).all():
         if retired_row.id in seen:
             continue
         seen.add(retired_row.id)
-        out.append((retired_row.to_model(), replacement_row.to_model()))
+        found.append((retired_row, replacement_row))
+    found.extend(await _event_recorded_demotions(session, seen))
+    found.sort(key=lambda pair: (_retired_sort_key(pair[0]), pair[0].id))
+    return [(retired.to_model(), replacement.to_model()) for retired, replacement in found]
+
+
+def _retired_sort_key(row: ParticleRow) -> float:
+    # Newest retirement first; an undated one last.
+    at = row.retired_at
+    if at is None:
+        return float("inf")
+    return -(at if at.tzinfo is not None else at.replace(tzinfo=UTC)).timestamp()
+
+
+async def _event_recorded_demotions(
+    session: AsyncSession, seen: set[str]
+) -> list[tuple[ParticleRow, ParticleRow]]:
+    """Update retirements whose winner only an ``UPDATE_SUPERSESSION`` event names."""
+    payloads = (
+        await session.execute(
+            select(OperatorEventRow.payload).where(
+                OperatorEventRow.event_type == OperatorEventType.UPDATE_SUPERSESSION.value
+            )
+        )
+    ).scalars()
+    winners: dict[str, str] = {}
+    for payload in payloads:
+        retired_id = str((payload or {}).get("retired_id") or "")
+        winner_id = str((payload or {}).get("winner_id") or "")
+        if retired_id and winner_id and retired_id not in seen:
+            winners.setdefault(retired_id, winner_id)
+    if not winners:
+        return []
+    rows: dict[str, ParticleRow] = {}
+    ids = list({*winners, *winners.values()})
+    for i in range(0, len(ids), 500):
+        result = await session.execute(
+            select(ParticleRow).where(ParticleRow.id.in_(ids[i : i + 500]))
+        )
+        rows.update({row.id: row for row in result.scalars()})
+    out: list[tuple[ParticleRow, ParticleRow]] = []
+    for retired_id, winner_id in winners.items():
+        retired, winner = rows.get(retired_id), rows.get(winner_id)
+        if (
+            retired is not None
+            and winner is not None
+            and retired.status != Status.ACTIVE.value
+            and retired.status_reason in {r.value for r in REPLACEMENT_DEMOTIONS}
+            and winner.status == Status.ACTIVE.value
+        ):
+            seen.add(retired_id)
+            out.append((retired, winner))
     return out
 
 
@@ -1900,6 +1954,35 @@ async def get_particles_by_ids(
         )
         for row in result.scalars():
             out[row.id] = row.to_model()
+    return out
+
+
+async def get_embeddings_by_ids(
+    session: AsyncSession, particle_ids: Sequence[str]
+) -> dict[str, np.ndarray[Any, np.dtype[np.float32]]]:
+    """Stored embeddings by particle id, any status.
+
+    A retired claim keeps the vector it was stored with, so a pass that
+    compares a retired claim with ACTIVE ones reads it here rather than
+    re-encoding it. A vector from another embedding model is left out, as in
+    :func:`get_active_particles_with_embeddings`, and so is a
+    row with none; missing ids are absent from the map.
+    """
+    if not particle_ids:
+        return {}
+    current_id = get_embedding_model_id()
+    out: dict[str, np.ndarray[Any, np.dtype[np.float32]]] = {}
+    ids = list(dict.fromkeys(particle_ids))
+    for i in range(0, len(ids), 500):
+        result = await session.execute(
+            select(ParticleRow.id, ParticleRow.embedding_json, ParticleRow.embedding_model_id)
+            .where(ParticleRow.id.in_(ids[i : i + 500]))
+            .where(ParticleRow.embedding_json.isnot(None))
+        )
+        for row in result.all():
+            if row[1] is None or (row[2] or LEGACY_EMBEDDING_MODEL_ID) != current_id:
+                continue
+            out[row[0]] = np.array(json.loads(row[1]), dtype=np.float32)
     return out
 
 

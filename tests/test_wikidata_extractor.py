@@ -349,3 +349,115 @@ async def test_two_extractions_of_the_same_bytes_produce_identical_triples() -> 
         }
 
     assert triples(_by_property(await _extract())) == triples(_by_property(await _extract()))
+
+
+# ---------------------------------------------------------------------------
+# Label ladder under an outage
+# ---------------------------------------------------------------------------
+
+
+def _client_ctx(*, enter_error: Exception | None = None) -> Any:
+    """A stand-in for ``particles.http.particles_client``'s async context manager."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = AsyncMock()
+    client.__aenter__ = (
+        AsyncMock(side_effect=enter_error) if enter_error else AsyncMock(return_value=client)
+    )
+    client.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=client)
+
+
+def _label_response(payload: dict[str, Any]) -> Any:
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value=payload)
+    return resp
+
+
+@pytest.fixture
+def empty_label_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    from particles.extraction import wikidata as wd
+
+    monkeypatch.setattr(wd, "_property_label_cache", {})
+    monkeypatch.setattr(wd, "_item_label_cache", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("empty_label_caches")
+@pytest.mark.parametrize("entity_id", ["Q42", "P571"])
+async def test_a_failed_label_fetch_is_returned_but_never_cached(
+    db_session: Any, entity_id: str
+) -> None:
+    """An unreachable Wikidata yields the id for this render and caches nothing."""
+    from unittest.mock import patch
+
+    import httpx
+
+    import particles.store.wikidata_cache  # noqa: F401  (registers the L2 cache)
+    from particles.extraction import wikidata as wd
+    from particles.store.wikidata_cache import get_label
+
+    fetch = wd._fetch_property_label if entity_id.startswith("P") else wd._fetch_item_label
+    offline = _client_ctx(enter_error=httpx.ConnectError("name resolution failed"))
+    with patch("particles.http.particles_client", offline):
+        assert await fetch(entity_id, session=db_session) == entity_id
+
+    assert await get_label(db_session, entity_id) is None
+    assert entity_id not in wd._item_label_cache
+    assert entity_id not in wd._property_label_cache
+
+    # Once Wikidata answers, the real label is fetched and cached.
+    online = _client_ctx()
+    with (
+        patch("particles.http.particles_client", online),
+        patch(
+            "particles.http.get_capped",
+            return_value=_label_response({"labels": {"en": "the real label"}}),
+        ),
+    ):
+        assert await fetch(entity_id, session=db_session) == "the real label"
+    assert await get_label(db_session, entity_id) == "the real label"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("empty_label_caches")
+async def test_an_error_status_is_a_failed_fetch(db_session: Any) -> None:
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    import particles.store.wikidata_cache  # noqa: F401
+    from particles.extraction import wikidata as wd
+    from particles.store.wikidata_cache import get_label
+
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("503", request=MagicMock(), response=MagicMock())
+    )
+    with (
+        patch("particles.http.particles_client", _client_ctx()),
+        patch("particles.http.get_capped", return_value=resp),
+    ):
+        assert await wd._fetch_item_label("Q42", session=db_session) == "Q42"
+    assert await get_label(db_session, "Q42") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("empty_label_caches")
+async def test_an_entity_with_no_english_label_is_cached_as_its_id(db_session: Any) -> None:
+    """Wikidata's own answer that there is no English label is a real answer."""
+    from unittest.mock import patch
+
+    import particles.store.wikidata_cache  # noqa: F401
+    from particles.extraction import wikidata as wd
+    from particles.store.wikidata_cache import get_label
+
+    with (
+        patch("particles.http.particles_client", _client_ctx()),
+        patch("particles.http.get_capped", return_value=_label_response({"labels": {}})),
+    ):
+        assert await wd._fetch_item_label("Q99", session=db_session) == "Q99"
+    assert await get_label(db_session, "Q99") == "Q99"

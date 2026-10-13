@@ -1,6 +1,6 @@
 {
   "about": "acceptance fixture: co-extracted (retired claim, candidate) cases for the re-anchor probe and its second reading. Each case is one passage, the state claim an update retired, and the claims extracted beside it. 'expected' is DEPENDS when the claim, read as a statement about now, relied on the retired circumstance being current, else HOLDS. Who labelled the cases, and the owner's review of the live runs, are recorded in 'labelled_by' and 'owner_review'. Run with: uv run python scripts/reanchor_fixture.py",
-  "labelled_by": "proposed by the implementing session. The owner confirmed every HOLDS / DEPENDS label of the first ten cases (delhi-flat to staying-here) on 2026-09-27; the eight cases from gp-surgery on were added the same day to reach the thirty-restatement bar and await the owner's confirmation.",
+  "labelled_by": "proposed by the implementing session. The owner confirmed every HOLDS / DEPENDS label of the first ten cases (delhi-flat to staying-here) on 2026-09-27; the eight cases from gp-surgery on were added the same day to reach the thirty-restatement bar and await the owner's confirmation. Eight cases (ledgerly-database to tern-login) were added on 2026-10-04: a retired state of a project or system, claims that refer to it by a definite description or that the passage gives it as the reason for (DEPENDS), and same-subject claims the passage ties to nothing in the retired claim, several of which a model's world knowledge would tempt (HOLDS). Proposed by the implementing session; the owner confirmed every label of the eight on 2026-10-04.",
   "owner_review": "2026-09-27, first live run (claude-sonnet-4-6 on extraction and verification): the 13 restatements written were all labelled faithful and needed by the owner. The car and phone candidates were proposed by the probe but rejected by the second reading, so they were not written and were not labelled. Third live run, after the second reading was calibrated, the probe was held to the past tense and both calls ran at temperature 0: the 15 restatements written (car and phone included) were all labelled faithful and needed by the owner.",
   "cases": [
     {
@@ -201,6 +201,99 @@
         {"claim": "The user's son's teacher sends homework home on Mondays.", "expected": "DEPENDS"},
         {"claim": "The user's son's class has 28 pupils.", "expected": "DEPENDS"},
         {"claim": "The user's son is learning the violin.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "ledgerly-database",
+      "date": "2026-09-04",
+      "passage": "# Session 3 (2026-09-04): local setup for Ledgerly\n\nUser: Ledgerly uses PostgreSQL 16 as its database.\n\nUser: Before running the test suite, start the database container with `docker compose up -d db`, otherwise pytest fails to connect.\n\nUser: The migrations in `migrations/` use JSONB columns for the audit log, so don't try to run them against anything else.",
+      "retired": "Ledgerly uses PostgreSQL 16 as its database.",
+      "candidates": [
+        {"claim": "Before running Ledgerly's test suite, the database container must be started with `docker compose up -d db`, otherwise pytest fails to connect.", "expected": "DEPENDS"},
+        {"claim": "If the `db` container is not running, pytest fails to connect when running Ledgerly's test suite.", "expected": "DEPENDS"},
+        {"claim": "Ledgerly's migrations in `migrations/` use JSONB columns for the audit log.", "expected": "HOLDS"},
+        {"claim": "Ledgerly's migrations in `migrations/` cannot be run against databases other than PostgreSQL (which supports JSONB).", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "kestrel-hosting",
+      "date": "2026-02-03",
+      "passage": "Notes, 2026-02-03\n\nKestrel is hosted on Heroku. To ship a release, push to the heroku remote with `git push heroku main`; the dynos restart on their own after the push. Logs are in the Heroku dashboard. Kestrel's API is written in Ruby, and its background jobs use Sidekiq.",
+      "retired": "Kestrel is hosted on Heroku.",
+      "candidates": [
+        {"claim": "To ship a Kestrel release, push to the heroku remote with `git push heroku main`.", "expected": "DEPENDS"},
+        {"claim": "Kestrel's dynos restart on their own after a push.", "expected": "DEPENDS"},
+        {"claim": "Kestrel's logs are in the Heroku dashboard.", "expected": "DEPENDS"},
+        {"claim": "Kestrel's API is written in Ruby.", "expected": "HOLDS"},
+        {"claim": "Kestrel's background jobs use Sidekiq.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "pelican-ci",
+      "date": "2026-05-14",
+      "passage": "Build notes, 2026-05-14\n\nThe CI for Pelican runs on Jenkins on the build box in the basement. Because the build box only has Java 11, the Gradle wrapper is pinned to 7.6. If a build hangs, restart the agent from the Jenkins UI. Pelican's tests are written with JUnit 5.",
+      "retired": "Pelican's CI runs on Jenkins on the build box in the basement.",
+      "candidates": [
+        {"claim": "Pelican's Gradle wrapper is pinned to 7.6 because the build box only has Java 11.", "expected": "DEPENDS"},
+        {"claim": "If a Pelican build hangs, the agent must be restarted from the Jenkins UI.", "expected": "DEPENDS"},
+        {"claim": "Pelican's tests are written with JUnit 5.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "team-office",
+      "date": "2026-01-08",
+      "passage": "Team notes, 2026-01-08\n\nOur office is at 40 Market Street. Parking in the garage downstairs is free with the badge, and the kitchen has an espresso machine. The team does stand-up at 9:30. We write everything in TypeScript.",
+      "retired": "The team's office is at 40 Market Street.",
+      "candidates": [
+        {"claim": "Parking in the garage downstairs from the team's office is free with the badge.", "expected": "DEPENDS"},
+        {"claim": "The kitchen in the team's office has an espresso machine.", "expected": "DEPENDS"},
+        {"claim": "The team does stand-up at 9:30.", "expected": "HOLDS"},
+        {"claim": "The team writes everything in TypeScript.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "brightline-mail",
+      "date": "2026-06-02",
+      "passage": "Ops log, 2026-06-02\n\nBrightline's email goes through Mailgun. Bounces show up in the Mailgun logs. Marketing emails are written as MJML templates. Every marketing email must carry an unsubscribe link.",
+      "retired": "Brightline sends its email through Mailgun.",
+      "candidates": [
+        {"claim": "Brightline's email bounces show up in the Mailgun logs.", "expected": "DEPENDS"},
+        {"claim": "Brightline's marketing emails are written as MJML templates.", "expected": "HOLDS"},
+        {"claim": "Every Brightline marketing email must carry an unsubscribe link.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "dev-laptop",
+      "date": "2026-04-30",
+      "passage": "Journal, 30 April 2026\n\nI develop on a 2019 Intel MacBook Pro. Docker builds are painfully slow on it, so I run the heavy test suite in CI instead. I use Neovim, and fish as my shell.",
+      "retired": "The user develops on a 2019 Intel MacBook Pro.",
+      "candidates": [
+        {"claim": "The user runs the heavy test suite in CI because Docker builds are slow on their development machine.", "expected": "DEPENDS"},
+        {"claim": "The user uses Neovim.", "expected": "HOLDS"},
+        {"claim": "The user uses fish as their shell.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "quill-assets",
+      "date": "2026-07-21",
+      "passage": "Infra notes, 2026-07-21\n\nAssets for Quill are stored in the S3 bucket quill-assets. To clear the cache, invalidate the CloudFront distribution in front of the bucket. Images are stored as WebP. Quill's frontend is built with Vite.",
+      "retired": "Quill stores its assets in the S3 bucket quill-assets.",
+      "candidates": [
+        {"claim": "To clear Quill's asset cache, invalidate the CloudFront distribution in front of the bucket.", "expected": "DEPENDS"},
+        {"claim": "Quill's images are stored as WebP.", "expected": "HOLDS"},
+        {"claim": "Quill's frontend is built with Vite.", "expected": "HOLDS"}
+      ]
+    },
+    {
+      "id": "tern-login",
+      "date": "2026-08-11",
+      "passage": "Session, 2026-08-11\n\nUser: Tern uses Auth0 for login. New users get added in the Auth0 dashboard, and the login page is Auth0's Universal Login screen, so we can't fully restyle it. Passwords have to be at least 12 characters. Tern's mobile app is written in Swift.",
+      "retired": "Tern uses Auth0 for login.",
+      "candidates": [
+        {"claim": "New Tern users are added in the Auth0 dashboard.", "expected": "DEPENDS"},
+        {"claim": "Tern's login page cannot be fully restyled because it is Auth0's Universal Login screen.", "expected": "DEPENDS"},
+        {"claim": "Tern's passwords must be at least 12 characters.", "expected": "HOLDS"},
+        {"claim": "Tern's mobile app is written in Swift.", "expected": "HOLDS"}
       ]
     }
   ]

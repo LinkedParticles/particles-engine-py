@@ -31,6 +31,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
+from particles import egress
 from particles.config import get_config
 from particles.secrets import get_otel_exporter_headers_optional
 
@@ -141,7 +142,7 @@ def _install_traces(cfg: ObservabilityConfig, resource: Any) -> None:
     if cfg.exporter == "console":
         # Synchronous export so the diagnose-now CLI prints each span as it closes.
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    elif cfg.exporter == "otlp":
+    elif cfg.exporter == "otlp" and _otlp_allowed(cfg):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
         otlp = OTLPSpanExporter(**_otlp_kwargs(cfg, "traces"))
@@ -162,7 +163,7 @@ def _install_metrics(cfg: ObservabilityConfig, resource: Any) -> None:
     readers: list[Any] = []
     if cfg.exporter == "console":
         readers.append(PeriodicExportingMetricReader(ConsoleMetricExporter()))
-    elif cfg.exporter == "otlp":
+    elif cfg.exporter == "otlp" and _otlp_allowed(cfg):
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 
         readers.append(
@@ -279,6 +280,31 @@ def _install_instrumentors() -> None:
     from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
     SQLAlchemyInstrumentor().instrument()
+
+
+_otlp_refusal_logged = False
+
+
+def _otlp_allowed(cfg: ObservabilityConfig) -> bool:
+    """Whether ``network.egress`` lets the OTLP exporter reach its endpoint.
+
+    The exporters run on their own threads over their own HTTP stack, so the
+    check is made here, where they are built: a refused endpoint gets no
+    exporter and one WARNING. With ``endpoint`` unset the OTel SDK's default,
+    ``http://localhost:4318``, is what is checked.
+    """
+    global _otlp_refusal_logged
+    host, port = egress.host_port(cfg.endpoint or "http://localhost:4318")
+    if egress.allows(host, port):
+        return True
+    if not _otlp_refusal_logged:
+        _otlp_refusal_logged = True
+        log.warning(
+            "network.egress refuses the OTLP endpoint %s:%s; no OTLP exporter is installed",
+            host,
+            port,
+        )
+    return False
 
 
 def _otlp_kwargs(cfg: ObservabilityConfig, signal: str) -> dict[str, Any]:

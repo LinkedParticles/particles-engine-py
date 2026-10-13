@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from particles.api.cli import app
 from particles.api.cli._claude_code import (
+    HOOK_TIMEOUT_SECONDS,
     ConfigEditError,
     absolutize_sqlite_dsn,
     build_hook_commands,
@@ -30,6 +31,7 @@ from particles.api.cli._claude_code import (
     merge_particles_hook_entries,
     render_env_prefix,
     strip_particles_hook_entries,
+    untimed_session_end_hooks,
 )
 
 DSN = "sqlite+aiosqlite:////tmp/x/memory.db"
@@ -63,6 +65,46 @@ class TestSettingsMerge:
         assert [h["command"] for g in merged["hooks"]["SessionEnd"] for h in g["hooks"]] == [
             COMMANDS["SessionEnd"]
         ]
+
+    def test_merge_writes_an_explicit_timeout_on_both_events(self) -> None:
+        """Without one, SessionEnd inherits a shared 1.5 s budget and is cancelled."""
+        merged = merge_particles_hook_entries({}, COMMANDS)
+        for event in ("SessionStart", "SessionEnd"):
+            (hook,) = [h for g in merged["hooks"][event] for h in g["hooks"]]
+            assert hook["timeout"] == HOOK_TIMEOUT_SECONDS
+        assert untimed_session_end_hooks(merged) == []
+
+    def test_rerun_adds_the_timeout_to_an_older_install(self) -> None:
+        legacy = {
+            "hooks": {
+                "SessionEnd": [{"hooks": [{"type": "command", "command": COMMANDS["SessionEnd"]}]}]
+            }
+        }
+        assert untimed_session_end_hooks(legacy) == [COMMANDS["SessionEnd"]]
+        assert untimed_session_end_hooks(merge_particles_hook_entries(legacy, COMMANDS)) == []
+
+    @pytest.mark.parametrize(
+        ("timeout", "flagged"),
+        [(None, True), (1, True), (1.5, True), (True, True), ("60", True), (2, False), (60, False)],
+    )
+    def test_untimed_detection(self, timeout: Any, flagged: bool) -> None:
+        hook: dict[str, Any] = {"type": "command", "command": COMMANDS["SessionEnd"]}
+        if timeout is not None:
+            hook["timeout"] = timeout
+        settings = {"hooks": {"SessionEnd": [{"hooks": [hook]}]}}
+        assert untimed_session_end_hooks(settings) == ([hook["command"]] if flagged else [])
+
+    def test_untimed_detection_ignores_foreign_and_other_events(self) -> None:
+        settings = {
+            "hooks": {
+                "SessionEnd": [{"hooks": [{"type": "command", "command": "echo foreign"}]}],
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": COMMANDS["SessionStart"]}]}
+                ],
+            }
+        }
+        assert untimed_session_end_hooks(settings) == []
+        assert untimed_session_end_hooks({"hooks": "corrupt"}) == []
 
     def test_merge_is_idempotent(self) -> None:
         once = merge_particles_hook_entries(FOREIGN_SETTINGS, COMMANDS)

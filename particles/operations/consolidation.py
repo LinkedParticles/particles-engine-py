@@ -69,12 +69,14 @@ from particles.core.schema import SuggestMode
 from particles.core.spend_budget import decide_spend
 from particles.core.status import Status
 from particles.db import write_lock, write_transaction
+from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.llm.batch_budget import (
     BatchWaitBudget,
     batch_wait_budget,
     current_batch_wait_budget,
 )
 from particles.llm.errors import AccountLevelLLMError
+from particles.llm.registry import purpose_allowed, purpose_endpoint
 from particles.llm.spend_budget import SpendBudget, current_spend_budget, spend_budget
 from particles.llm.usage import (
     LLMUsage,
@@ -104,13 +106,17 @@ from particles.operations.curation.cards import CardKind, CurationCard
 from particles.operations.curation.collect import cards_from_findings, collect_cards
 from particles.operations.curation.session import _suppressed_keys, build_curation_queue
 from particles.operations.curation.snapshot import QueueSource, collect_and_persist
+from particles.operations.held_release import ReleaseReport, run_release
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.lint.contestedness import contested_findings_for
 from particles.operations.lint.contradictions import contradiction_partner, count_disagreements
 from particles.operations.lint.open_inconsistency import open_inconsistency_findings
 from particles.operations.modality import reclassified_particle_ids_since
+from particles.operations.paraphrases import ParaphraseReport, run_paraphrases
 from particles.operations.reanchor import ReanchorReport, prior_cursor, run_reanchor
 from particles.operations.reconcile import (
+    UPDATE_PROBE_LEDGER,
+    UPDATE_PROBE_ORDER,
     count_supersession_candidates,
     count_update_candidates,
     reconcile_supersession,
@@ -178,7 +184,9 @@ PASS_ORDER: tuple[str, ...] = (
     "extract",
     "reconcile",
     "reconcile_updates",
+    "paraphrases",
     "reanchor",
+    "release",
     "census",
     "disclose",
     "curation",
@@ -889,8 +897,9 @@ class ConsolidationReport(BaseModel):
     #: Snapshots stranded IN_PROGRESS by a killed run, reset to PENDING before
     #: the pass listed its work.
     pending_reset_stale: int = 0
-    #: Capture time of the oldest snapshot still PENDING after the pass: how
-    #: long the backlog has been waiting, which the count alone does not show.
+    #: When the longest-owed entry still PENDING after the pass began owing
+    #: extraction: how long the backlog has been waiting, which
+    #: the count alone does not show.
     pending_oldest_at: datetime | None = None
     # Superseded generations of MUTABLE entries skipped before the pass listed
     # its work. Not part of ``pending_total``: they were never owed.
@@ -903,13 +912,25 @@ class ConsolidationReport(BaseModel):
     update_demoted: int = 0
     update_candidate_pairs: int = 0
     update_probes_run: int = 0
+    #: The cap the sweep ran under (``consolidation.max_update_probes``), as
+    #: the sweep reported it, so the record reads without the config.
+    update_probe_cap: int = 0
+    #: The cap stopped the sweep with qualifying pairs still unprobed; those
+    #: pairs sit below every probed one in the sweep's order (highest content
+    #: cosine first) and ``update_not_reached`` counts them.
+    update_cap_reached: bool = False
+    update_not_reached: int = 0
     # qualifying pairs the probe-verdict ledger had already cleared.
     update_previously_cleared: int = 0
     # confirmed pairs that give a fixed slot two values, each opened
     # for review with both claims left ACTIVE instead of retired.
     update_fixed_slot: int = 0
+    # Pass 2b': the paraphrases pass, its own sub-report.
+    paraphrases: ParaphraseReport | None = None
     # Pass 2c: the re-anchor pass, its own sub-report.
     reanchor: ReanchorReport | None = None
+    # Pass 2d: the held-claim release pass, its own sub-report.
+    release: ReleaseReport | None = None
     reconcile_candidate_pairs: int = 0
     reconcile_probes_run: int = 0
 
@@ -1242,7 +1263,9 @@ def build_run_payload(
     spend, the passes it skipped, and ``limited``, which keeps a run that left
     LLM work undone from advancing the delta watermark. ``closure`` is additive
     too: the run's contested fraction and transition split, omitted
-    for a run that did not measure.
+    for a run that did not measure. ``speaker_openers`` is additive too:
+    a digest of the speaker references the about-subject key
+    read, so a change in the sweep's pairs can be traced to an opener edit.
     """
     payload: dict[str, Any] = {
         "format": RUN_PAYLOAD_FORMAT,
@@ -1255,6 +1278,7 @@ def build_run_payload(
         "semantic_degraded": semantic_degraded,
         "semantic_degraded_reason": semantic_degraded_reason,
         "providers": providers,
+        "speaker_openers": speaker_openers_digest(speaker_forms(get_config().subjects)),
         "passes": [
             {
                 "name": p.name,
@@ -1303,6 +1327,11 @@ def _semantic_availability(structural_only: bool) -> tuple[bool, str | None]:
         return False, "consolidation.semantic is false"
     if llm_circuit_open():
         return False, "LLM unavailable (circuit breaker open)"
+    if not purpose_allowed("semantic_lint"):
+        # the contradiction and update probes cannot run, so the
+        # LLM passes degrade with the posture named, as for a keyless install.
+        host, port, _ = purpose_endpoint("semantic_lint")
+        return False, f"egress: network.egress does not allow semantic_lint at {host}:{port}"
     needs_key = any(cfg.llm.for_purpose(p).provider == "anthropic" for p in _RUN_PURPOSES)
     if needs_key:
         from particles.secrets import get_anthropic_api_key_optional
@@ -1504,6 +1533,36 @@ async def run_consolidation(
                     lambda: _pass_reconcile_updates(session, report, scope_ids),
                 )
 
+            # --------------------------- pass 2b': paraphrases
+            # After the update sweep, so its retirements are triggers tonight,
+            # and before re-anchoring, which then sees the phrasings retired here.
+            update_cfg = get_config().reconciliation.update_supersession
+            if not semantic_ok:
+                _skip(
+                    report,
+                    "paraphrases",
+                    f"update probes are LLM-priced ({degrade_reason})",
+                )
+            elif not update_cfg.enabled:
+                _skip(
+                    report,
+                    "paraphrases",
+                    "reconciliation.update_supersession.enabled is false",
+                )
+            elif update_cfg.max_paraphrases == 0:
+                _skip(
+                    report,
+                    "paraphrases",
+                    "reconciliation.update_supersession.max_paraphrases is 0",
+                )
+            else:
+                await _run_pass(
+                    session,
+                    report,
+                    "paraphrases",
+                    lambda: _pass_paraphrases(session, report, actor=actor),
+                )
+
             # ------------------------------ pass 2c: re-anchor
             # After both sweeps, so every update retirement of the night exists,
             # and before the census, which then sees the restatements.
@@ -1522,6 +1581,20 @@ async def run_consolidation(
                     "reanchor",
                     lambda: _pass_reanchor(session, report, actor=actor),
                 )
+
+            # -------------------------- pass 2d: held-claim release
+            # After re-anchor, so every autonomous retirement of the night
+            # exists, and before the census, which then sees a released claim.
+            if not semantic_ok:
+                _skip(
+                    report,
+                    "release",
+                    f"contradiction probes are LLM-priced ({degrade_reason})",
+                )
+            elif not get_config().consolidation.release.enabled:
+                _skip(report, "release", "consolidation.release.enabled is false")
+            else:
+                await _run_pass(session, report, "release", lambda: _pass_release(session, report))
 
             # ------------------------------------------------- pass 3: census
             # the census has its own cadence. Gather the last census's
@@ -1769,6 +1842,15 @@ class _BudgetSkip(Exception):  # noqa: N818 — a control-flow signal, not an er
     """
 
 
+class _EgressSkip(Exception):  # noqa: N818 — a control-flow signal, not an error
+    """Raised by a pass body whose LLM purpose ``network.egress`` refuses.
+
+    Raised before any snapshot is claimed, so nothing is attempted and no
+    attempt is counted; :func:`_run_pass` records the pass as skipped with
+    reason ``egress`` instead of failing it every cycle.
+    """
+
+
 #: LLM calls one abstraction promotion makes: the synthesis plus the
 #: entailment and duplicate judges. The budget's cap-bound estimate.
 _ABSTRACTION_CALLS_PER_PROMOTION = 3
@@ -1899,6 +1981,9 @@ async def _run_pass(
         entry.status = "skipped"
         entry.detail = str(skipped)
         _note_budget_skip(report, name)
+    except _EgressSkip as skipped:
+        entry.status = "skipped"
+        entry.detail = str(skipped)
     except Exception as exc:  # noqa: BLE001 — §8: continue and report
         with contextlib.suppress(Exception):
             await session.rollback()
@@ -1941,6 +2026,8 @@ def _pass_outcome(report: ConsolidationReport, entry: ConsolidationPass) -> Pass
     if entry.name == "census" and (report.semantic_degraded or report.census_probe_skipped):
         return "degraded"
     if entry.name == "utility" and report.utility_behavioural_skipped:
+        return "degraded"
+    if entry.name == "release" and report.release is not None and report.release.incomplete:
         return "degraded"
     return "ok"
 
@@ -1994,14 +2081,28 @@ def _pass_summary(
                 f"probed {report.update_probes_run} of "
                 f"{_plural(report.update_candidate_pairs, 'pair')}",
             ]
+            if report.update_cap_reached:
+                parts.append(
+                    f"cap {report.update_probe_cap} reached, "
+                    f"{_plural(report.update_not_reached, 'pair')} not reached"
+                )
             if report.update_fixed_slot:
                 parts.append(f"{report.update_fixed_slot} fixed-slot pair(s) sent to review")
             if report.update_previously_cleared:
                 parts.append(f"{report.update_previously_cleared} previously cleared")
+        case "paraphrases" if report.paraphrases is not None:
+            parts = [
+                render_paraphrases_line(report.paraphrases)
+                .strip()
+                .removeprefix("paraphrases")
+                .strip()
+            ]
         case "reanchor" if report.reanchor is not None:
             parts = [
                 render_reanchor_line(report.reanchor).strip().removeprefix("re-anchor").strip()
             ]
+        case "release" if report.release is not None:
+            parts = [render_release_line(report.release).strip().removeprefix("release").strip()]
         case "census":
             parts = [_plural(report.headline_contradictions, "contradiction")]
             if report.semantic_degraded or report.census_probe_skipped:
@@ -2103,7 +2204,7 @@ async def _count_backlog(session: AsyncSession, report: ConsolidationReport) -> 
     pending = await list_pending_snapshots_for_catchup(session)
     report.pending_total = len(pending)
     report.pending_remaining = len(pending)
-    report.pending_oldest_at = min((p.captured_at for p in pending), default=None)
+    report.pending_oldest_at = min((p.waiting_since for p in pending), default=None)
     return 0
 
 
@@ -2195,6 +2296,18 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
 
     pending = await list_pending_snapshots_for_catchup(session)
     report.pending_total = len(pending)
+    if pending and not purpose_allowed("extraction"):
+        # no snapshot is claimed, so each stays PENDING with its
+        # attempt count unchanged and resumes on the first run after the
+        # policy opens. The reason is derived from the posture, never stored.
+        host, port, _ = purpose_endpoint("extraction")
+        report.pending_remaining = report.pending_total
+        report.pending_oldest_at = await _oldest_pending_at(session)
+        await session.commit()
+        raise _EgressSkip(
+            f"egress: network.egress does not allow the extraction endpoint "
+            f"{host}:{port}; {len(pending)} snapshot(s) stay PENDING"
+        )
     batching = get_config().consolidation.extract_batching
     chosen = _extract_selection(pending, batching=batching)
     if current_spend_budget() is not None:
@@ -2213,7 +2326,9 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
         extracted = await _pass_extract_pooled(chosen, report)
     else:
         cap = get_config().consolidation.max_pending_entries
-        extracted = await _pass_extract_serial(session, pending[:cap], report, extract_snapshot)
+        extracted = await _pass_extract_serial(
+            session, _prioritised(pending)[:cap], report, extract_snapshot
+        )
     report.pending_oldest_at = await _oldest_pending_at(session)
     return extracted
 
@@ -2223,13 +2338,32 @@ def _extract_selection(
 ) -> list[tuple[str, str]]:
     """``(entry_id, snapshot_id)`` pass 1 would extract from the catch-up queue.
 
-    The pooled pass takes one snapshot per entry up to the cap;
-    the serial loop takes the first ``cap`` snapshots as listed.
+    The priority class goes first (:func:`_prioritised`). The
+    pooled pass then takes one snapshot per entry up to the cap;
+    the serial loop takes the first ``cap`` snapshots. The plan preview calls
+    this same function, so it shows the set the run will take.
     """
     cap = get_config().consolidation.max_pending_entries
+    ordered = _prioritised(pending)
     if batching:
-        return _one_per_entry(pending, cap)
-    return [(item.entry_id, item.snapshot_id) for item in pending[:cap]]
+        return _one_per_entry(ordered, cap)
+    return [(item.entry_id, item.snapshot_id) for item in ordered[:cap]]
+
+
+def _prioritised(pending: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
+    """The catch-up queue with ``consolidation.priority_tags`` entries moved to the front.
+
+    A stable partition: each half keeps the listing's
+    least-tried, longest-owed order. Applied here, after the shared listing,
+    so the backlog count and ``oldest waiting since`` still describe the
+    whole queue rather than the class.
+    """
+    priority = set(get_config().consolidation.priority_tags)
+    if not priority:
+        return list(pending)
+    first = [item for item in pending if item.tags & priority]
+    rest = [item for item in pending if not item.tags & priority]
+    return first + rest
 
 
 async def _snapshot_sizes(session: AsyncSession, snapshot_ids: Sequence[str]) -> list[int]:
@@ -2276,7 +2410,7 @@ async def _oldest_pending_at(session: AsyncSession) -> datetime | None:
     from particles.corpus.store import list_pending_snapshots_for_catchup
 
     pending = await list_pending_snapshots_for_catchup(session)
-    return min((p.captured_at for p in pending), default=None)
+    return min((p.waiting_since for p in pending), default=None)
 
 
 @dataclass
@@ -2658,7 +2792,41 @@ async def _pass_reconcile_updates(
     report.update_fixed_slot = fixed if isinstance(fixed, int) else 0
     candidates = summary.get("candidate_pairs", 0)
     report.update_candidate_pairs = candidates if isinstance(candidates, int) else 0
+    probe_cap = summary.get("probe_cap", 0)
+    report.update_probe_cap = probe_cap if isinstance(probe_cap, int) else 0
+    report.update_cap_reached = summary.get("cap_reached") is True
+    unreached = summary.get("not_reached", 0)
+    report.update_not_reached = unreached if isinstance(unreached, int) else 0
     return report.update_probes_run + (update_probed if isinstance(update_probed, int) else 0)
+
+
+async def _pass_paraphrases(
+    session: AsyncSession, report: ConsolidationReport, *, actor: str
+) -> int:
+    """Pass 2b': retire the other phrasings of a value an update replaced.
+
+    Probe-bearing: one update probe per paraphrase candidate, plus a second
+    reading per ``CHANGES``, capped at ``consolidation.max_paraphrase_probes``
+    first readings. No contradiction probe is asked. Resumes from the cursor
+    the last run of this actor recorded.
+
+    Under a dollar budget the pass's own dry run (no call, no write) prices it
+    first: every candidate it would ask, and a second reading each.
+    """
+    cursor = await prior_cursor(session, actor, "paraphrases")
+    if current_spend_budget() is not None:
+        planned = await run_paraphrases(session, cursor=cursor, dry_run=True)
+        reason = _budget_skip_reason("paraphrases", paraphrase_estimate(planned))
+        if reason is not None:
+            raise _BudgetSkip(reason)
+    report.paraphrases = await run_paraphrases(session, cursor=cursor)
+    await session.commit()
+    return report.paraphrases.llm_calls
+
+
+def paraphrase_estimate(planned: ParaphraseReport) -> PassEstimate:
+    """A paraphrases dry run priced: each first reading, and at most a second each."""
+    return probe_estimate(planned.probes) + context_call_estimate("verification", planned.probes)
 
 
 async def _pass_reanchor(session: AsyncSession, report: ConsolidationReport, *, actor: str) -> int:
@@ -2682,6 +2850,29 @@ async def _pass_reanchor(session: AsyncSession, report: ConsolidationReport, *, 
     report.reanchor = await run_reanchor(session, cursor=cursor, actor=actor)
     await session.commit()
     return report.reanchor.llm_calls
+
+
+async def _pass_release(session: AsyncSession, report: ConsolidationReport) -> int:
+    """Pass 2d: release a claim held behind a retired claim.
+
+    Probe-bearing: one contradiction probe per pair and a second reading per
+    confirmed pair, over at most ``consolidation.release.max_records`` records.
+    A store with no qualifying record pays nothing. Under a dollar budget the
+    pass's own dry run (no call, no write) prices it first.
+    """
+    if current_spend_budget() is not None:
+        planned = await run_release(session, dry_run=True)
+        reason = _budget_skip_reason("release", release_estimate(planned))
+        if reason is not None:
+            raise _BudgetSkip(reason)
+    report.release = await run_release(session)
+    await session.commit()
+    return report.release.llm_calls
+
+
+def release_estimate(planned: ReleaseReport) -> PassEstimate:
+    """A release dry run priced: a probe per pair, and at most a second reading each."""
+    return probe_estimate(planned.pairs) + context_call_estimate("verification", planned.pairs)
 
 
 def _reanchor_estimate(planned: ReanchorReport) -> PassEstimate:
@@ -3254,8 +3445,24 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "reconcile_demoted": report.reconcile_demoted,
         "reconcile_candidate_pairs": report.reconcile_candidate_pairs,
         "reconcile_probes_run": report.reconcile_probes_run,
+        # The update sweep: what qualified, what was probed under
+        # which cap, whether the cap stopped it, and in what order it went, so
+        # a pair left unprobed can be told from one that never qualified. The
+        # probed pairs themselves are in the probe-verdict ledger the pointer
+        # names, not copied here.
+        "update_candidate_pairs": report.update_candidate_pairs,
+        "update_probes_run": report.update_probes_run,
+        "update_probe_cap": report.update_probe_cap,
+        "update_cap_reached": report.update_cap_reached,
+        "update_not_reached": report.update_not_reached,
+        "update_ordering": UPDATE_PROBE_ORDER,
+        "update_probe_ledger": dict(UPDATE_PROBE_LEDGER),
+        "update_demoted": report.update_demoted,
+        "update_fixed_slot": report.update_fixed_slot,
         "update_previously_cleared": report.update_previously_cleared,
+        **({"paraphrases": report.paraphrases.payload()} if report.paraphrases is not None else {}),
         **({"reanchor": report.reanchor.payload()} if report.reanchor is not None else {}),
+        **({"release": report.release.payload()} if report.release is not None else {}),
         "utility_literal": report.utility_literal,
         "utility_behavioural": report.utility_behavioural,
         "utility_behavioural_calls": report.utility_behavioural_calls,
@@ -3407,6 +3614,26 @@ def _pending_line(report: ConsolidationReport) -> str:
     return line
 
 
+def render_paraphrases_line(paraphrases: ParaphraseReport) -> str:
+    """The run report's line for the paraphrases pass."""
+    if paraphrases.skipped_reason is not None:
+        return f"  paraphrases      skipped ({paraphrases.skipped_reason})"
+    parts = [f"{paraphrases.triggers} update(s) examined"]
+    if paraphrases.retired:
+        parts.append(f"{len(paraphrases.retired)} other phrasing(s) retired")
+    if paraphrases.kept:
+        parts.append(f"{len(paraphrases.kept)} candidate(s) kept")
+    if paraphrases.previously_cleared:
+        parts.append(f"{paraphrases.previously_cleared} previously cleared")
+    if paraphrases.capped:
+        parts.append(
+            f"capped at {paraphrases.probe_cap} probe(s) (consolidation.max_paraphrase_probes)"
+        )
+    if paraphrases.waiting:
+        parts.append(f"{paraphrases.waiting} waiting")
+    return "  paraphrases      " + ", ".join(parts)
+
+
 def render_reanchor_line(reanchor: ReanchorReport) -> str:
     """The report line for pass 2c."""
     if reanchor.skipped_reason is not None:
@@ -3418,9 +3645,29 @@ def render_reanchor_line(reanchor: ReanchorReport) -> str:
         parts.append(f"{len(reanchor.matched_existing)} matched to an existing claim")
     if reanchor.unrestated:
         parts.append(f"{len(reanchor.unrestated)} kept for review (stale_basis)")
+    if reanchor.unanswered:
+        parts.append(f"{reanchor.unanswered} candidate(s) the probe gave no verdict for")
     if reanchor.waiting:
         parts.append(f"{reanchor.waiting} waiting")
     return "  re-anchor        " + ", ".join(parts)
+
+
+def render_release_line(release: ReleaseReport) -> str:
+    """The report line for pass 2d."""
+    if release.skipped_reason is not None:
+        return f"  release          skipped ({release.skipped_reason})"
+    parts = [f"{release.examined} of {release.qualifying} held claim(s) examined"]
+    if release.released:
+        parts.append(f"{len(release.released)} released")
+    if release.blocked:
+        parts.append(f"{len(release.blocked)} still contradicted (kept for review)")
+    if release.incomplete:
+        parts.append(f"{release.incomplete} left open on an incomplete check")
+    if release.unchanged:
+        parts.append(f"{release.unchanged} unchanged since last examined")
+    if release.waiting:
+        parts.append(f"{release.waiting} waiting")
+    return "  release          " + ", ".join(parts)
 
 
 def render_disclosure_line(disclosure: DisclosureReport) -> str:
@@ -3582,8 +3829,14 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
     lines.append(_pending_line(report))
     if report.reconcile_demoted:
         lines.append(f"  reconcile        demoted {report.reconcile_demoted} superseded claim(s)")
+    if report.update_demoted:
+        lines.append(f"  update sweep     retired {report.update_demoted} replaced claim(s)")
+    if report.paraphrases is not None:
+        lines.append(render_paraphrases_line(report.paraphrases))
     if report.reanchor is not None:
         lines.append(render_reanchor_line(report.reanchor))
+    if report.release is not None and (report.release.qualifying or report.release.skipped_reason):
+        lines.append(render_release_line(report.release))
     utility = f"  utility events   +{report.utility_literal + report.utility_behavioural}"
     if report.utility_behavioural:
         utility += f" ({report.utility_behavioural} behavioural)"
@@ -3659,6 +3912,15 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             f"  update sweep: {report.update_previously_cleared} pair(s) skipped as "
             f"previously cleared (not counted against consolidation.max_update_probes)"
         )
+    if not report.semantic_degraded and report.update_cap_reached:
+        lines.append("")
+        lines.append(
+            f"  update probe: {report.update_probes_run:,} of "
+            f"{report.update_candidate_pairs:,} pairs probed; cap "
+            f"{report.update_probe_cap:,} reached (consolidation.max_update_probes; "
+            f"pairs are probed by content cosine, highest first, so the "
+            f"{report.update_not_reached:,} not reached rank below every probed pair)"
+        )
     if (
         not report.semantic_degraded
         and report.reconcile_probes_run < report.reconcile_candidate_pairs
@@ -3691,6 +3953,10 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
         lines.append("")
         for warning in report.reanchor.warnings:
             lines.append(f"  re-anchor: {warning}")
+    if report.release is not None and report.release.warnings:
+        lines.append("")
+        for warning in report.release.warnings:
+            lines.append(f"  release: {warning}")
     if report.abstraction is not None and report.abstraction.warnings:
         lines.append("")
         for warning in report.abstraction.warnings:

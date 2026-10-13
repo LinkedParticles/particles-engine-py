@@ -18,6 +18,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import LintFinding
+from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.operations._llm import _llm_call
 from particles.store.particle_store import get_active_particles
 
@@ -92,7 +93,8 @@ async def _llm_check_granularity(content: str) -> str | None:
         "- 'NO' if it contains a single atomic claim\n\n"
         f"Text: {content}"
     )
-    response = await _llm_call(prompt, max_tokens=150)
+    # Room for a model that thinks before it answers (see PROBE_MAX_TOKENS).
+    response = await _llm_call(prompt, max_tokens=PROBE_MAX_TOKENS)
     if response and response.upper().startswith("YES"):
         return response[4:].strip()
     return None

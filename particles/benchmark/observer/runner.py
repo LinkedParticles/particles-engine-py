@@ -103,8 +103,11 @@ def _scripted_perception(refused: dict[str, int]) -> Iterator[SlotProbeProvider]
     }
     probe = SlotProbeProvider()
     overrides["semantic_lint"] = probe
-    # The scripted probe alone decides: the second reading on ``verification``
-    # is refused here, so it is off for the run.
+    # The update probe's second reading asks the same slot question
+    # on ``verification``; the scripted table answers it as it answers the first.
+    overrides["verification"] = probe
+    # The contradiction's own second reading is switched off below,
+    # so the scripted probe alone decides a contradiction.
     extraction = get_config().extraction
     verify_before = extraction.verify_conflicts
     extraction.verify_conflicts = False

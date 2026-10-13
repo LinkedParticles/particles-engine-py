@@ -12,6 +12,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.api.client import get_backend
 from particles.core.schema import Particle, ResolutionAction
 from particles.db import session_scope
@@ -74,7 +75,7 @@ def review_cmd(
             typer.echo(f"DISCARD {verb} both sides of {len(items)} conflicts.")
             if dry_run:
                 return
-            if not yes and not typer.confirm("Proceed?", default=False):
+            if not yes and not confirm("Proceed?", default=False):
                 typer.echo("Aborted; nothing written.")
                 raise typer.Exit(1)
             particles_list = [item.inconsistency for item in items]

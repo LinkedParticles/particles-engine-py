@@ -83,6 +83,30 @@ http:  # [client]
   # Reddit curl subprocess as --max-filesize. Default 100 MiB.
   max_bytes: 104857600
 
+# The no-egress posture. Running the LLM locally is not enough to
+# keep data on the machine: subject resolution reaches Wikidata, URL deposits
+# fetch, the encoder downloads from Hugging Face, and any hosted LLM purpose
+# left configured calls out. This one switch governs all of them.
+#   open       no check (the default; today's behaviour)
+#   none       refuse every outbound connection and name lookup, loopback included
+#   allowlist  refuse everything except the destinations listed in `allow`
+# Local is never inferred: an endpoint counts as local only when it matches an
+# entry. `localhost` and `127.0.0.1` are different entries, and a private
+# address is not local unless listed. `particles config validate` and
+# `particles hook doctor` report what the posture switches off.
+network:  # [client]
+  egress: open
+  # Each entry: `host` is an IP literal, a CIDR block, or an exact host name
+  # (no wildcards); `port` is optional (omitted means any port).
+  allow: []
+  # Example: a model server on this machine and one on the LAN.
+  # egress: allowlist
+  # allow:
+  #   - host: localhost
+  #     port: 11434
+  #   - host: 192.168.1.20
+  #     port: 8000
+
 # FastAPI app limits (defense-in-depth for the HTTP surface).
 api:  # [engine]
   # Cap on the accepted *inbound* request body, in bytes. Bodies larger than
@@ -311,6 +335,36 @@ claude_code:  # [engine]
     # current session (covers SIGKILL / crashes / an unreachable store at a
     # prior session end). 0 disables the sweep.
     catchup_limit: 5
+  # Agent-side extraction: a Stop hook asks the session's own agent
+  # to extract a span of its deposited transcript, through the
+  # `extraction_submit` MCP tool. The user's plan pays; no API key is needed
+  # for extraction. Defaults come from the 2026-10-09 offline replay and store
+  # query (docs/benchmarks/agent-extraction-defaults-2026-10-09.md).
+  agent_extraction:
+    # off | shadow | on. shadow asks and verifies but writes and marks
+    # nothing, logging what would have happened.
+    mode: "off"
+    # Ask when the distilled transcript has grown this much past what was
+    # extracted (replay: about 1.7 asks per active hour).
+    min_new_chars: 8000
+    # Seconds between asks in one session.
+    min_interval_seconds: 600
+    # Waive the interval while more than one span is owed and the last ask
+    # was answered with progress (its span is not owed again).
+    catch_up: true
+    # Asks per session where a background extractor can take the rest. A
+    # keyless install is never capped.
+    max_asks_per_session: 6
+    # Largest span one ask carries; its text rides in the ask.
+    max_span_chars: 40000
+    # An ask unanswered after this many seconds expires.
+    ask_ttl_seconds: 900
+    # A submission covers its span with at least this many accepted claims per
+    # 1000 characters (10th percentile of the general extractor's deltas).
+    min_claims_per_kchar: 2.7
+    # ...and at most this share of candidates dropped for missing evidence.
+    # Placeholder until the shadow week measures it.
+    max_evidence_drop_ratio: 0.5
 
 # Agent-memory product surface — the MEMORY.md projection.
 # Namespace shared with the claude_code hook integration above:
@@ -414,6 +468,8 @@ llm:  # [client]
   #     base_url: https://api.openai.com/v1  # the adapter appends /chat/completions
   #     max_tokens_param: max_completion_tokens  # reasoning models reject max_tokens
   #     send_temperature: false           # …and non-default temperatures
+  #     reasoning_effort: minimal         # sent as-is when set; unset sends nothing.
+  #                                       # "none" turns qwen3 thinking off on Ollama
   #     structured_output: strict         # strict-dialect JSON schemas (see below)
   #   deepseek:
   #     base_url: https://api.deepseek.com/v1
@@ -1048,6 +1104,19 @@ reconciliation:  # [engine]
     subject_floor: 0.45
     # Contradiction probes per extracted claim from this search, at most.
     max_candidates: 3
+    # Paraphrases pass: when an update retires a claim, the other
+    # ACTIVE claims about the same subject at this cosine to the retired claim
+    # or above are put to the update probe against the claim that replaced it,
+    # and retired when both readings say the value changed.
+    paraphrase_floor: 0.70
+    # Candidates asked per retirement, highest cosine first. 0 turns the pass off.
+    max_paraphrases: 3
+    # an update is established by the update probe, read twice, not
+    # by the contradiction probe, so a dated "moved to X" retires the old home.
+    # A pair whose older claim records a past value ("until 2025", "used to")
+    # still needs the contradiction probe too. false restores the pre-1.187.0
+    # gate on every pair.
+    same_slot_admits: true
 
 # Content age decay — effective_confidence multiplier based on publication age..
 # Omit a source type entirely to disable decay for it.
@@ -1332,8 +1401,10 @@ subjects:  # [engine]
   # docs/benchmarks/subject-resolution-judge-2026-10-01.md. With no LLM key or
   # an unusable reply it takes the top hit; set top_hit for no model call at all.
   wikidata_candidate_selection: llm_judge
-  # Output budget of one llm_judge call.
-  wikidata_judge_max_tokens: 200
+  # Output budget of one llm_judge call. The reply is one short JSON object;
+  # the rest is room for a model that thinks by default, whose thinking spends
+  # from this budget. Lowering it can leave such a model with no text.
+  wikidata_judge_max_tokens: 4096
   # How many search hits the llm_judge is shown (5 to 50). The ambiguity gate
   # and the other selection values still read the first five, so which names
   # reach the model is unchanged; the extra hits come with the same one search
@@ -1378,6 +1449,13 @@ subjects:  # [engine]
   # ("the owner", or a first name) adds them to persona_aliases, or merges
   # the Subjects with `particles subjects merge`.
   persona_source_tags: [memory-file]
+  # speaker references a first-person claim may open on. A claim
+  # from a persona source (not JOURNAL) that opens on one of these, or on
+  # persona_canonical_name, gains the speaker as a subject when the extractor
+  # left it out, and is also keyed on the speaker for update supersession.
+  # An opener counts only when it is also in persona_aliases, so add a house
+  # term ("the owner") to both lists. An empty list turns this off.
+  persona_openers: [the user, the speaker]
   # Source types that skip live-ontology authorities (Wikidata) during
   # resolution. Chat-transcript harvests and personal journals name private
   # referents by construction: ~none of the names resolve and the fruitless,
@@ -1937,51 +2015,60 @@ audit:  # [engine]
   max_contradiction_verifications: 25
   # Output budget of one second reading. llm.verification defaults to a model
   # that may think before it answers, and the thinking spends from this budget.
+  # The update probe's second reading, before an update retires a claim, uses
+  # this budget and the retry below as well.
   verify_max_tokens: 1024
   # A second reading cut at verify_max_tokens (or empty, the budget spent on
   # thinking) is re-issued once at this larger budget; a reply still cut
   # leaves its flag unverified. At or below verify_max_tokens disables it.
   verify_retry_max_tokens: 4096
   # Assumptions behind the dollar range and wall time the estimate prints
-  # (priced from llm.price_per_mtok; each figure is disclosed with it). Measured
-  # on 2026-09-25: a first-run audit of 96 Claude Code memory files (~53k
-  # source tokens) into a fresh store, claude-sonnet-5 extraction at
-  # extraction.max_tokens 16384 with the retry at 20000 (since raised to 32000
-  # and 64000), claude-haiku-4-5
-  # probes, a 200-probe cap. It made 104 extraction calls averaging ~7,000
-  # output tokens each (mostly thinking, so nearly flat in the source size),
-  # retried 8 of the 96 first calls, made 374 semantic-lint calls (the 200
-  # audit probes plus ~174 §6.6 probes during extraction), billed $7.97, and
-  # took 96 minutes. The estimate before this re-basing printed $1.92-3.57.
+  # (priced from llm.price_per_mtok; each figure is disclosed with it). Fitted
+  # to two measured claude-sonnet-5 runs: 96 Claude Code memory files (~2.2k
+  # characters each; 104 calls, $7.97, 96 minutes, 2026-09-25) and 6 active
+  # ADRs (13-22k characters each; 11 chunked calls plus 2 retries, 317k output
+  # tokens, about 7 claims per 1,000 characters, 2026-10-04).
   #
-  # Expected output tokens per extraction call, retries averaged in. The
-  # per-model mapping is keyed like llm.price_per_mtok and wins over the
-  # scalar; the 2026-09 provider survey measured ~3,600 per call on
-  # claude-haiku-4-5, for example:
-  #   estimate_output_tokens_per_extraction_call_by_model: {claude-haiku-4-5: 3600}
-  estimate_output_tokens_per_extraction_call: 7000
-  estimate_output_tokens_per_extraction_call_by_model: {}
-  # The expected range runs from (1 - spread) x that figure with no retries to
-  # (1 + spread) x it with the expected retries. The ceiling is every call at
-  # extraction.max_tokens plus the expected retries at
+  # Output per extraction call is a fixed part plus a part proportional to the
+  # characters the call reads: ~6,000 for a memory note, ~31,600 for a full
+  # 15,000-character chunk of a dense design document. The estimate only
+  # counts the files the run will extract: an unchanged file already
+  # extracted is skipped and the skip is disclosed.
+  estimate_output_tokens_per_call_base: 1600
+  estimate_output_tokens_per_source_char: 2.0
+  # Multiplies both figures for an extraction model that writes more or less
+  # than claude-sonnet-5, keyed like llm.price_per_mtok. The 2026-09 provider
+  # survey measured about 0.55 of sonnet's output on claude-haiku-4-5:
+  #   estimate_output_scale_by_model: {claude-haiku-4-5: 0.55}
+  estimate_output_scale_by_model: {}
+  # The expected range takes every call at (1 - spread) up to every call at
+  # (1 + spread) of its figure. A call whose output passes
+  # extraction.max_tokens at that end is billed that whole budget plus a retry
+  # at extraction.retry_max_tokens, and one that passes the retry budget too
+  # is disclosed as at risk of losing the claims past the cut. The ceiling is
+  # every call at extraction.max_tokens plus the high end's retries at
   # extraction.retry_max_tokens.
   estimate_output_spread: 0.25
-  # Fraction of extraction calls retried at extraction.retry_max_tokens (8 of
-  # 96 in the measured run, at the old 16384 first budget, so a conservative
-  # bound now). Ignored when the retry is disabled.
+  # Fraction of extraction calls retried for any reason (empty or unparseable
+  # replies as well as cut ones), a floor under the length retries above: 8
+  # of 96 in the memory run, at the old 16384 first budget, so a conservative
+  # bound. Ignored when the retry is disabled.
   estimate_extraction_retry_rate: 0.083
   # §6.6 contradiction probes the extraction pipeline makes per extraction
   # call, on top of the capped audit probes. Uncapped and density-dependent.
   estimate_reconcile_probes_per_extraction_call: 1.8
   # One contradiction probe: instruction + two claims in, a one-sentence reason
-  # and a verdict line out (the probe call's own max_tokens is 250, so the
-  # output figure is a bound; the measured run averaged ~305 in, ~56 out).
+  # and a verdict line out (the measured run, on a model that did not think,
+  # averaged ~305 in, ~56 out). An expectation, not a bound: the probe's own
+  # max_tokens leaves a thinking model room, and thinking is billed as output.
+  # Raise it if a run's usage line shows probes averaging more.
   estimate_probe_input_tokens: 350
   estimate_probe_output_tokens: 250
-  # Wall time per call; calls run one at a time. 50 s per extraction call and
-  # 1.5 s per probe reproduce the measured run's 96 minutes (the total is
+  # Wall time; calls run one at a time. Extraction is timed by the output it
+  # writes: 125 tokens a second and 1.5 s per probe reproduce the memory run's
+  # 96 minutes and the 22 minutes one 49k-character ADR took (the totals are
   # measured, the split between the two is assumed).
-  estimate_seconds_per_extraction_call: 50
+  estimate_extraction_output_tokens_per_second: 125
   estimate_seconds_per_probe: 1.5
   # One second reading: instruction + two claims with their passages in, and
   # the call's own budget (verify_max_tokens, 1024) out as a bound; the
@@ -2017,6 +2104,11 @@ consolidation:  # [engine]
   # Pass 1 per-run cap; a capped run discloses the remainder and the next run
   # continues (level-triggered — the corpus is the state).
   max_pending_entries: 20
+  # Pass 1 priority class: entries carrying any of these tags
+  # (rule files, Claude Code memory files) take the cap's slots first, so a
+  # file edited during the day is extracted that night. The cap is unchanged;
+  # transcripts fill what remains. [] restores plain longest-owed order.
+  priority_tags: [rule-file, memory-file]
   # Pass 1 pooled batching: run the capped set as concurrent
   # per-snapshot tasks whose LLM requests merge into one Message
   # Batches job at 50% price (batch mechanics reuse the llm.batch.* knobs;
@@ -2043,6 +2135,9 @@ consolidation:  # [engine]
   # spent on a pair the update rung can actually act on (the sweep pre-filters
   # by lineage and date), so the budget goes further than the figure above.
   max_update_probes: 100
+  # Per-run cap on the paraphrases pass's update probes, first
+  # readings only. A capped run resumes at the next retirement on the next run.
+  max_paraphrase_probes: 30
   # Cycle lock. The kernel holds consolidate.lock for the whole
   # cycle: a live cycle is never reclaimed, and a crashed one frees it at once.
   # Minutes after which a skipped caller warns on stderr that the holder may
@@ -2125,6 +2220,18 @@ consolidation:  # [engine]
     max_candidates_per_retirement: 8
     # Second readings, and so writes, per run.
     max_restatements_per_run: 20
+  # Held-claim release: a newer claim held quarantined behind a
+  # stored claim (a rung-3 record) is re-checked once an update, the re-anchor
+  # pass or the document sweep retires that stored claim. It is released
+  # (minted ACTIVE, the record closed) only when no ACTIVE claim still
+  # contradicts it; otherwise nothing changes, and the record's curation card
+  # names what blocks it. The pass never retires a claim.
+  release:
+    enabled: true
+    # Records examined per run, oldest retirement first. Each costs one
+    # contradiction probe and at most one second reading per pair (the nearest
+    # claim plus up to reconciliation.update_supersession.max_candidates).
+    max_records: 10
   # Run-level batch-wait budget. llm.batch.max_wait_seconds bounds
   # one Message Batches job; this bounds the total one run waits on all of
   # them. Each batch waits at most the balance left; below the floor, the

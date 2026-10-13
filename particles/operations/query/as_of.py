@@ -206,11 +206,24 @@ class AsOfView:
         ``stored_retired_at`` is the §2a storage column threaded beside the
         model by the widened loader (it is not a ``Particle`` field).
         """
-        not_visible = AsOfEvaluation(visible=False, note=None, excluded_undatable=False)
-
         # §1 condition 1: it had been asserted by T.
         if ensure_utc(particle.asserted_at) > self.as_of:
-            return not_visible
+            return AsOfEvaluation(visible=False, note=None, excluded_undatable=False)
+        return self._after_assertion(particle, stored_retired_at)
+
+    def in_force(self, particle: Particle, stored_retired_at: datetime | None) -> bool:
+        """Every §1 test but the assertion instant: not born retired, valid at T, unretired.
+
+        The exposure read asks whether a source the session
+        loaded stated the claim, which does not depend on when the store
+        extracted it. Query and the graph view keep :meth:`evaluate`.
+        """
+        return self._after_assertion(particle, stored_retired_at).visible
+
+    def _after_assertion(
+        self, particle: Particle, stored_retired_at: datetime | None
+    ) -> AsOfEvaluation:
+        not_visible = AsOfEvaluation(visible=False, note=None, excluded_undatable=False)
 
         # Born-retired rows (INCONSISTENCY records, quarantine losers) were
         # never believed and are not counted as undatable. Once resolved they

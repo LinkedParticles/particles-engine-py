@@ -462,16 +462,22 @@ class TestEstimate:
 
     def test_priced_when_every_model_has_a_price(self) -> None:
         cfg = get_config()
-        for purpose in ("extraction", "semantic_lint"):
+        for purpose in ("extraction", "semantic_lint", "verification"):
             model = cfg.llm.for_purpose(purpose).model
             cfg.llm.price_per_mtok[model] = TokenPrice(input=2.0, output=10.0)
         est = estimate_rot_run("live", seeds=[42], days=90, checkpoints=[90])
+        # up to one second slot reading per value-bearing event.
+        [second_line] = [a for a in est.assumptions if "second slot reading" in a]
+        second = int(re.search(r"up to (\d+) second", second_line).group(1))  # type: ignore[union-attr]
         expected = (
             est.extraction_input_tokens * 2.0
             + est.extraction_output_tokens * 10.0
             + est.probe_input_tokens * 2.0
             + est.probe_output_tokens * 10.0
+            + second * cfg.benchmark_rot.estimate_probe_input_tokens * 2.0
+            + second * cfg.audit.verify_max_tokens * 10.0
         ) / 1e6
+        assert second > 0
         assert est.cost_usd == pytest.approx(expected)
 
     def test_unknown_arm_refused(self) -> None:
@@ -933,9 +939,10 @@ class TestRealPairs:
 
         rulings = _write_rulings(tmp_path / "rulings.jsonl", _ruling("coexist"))
         check = _AlwaysRetires()
-        # The probe arm leaves semantic_lint to the configured provider; this
-        # outer override stands in for the live model.
-        with override_providers({"semantic_lint": check}):
+        # The probe arm leaves semantic_lint and verification (the update
+        # probe's second reading) to the configured providers; this
+        # outer override stands in for the live models.
+        with override_providers({"semantic_lint": check, "verification": check}):
             report = await run_rot_benchmark(
                 arm="probe",
                 seeds=[42],

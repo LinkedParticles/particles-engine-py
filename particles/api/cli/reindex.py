@@ -14,7 +14,7 @@ from typing import cast
 import typer
 
 from particles.api.cli import app, run
-from particles.api.cli._progress import progress_line, set_heartbeat_status
+from particles.api.cli._progress import confirm, progress_line, set_heartbeat_status
 from particles.api.cli._remote import refuse_remote_sync
 from particles.api.client import get_backend
 from particles.llm.usage import LLMUsage, render_usage_line
@@ -284,7 +284,7 @@ async def _estimate(
                 err=True,
             )
             raise typer.Exit(_EXIT_NOT_STARTED)
-        if not typer.confirm(
+        if not confirm(
             f"Re-extract and judge {len(plan.sample)} sampled snapshot(s)?", err=as_json
         ):
             typer.echo("Aborted: nothing was spent.", err=as_json)

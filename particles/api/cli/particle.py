@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.db import DEFAULT_STORE, session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
@@ -494,7 +495,7 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
         typer.echo("\n--dry-run: nothing written.")
         return
     if not yes:
-        typer.confirm("\nRetract this belief?", abort=True)
+        confirm("\nRetract this belief?", abort=True)
 
     async with session_scope(write=True) as session:  # writer lock
         try:

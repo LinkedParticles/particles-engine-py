@@ -130,13 +130,13 @@ async def test_inbox_tick_skips_the_read_until_the_mtime_moves(
 
     async def _fake_process_inbox(_session: Any, path: Path, **_kw: Any) -> dict[str, list[str]]:
         calls.append(path)
-        return {"processed": ["https://example.com/one"], "failed": []}
+        return {"processed": ["https://example.com/one"], "failed": [], "refused": []}
 
     monkeypatch.setattr("particles.operations.inbox.process_inbox", _fake_process_inbox)
     monkeypatch.setattr("particles.db.session_scope", _fake_session_scope)
 
     tick = daemon_mod._make_inbox_tick(inbox)
-    assert await tick() == "processed 1, failed 0"
+    assert await tick() == "processed 1, failed 0, refused 0"
     # Nothing changed since the last pass → no second read.
     assert await tick() == "unchanged"
     assert len(calls) == 1
@@ -144,7 +144,7 @@ async def test_inbox_tick_skips_the_read_until_the_mtime_moves(
     # A phone append moves the mtime; the next tick picks it up.
     inbox.write_text("https://example.com/one\nhttps://example.com/two\n")
     os.utime(inbox, (_FUTURE, _FUTURE))
-    assert await tick() == "processed 1, failed 0"
+    assert await tick() == "processed 1, failed 0, refused 0"
     assert len(calls) == 2
 
 

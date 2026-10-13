@@ -2785,6 +2785,17 @@
             "title": "Semantic Skipped",
             "type": "boolean"
           },
+          "semantic_skipped_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Skipped Reason"
+          },
           "summary": {
             "additionalProperties": {
               "type": "integer"
@@ -3121,6 +3132,8 @@
           "EXTRACT_RUN",
           "INCONSISTENCY_CLOSED",
           "DEPENDENT_CLAIM_EXAMINED",
+          "UPDATE_SUPERSESSION",
+          "HELD_CLAIM_EXAMINED",
           "ABSTRACTION_CANDIDATE",
           "ABSTRACTION_RESOLVED",
           "DUPLICATES_MERGED",
@@ -3134,7 +3147,10 @@
           "VOCABULARY_PROPOSED",
           "VOCABULARY_RULED",
           "MODALITY_RECLASSIFIED",
-          "MODALITY_GRANT_QUEUED"
+          "MODALITY_GRANT_QUEUED",
+          "AGENT_EXTRACTION_ASKED",
+          "AGENT_EXTRACTION_CONTINUED",
+          "AGENT_EXTRACTION_SUBMITTED"
         ],
         "title": "OperatorEventType",
         "type": "string"

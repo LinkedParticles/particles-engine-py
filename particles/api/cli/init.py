@@ -330,9 +330,13 @@ def _install(
 
     command_base = command_override or _default_command_base()
     hook_env = _hook_command_env(handle, config_path, will_write_config=new_config_text is not None)
+    # the Stop entry rides only an install that uses agent extraction.
+    agent_mode = get_config().claude_code.agent_extraction.mode
     merged = merge_particles_hook_entries(
-        settings, build_hook_commands(command_base, handle, hook_env)
+        settings,
+        build_hook_commands(command_base, handle, hook_env, include_stop=agent_mode != "off"),
     )
+    _note_agent_extraction(result, agent_mode)
     rendered = render_settings_json(merged)
     _warn_if_store_dsn_cwd_relative(handle, hook_env)
 
@@ -436,6 +440,25 @@ def _hook_command_map(settings: dict[str, Any]) -> dict[str, list[str]]:
         if commands:
             out[event] = commands
     return out
+
+
+def _note_agent_extraction(result: dict[str, Any], mode: str) -> None:
+    """Report agent-side extraction's state, and recommend it to a keyless install.
+
+    The Stop entry is installed only when the mode is ``shadow`` or ``on``.
+    ``on`` becomes the keyless default only after a shadow week has measured
+    the agent-dependent defaults (§ Defaults are measured), so until
+    then a keyless install is told how to switch it on, not switched.
+    """
+    from particles.extraction.agent import purpose_servable
+
+    result["agent_extraction"] = mode
+    if mode == "off" and not purpose_servable("extraction"):
+        result["next_steps"].append(
+            "No extraction API key is configured. To let your Claude Code sessions extract "
+            "their own transcripts instead, set `claude_code.agent_extraction.mode: "
+            "on` in config.yaml and re-run `particles init claude-code` to install the Stop hook."
+        )
 
 
 def _is_project_scope(settings_path: Path) -> bool:

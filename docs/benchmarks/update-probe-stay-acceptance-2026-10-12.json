@@ -1,0 +1,4132 @@
+{
+ "about": "Acceptance replay of 2026-10-12: scripts/replay_update_probe.py --set all --combined --pin-verification --halves reported --halves bounded --samples 3, once per model. 'reported' is the shipped prompt, 'bounded' adds the bounded-stay clarification; every sample is the production protocol's settled verdict, both readings pinned to the named model. Bars per set are as the script prints them.",
+ "models": [
+  {
+   "model": "claude-sonnet-5-5",
+   "cost_usd": 2.8295,
+   "runs": [
+    {
+     "prompt": "reported",
+     "replay": {
+      "bars": {
+       "world_changes": "0/54",
+       "world_ok": true,
+       "user_updates_changes": "21/21",
+       "user_updates_ok": true,
+       "hand_misses": [],
+       "hand_ok": true,
+       "world_changes_by_row": {
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 0,
+        "10": 0,
+        "12": 0,
+        "13": 0,
+        "18": 0,
+        "19": 0,
+        "20": 0,
+        "23": 0,
+        "28": 0,
+        "29": 0,
+        "30": 0,
+        "31": 0,
+        "32": 0,
+        "34": 0,
+        "35": 0
+       }
+      },
+      "rows": [
+       {
+        "id": 3,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 4,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 11,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 22,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 24,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 25,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 27,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 9,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 21,
+        "label": "user-unclear",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 26,
+        "label": "user-unclear",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 33,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 14,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 15,
+        "label": "abstention",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 17,
+        "label": "abstention",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 5,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 6,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 7,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 8,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 10,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 12,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 13,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 18,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 19,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 20,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 23,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 28,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 29,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 30,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 31,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 32,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 34,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 35,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "h0",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h1",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h2",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h3",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h4",
+        "label": "different",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h5",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h6",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h7",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h8",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h9",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h10",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h11",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h12",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h13",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h14",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h15",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "configuration": {
+      "bars": {
+       "misses": [],
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "ledgerly-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-now",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-migrated",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-uses",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "brightline-mail-replaced",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "quill-vite-upgraded",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "tern-login-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "team-tracker",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "ledgerly-cache-added",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "mouse-price",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "pi-ram",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "orbit-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-ci-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-bucket-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "tern-billing",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-cache-step",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-gradle-pin",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "stay": {
+      "bars": {
+       "misses": [
+        "trip-move-run2",
+        "trip-move-short",
+        "sister-pune",
+        "sublet-berlin",
+        "visiting-mit"
+       ],
+       "false_changes": "3/51",
+       "ok": false
+      },
+      "rows": [
+       {
+        "id": "trip-move-run2",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-move-short",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sister-pune",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sublet-berlin",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-acme",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "foster-biscuit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "interim-lead",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-for-good",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "visiting-mit",
+        "expected": "not_changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-plans-move",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-hotel-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-restated",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-enjoys",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sister-lives",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-start",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "foster-age",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "move-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-owns-flat",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-company-hq",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "resident-this-week",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-trip",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-diwali",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "fulltime-secondment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "lead-interim-head",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-back-home",
+        "expected": "report",
+        "samples": [
+         "different",
+         null,
+         "different"
+        ]
+       },
+       {
+        "id": "contract-extended",
+        "expected": "report",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       }
+      ]
+     },
+     "stay-heldout": {
+      "bars": {
+       "positives_matched": "1/6",
+       "positive_misses": [
+        "goa-winter",
+        "leeds-housesit",
+        "singapore-trip",
+        "nairobi-placement",
+        "glasgow-sofa"
+       ],
+       "false_changes": "0/24",
+       "ok": false
+      },
+      "rows": [
+       {
+        "id": "goa-winter",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         null
+        ]
+       },
+       {
+        "id": "leeds-housesit",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "singapore-trip",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-room",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "nairobi-placement",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "glasgow-sofa",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "glasgow-weekend",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "singapore-office",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nairobi-considering",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-landlord",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-repaint",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nurse-placement",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "leeds-job-offer",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "goa-apartment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "prompt": "bounded",
+     "replay": {
+      "bars": {
+       "world_changes": "0/54",
+       "world_ok": true,
+       "user_updates_changes": "21/21",
+       "user_updates_ok": true,
+       "hand_misses": [],
+       "hand_ok": true,
+       "world_changes_by_row": {
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 0,
+        "10": 0,
+        "12": 0,
+        "13": 0,
+        "18": 0,
+        "19": 0,
+        "20": 0,
+        "23": 0,
+        "28": 0,
+        "29": 0,
+        "30": 0,
+        "31": 0,
+        "32": 0,
+        "34": 0,
+        "35": 0
+       }
+      },
+      "rows": [
+       {
+        "id": 3,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 4,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 11,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 22,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 24,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 25,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 27,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 9,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 21,
+        "label": "user-unclear",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 26,
+        "label": "user-unclear",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 33,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 14,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 15,
+        "label": "abstention",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 17,
+        "label": "abstention",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 5,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 6,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 7,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 8,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 10,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 12,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 13,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 18,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 19,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 20,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 23,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 28,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 29,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 30,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 31,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 32,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 34,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 35,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "h0",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h1",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h2",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h3",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h4",
+        "label": "different",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h5",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h6",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h7",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h8",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h9",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h10",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h11",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h12",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h13",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h14",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h15",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "configuration": {
+      "bars": {
+       "misses": [],
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "ledgerly-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-now",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-migrated",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-uses",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "brightline-mail-replaced",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "quill-vite-upgraded",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "tern-login-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "team-tracker",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "ledgerly-cache-added",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "mouse-price",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "pi-ram",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "orbit-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-ci-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-bucket-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "tern-billing",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-cache-step",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-gradle-pin",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "stay": {
+      "bars": {
+       "misses": [],
+       "false_changes": "0/51",
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "trip-move-run2",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-move-short",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "sister-pune",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "sublet-berlin",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "contract-acme",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "foster-biscuit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "interim-lead",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-for-good",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "visiting-mit",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-plans-move",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-hotel-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-restated",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-enjoys",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sister-lives",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-start",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "foster-age",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "move-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-owns-flat",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-company-hq",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "resident-this-week",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-trip",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-diwali",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "fulltime-secondment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "lead-interim-head",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-back-home",
+        "expected": "report",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "contract-extended",
+        "expected": "report",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       }
+      ]
+     },
+     "stay-heldout": {
+      "bars": {
+       "positives_matched": "6/6",
+       "positive_misses": [],
+       "false_changes": "0/24",
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "goa-winter",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "leeds-housesit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "singapore-trip",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "valencia-room",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "nairobi-placement",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-sofa",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-weekend",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "singapore-office",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nairobi-considering",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-landlord",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-repaint",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nurse-placement",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "leeds-job-offer",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "goa-apartment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-6",
+   "cost_usd": 3.0313,
+   "runs": [
+    {
+     "prompt": "reported",
+     "replay": {
+      "bars": {
+       "world_changes": "0/54",
+       "world_ok": true,
+       "user_updates_changes": "21/21",
+       "user_updates_ok": true,
+       "hand_misses": [],
+       "hand_ok": true,
+       "world_changes_by_row": {
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 0,
+        "10": 0,
+        "12": 0,
+        "13": 0,
+        "18": 0,
+        "19": 0,
+        "20": 0,
+        "23": 0,
+        "28": 0,
+        "29": 0,
+        "30": 0,
+        "31": 0,
+        "32": 0,
+        "34": 0,
+        "35": 0
+       }
+      },
+      "rows": [
+       {
+        "id": 3,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 4,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 11,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 22,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 24,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 25,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 27,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 9,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 21,
+        "label": "user-unclear",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 26,
+        "label": "user-unclear",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 33,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 14,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 15,
+        "label": "abstention",
+        "samples": [
+         "different",
+         "fixed",
+         "different"
+        ]
+       },
+       {
+        "id": 17,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "different",
+         "fixed"
+        ]
+       },
+       {
+        "id": 5,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 6,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 7,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 8,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 10,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 12,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 13,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 18,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 19,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 20,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 23,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 28,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 29,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 30,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 31,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 32,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 34,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 35,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "h0",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h1",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h2",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h3",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h4",
+        "label": "different",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h5",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h6",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h7",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h8",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h9",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h10",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h11",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h12",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h13",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h14",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h15",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "configuration": {
+      "bars": {
+       "misses": [],
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "ledgerly-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-now",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-migrated",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-uses",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "brightline-mail-replaced",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "quill-vite-upgraded",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "tern-login-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "team-tracker",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "ledgerly-cache-added",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "mouse-price",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "pi-ram",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "orbit-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-ci-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-bucket-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "tern-billing",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-cache-step",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-gradle-pin",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "stay": {
+      "bars": {
+       "misses": [
+        "trip-move-run2",
+        "sister-pune"
+       ],
+       "false_changes": "1/51",
+       "ok": false
+      },
+      "rows": [
+       {
+        "id": "trip-move-run2",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "changes",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-move-short",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "sister-pune",
+        "expected": "changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sublet-berlin",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "contract-acme",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "foster-biscuit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "interim-lead",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-for-good",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "changes"
+        ]
+       },
+       {
+        "id": "visiting-mit",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-plans-move",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-hotel-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-restated",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-enjoys",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sister-lives",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-start",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "foster-age",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "move-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-owns-flat",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-company-hq",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "resident-this-week",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-trip",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-diwali",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "fulltime-secondment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "lead-interim-head",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-back-home",
+        "expected": "report",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-extended",
+        "expected": "report",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       }
+      ]
+     },
+     "stay-heldout": {
+      "bars": {
+       "positives_matched": "6/6",
+       "positive_misses": [],
+       "false_changes": "0/24",
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "goa-winter",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "leeds-housesit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "singapore-trip",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "valencia-room",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "nairobi-placement",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-sofa",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-weekend",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "singapore-office",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nairobi-considering",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-landlord",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-repaint",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nurse-placement",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "leeds-job-offer",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "goa-apartment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "prompt": "bounded",
+     "replay": {
+      "bars": {
+       "world_changes": "0/54",
+       "world_ok": true,
+       "user_updates_changes": "21/21",
+       "user_updates_ok": true,
+       "hand_misses": [],
+       "hand_ok": true,
+       "world_changes_by_row": {
+        "5": 0,
+        "6": 0,
+        "7": 0,
+        "8": 0,
+        "10": 0,
+        "12": 0,
+        "13": 0,
+        "18": 0,
+        "19": 0,
+        "20": 0,
+        "23": 0,
+        "28": 0,
+        "29": 0,
+        "30": 0,
+        "31": 0,
+        "32": 0,
+        "34": 0,
+        "35": 0
+       }
+      },
+      "rows": [
+       {
+        "id": 3,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 4,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 11,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 22,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 24,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 25,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 27,
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 9,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 21,
+        "label": "user-unclear",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": 26,
+        "label": "user-unclear",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 33,
+        "label": "user-unclear",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 14,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 15,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": 17,
+        "label": "abstention",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 5,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 6,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 7,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 8,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 10,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 12,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 13,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 18,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 19,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 20,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 23,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 28,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 29,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 30,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 31,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 32,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 34,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": 35,
+        "label": "world-fact",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "h0",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h1",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h2",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h3",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h4",
+        "label": "different",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h5",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h6",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h7",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h8",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h9",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h10",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h11",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h12",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h13",
+        "label": "user-update",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "h14",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "h15",
+        "label": "history",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "configuration": {
+      "bars": {
+       "misses": [],
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "ledgerly-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-now",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "kestrel-host-migrated",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-uses",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "pelican-ci-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "brightline-mail-replaced",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "quill-vite-upgraded",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "tern-login-switched",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "team-tracker",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "ledgerly-cache-added",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "mouse-price",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "pi-ram",
+        "expected": "not_changes",
+        "samples": [
+         "fixed",
+         "fixed",
+         "fixed"
+        ]
+       },
+       {
+        "id": "orbit-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-ci-history",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-bucket-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "tern-billing",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "quill-cache-step",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "pelican-gradle-pin",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "stay": {
+      "bars": {
+       "misses": [],
+       "false_changes": "0/51",
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "trip-move-run2",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-move-short",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "sister-pune",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "sublet-berlin",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "contract-acme",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "foster-biscuit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "interim-lead",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-for-good",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "visiting-mit",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-plans-move",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-hotel-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-restated",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-enjoys",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "sister-lives",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-start",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "foster-age",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "move-detail",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-owns-flat",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "trip-company-hq",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "resident-this-week",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-trip",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-diwali",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "fulltime-secondment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "lead-interim-head",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "home-moved",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "trip-back-home",
+        "expected": "report",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "contract-extended",
+        "expected": "report",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     },
+     "stay-heldout": {
+      "bars": {
+       "positives_matched": "6/6",
+       "positive_misses": [],
+       "false_changes": "0/24",
+       "ok": true
+      },
+      "rows": [
+       {
+        "id": "goa-winter",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "leeds-housesit",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "singapore-trip",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "valencia-room",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "nairobi-placement",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-sofa",
+        "expected": "changes",
+        "samples": [
+         "changes",
+         "changes",
+         "changes"
+        ]
+       },
+       {
+        "id": "glasgow-weekend",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "singapore-office",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nairobi-considering",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-landlord",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "valencia-repaint",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "nurse-placement",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "leeds-job-offer",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       },
+       {
+        "id": "goa-apartment",
+        "expected": "not_changes",
+        "samples": [
+         "different",
+         "different",
+         "different"
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

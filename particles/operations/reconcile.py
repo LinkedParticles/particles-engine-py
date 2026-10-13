@@ -48,6 +48,7 @@ from particles.core.conflict_resolution import (
     is_generic_instance_pair,
     resolve_conflict,
     sweep_action,
+    sweep_action_first,
 )
 from particles.core.contradiction_disclosure import ORIGIN_KEY
 from particles.core.observer_scope import PairPrecondition
@@ -59,20 +60,24 @@ from particles.corpus.supersession import iter_supersession_entry_pairs
 from particles.db import write_transaction
 from particles.embeddings import cosine_similarity
 from particles.extraction.registry import infer_domain
+from particles.ingest.conflict_plan import plan_update_event
 from particles.ingest.observer_gate import ObserverGate
+from particles.ingest.pair_selection import admits_update_first
 from particles.ingest.pipeline import (
     _CONTRADICTION_PROBE_MAX_TOKENS,
+    SlotReading,
     _contradiction_prompt,
     _contradiction_verdict,
     _is_attribution_paraphrase,
-    _slot_verdict,
     _trigger_ref_for,
-    _update_prompt,
     contradiction_prompt_hash,
+    read_update_slot,
     update_prompt_hash,
 )
+from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.operations._llm import _llm_call, record_unusable_reply
 from particles.operations.probe_ledger import recall, remember
+from particles.store.event_store import record_event
 from particles.store.particle_store import (
     get_active_particles_with_embeddings,
     get_inconsistency_particles,
@@ -81,6 +86,26 @@ from particles.store.particle_store import (
 )
 
 log = logging.getLogger(__name__)
+
+#: How the update sweep orders its qualifying pairs before the probe cap: the
+#: pairs are probed in descending content cosine, and a pair the cap leaves
+#: unprobed sits below every probed one. Ties keep the gather's order, which is
+#: the subject index's order and carries no meaning. Recorded on the run so an
+#: operator can tell a pair skipped by budget from one that never qualified.
+UPDATE_PROBE_ORDER = "content cosine, highest first"
+
+#: Where each probed pair's verdict is kept: the probe-verdict ledger rows of
+#: this kind, keyed by the content hash of each claim. The run record
+#: carries the counts and this pointer, never a second copy of the ledger.
+UPDATE_PROBE_LEDGER: dict[str, str] = {
+    "table": "probe_verdicts",
+    # a pair is asked the update question first; the contradiction
+    # verdict is kept for a pair whose older claim records a past value, and
+    # for a fixed slot given two values.
+    "probe_kind": ProbeKind.UPDATE_SLOT.value,
+    "also": ProbeKind.RECONCILE_CONTRADICTION.value,
+    "keyed_by": "content hash of each claim",
+}
 
 EmbeddingPair = tuple[Particle, np.ndarray[Any, np.dtype[np.float32]]]
 
@@ -120,22 +145,24 @@ UPDATE_SWEEP_ACTOR = "update-sweep"
 FIXED_SLOT_ORIGIN = "update_sweep_fixed_slot"
 
 
-async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
-    """The rung 2.5 update probe, routed through the breaker seam.
+async def _read_update_slot(earlier: str, later: str) -> SlotReading:
+    """The rung 2.5 update probe the sweep asks: the one every route asks.
 
-    Same prompt and parser as :func:`particles.ingest.pipeline._has_update_signal`.
-    ``None`` when the probe could not complete; the sweep reads that as no
-    update and keeps both claims, but does not record it as a verdict.
+    :func:`particles.ingest.pipeline.read_update_slot`, through the
+    breaker seam, with its second reading on ``verification`` before any
+    ``CHANGES`` stands. The reading says which purpose decided, which the
+    ledger records.
     """
-    response = await _llm_call(
-        _update_prompt(earlier, later), max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS
-    )
-    if response is None:
-        return None
-    verdict = _slot_verdict(response)
-    if verdict is None:
-        record_unusable_reply("reconcile update probe", response)
-    return verdict
+    return await read_update_slot(earlier, later)
+
+
+async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
+    """The settled verdict of :func:`_read_update_slot`, for callers that keep no ledger.
+
+    ``None`` when the deciding reading could not complete; the sweep reads that
+    as no update and keeps both claims, but does not record it as a verdict.
+    """
+    return (await _read_update_slot(earlier, later)).verdict
 
 
 async def _open_record_pairs(session: AsyncSession) -> set[frozenset[str]]:
@@ -511,9 +538,13 @@ async def _update_candidates(
     candidate's. A declined pair is dropped before any probe is spent, and so
     is a generic paired with an instance claim.
     """
+    from particles.ingest.subject_resolver import load_speaker_key
     from particles.ingest.update_supersession import SubjectIndex
 
-    index = SubjectIndex.build(await get_active_particles_with_embeddings(session))
+    index = SubjectIndex.build(
+        await get_active_particles_with_embeddings(session),
+        speaker=await load_speaker_key(session),
+    )
     out = _UpdateGather(subject_groups=len(index.by_subject))
     entries: dict[str, CorpusEntry | None] = {}
     gate = await ObserverGate.open(session)
@@ -597,10 +628,17 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
        nothing here.
     2. **Probe under a cap.** Highest-cosine first, up to
        ``consolidation.max_update_probes``. A pair is confirmed when the
-       contradiction probe says the claims conflict **and** the update probe
-       says the newer one gives a new value for the older one's slot;
-       the cap counts pairs, and ``update_probed`` counts the second
-       calls. A confirmed pair demotes its older
+       update probe, read twice, says the newer claim gives a new value for
+       the older one's slot; it is asked first, and the
+       contradiction probe only for a fixed slot given two values.
+       A pair whose older claim records a past value
+       (:func:`~particles.ingest.pair_selection.admits_update_first`) keeps the
+       contradiction probe in front, as before 1.187.0. The cap counts pairs,
+       and ``update_probed`` counts update questions. When the cap stops the
+       sweep, ``cap_reached`` is true and ``not_reached`` counts the pairs left
+       behind it; ``ordering`` names the order (:data:`UPDATE_PROBE_ORDER`), so
+       a pair outside the probed set can be told from one that never
+       qualified. A confirmed pair demotes its older
        member ``PROVENANCE_STALE`` / ``SUPERSEDED_BY_UPDATE`` and points the
        newer one's ``supersedes`` at it. A particle demoted earlier in the run
        is never probed again, so a subject carrying three generations
@@ -639,9 +677,15 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
         "reviews": [],
         "previously_cleared": 0,
         "probe_cap": probe_cap,
+        "cap_reached": False,
+        "not_reached": 0,
+        "ordering": UPDATE_PROBE_ORDER,
         "demoted": 0,
         "demotions": [],
         "observer_declined": 0,
+        # the key reads persona_openers at index build, so an edit
+        # rekeys stored claims without a write; the digest makes it traceable.
+        "speaker_openers": speaker_openers_digest(speaker_forms(cfg.subjects)),
     }
     if not update_cfg.enabled:
         log.info(
@@ -677,40 +721,39 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     reviews: list[dict[str, object]] = []
     open_pairs: set[frozenset[str]] | None = None
     demotions: list[dict[str, object]] = []
-    for sim, newer, older in candidates:
+    cap_reached = False
+    not_reached = 0
+    for position, (sim, newer, older) in enumerate(candidates):
         if probed >= probe_cap:
+            # The cap stopped the sweep with pairs still in order behind it.
+            cap_reached = True
+            not_reached = len(candidates) - position
             break
         if newer.id in demoted_ids or older.id in demoted_ids:
             continue
-        probe = await _has_contradiction_signal(newer.content, older.content)
         probed += 1
-        if probe is not None and not _is_attribution_paraphrase(newer.content, older.content):
-            # The attribution pre-filter answers without a call; only a model's
-            # answer is a verdict worth keeping.
-            await remember(
-                session,
-                ProbeKind.RECONCILE_CONTRADICTION,
-                contradiction_prompt_hash(),
-                {_contradiction_key(newer, older): probe},
-                purpose="semantic_lint",
-            )
-        if probe is not True:
-            continue
-        # A contradiction is an update only when both claims fill one slot and
-        # the newer one gives it a new value, and only when that slot
-        # changes over time. The ledger keeps whether the pair may
-        # retire.
-        update_probed += 1
-        slot = await _has_update_signal(older.content, newer.content)
-        if slot is not None:
-            await remember(
-                session,
-                ProbeKind.UPDATE_SLOT,
-                update_prompt_hash(),
-                {_slot_key(older, newer): admits_update(slot)},
-                purpose="semantic_lint",
-            )
-        action = sweep_action(slot)
+        # the update question first, unless the older claim records a
+        # past value; the contradiction probe then runs only where its answer
+        # can still change the outcome (a fixed slot given two values).
+        first = _asked_first(older)
+        if first:
+            update_probed += 1
+            slot = await _sweep_slot(session, older, newer)
+            first_action = sweep_action_first(slot)
+            if first_action is None:
+                probe = await _sweep_contradiction(session, newer, older)
+                first_action = sweep_action(slot) if probe is True else SweepAction.KEEP
+            action = first_action
+        else:
+            probe = await _sweep_contradiction(session, newer, older)
+            if probe is not True:
+                continue
+            # A contradiction is an update only when both claims fill one slot
+            # and the newer one gives it a new value, and only when
+            # that slot changes over time.
+            update_probed += 1
+            slot = await _sweep_slot(session, older, newer)
+            action = sweep_action(slot)
         if action is SweepAction.KEEP:
             different_slot += 1
             continue
@@ -737,12 +780,16 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
                     f"(a fixed slot given two values, sim {sim:.3f})"
                 )
             continue
+        # The ladder's own rung 2.5 decides, ALEATORY condition included: an
+        # older ALEATORY claim is retired by a newer settled one, and a newer
+        # ALEATORY claim retires nothing (``newer_is_settled``).
         verdict = resolve_conflict(
             older,
             newer,
-            has_contradiction_signal=True,
+            has_contradiction_signal=not first,
             update_order=1,
             single_trust_order=cfg.reconciliation.store_mode == "single",
+            same_slot_update=first,
         )
         if verdict is not ConflictVerdict.UPDATE_SUPERSEDES:
             continue
@@ -764,6 +811,15 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
                     StatusReason.SUPERSEDED_BY_UPDATE,
                 )
                 await _set_supersedes_if_unset(session, newer.id, older.id)
+                event = plan_update_event(older.id, newer.id, route="sweep")
+                await record_event(
+                    session,
+                    actor=event.actor,
+                    event_type=event.event_type,
+                    reason=event.reason,
+                    refs=list(event.refs),
+                    payload=dict(event.payload),
+                )
         if progress is not None:
             verb = "would demote" if dry_run else "demoted"
             progress(f"{verb} {older.id[:8]} (superseded by {newer.id[:8]}, sim {sim:.3f})")
@@ -783,10 +839,13 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
             progress(msg)
     summary["demoted"] = len(demoted_ids)
     summary["demotions"] = demotions
-    if probed < len(candidates):
+    summary["cap_reached"] = cap_reached
+    summary["not_reached"] = not_reached
+    if cap_reached:
         msg = (
             f"Update sweep probe capped: probed {probed} of {len(candidates)} qualifying "
-            f"pair(s) (consolidation.max_update_probes = {probe_cap})."
+            f"pair(s), {not_reached} not reached (consolidation.max_update_probes = "
+            f"{probe_cap}; order: {UPDATE_PROBE_ORDER})."
         )
         log.info(msg)
         if progress is not None:
@@ -804,6 +863,48 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     return summary
 
 
+def _asked_first(older: Particle) -> bool:
+    """Whether the sweep asks this pair the update question first."""
+    if not get_config().reconciliation.update_supersession.same_slot_admits:
+        return False
+    return admits_update_first(older.content)
+
+
+async def _sweep_contradiction(
+    session: AsyncSession, newer: Particle, older: Particle
+) -> bool | None:
+    """The sweep's contradiction probe on one pair, kept in the ledger when a model answered."""
+    probe = await _has_contradiction_signal(newer.content, older.content)
+    if probe is not None and not _is_attribution_paraphrase(newer.content, older.content):
+        # The attribution pre-filter answers without a call; only a model's
+        # answer is a verdict worth keeping.
+        await remember(
+            session,
+            ProbeKind.RECONCILE_CONTRADICTION,
+            contradiction_prompt_hash(),
+            {_contradiction_key(newer, older): probe},
+            purpose="semantic_lint",
+        )
+    return probe
+
+
+async def _sweep_slot(
+    session: AsyncSession, older: Particle, newer: Particle
+) -> SlotVerdict | None:
+    """The sweep's update probe on one pair; the ledger keeps whether it may retire."""
+    reading = await _read_update_slot(older.content, newer.content)
+    slot = reading.verdict
+    if slot is not None:
+        await remember(
+            session,
+            ProbeKind.UPDATE_SLOT,
+            update_prompt_hash(),
+            {_slot_key(older, newer): admits_update(slot)},
+            purpose=reading.purpose,
+        )
+    return slot
+
+
 def _contradiction_key(newer: Particle, older: Particle) -> VerdictKey:
     return verdict_key(ProbeKind.RECONCILE_CONTRADICTION, newer.content, older.content)
 
@@ -818,9 +919,11 @@ async def _drop_cleared_updates(
 ) -> tuple[list[tuple[float, Particle, Particle]], int]:
     """Split off the qualifying pairs the ledger already cleared.
 
-    A pair demotes only when the contradiction probe and the slot probe both
+    A pair asked the contradiction probe first demotes only when both probes
     answer YES, so a recorded NO from either, under that probe's
-    current prompt, clears it.
+    current prompt, clears it. A pair asked the update question first
+    demotes on the update answer alone, so only a recorded update NO
+    clears it: a contradiction NO recorded before 1.187.0 does not.
     """
     if not candidates:
         return candidates, 0
@@ -840,7 +943,7 @@ async def _drop_cleared_updates(
         (sim, newer, older)
         for sim, newer, older in candidates
         if not remembered_clear(
-            contradiction.get(_contradiction_key(newer, older)),
+            None if _asked_first(older) else contradiction.get(_contradiction_key(newer, older)),
             slot.get(_slot_key(older, newer)),
         )
     ]
