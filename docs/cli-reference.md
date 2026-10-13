@@ -283,7 +283,7 @@ $ particles reconcile [OPTIONS]
 
 **Options**:
 
-* `--updates`: Run the same-subject update sweep instead of the document-supersession sweep: retire a value when a later claim from the same source lineage gives a new value for the same attribute.
+* `--updates`: Run the same-subject update sweep instead of the document-supersession sweep: retire a value when a later claim from the same source lineage gives a new value for the same attribute. The paraphrases pass follows it, retiring the other phrasings of each replaced value, from the nightly cycle's position without moving it.
 * `--dependents`: Run the re-anchor pass: restate claims that relied on a state an update retired, such as a place described as near the user's old flat. Resumes from the nightly cycle's position without moving it.
 * `--scope <str>`: With --dependents: 'cursor' examines update retirements after the nightly position; 'store' examines every one.  [default: cursor]
 * `--dry-run`: Report what would be demoted without mutating the store.
@@ -688,6 +688,8 @@ $ particles benchmark memory [OPTIONS] COMMAND [ARGS]...
 * `--batch-qa`: Submit the QA answer + judge calls (conditions ii-iv) as Message Batches jobs, one answer batch and one judge batch per condition, all at 50% price, instead of one sequential call per question. The sibling of --pooled for the answerer/judge (the two compose); same model/prompt/budget, so the report is comparable. Off by default (a batch's floor is one poll interval: the right trade for a paid run, the wrong one for a small/interactive run); degrades to sequential calls when llm.batch is off.
 * `--memory <particles|chunks|notes>`: The memory under test: particles (the store; the default), or a COMPARATOR memory over the same questions, answer scaffold, judge and retrieval scoring: chunks (raw-transcript RAG, no write-time LLM call) or notes (LLM-written session notes by the extraction model). The report's selection.memory names which ran.  [default: particles]
 * `--baselines / --no-baselines`: Run the qa_full_context / qa_no_memory baseline conditions. --no-baselines is for a comparator run reusing the particles run's baseline columns (same tuple ⇒ same calls); they render `not run`.  [default: baselines]
+* `--llm-replay <off|record|replay>`: Record or replay this run's LLM completions. record writes every reply to the replay cache; replay answers each byte-identical request from it and calls the provider only on a miss, which it records. For ablations that change ranking, decay or top-k and would otherwise pay again for the same extraction and answer calls. Combine with --fresh, since a completed run's checkpoint replays without reaching the LLM at all.  [default: off]
+* `--llm-replay-dir <path>`: Directory of the replay cache (default ~/.particles/llm-replay/). Never inside a store; deleting it loses nothing but the saving.
 * `--help`: Show this message and exit.
 
 **Commands**:
@@ -1792,6 +1794,7 @@ $ particles extractor calibrate [OPTIONS] {extractor_id}
 * `--regenerate / --no-regenerate`: Overwrite an existing calibration; without it, an extractor that already has one exits 1  [default: no-regenerate]
 * `--runs <int range>`: Fit over the pooled pairs from N independent passes instead of one. A single pass is a noisy estimator (measured T spread 1.86-2.60 against a pooled 2.15), so N>1 persists the centre of the distribution rather than a draw from it. Small N is not enough: ~13 passes was the measured requirement on that suite, and a pooled fit over 3 was still refused. Costs N× the LLM calls  [default: 1; x>=1]
 * `-y, --yes`: Pre-confirm the cost gate for a pooled fit (--runs N)
+* `--method <temperature|isotonic>`: The calibration form: one temperature (default), or an isotonic map from stated confidence to observed hit rate, for an extractor whose confidence needs a base-rate correction rather than a stretch  [default: temperature]
 * `--help`: Show this message and exit.
 
 ### `particles extractor calibrations`
@@ -1876,6 +1879,7 @@ $ particles hook [OPTIONS] COMMAND [ARGS]...
 
 * `session-start`: SessionStart hook: push the memory digest...
 * `session-end`: SessionEnd hook: harvest the session...
+* `stop`: Stop hook: ask the session's agent to...
 * `log`: Print recent hook-log entries (one JSONL...
 * `doctor`: Diagnose whether ``particles hook``...
 
@@ -1907,6 +1911,21 @@ $ particles hook session-end [OPTIONS]
 **Options**:
 
 * `--store <str>`: Memory store the harvest deposits into.  [required]
+* `--help`: Show this message and exit.
+
+### `particles hook stop`
+
+Stop hook: ask the session's agent to extract what it has not yet recorded.
+
+**Usage**:
+
+```console
+$ particles hook stop [OPTIONS]
+```
+
+**Options**:
+
+* `--store <str>`: Memory store the ask deposits into.  [required]
 * `--help`: Show this message and exit.
 
 ### `particles hook log`

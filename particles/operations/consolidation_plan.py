@@ -6,10 +6,12 @@
 
 :func:`plan_consolidation` runs the gather half of every pass in the cycle's
 order and stops before the first LLM call: the snapshots pass 1
-would extract, the candidate pairs passes 2 and 2b would probe, the triggers
-pass 2c would examine, the candidate pairs the census would probe, and the
-matcher groups the utility pass would judge. Each LLM-priced pass is priced at
-list price over estimated tokens (:mod:`particles.operations.spend_estimate`).
+would extract, the candidate pairs passes 2 and 2b would probe, the paraphrase
+candidates pass 2b' would ask about, the triggers pass 2c would examine, the
+held claims pass 2d would re-check and the pairs it would check them against,
+the candidate pairs the census would probe, and the matcher groups the utility
+pass would judge. Each LLM-priced pass is priced at list price over estimated
+tokens (:mod:`particles.operations.spend_estimate`).
 It writes nothing, takes no cycle lock and makes no LLM call; the shape copies
 ``particles structure --dry-run``, whose dry run doubles as the coverage probe.
 
@@ -50,10 +52,14 @@ from particles.operations.consolidation import (
     _utcnow,
     latest_census_event,
     latest_run_event,
+    paraphrase_estimate,
+    release_estimate,
 )
 from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.curation.collect import collect_cards
+from particles.operations.held_release import run_release
 from particles.operations.lint import ContradictionProbeControl
+from particles.operations.paraphrases import run_paraphrases
 from particles.operations.reanchor import prior_cursor, run_reanchor
 from particles.operations.reconcile import count_supersession_candidates, count_update_candidates
 from particles.operations.spend_estimate import (
@@ -202,11 +208,17 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
         chosen = _extract_selection(pending, batching=cfg.extract_batching)
         sizes = await _snapshot_sizes(session, [snapshot_id for _, snapshot_id in chosen])
         estimate = extraction_estimate(sizes)
+        # say how many of the chosen came from the priority class.
+        priority = set(cfg.priority_tags)
+        tagged = {item.snapshot_id for item in pending if item.tags & priority}
+        first = sum(1 for _, snapshot_id in chosen if snapshot_id in tagged)
+        priority_note = f", {first} from consolidation.priority_tags" if priority else ""
         passes.append(
             _planned(
                 "extract",
                 f"would extract {len(chosen)} of {_plural(len(pending), 'pending snapshot')} "
-                f"(consolidation.max_pending_entries = {cfg.max_pending_entries}), "
+                f"(consolidation.max_pending_entries = {cfg.max_pending_entries}"
+                f"{priority_note}), "
                 f"{sum(sizes):,} source bytes; listed before the run's stale-claim reset "
                 "and superseded-generation collapse",
                 estimate,
@@ -269,6 +281,35 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
             )
         )
 
+    # pass 2b' — paraphrases (its own dry run: no call, no write)
+    update_cfg = config.reconciliation.update_supersession
+    if not semantic_ok:
+        passes.append(_skipped("paraphrases", f"update probes are LLM-priced ({degrade_reason})"))
+    elif not update_cfg.enabled:
+        passes.append(
+            _skipped("paraphrases", "reconciliation.update_supersession.enabled is false")
+        )
+    elif update_cfg.max_paraphrases == 0:
+        passes.append(
+            _skipped("paraphrases", "reconciliation.update_supersession.max_paraphrases is 0")
+        )
+    else:
+        cursor = await prior_cursor(session, actor, "paraphrases")
+        para = await run_paraphrases(session, cursor=cursor, dry_run=True)
+        passes.append(
+            _planned(
+                "paraphrases",
+                f"{_plural(para.triggers, 'update retirement')} past the cursor examined, "
+                f"{_plural(para.above_floor, 'claim')} above "
+                f"reconciliation.update_supersession.paraphrase_floor = "
+                f"{update_cfg.paraphrase_floor}, would probe {para.probes} "
+                f"(consolidation.max_paraphrase_probes = {cfg.max_paraphrase_probes}"
+                f"{', capped' if para.capped else ''}); up to a second reading each, plus "
+                "the phrasings of any claim the run itself retires",
+                paraphrase_estimate(para),
+            )
+        )
+
     # pass 2c — re-anchor (its own dry run: no call, no write)
     if not semantic_ok:
         passes.append(_skipped("reanchor", f"re-anchor probes are LLM-priced ({degrade_reason})"))
@@ -287,6 +328,27 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
             )
         )
         passes.append(_planned("reanchor", detail, _reanchor_estimate(reanchor)))
+
+    # pass 2d — held-claim release (its own dry run: no call, no write)
+    if not semantic_ok:
+        passes.append(
+            _skipped("release", f"contradiction probes are LLM-priced ({degrade_reason})")
+        )
+    elif not cfg.release.enabled:
+        passes.append(_skipped("release", "consolidation.release.enabled is false"))
+    else:
+        release = await run_release(session, dry_run=True)
+        detail = (
+            release.skipped_reason
+            if release.skipped_reason
+            else (
+                f"{_plural(release.qualifying, 'held claim')} behind a retired claim, "
+                f"would examine {release.examined} "
+                f"(consolidation.release.max_records = {cfg.release.max_records}) against "
+                f"{_plural(release.pairs, 'pair')}; up to a second reading each"
+            )
+        )
+        passes.append(_planned("release", detail, release_estimate(release)))
 
     # pass 3 — census: its own cadence first, then the probe's
     # candidate pairs, gathered with a cap of 0, over changes since the last

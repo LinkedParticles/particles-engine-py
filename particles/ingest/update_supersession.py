@@ -23,11 +23,17 @@ The about-subject is the entity a claim is *about*: the triple's
 subject when the claim has one, else its sole subject. A particle's
 ``subject_ids`` also carry the entities it merely mentions ("moved from Boston
 to Denver" names both cities), which must never become keys.
+
+One subject is added to that key: the speaker's, for a claim that opens on a
+speaker reference and carries the persona Subject (
+:class:`SpeakerKey`). The extractor often leaves the speaker out of a
+first-person claim's subjects, so "The user is not going back to Delhi" keyed
+on Delhi alone and never met the speaker's earlier claims about Delhi.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -35,7 +41,9 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from particles.config import SubjectsConfig
 from particles.core.generics import is_generic_claim
+from particles.core.reanchor import is_reanchor_restatement
 from particles.core.schema import (
     CorpusEntry,
     Particle,
@@ -45,7 +53,9 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.stance import stance_holder
 from particles.embeddings import cosine_similarity
+from particles.extraction.components import component_digest
 from particles.extraction.general import CandidateParticle
+from particles.extraction.journal import SOURCE_TYPE as JOURNAL_SOURCE_TYPE
 from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
 
@@ -55,6 +65,128 @@ Embedding = np.ndarray[Any, np.dtype[np.float32]]
 #: agent asserted is never retired by, nor retires, an extracted claim on the
 #: strength of a timestamp (condition 4).
 MCP_ASSERTER_PREFIX = "mcp:"
+
+
+@dataclass(frozen=True)
+class SpeakerKey:
+    """The persona Subject a speaker-anchored claim is also keyed on.
+
+    Built once per pass by the caller that builds the index
+    (:func:`~particles.ingest.subject_resolver.load_speaker_key`) and passed in,
+    so :func:`particle_subject_ids` stays a pure function of its arguments.
+    """
+
+    #: The persona Subject's id.
+    subject_id: str
+    #: Casefolded speaker references a claim may open on, longest first
+    #: (:func:`speaker_forms`).
+    forms: tuple[str, ...]
+    #: Casefolded names that fold onto the persona in a persona source
+    #: (:func:`persona_names`).
+    names: frozenset[str]
+
+
+def speaker_forms(cfg: SubjectsConfig) -> tuple[str, ...]:
+    """The speaker references a first-person claim may open on.
+
+    ``persona_canonical_name`` plus each ``persona_openers`` form that is also a
+    persona alias, casefolded, longest first so "jeff gage" is tried before
+    "jeff". An opener that is not an alias is ignored: the name §1 appends must
+    fold onto the persona, or it would mint a Subject of its own. Empty when
+    ``persona_openers`` is empty, which turns the rule off.
+    """
+    if not cfg.persona_openers:
+        return ()
+    aliases = {a.strip().casefold() for a in cfg.persona_aliases}
+    forms = {cfg.persona_canonical_name.strip().casefold()}
+    forms |= {o.strip().casefold() for o in cfg.persona_openers if o.strip().casefold() in aliases}
+    return tuple(sorted((f for f in forms if f), key=lambda f: (-len(f), f)))
+
+
+def persona_names(cfg: SubjectsConfig) -> frozenset[str]:
+    """Casefolded names the persona fold maps onto the persona Subject."""
+    return frozenset(
+        {cfg.persona_canonical_name.strip().casefold()}
+        | {a.strip().casefold() for a in cfg.persona_aliases}
+    )
+
+
+def speaker_openers_digest(forms: Collection[str]) -> str:
+    """A digest of the speaker references in force, for run records.
+
+    The key is derived at read time, so an edit to ``persona_openers`` rekeys
+    every stored claim without writing anything. The sweep and the
+    consolidation record carry this digest beside their pair counts, so a change
+    in pairs can be traced to an opener edit.
+    """
+    return component_digest(*sorted(forms))
+
+
+#: The component record name of the attach.
+SPEAKER_COMPONENT = "attach.speaker"
+
+#: Source types the attach never runs on. The journal extractor withholds the
+#: author on purpose, behind the gate; attaching the
+#: persona would cross that gate on its own.
+SPEAKER_EXCLUDED_SOURCE_TYPES = frozenset({JOURNAL_SOURCE_TYPE})
+
+_POSSESSIVES = ("'s", "\u2019s")
+
+
+def speaker_opener(content: str, forms: Iterable[str]) -> str | None:
+    """The speaker reference ``content`` opens on, spelled as in ``content``, or ``None``.
+
+    ``forms`` are casefolded (:func:`speaker_forms`). A form matches at the
+    start of the claim, case-insensitively, when whitespace or a possessive
+    ``'s`` follows it: "The user's flat is in Bandra" opens on "The user",
+    while "User accounts are locked" opens on nothing for the form "user", and
+    "Sandeep's is near the user's flat" mentions the speaker without opening on
+    them.
+    """
+    text = content.lstrip()
+    for form in forms:
+        head = text[: len(form)]
+        if not form or head.casefold() != form:
+            continue
+        rest = text[len(form) :]
+        if rest[:1].isspace() or (rest[:2] in _POSSESSIVES and not rest[2:3].isalnum()):
+            return head
+    return None
+
+
+def attach_speaker(
+    candidate: CandidateParticle, forms: Iterable[str], names: Collection[str]
+) -> str | None:
+    """Append the speaker reference a candidate opens on to its subjects.
+
+    Returns the appended name, or ``None`` when the candidate opens on no
+    speaker reference or already lists a name in ``names`` (one that folds onto
+    the persona). The appended name is the surface form the claim used, so the
+    persona fold, its alias record, ``bind_subject_id`` and the §6.6 precompute
+    all see the name the extractor would have emitted. The caller decides that
+    the source is a persona source and not a journal.
+    """
+    if any(n.strip().casefold() in names for n in candidate.subjects):
+        return None
+    spoken = speaker_opener(candidate.content, forms)
+    if spoken is None:
+        return None
+    candidate.subjects.append(spoken)
+    return spoken
+
+
+def candidate_speaker_name(candidate: CandidateParticle, speaker: SpeakerKey | None) -> str | None:
+    """The name a speaker-anchored candidate carries for the persona, or ``None``.
+
+    Speaker-anchored: the claim opens on a speaker reference and one of its
+    subject names folds onto the persona. The §6.6 precompute resolves the name
+    and keys on it only when it resolves to ``speaker.subject_id``, so a
+    candidate is keyed on the persona exactly when the stored claim it becomes
+    would be (:func:`particle_subject_ids`).
+    """
+    if speaker is None or speaker_opener(candidate.content, speaker.forms) is None:
+        return None
+    return next((n for n in candidate.subjects if n.strip().casefold() in speaker.names), None)
 
 
 def candidate_subject_names(candidate: CandidateParticle) -> list[str]:
@@ -83,11 +215,28 @@ def candidate_subject_names(candidate: CandidateParticle) -> list[str]:
     return names if len(names) == 1 else []
 
 
-def particle_subject_ids(particle: Particle) -> list[str]:
-    """The subject id a stored particle is paired on — its about-subject, or none."""
+def particle_subject_ids(particle: Particle, *, speaker: SpeakerKey | None) -> list[str]:
+    """The subject ids a stored particle is paired on.
+
+    Its about-subject, or none; plus the persona Subject when the claim is
+    speaker-anchored, i.e. it opens on a speaker reference and carries the
+    persona. ``speaker`` is required so every reader of the key
+    decides it explicitly: a caller that forgot it would silently read the
+    narrower key, and the write path and the sweep would disagree about a pair.
+    Pass ``None`` only where the rule is off.
+    """
     if particle.structured_claim is not None and particle.structured_claim.subject_id:
-        return [particle.structured_claim.subject_id]
-    return list(particle.subject_ids) if len(particle.subject_ids) == 1 else []
+        keys = [particle.structured_claim.subject_id]
+    else:
+        keys = list(particle.subject_ids) if len(particle.subject_ids) == 1 else []
+    if (
+        speaker is not None
+        and speaker.subject_id in particle.subject_ids
+        and speaker.subject_id not in keys
+        and speaker_opener(particle.content, speaker.forms) is not None
+    ):
+        keys.append(speaker.subject_id)
+    return keys
 
 
 def is_reconcilable(particle: Particle) -> bool:
@@ -136,15 +285,19 @@ class SubjectIndex:
         cls,
         pairs: Iterable[tuple[Particle, Embedding | None]],
         *,
+        speaker: SpeakerKey | None,
         exclude_ids: Iterable[str] = (),
     ) -> SubjectIndex:
-        """Index ``pairs`` (typically every ACTIVE particle with an embedding)."""
+        """Index ``pairs`` (typically every ACTIVE particle with an embedding).
+
+        ``speaker`` is the persona key (see :func:`particle_subject_ids`).
+        """
         excluded = set(exclude_ids)
         index = cls()
         for particle, emb in pairs:
             if emb is None or particle.id in excluded or not is_reconcilable(particle):
                 continue
-            for key in particle_subject_ids(particle):
+            for key in particle_subject_ids(particle, speaker=speaker):
                 index.by_subject.setdefault(key, []).append((particle, emb))
         return index
 
@@ -278,6 +431,8 @@ def update_order(
     and ``None`` whenever the pair does not qualify:
 
     * either side is operator- or agent-asserted (:func:`is_extractor_asserted`);
+    * either side is a restatement the re-anchor pass wrote, which is dated
+      history and never an old or a new value (guard 1);
     * the sides are distinguishable to trust — a different URL authority (the
       rule key), source type, snapshot author (the §6.4 AUTHOR tier),
       or contributor attribution. Only the entry itself may differ; a
@@ -294,6 +449,8 @@ def update_order(
       contributor's date retire another's belief.
     """
     if not (is_extractor_asserted(new_particle) and is_extractor_asserted(existing)):
+        return None
+    if is_reanchor_restatement(new_particle) or is_reanchor_restatement(existing):
         return None
     if new_entry is None or existing_entry is None:
         return None

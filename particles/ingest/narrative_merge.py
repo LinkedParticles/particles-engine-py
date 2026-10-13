@@ -38,13 +38,17 @@ import logging
 from particles.config import get_config
 from particles.core.schema import ParticleType
 from particles.extraction.general import CandidateParticle
+from particles.llm.breaker import PROBE_MAX_TOKENS
 
 log = logging.getLogger(__name__)
 
-# Whole-entry label synthesis is one short sentence; a small cap suffices.
-# Literal, mirroring the §6.6 contradiction probe's ``max_tokens=120`` in
-# pipeline.py (small bounded LLM calls don't warrant a config knob).
-_MERGE_LABEL_MAX_TOKENS = 256
+# Whole-entry label synthesis is one short sentence, but ``extraction`` can
+# route to a model that thinks by default, and thinking spends from
+# ``max_tokens``: at the old 256 such a model can return no text, and the merge
+# then falls back to the first chunk's label. It takes the shared probe
+# budget, as the §6.6 contradiction probe does (a small bounded call does not
+# warrant a config knob).
+_MERGE_LABEL_MAX_TOKENS = PROBE_MAX_TOKENS
 
 
 def narrative_labels(candidates: list[CandidateParticle]) -> list[str]:

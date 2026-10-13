@@ -32,6 +32,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+from particles import egress
 from particles.benchmark.memory.schema import MemoryQuestion, MemorySession, MemoryTurn
 from particles.config import get_config
 from particles.http import particles_client
@@ -229,6 +230,14 @@ async def ensure_dataset(
             f"(placeholder {UNPINNED!r} in particles.benchmark.memory.loader."
             f"EXPECTED_SHA256). Record the digest of the file at {url} before the "
             f"first download, or pass --dataset-file with a locally verified copy."
+        )
+
+    if not egress.allows_url(url):
+        # Refuse before creating a .part file.
+        raise MemoryDatasetLoadError(
+            f"network.egress does not allow {egress.host_port(url)[0]}, so the "
+            f"LongMemEval {variant!r} variant cannot be downloaded. Pass --dataset-file "
+            f"with a locally verified copy."
         )
 
     log.info("Downloading LongMemEval %s variant from %s", variant, url)

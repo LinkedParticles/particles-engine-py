@@ -35,6 +35,9 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
+
+import typer
 
 from particles.config import get_config
 
@@ -148,6 +151,20 @@ def heartbeat_paused() -> Iterator[None]:
     finally:
         with _paint_lock:
             _paused = False
+
+
+def confirm(text: str, **kwargs: Any) -> bool:
+    """``typer.confirm`` with the heartbeat held off until the answer is in.
+
+    Every verb runs under the liveness heartbeat (:func:`heartbeat`, entered by
+    ``run()``), which repaints its in-place line on stderr every few seconds.
+    A prompt written while it ticks is painted over and the verb looks busy
+    while it waits on the keyboard: a ``memory rebuild-utility`` run sat on a
+    hidden "Proceed?" for almost three hours. Every interactive confirmation in
+    the CLI goes through here.
+    """
+    with heartbeat_paused():
+        return bool(typer.confirm(text, **kwargs))
 
 
 class _ClearLineFormatter(logging.Formatter):

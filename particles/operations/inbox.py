@@ -47,6 +47,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.egress import EgressRefused
 from particles.render.markdown import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -82,6 +83,15 @@ def format_failed_marker(url: str, error: str, *, now: datetime | None = None) -
     return f"# Failed {when} ({cleaned}) {url}"
 
 
+def format_refused_marker(url: str, *, now: datetime | None = None) -> str:
+    """Render the in-file marker for a URL the no-egress posture refused.
+
+    Distinct from ``# Failed`` so an operator can tell a policy from an outage.
+    """
+    when = (now or datetime.now(UTC)).isoformat()
+    return f"# Refused (network.egress) {when} {url}"
+
+
 async def process_inbox(
     session: AsyncSession,
     inbox_path: Path,
@@ -101,7 +111,12 @@ async def process_inbox(
     """
     from particles.corpus.deposit import deposit_url
 
-    summary: dict[str, list[str]] = {"processed": [], "failed": [], "skipped": []}
+    summary: dict[str, list[str]] = {
+        "processed": [],
+        "failed": [],
+        "refused": [],
+        "skipped": [],
+    }
 
     if not inbox_path.exists():
         log.debug("Inbox file does not exist yet: %s", inbox_path)
@@ -119,6 +134,12 @@ async def process_inbox(
         try:
             entry_id, _snapshot_id = await deposit_url(session, url, deposited_by=deposited_by)
             await session.commit()
+        except EgressRefused:
+            await session.rollback()
+            log.info("Inbox deposit refused by network.egress: %s", url)
+            lines[line_index] = format_refused_marker(url)
+            summary["refused"].append(url)
+            continue
         except Exception as exc:  # pragma: no cover — exercised via integration
             await session.rollback()
             error = f"{type(exc).__name__}: {exc}"

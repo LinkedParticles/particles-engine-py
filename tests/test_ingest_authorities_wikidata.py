@@ -25,6 +25,7 @@ import pytest
 from particles.config import get_config
 from particles.ingest.authorities import wikidata
 from particles.ingest.authorities._shared import reset_limiters
+from particles.ingest.authorities.registry import AuthorityUnreachable
 
 # Captured at import, before any autouse fixture swaps the module attribute.
 from particles.ingest.authorities.wikidata import _wikidata_limiter as _real_wikidata_limiter
@@ -272,6 +273,23 @@ async def test_search_failed_alias_read_rejects_every_continuation(
     assert any("continuation alias fetch failed" in r.getMessage() for r in caplog.records)
 
 
+async def test_search_failed_alias_read_with_only_continuations_is_unreachable() -> None:
+    # Every hit continues the name, so the failed alias read is the whole
+    # answer: an empty list would be a guess, not a miss.
+    search = {"search": [{"id": "Q192490", "label": "PostgreSQL", "description": "DBMS"}]}
+    failing = _json_response({})
+    failing.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("503", request=MagicMock(), response=MagicMock())
+    )
+    client = _mock_client(_json_response(search), failing)
+
+    with (
+        patch("particles.ingest.authorities.wikidata.particles_client", return_value=client),
+        pytest.raises(AuthorityUnreachable),
+    ):
+        await wikidata._wikidata_candidates("Postgres")
+
+
 # A deeper search: the recorded "Postgres" response extended past
 # five hits. Rank 6 continues the name with a letter and lists no "Postgres"
 # alias, so the filter must drop it exactly as it drops rank 3; rank 7 breaks
@@ -402,9 +420,10 @@ async def test_search_returns_nothing_without_results(payload: dict[str, Any]) -
         assert await wikidata._wikidata_candidates("Nonexistent Thing") == []
 
 
-async def test_search_http_error_returns_nothing_and_warns(
+async def test_search_http_error_is_unreachable_and_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # An error status is not "no such entity".
     resp = _json_response({"search": [{"id": "Q1", "label": "Python"}]})
     resp.raise_for_status = MagicMock(
         side_effect=httpx.HTTPStatusError("503", request=MagicMock(), response=MagicMock())
@@ -414,20 +433,46 @@ async def test_search_http_error_returns_nothing_and_warns(
     with (
         patch("particles.ingest.authorities.wikidata.particles_client", return_value=client),
         caplog.at_level(logging.WARNING, logger=wikidata.__name__),
+        pytest.raises(AuthorityUnreachable),
     ):
-        assert await wikidata._wikidata_candidates("Python") == []
+        await wikidata._wikidata_candidates("Python")
 
     resp.json.assert_not_called()
     assert any("Wikidata search failed for 'Python'" in r.getMessage() for r in caplog.records)
 
 
-async def test_search_connect_error_returns_nothing() -> None:
+def _offline_client() -> AsyncMock:
     client = AsyncMock()
     client.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     client.__aexit__ = AsyncMock(return_value=False)
+    return client
 
-    with patch("particles.ingest.authorities.wikidata.particles_client", return_value=client):
-        assert await wikidata._wikidata_candidates("Python") == []
+
+async def test_search_connect_error_is_unreachable() -> None:
+    with (
+        patch(
+            "particles.ingest.authorities.wikidata.particles_client",
+            return_value=_offline_client(),
+        ),
+        pytest.raises(AuthorityUnreachable),
+    ):
+        await wikidata._wikidata_candidates("Python")
+
+
+async def test_resolve_reports_an_outage_as_unreachable() -> None:
+    # The resolver reads this as "could not ask", never as a miss.
+    with patch(
+        "particles.ingest.authorities.wikidata.particles_client",
+        return_value=_offline_client(),
+    ):
+        resolution = await wikidata.WikidataAuthority().resolve(
+            MagicMock(), "Python", particle_content=None, domain=None
+        )
+
+    assert resolution is not None
+    assert resolution.unreachable
+    assert resolution.external_ref is None
+    assert resolution.existing is None
 
 
 # ---------------------------------------------------------------------------

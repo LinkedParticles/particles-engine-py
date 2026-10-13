@@ -1,0 +1,410 @@
+{
+ "about": "Acceptance item 4b: the memory-rot benchmark's probe arm (scripted extraction, live checks), seeds 42/43/44, --no-real-pairs, every purpose on one model, the implementation at commit bf7d25af under reconciliation.update_supersession.same_slot_admits true (proposed gate) and false (shipped gate), beside the oracle arm (zero LLM calls). Per-world retirement counts and the report metrics; stores were not kept, so retirements are compared to the oracle by count per world, not claim by claim. Spend: the runs report no actual figure; --estimate gave upper bounds of US.84 per gate on claude-sonnet-5-5 and US.26 on claude-sonnet-4-6.",
+ "runs": {
+  "oracle": {
+   "selection": {
+    "arm": "oracle",
+    "seeds": [
+     42,
+     43,
+     44
+    ],
+    "semantic_lint_model_id": "rot-oracle:contradiction-probe"
+   },
+   "metrics": {
+    "recall_current_at_k": {
+     "numerator": 216,
+     "denominator": 216,
+     "value": 1.0
+    },
+    "current_first": {
+     "numerator": 203,
+     "denominator": 216,
+     "value": 0.9398148148148148
+    },
+    "stale_over_current": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_over_current_unflagged": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_retained_at_k": {
+     "numerator": 6,
+     "denominator": 123,
+     "value": 0.04878048780487805
+    },
+    "poison_leak_at_k": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_first": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_surfaced_at_k": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "first_hit_counts": {
+     "stale": 1,
+     "current": 203,
+     "history": 12
+    }
+   },
+   "worlds": [
+    {
+     "seed": 42,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 43,
+     "store_census": {
+      "ACTIVE": 46,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 44,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 22
+     }
+    }
+   ]
+  },
+  "claude-sonnet-5-5-true": {
+   "selection": {
+    "arm": "probe",
+    "seeds": [
+     42,
+     43,
+     44
+    ],
+    "semantic_lint_model_id": "anthropic:claude-sonnet-5-5"
+   },
+   "metrics": {
+    "recall_current_at_k": {
+     "numerator": 216,
+     "denominator": 216,
+     "value": 1.0
+    },
+    "current_first": {
+     "numerator": 203,
+     "denominator": 216,
+     "value": 0.9398148148148148
+    },
+    "stale_over_current": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_over_current_unflagged": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_retained_at_k": {
+     "numerator": 6,
+     "denominator": 123,
+     "value": 0.04878048780487805
+    },
+    "poison_leak_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "poison_first": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_surfaced_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "first_hit_counts": {
+     "stale": 1,
+     "current": 203,
+     "history": 12
+    }
+   },
+   "worlds": [
+    {
+     "seed": 42,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 43,
+     "store_census": {
+      "ACTIVE": 47,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 44,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 22
+     }
+    }
+   ]
+  },
+  "claude-sonnet-5-5-false": {
+   "selection": {
+    "arm": "probe",
+    "seeds": [
+     42,
+     43,
+     44
+    ],
+    "semantic_lint_model_id": "anthropic:claude-sonnet-5-5"
+   },
+   "metrics": {
+    "recall_current_at_k": {
+     "numerator": 216,
+     "denominator": 216,
+     "value": 1.0
+    },
+    "current_first": {
+     "numerator": 202,
+     "denominator": 216,
+     "value": 0.9351851851851852
+    },
+    "stale_over_current": {
+     "numerator": 2,
+     "denominator": 123,
+     "value": 0.016260162601626018
+    },
+    "stale_over_current_unflagged": {
+     "numerator": 2,
+     "denominator": 123,
+     "value": 0.016260162601626018
+    },
+    "stale_retained_at_k": {
+     "numerator": 11,
+     "denominator": 123,
+     "value": 0.08943089430894309
+    },
+    "poison_leak_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "poison_first": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_surfaced_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "first_hit_counts": {
+     "stale": 2,
+     "current": 202,
+     "history": 12
+    }
+   },
+   "worlds": [
+    {
+     "seed": 42,
+     "store_census": {
+      "ACTIVE": 54,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 16
+     }
+    },
+    {
+     "seed": 43,
+     "store_census": {
+      "ACTIVE": 47,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 44,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 22
+     }
+    }
+   ]
+  },
+  "claude-sonnet-4-6-true": {
+   "selection": {
+    "arm": "probe",
+    "seeds": [
+     42,
+     43,
+     44
+    ],
+    "semantic_lint_model_id": "anthropic:claude-sonnet-4-6"
+   },
+   "metrics": {
+    "recall_current_at_k": {
+     "numerator": 216,
+     "denominator": 216,
+     "value": 1.0
+    },
+    "current_first": {
+     "numerator": 203,
+     "denominator": 216,
+     "value": 0.9398148148148148
+    },
+    "stale_over_current": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_over_current_unflagged": {
+     "numerator": 1,
+     "denominator": 123,
+     "value": 0.008130081300813009
+    },
+    "stale_retained_at_k": {
+     "numerator": 6,
+     "denominator": 123,
+     "value": 0.04878048780487805
+    },
+    "poison_leak_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "poison_first": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_surfaced_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "first_hit_counts": {
+     "stale": 1,
+     "current": 203,
+     "history": 12
+    }
+   },
+   "worlds": [
+    {
+     "seed": 42,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 43,
+     "store_census": {
+      "ACTIVE": 47,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 44,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 22
+     }
+    }
+   ]
+  },
+  "claude-sonnet-4-6-false": {
+   "selection": {
+    "arm": "probe",
+    "seeds": [
+     42,
+     43,
+     44
+    ],
+    "semantic_lint_model_id": "anthropic:claude-sonnet-4-6"
+   },
+   "metrics": {
+    "recall_current_at_k": {
+     "numerator": 216,
+     "denominator": 216,
+     "value": 1.0
+    },
+    "current_first": {
+     "numerator": 202,
+     "denominator": 216,
+     "value": 0.9351851851851852
+    },
+    "stale_over_current": {
+     "numerator": 2,
+     "denominator": 123,
+     "value": 0.016260162601626018
+    },
+    "stale_over_current_unflagged": {
+     "numerator": 2,
+     "denominator": 123,
+     "value": 0.016260162601626018
+    },
+    "stale_retained_at_k": {
+     "numerator": 11,
+     "denominator": 123,
+     "value": 0.08943089430894309
+    },
+    "poison_leak_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "poison_first": {
+     "numerator": 0,
+     "denominator": 51,
+     "value": 0.0
+    },
+    "poison_surfaced_at_k": {
+     "numerator": 2,
+     "denominator": 51,
+     "value": 0.0392156862745098
+    },
+    "first_hit_counts": {
+     "stale": 2,
+     "current": 202,
+     "history": 12
+    }
+   },
+   "worlds": [
+    {
+     "seed": 42,
+     "store_census": {
+      "ACTIVE": 54,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 16
+     }
+    },
+    {
+     "seed": 43,
+     "store_census": {
+      "ACTIVE": 47,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 18
+     }
+    },
+    {
+     "seed": 44,
+     "store_census": {
+      "ACTIVE": 52,
+      "PROVENANCE_STALE/SUPERSEDED_BY_UPDATE": 22
+     }
+    }
+   ]
+  }
+ }
+}

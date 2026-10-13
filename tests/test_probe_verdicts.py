@@ -489,16 +489,36 @@ class TestUpdateSweep:
 
         first = await self._sweep(db_session, client)
         assert (first["probed"], first["update_probed"], first["different_slot"]) == (1, 1, 1)
-        assert client.messages.create.call_count == 2
+        # the update question is asked first, and a different slot
+        # needs no contradiction probe.
+        assert client.messages.create.call_count == 1
         second = await self._sweep(db_session, client)
         assert (second["probed"], second["update_probed"], second["previously_cleared"]) == (
             0,
             0,
             1,
         )
-        assert client.messages.create.call_count == 2
-        assert await count_verdicts(db_session, ProbeKind.RECONCILE_CONTRADICTION) == 1
+        assert client.messages.create.call_count == 1
+        assert await count_verdicts(db_session, ProbeKind.RECONCILE_CONTRADICTION) == 0
         assert await count_verdicts(db_session, ProbeKind.UPDATE_SLOT) == 1
+
+    async def test_a_contradiction_no_from_before_1_187_does_not_clear_an_update(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """a store that cleared a pair on a contradiction NO re-asks it once."""
+        from particles.config import get_config
+
+        await self._backlog(db_session, monkeypatch)
+        changes = "REASON: A new home city.\nSLOT: CHANGES\nVERDICT: YES"
+        update_cfg = get_config().reconciliation.update_supersession
+        # Before 1.187.0: the contradiction probe in front, answering NO.
+        monkeypatch.setattr(update_cfg, "same_slot_admits", False)
+        before = await self._sweep(db_session, _client(lambda _text: NO))
+        assert (before["probed"], before["demoted"]) == (1, 0)
+        # After: the recorded contradiction NO no longer clears the pair.
+        monkeypatch.setattr(update_cfg, "same_slot_admits", True)
+        after = await self._sweep(db_session, _client(lambda _text: changes))
+        assert (after["previously_cleared"], after["probed"], after["demoted"]) == (0, 1, 1)
 
     async def test_a_fixed_slot_pair_is_asked_once(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch

@@ -18,6 +18,7 @@ The leading underscore marks the module as internal to the ``cli`` package
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
 import json
@@ -42,6 +43,21 @@ log = logging.getLogger(__name__)
 #: settings. ``init`` replaces/removes exactly the entries whose
 #: command contains it — the surgicality contract.
 HOOK_SENTINEL = "particles hook"
+
+#: The per-hook ``timeout`` (seconds) the installer writes on every
+#: Particles-owned entry. Without one, Claude Code gives all SessionEnd hooks a
+#: shared 1.5 s budget, and interpreter start-up plus imports alone take longer
+#: than that, so the harvest is cancelled before its body runs. A per-hook
+#: timeout raises that budget to match, up to 60 s, Claude Code's ceiling. On
+#: SessionStart, which otherwise defaults to 600 s, it bounds a wedged digest
+#: push to a minute. Either way it sits well above the hook's own internal
+#: deadline (``claude_code.hook_deadline_seconds``).
+HOOK_TIMEOUT_SECONDS = 60
+
+#: Claude Code's default shared SessionEnd budget, in seconds. A Particles
+#: SessionEnd hook whose ``timeout`` is absent or no larger than this is cut
+#: off by it (``particles hook doctor`` reports one).
+SESSION_END_DEFAULT_BUDGET_SECONDS = 1.5
 
 #: Truncate-rotation cap for the hook log: when the JSONL file
 #: exceeds this size, it is truncated and restarted (simple, no side-car state).
@@ -481,9 +497,18 @@ def read_hook_log_tail(n: int) -> list[str]:
 
 
 def build_hook_commands(
-    command_base: str, store: str, env: Mapping[str, str] | None = None
+    command_base: str,
+    store: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    include_stop: bool = False,
 ) -> dict[str, str]:
-    """The two hook command strings for a given base + store handle.
+    """The hook command strings for a given base + store handle.
+
+    ``include_stop`` adds the Stop entry, the agent-side extraction
+    ask. It is installed only while agent extraction is on: a Stop hook runs at
+    the end of every assistant turn and the user waits for it, so an install
+    that does not use it must not pay for it.
 
     Claude Code runs the hook from the *session's* working directory, which is
     almost never the store's directory (it is routinely a git worktree). Any
@@ -493,10 +518,13 @@ def build_hook_commands(
     absent ``env`` reproduces the original bare command exactly.
     """
     prefix = render_env_prefix(env)
-    return {
+    commands = {
         "SessionStart": f"{prefix}{command_base} hook session-start --store {store}",
         "SessionEnd": f"{prefix}{command_base} hook session-end --store {store}",
     }
+    if include_stop:
+        commands["Stop"] = f"{prefix}{command_base} hook stop --store {store}"
+    return commands
 
 
 def render_env_prefix(env: Mapping[str, str] | None) -> str:
@@ -555,6 +583,34 @@ def particles_hook_commands(settings: dict[str, Any]) -> list[str]:
     return found
 
 
+def untimed_session_end_hooks(settings: dict[str, Any]) -> list[str]:
+    """Particles-owned SessionEnd commands whose ``timeout`` leaves the 1.5 s budget in force.
+
+    An entry written before the installer set :data:`HOOK_TIMEOUT_SECONDS`, or
+    edited by hand, inherits Claude Code's shared SessionEnd budget, which the
+    harvest cannot finish inside. A ``timeout`` that is not a number counts as
+    absent.
+    """
+    hooks_cfg = settings.get("hooks")
+    if not isinstance(hooks_cfg, dict):
+        return []
+    groups = hooks_cfg.get("SessionEnd")
+    if not isinstance(groups, list):
+        return []
+    found: list[str] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            continue
+        for hook in group["hooks"]:
+            if not _is_particles_hook(hook):
+                continue
+            timeout = hook.get("timeout")
+            numeric = isinstance(timeout, int | float) and not isinstance(timeout, bool)
+            if not numeric or timeout <= SESSION_END_DEFAULT_BUDGET_SECONDS:
+                found.append(str(hook["command"]))
+    return found
+
+
 def strip_particles_hook_entries(settings: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy of ``settings`` with every Particles-owned hook removed.
 
@@ -606,7 +662,8 @@ def merge_particles_hook_entries(
     """Merge the Particles-owned hook entries into ``settings`` (replace semantics).
 
     Strips any existing Particles-owned entries first (re-run = repair/upgrade),
-    then appends one matcher-group per event. Everything else is preserved.
+    then appends one matcher-group per event, each carrying an explicit
+    :data:`HOOK_TIMEOUT_SECONDS`. Everything else is preserved.
     """
     result = strip_particles_hook_entries(settings)
     hooks_cfg = result.setdefault("hooks", {})
@@ -620,7 +677,9 @@ def merge_particles_hook_entries(
             raise ValueError(
                 f"Claude Code settings 'hooks.{event}' is not an array — refusing to rewrite it."
             )
-        groups.append({"hooks": [{"type": "command", "command": command}]})
+        groups.append(
+            {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
+        )
     return result
 
 
@@ -691,7 +750,12 @@ def _turn_parts(entry_type: str, content: Any) -> list[str]:
     return parts
 
 
-def distill_transcript(jsonl_text: str, session_id: str | None = None) -> str:
+def distill_transcript(
+    jsonl_text: str,
+    session_id: str | None = None,
+    *,
+    exclude_uuids: frozenset[str] = frozenset(),
+) -> str:
     """Distill a Claude Code transcript JSONL into speaker-turn Markdown.
 
     Deterministic and LLM-free: user and assistant text turns
@@ -700,6 +764,11 @@ def distill_transcript(jsonl_text: str, session_id: str | None = None) -> str:
     lines skipped. The output format is **stable input** for a future
     conversation-aware extractor (§ Composition point) — change it
     only with a distiller version story.
+
+    ``exclude_uuids`` names transcript records left out entirely: an
+    agent-extraction ask and the agent's answer to it (see
+    :func:`ask_exclusions`). They always follow the snapshot the ask was made
+    on, so leaving them out keeps every snapshot a prefix of the next.
     """
     out: list[str] = []
     if session_id:
@@ -714,6 +783,8 @@ def distill_transcript(jsonl_text: str, session_id: str | None = None) -> str:
             continue
         if not isinstance(entry, dict):
             continue
+        if exclude_uuids and entry.get("uuid") in exclude_uuids:
+            continue
         entry_type = entry.get("type")
         if entry_type not in ("user", "assistant"):
             continue
@@ -727,6 +798,254 @@ def distill_transcript(jsonl_text: str, session_id: str | None = None) -> str:
         out.append(f"## {speaker}")
         out.append("\n\n".join(parts))
     return ("\n\n".join(out) + "\n") if out else ""
+
+
+def _record_text(entry: dict[str, Any]) -> str:
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(b.get("text", ""))
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+def _is_typed_prompt(entry: dict[str, Any], ask_marker: str) -> bool:
+    """A user record a person typed: text, not a tool result, and not an ask."""
+    if entry.get("type") != "user" or entry.get("isMeta"):
+        return False
+    text = _record_text(entry)
+    return bool(text.strip()) and ask_marker not in text
+
+
+def ask_exclusions(
+    jsonl_text: str, asks: Sequence[tuple[str, str | None]], *, ask_marker: str
+) -> frozenset[str]:
+    """The transcript records an agent-extraction ask and its answer span.
+
+    Each ask is ``(after_uuid, through_uuid)``: the last record the snapshot
+    the ask was made on held, and the last record of the agent's answering
+    turn, which the continuation Stop recorded. Everything strictly after
+    ``after_uuid`` up to and including ``through_uuid`` is excluded. When no
+    continuation was recorded (``through_uuid`` is ``None``), the span ends
+    before the next prompt a person typed, which is where the answering turn
+    must have ended. A record carrying ``ask_marker`` is the ask itself and
+    never ends a span.
+    """
+    if not asks:
+        return frozenset()
+    open_after = {after: through for after, through in asks}
+    excluded: set[str] = set()
+    active: str | None | bool = False  # False: not in a span; else its through uuid
+    for raw_line in jsonl_text.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        uuid = entry.get("uuid")
+        if active is not False:
+            if active is None and _is_typed_prompt(entry, ask_marker):
+                active = False
+            elif isinstance(uuid, str):
+                excluded.add(uuid)
+                if uuid == active:
+                    active = False
+                    continue
+        if isinstance(uuid, str) and uuid in open_after:
+            active = open_after[uuid]
+    return frozenset(excluded)
+
+
+def transcript_last_record(jsonl_text: str) -> tuple[str | None, str | None]:
+    """The ``uuid`` of the transcript's last record and the model of its last assistant turn."""
+    last_uuid: str | None = None
+    model: str | None = None
+    for raw_line in jsonl_text.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("uuid"), str):
+            last_uuid = entry["uuid"]
+        if entry.get("type") == "assistant":
+            found = (entry.get("message") or {}).get("model")
+            if isinstance(found, str) and found:
+                model = found
+    return last_uuid, model
+
+
+def _is_particles_server(server: Any) -> bool:
+    """An MCP server entry that runs ``particles mcp serve``."""
+    if not isinstance(server, dict):
+        return False
+    argv = [str(server.get("command", ""))] + [str(a) for a in server.get("args") or []]
+    words = " ".join(argv).split()
+    return any(w.endswith("particles") for w in words) and "mcp" in words and "serve" in words
+
+
+def _servers_in(config: Any) -> list[Any]:
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    return list(servers.values()) if isinstance(servers, dict) else []
+
+
+def particles_executable(argv: str | Sequence[str]) -> str | None:
+    """The ``particles`` executable a hook command or MCP server entry runs, if it names one.
+
+    ``argv`` is a hook command string (``env K=V … /path/particles hook stop``)
+    or a server's argv. ``None`` when no word is a ``particles`` executable,
+    e.g. a server launched through ``uv run --project … particles``, whose
+    install depends on that project's environment.
+    """
+    if isinstance(argv, str):
+        try:
+            words = shlex.split(argv)
+        except ValueError:
+            return None
+    else:
+        words = list(argv)
+    for word in words:
+        if Path(word).name == "particles" and os.sep in word:
+            return word
+    return None
+
+
+def particles_mcp_executables(home: Path | None = None) -> list[str]:
+    """The ``particles`` executables the user-scope Particles MCP servers run.
+
+    Only servers that name the executable by path are counted (see
+    :func:`particles_executable`).
+    """
+    home = home or Path.home()
+    try:
+        user = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found: list[str] = []
+    for server in _servers_in(user):
+        if not _is_particles_server(server):
+            continue
+        argv = [str(server.get("command", ""))] + [str(a) for a in server.get("args") or []]
+        exe = particles_executable(argv)
+        if exe is not None:
+            found.append(exe)
+    return found
+
+
+@dataclass(frozen=True)
+class InstallPin:
+    """Where a source-checkout install sits relative to its repository's release tags."""
+
+    branch: str | None
+    """The checked-out branch, or ``None`` when HEAD is detached."""
+    tag: str | None
+    """The release tag HEAD is exactly at, if any."""
+    newest_tag: str | None
+    """The newest ``v*`` tag the checkout has fetched."""
+
+
+def install_report(
+    *,
+    root: Path,
+    version: str,
+    pin: InstallPin | None,
+    hook_commands: Sequence[str],
+    mcp_exes: Sequence[str],
+    running_exe: str | None,
+) -> list[str]:
+    """The doctor's ``install:`` lines: which install sessions run, and whether it is stale.
+
+    A Claude Code session keeps its MCP server for its whole life, and the
+    server imports some modules only on first use. A server running from a
+    checkout that is then pulled mixes old and new code and fails with an
+    ``ImportError``. A pinned release tag avoids that, but only while someone
+    remembers to advance it. Every line is advisory.
+    """
+    pad = " " * 16
+    lines = [f"install:        Particles {version} at {root}"]
+    hook_exes = [e for e in map(particles_executable, hook_commands) if e is not None]
+    hooks = sorted({str(Path(e).resolve()) for e in hook_exes})
+    servers = sorted({str(Path(e).resolve()) for e in mcp_exes})
+    if len(hooks) > 1:
+        lines.append(f"{pad}⚠ the installed hooks run different executables: {', '.join(hooks)}")
+    if hooks and servers and set(servers) != set(hooks):
+        lines.append(
+            f"{pad}⚠ the MCP server runs {', '.join(servers)} but the hooks run "
+            f"{', '.join(hooks)}. Point both at one install."
+        )
+    running = str(Path(running_exe).resolve()) if running_exe else None
+    if running and hooks and running not in hooks:
+        lines.append(f"{pad}⚠ this doctor runs {running}, not the install the hooks run.")
+        command = next(c for c in hook_commands if particles_executable(c))
+        store = re.search(r" --store \S+", command)
+        doctor = command.split(" hook ")[0] + " hook doctor" + (store.group(0) if store else "")
+        lines.append(f"{pad}To check what your sessions run: `{doctor}`")
+        return lines
+    if pin is None:
+        return lines
+    if pin.branch is not None:
+        lines.append(
+            f"{pad}⚠ runs from a working checkout (branch {pin.branch}). Pulling it changes"
+        )
+        lines.append(f"{pad}code under running sessions. Run the hooks and the MCP server from a")
+        lines.append(
+            f"{pad}release tag in a separate worktree (the Claude Code guide, "
+            "Running from a source checkout)."
+        )
+    elif pin.tag is None:
+        lines.append(f"{pad}⚠ detached at a commit that is not a release tag.")
+    elif pin.newest_tag is not None and pin.newest_tag != pin.tag:
+        lines.append(
+            f"{pad}⚠ pinned at {pin.tag}; {pin.newest_tag} is the newest tag fetched. To advance:"
+        )
+        lines.append(f"{pad}  git -C {root} checkout --detach {pin.newest_tag}")
+        lines.append(f"{pad}  uv sync --project {root} --frozen --no-dev")
+        lines.append(f"{pad}then reopen running sessions.")
+    else:
+        lines.append(
+            f"{pad}pinned at {pin.tag}, the newest tag fetched (`git fetch --tags` to check)"
+        )
+    return lines
+
+
+def particles_mcp_registered(cwd: Path, home: Path | None = None) -> bool:
+    """Whether a Claude Code session started in ``cwd`` has the Particles MCP server.
+
+    Reads the places Claude Code takes MCP servers from: user scope and the
+    per-project entries in ``~/.claude.json``, and a ``.mcp.json`` in the
+    session directory or its repository root. A server from a plugin is not
+    seen, so the answer can be a false negative, never a false positive. The
+    Stop hook asks only when this is true: an ask in a session
+    without ``extraction_submit`` is a turn spent for nothing.
+    """
+    home = home or Path.home()
+    root = find_repository_root(cwd)
+    dirs = [d for d in dict.fromkeys([cwd, root]) if d is not None]
+    configs: list[Any] = []
+    try:
+        user = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        user = {}
+    configs.append(user)
+    projects = user.get("projects") if isinstance(user, dict) else None
+    for d in dirs:
+        if isinstance(projects, dict):
+            configs.append(projects.get(str(d)))
+        with contextlib.suppress(OSError, ValueError):
+            configs.append(json.loads((d / ".mcp.json").read_text(encoding="utf-8")))
+    return any(_is_particles_server(s) for c in configs for s in _servers_in(c))
 
 
 def transcript_started_at(jsonl_text: str) -> datetime | None:

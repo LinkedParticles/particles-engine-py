@@ -15,6 +15,7 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.db import session_scope
 
 cache_app = typer.Typer(
@@ -173,7 +174,7 @@ async def _evict(subject_prefix: str, yes: bool) -> None:
         raise typer.Exit(1)
 
     if not yes:
-        typer.confirm(f"Evict every cached article for {resolved[:8]}…?", abort=True)
+        confirm(f"Evict every cached article for {resolved[:8]}…?", abort=True)
     async with session_scope() as session:
         removed = await evict_subject(session, resolved)
         await session.commit()

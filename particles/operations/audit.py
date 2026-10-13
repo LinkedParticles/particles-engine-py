@@ -16,8 +16,10 @@ Surface-side — it reuses the helpers in
 ``particles/api/cli/_claude_code.py`` and lives with the ``particles audit``
 verb (``particles/api/cli/audit.py``); this Engine module receives the
 harvested entry ids. ``estimate_extraction`` is the §4 dry-run cost estimate
-(byte counts × the extraction chunker), computed before anything touches the
-store.
+(source sizes × the extraction chunker × an output model that scales with the
+characters each call reads), computed before anything is deposited;
+``plan_extraction`` reads the store first so it counts only the sources the
+run will actually extract.
 
 The renderer bakes the ADR's honesty stance into the copy (§5/§6, approved
 verbatim 2026-07-11): hedged class labels ("potential", "likely-",
@@ -28,6 +30,7 @@ dead end.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from collections.abc import Callable, Sequence
@@ -44,10 +47,13 @@ from particles.core.progress import ProgressEvent
 from particles.core.schema import (
     ExtractionStatus,
     JudgeVerdictKind,
+    Mutability,
     QualityReport,
     SuggestMode,
 )
 from particles.core.status import Status
+from particles.corpus.deposit import load_blob
+from particles.corpus.store import get_entry_by_uri, list_snapshots_for_entry
 from particles.llm.usage import LLMUsage, format_usd, render_usage_line, track_usage
 from particles.operations._llm import (
     llm_circuit_open,
@@ -145,17 +151,26 @@ class AuditEstimate(BaseModel):
 
     Mirrors the general extractor's chunking: one LLM call per source at or
     under ``extraction.html_chunk_size`` characters, else one call per chunk,
-    bounded by ``extraction.max_llm_calls_per_source``. Output is a per-call
-    figure for the extraction model (``audit.estimate_output_tokens_per_extraction_call``
-    and its per-model mapping), with the expected retries at
-    ``extraction.retry_max_tokens``. Contradiction probes are density-dependent,
-    so they enter the dollar range as zero to the audit cap
-    (``audit.max_contradiction_probes``) plus the expected §6.6 probes the
-    extraction pipeline makes.
+    bounded by ``extraction.max_llm_calls_per_source`` (text past the cap is
+    never read). Each call's output is a fixed part plus a part proportional
+    to the characters it reads (``audit.estimate_output_tokens_per_call_base``,
+    ``audit.estimate_output_tokens_per_source_char``, scaled per model), so a
+    dense document costs what its length implies rather than a flat per-call
+    figure. A call whose output would pass ``extraction.max_tokens`` is billed
+    that whole first budget plus a retry at ``extraction.retry_max_tokens``.
+    Contradiction probes are density-dependent, so they enter the dollar range
+    as zero to the audit cap (``audit.max_contradiction_probes``) plus the
+    expected §6.6 probes the extraction pipeline makes.
     """
 
     entries: int = 0
+    #: Harvested entries the run will not extract: their content is already in
+    #: the store and no snapshot of theirs is waiting (``plan_extraction``).
+    already_captured: int = 0
+    #: Characters the calls will read; ``unread_chars`` lie past the per-source
+    #: call cap and are never sent.
     total_chars: int = 0
+    unread_chars: int = 0
     #: First-attempt extraction calls; ``expected_retries`` rides on top.
     estimated_llm_calls: int = 0
     #: Source text only, at ~4 characters per token.
@@ -165,20 +180,30 @@ class AuditEstimate(BaseModel):
     extraction_model: str = ""
     probe_model: str = ""
     #: Extraction input: source text plus the per-call prompt overhead, first
-    #: attempts only. ``retry_input_tokens`` is what the expected retries re-send.
+    #: attempts only. ``retry_input_tokens`` is what the high end's retries re-send.
     input_tokens: int = 0
     retry_input_tokens: int = 0
-    #: Calls expected to be retried at ``extraction.retry_max_tokens`` (0 when
-    #: the retry is disabled).
+    #: Retries expected at ``extraction.retry_max_tokens`` (0 when the retry is
+    #: disabled): calls likely to run past ``extraction.max_tokens``, at least
+    #: ``audit.estimate_extraction_retry_rate`` of all calls.
     expected_retries: float = 0.0
-    #: Expected output tokens per extraction call and the config key it came from.
-    output_tokens_per_call: int = 0
-    output_tokens_per_call_source: str = ""
-    #: Extraction output: the expected band and the ceiling (first attempts at
-    #: ``extraction.max_tokens`` plus the expected retries at their budget).
+    #: The output model after the per-model scale: a fixed part per call plus
+    #: a rate per source character, and where they came from.
+    output_tokens_per_call_base: int = 0
+    output_tokens_per_source_char: float = 0.0
+    output_basis: str = ""
+    #: Extraction output: the expected band, its middle (what the wall time is
+    #: timed on), and the ceiling (first attempts at ``extraction.max_tokens``
+    #: plus the high end's retries at their budget).
     output_tokens_low: int = 0
+    output_tokens_expected: int = 0
     output_tokens_high: int = 0
     output_tokens_ceiling: int = 0
+    #: Retries the ceiling counts at ``extraction.retry_max_tokens``.
+    ceiling_retries: int = 0
+    #: Calls whose output at the high end passes the last budget they get, so
+    #: their reply may be cut and the claims past the cut lost.
+    calls_at_risk_of_truncation: int = 0
     #: Audit contradiction probes at the cap, plus the expected §6.6 probes the
     #: extraction pipeline makes. The token totals cover both.
     probe_cap: int = 0
@@ -204,55 +229,190 @@ class AuditEstimate(BaseModel):
     unpriced: list[str] = Field(default_factory=list)
 
 
-def estimate_extraction(char_counts: Sequence[int]) -> AuditEstimate:
-    """Estimate extraction LLM calls, tokens, dollars, and wall time for texts of these sizes."""
+@dataclass(frozen=True)
+class OutputModel:
+    """Expected output tokens of one extraction call: ``base + per_char × chars``."""
+
+    base: float
+    per_char: float
+    #: The config keys the figures came from, for the printed estimate.
+    basis: str
+
+    def expected(self, chars: int) -> float:
+        """Expected output of one call that reads ``chars`` characters of source."""
+        return self.base + self.per_char * chars
+
+
+def extraction_output_model(provider: str, model: str) -> OutputModel:
+    """The configured output model for extraction on ``provider:model``.
+
+    Shared by the audit estimate and the consolidation cycle's spend estimates
+    (``operations/spend_estimate.py``), so the two price extraction alike.
+    """
+    audit_cfg = get_config().audit
+    base = float(audit_cfg.estimate_output_tokens_per_call_base)
+    per_char = audit_cfg.estimate_output_tokens_per_source_char
+    basis = (
+        "audit.estimate_output_tokens_per_call_base, audit.estimate_output_tokens_per_source_char"
+    )
+    scale, key = lookup_by_model(audit_cfg.estimate_output_scale_by_model, provider, model)
+    if scale is not None:
+        base *= scale
+        per_char *= scale
+        basis += f", ×{scale:g} by audit.estimate_output_scale_by_model[{key}]"
+    return OutputModel(base=base, per_char=per_char, basis=basis)
+
+
+def chunk_sizes(chars: int) -> list[int]:
+    """The characters each extraction call reads from a source of ``chars`` characters.
+
+    One call at or under ``extraction.html_chunk_size``; above it, full chunks
+    and a remainder, cut off at ``extraction.max_llm_calls_per_source`` (the
+    extractor's paragraph chunker lands each cut a little short of the size,
+    which this ignores).
+    """
+    cfg = get_config().extraction
+    if chars <= 0:
+        return []
+    if chars <= cfg.html_chunk_size:
+        return [chars]
+    full, rest = divmod(chars, cfg.html_chunk_size)
+    sizes = [cfg.html_chunk_size] * full + ([rest] if rest else [])
+    return sizes[: cfg.max_llm_calls_per_source]
+
+
+@dataclass(frozen=True)
+class _CallOutput:
+    """One call's billed output at one end of the band, and what it took."""
+
+    tokens: float
+    retried: bool
+    cut: bool
+
+
+def _billed_output(output: float, max_tokens: int, retry_max_tokens: int) -> _CallOutput:
+    """What a call wanting ``output`` tokens bills, given the two budgets.
+
+    Within ``max_tokens`` it bills what it writes. Past it, the first reply is
+    cut and billed in full, then the retry at ``retry_max_tokens`` writes the
+    call again, itself cut if the output passes that budget too. With the
+    retry disabled the cut first reply is all there is.
+    """
+    if output <= max_tokens:
+        return _CallOutput(output, retried=False, cut=False)
+    if retry_max_tokens <= max_tokens:
+        return _CallOutput(float(max_tokens), retried=False, cut=True)
+    return _CallOutput(
+        max_tokens + min(output, retry_max_tokens),
+        retried=True,
+        cut=output > retry_max_tokens,
+    )
+
+
+def _overflow_probability(expected: float, spread: float, max_tokens: int) -> float:
+    """Chance a call's output passes ``max_tokens``, its output uniform within ``±spread``."""
+    low, high = expected * (1 - spread), expected * (1 + spread)
+    if high <= max_tokens:
+        return 0.0
+    if low > max_tokens or high == low:
+        return 1.0
+    return (high - max_tokens) / (high - low)
+
+
+def estimate_extraction(char_counts: Sequence[int], *, already_captured: int = 0) -> AuditEstimate:
+    """Estimate extraction LLM calls, tokens, dollars, and wall time for texts of these sizes.
+
+    ``char_counts`` are the sources the run will extract (``plan_extraction``
+    sizes them and drops what is already captured); ``already_captured`` is
+    how many harvested entries it skips, disclosed beside the count.
+    """
     config = get_config()
     cfg = config.extraction
     audit_cfg = config.audit
     extraction_sel = config.llm.for_purpose("extraction")
     probe_sel = config.llm.for_purpose("semantic_lint")
     verify_sel = config.llm.for_purpose("verification")
+    output_model = extraction_output_model(extraction_sel.provider, extraction_sel.model)
+    spread = audit_cfg.estimate_output_spread
+    retry_enabled = cfg.retry_max_tokens > cfg.max_tokens
 
-    per_call, key = lookup_by_model(
-        audit_cfg.estimate_output_tokens_per_extraction_call_by_model,
-        extraction_sel.provider,
-        extraction_sel.model,
-    )
-    if per_call is None:
-        per_call = audit_cfg.estimate_output_tokens_per_extraction_call
-        per_call_source = "audit.estimate_output_tokens_per_extraction_call"
-    else:
-        per_call_source = f"audit.estimate_output_tokens_per_extraction_call_by_model[{key}]"
-    # A call's output can never exceed its own budget.
-    per_call = min(per_call, cfg.max_tokens)
-
-    calls = 0
     entries = 0
-    total = 0
+    read_chars = 0
+    unread_chars = 0
+    chunks: list[int] = []
     for n in char_counts:
         if n <= 0:
             continue
         entries += 1
-        total += n
-        if n <= cfg.html_chunk_size:
-            calls += 1
-        else:
-            calls += min(math.ceil(n / cfg.html_chunk_size), cfg.max_llm_calls_per_source)
+        sizes = chunk_sizes(n)
+        chunks.extend(sizes)
+        read_chars += sum(sizes)
+        unread_chars += n - sum(sizes)
+    calls = len(chunks)
+
     # ~4 chars per token is the standard rough conversion; the estimate is a
     # magnitude signal for the confirm gate, not a billing quote.
-    source_tokens_total = total // 4
+    source_tokens_total = read_chars // 4
     input_tokens = source_tokens_total + calls * cfg.estimate_prompt_overhead_tokens
 
-    retry_enabled = cfg.retry_max_tokens > cfg.max_tokens
-    retries = calls * audit_cfg.estimate_extraction_retry_rate if retry_enabled else 0.0
-    # A retry re-sends the same call: the average call's input again.
-    retry_input = round(retries * input_tokens / calls) if calls else 0
+    # Each end of the band takes every call at that end of its spread, so a
+    # call near the first budget retries at the high end and not at the low.
+    low = [
+        _billed_output(
+            output_model.expected(n) * (1 - spread), cfg.max_tokens, cfg.retry_max_tokens
+        )
+        for n in chunks
+    ]
+    high = [
+        _billed_output(
+            output_model.expected(n) * (1 + spread), cfg.max_tokens, cfg.retry_max_tokens
+        )
+        for n in chunks
+    ]
+    # The middle weighs each call's retry by its chance of passing the budget.
+    expected_out = 0.0
+    length_retries = 0.0
+    for n in chunks:
+        want = output_model.expected(n)
+        if not retry_enabled:
+            expected_out += min(want, cfg.max_tokens)
+            continue
+        p = _overflow_probability(want, spread, cfg.max_tokens)
+        length_retries += p
+        expected_out += min(want, cfg.retry_max_tokens) + p * cfg.max_tokens
 
-    spread = audit_cfg.estimate_output_spread
-    output_low = round(calls * per_call * (1 - spread))
-    output_high = round((calls + retries) * per_call * (1 + spread))
-    # The ceiling counts every expected retry at its full budget, rounded up.
-    output_ceiling = calls * cfg.max_tokens + math.ceil(retries) * cfg.retry_max_tokens
+    # The retry rate is a floor for every cause (empty and unparseable replies
+    # too); calls retried for any other reason re-run an average call.
+    floor = calls * audit_cfg.estimate_extraction_retry_rate if retry_enabled else 0.0
+    high_length_retries = sum(1 for c in high if c.retried)
+    mid_other = max(0.0, floor - length_retries)
+    high_other = max(0.0, floor - high_length_retries)
+    if calls:
+        expected_out += mid_other * expected_out / calls
+    high_out = sum(c.tokens for c in high)
+    if calls:
+        high_out += high_other * high_out / calls
+    retries = length_retries + mid_other
+    high_retries = high_length_retries + high_other
+
+    # A retry re-sends its call. Length retries re-send their own chunk;
+    # the rest re-send an average call.
+    per_call_input = input_tokens / calls if calls else 0.0
+    retry_input = round(
+        sum(
+            n // 4 + cfg.estimate_prompt_overhead_tokens
+            for n, c in zip(chunks, high, strict=True)
+            if c.retried
+        )
+        + high_other * per_call_input
+    )
+
+    output_low = round(sum(c.tokens for c in low))
+    output_high = round(high_out)
+    # The ceiling counts every call at its first budget and every retry the
+    # high end expects at its full budget, rounded up.
+    ceiling_retries = math.ceil(high_retries)
+    output_ceiling = calls * cfg.max_tokens + ceiling_retries * cfg.retry_max_tokens
 
     probe_cap = audit_cfg.max_contradiction_probes if entries else 0
     reconcile_probes = round(calls * audit_cfg.estimate_reconcile_probes_per_extraction_call)
@@ -270,7 +430,7 @@ def estimate_extraction(char_counts: Sequence[int]) -> AuditEstimate:
     verify_output = verify_cap * audit_cfg.estimate_verify_output_tokens
 
     wall_seconds = (
-        (calls + retries) * audit_cfg.estimate_seconds_per_extraction_call
+        expected_out / audit_cfg.estimate_extraction_output_tokens_per_second
         + probes * audit_cfg.estimate_seconds_per_probe
         + verify_cap * audit_cfg.estimate_seconds_per_verification
     )
@@ -288,7 +448,9 @@ def estimate_extraction(char_counts: Sequence[int]) -> AuditEstimate:
 
     return AuditEstimate(
         entries=entries,
-        total_chars=total,
+        already_captured=already_captured,
+        total_chars=read_chars,
+        unread_chars=unread_chars,
         estimated_llm_calls=calls,
         estimated_tokens=source_tokens_total,
         extraction_model=extraction_sel.model,
@@ -296,11 +458,15 @@ def estimate_extraction(char_counts: Sequence[int]) -> AuditEstimate:
         input_tokens=input_tokens,
         retry_input_tokens=retry_input,
         expected_retries=retries,
-        output_tokens_per_call=per_call,
-        output_tokens_per_call_source=per_call_source,
+        output_tokens_per_call_base=round(output_model.base),
+        output_tokens_per_source_char=output_model.per_char,
+        output_basis=output_model.basis,
         output_tokens_low=output_low,
+        output_tokens_expected=round(expected_out),
         output_tokens_high=output_high,
         output_tokens_ceiling=output_ceiling,
+        ceiling_retries=ceiling_retries,
+        calls_at_risk_of_truncation=sum(1 for c in high if c.cut),
         probe_cap=probe_cap,
         reconcile_probes=reconcile_probes,
         probe_input_tokens=probe_input,
@@ -329,6 +495,98 @@ def estimate_extraction(char_counts: Sequence[int]) -> AuditEstimate:
         ),
         unpriced=unpriced,
     )
+
+
+@dataclass(frozen=True)
+class PriorCapture:
+    """What the store already holds for one harvested source, gathered before deposit."""
+
+    mutability: Mutability
+    #: Content hash of the entry's newest snapshot.
+    latest_hash: str
+    #: Whether a snapshot the run would extract is waiting: the newest one for
+    #: a collapsing ``MUTABLE`` entry, any one otherwise.
+    pending: bool
+    #: Text of the newest COMPLETE snapshot of an ``APPEND_ONLY`` entry, the
+    #: base its next read is a delta from; ``None`` otherwise.
+    append_base: str | None = None
+
+
+@dataclass(frozen=True)
+class ExtractionPlan:
+    """Sizes of the sources a harvest run will extract, and how many it will skip."""
+
+    char_counts: list[int]
+    already_captured: int
+
+
+def extraction_chars(text: str, prior: PriorCapture | None) -> int:
+    """Characters the run will read from ``text``; 0 when it will not extract it.
+
+    Pure. A new source is read whole. An unchanged one (its newest snapshot
+    already carries this content) is deposited as a no-op, so it is extracted
+    only when a snapshot of it is still waiting. An ``APPEND_ONLY`` source that
+    grew past its last extracted text is read as the new tail only. A changed
+    ``MUTABLE`` source is counted whole, though carry-forward may reuse the
+    chunks an edit left alone, so it leans high.
+    """
+    if prior is None:
+        return len(text)
+    unchanged = prior.latest_hash == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if unchanged and not prior.pending:
+        return 0
+    base = prior.append_base
+    if base is not None and text.startswith(base):
+        return len(text) - len(base)
+    return len(text)
+
+
+async def plan_extraction(
+    session: AsyncSession, sources: Sequence[tuple[str, str]]
+) -> ExtractionPlan:
+    """Size what a harvest of ``(uri_r, text)`` sources will extract, before depositing it.
+
+    ``run_memory_audit`` extracts only the PENDING snapshots of the harvested
+    entries, so an unchanged file whose snapshot is COMPLETE costs nothing and
+    is counted in ``already_captured`` instead (read-only; nothing is written).
+    """
+    collapse = get_config().extraction.collapse_superseded_pending
+    counts: list[int] = []
+    skipped = 0
+    for uri_r, text in sources:
+        prior: PriorCapture | None = None
+        entry = await get_entry_by_uri(session, uri_r)
+        snaps = await list_snapshots_for_entry(session, entry.entry_id) if entry else []
+        if entry is not None and snaps:
+            latest = max(snaps, key=lambda s: s.captured_at)
+            pending = (
+                latest.extraction_status is ExtractionStatus.PENDING
+                if collapse and entry.mutability is Mutability.MUTABLE
+                else any(s.extraction_status is ExtractionStatus.PENDING for s in snaps)
+            )
+            append_base: str | None = None
+            if entry.mutability is Mutability.APPEND_ONLY:
+                complete = [s for s in snaps if s.extraction_status is ExtractionStatus.COMPLETE]
+                if complete:
+                    newest = max(complete, key=lambda s: s.captured_at)
+                    try:
+                        append_base = load_blob(newest.content_hash).decode(
+                            "utf-8", errors="replace"
+                        )
+                    except FileNotFoundError:
+                        append_base = None
+            prior = PriorCapture(
+                mutability=entry.mutability,
+                latest_hash=latest.content_hash,
+                pending=pending,
+                append_base=append_base,
+            )
+        chars = extraction_chars(text, prior)
+        if chars > 0:
+            counts.append(chars)
+        else:
+            skipped += 1
+    return ExtractionPlan(char_counts=counts, already_captured=skipped)
 
 
 def _per_mtok(price: TokenPrice) -> str:
@@ -411,6 +669,10 @@ def render_cost(estimate: AuditEstimate) -> str:
     )
 
 
+def _entries(n: int) -> str:
+    return f"{n} entr{'y' if n == 1 else 'ies'}"
+
+
 def render_estimate(estimate: AuditEstimate) -> str:
     """Human rendering of the §4 estimate (always printed pre-extraction)."""
     config = get_config()
@@ -423,29 +685,40 @@ def render_estimate(estimate: AuditEstimate) -> str:
         if retries
         else ""
     )
+    skipped = (
+        f" ({_entries(estimate.already_captured)} already captured, skipped)"
+        if estimate.already_captured
+        else ""
+    )
+    unread = (
+        f" {estimate.unread_chars:,} characters past extraction.max_llm_calls_per_source "
+        "are not read."
+        if estimate.unread_chars
+        else ""
+    )
     lines = [
-        f"Estimate: {estimate.entries} entr{'y' if estimate.entries == 1 else 'ies'} to "
-        f"extract → ~{estimate.estimated_llm_calls} extraction LLM call(s){retry_clause}, "
-        f"~{estimate.estimated_tokens:,} tokens of source text. Contradiction probes are "
+        f"Estimate: {_entries(estimate.entries)} to extract{skipped} → "
+        f"~{estimate.estimated_llm_calls} extraction LLM call(s){retry_clause}, "
+        f"~{estimate.estimated_tokens:,} tokens of source text.{unread} Contradiction probes are "
         f"similarity-gated and scale with near-duplicate density, not n²: up to "
         f"{estimate.probe_cap} in the audit (audit.max_contradiction_probes) and "
         f"~{estimate.reconcile_probes} expected while extraction reconciles new beliefs"
         + (
             f", and up to {estimate.verify_cap} second reading(s) of the audit's flags "
-            f"(audit.max_contradiction_verifications). "
+            f"(audit.max_contradiction_verifications)."
             if estimate.verify_cap
-            else ". "
-        )
-        + "Already-captured content is skipped automatically.",
+            else "."
+        ),
         render_cost(estimate),
     ]
     elapsed = time_summary(estimate)
     if elapsed is not None:
         lines.append(
             f"Time: {elapsed}. Calls run one at a time, at "
-            f"~{audit_cfg.estimate_seconds_per_extraction_call:g} s per extraction call and "
-            f"~{audit_cfg.estimate_seconds_per_probe:g} s per probe "
-            f"(audit.estimate_seconds_per_extraction_call, audit.estimate_seconds_per_probe)"
+            f"~{audit_cfg.estimate_extraction_output_tokens_per_second:g} output tokens a "
+            f"second for extraction and ~{audit_cfg.estimate_seconds_per_probe:g} s per probe "
+            f"(audit.estimate_extraction_output_tokens_per_second, "
+            f"audit.estimate_seconds_per_probe)"
             + (
                 f", ~{audit_cfg.estimate_seconds_per_verification:g} s per second reading "
                 f"(audit.estimate_seconds_per_verification)."
@@ -454,20 +727,28 @@ def render_estimate(estimate: AuditEstimate) -> str:
             )
         )
     ceiling = f"{estimate.estimated_llm_calls} call(s) × extraction.max_tokens {cfg.max_tokens:,}"
-    ceiling_retries = math.ceil(estimate.expected_retries)
-    if ceiling_retries:
+    if estimate.ceiling_retries:
         ceiling += (
-            f", plus {ceiling_retries} × extraction.retry_max_tokens {cfg.retry_max_tokens:,}"
+            f", plus {estimate.ceiling_retries} × extraction.retry_max_tokens "
+            f"{cfg.retry_max_tokens:,}"
         )
     spread = round(audit_cfg.estimate_output_spread * 100)
+    truncation = (
+        f" {estimate.calls_at_risk_of_truncation} call(s) may be cut even at "
+        "extraction.retry_max_tokens, losing the claims past the cut."
+        if estimate.calls_at_risk_of_truncation
+        else ""
+    )
     lines.append(
         f"  Tokens: ~{estimate.input_tokens + estimate.retry_input_tokens:,} extraction "
         f"input (source plus the per-call prompt, retries included); "
         f"~{estimate.output_tokens_low:,} to ~{estimate.output_tokens_high:,} output "
-        f"expected (~{estimate.output_tokens_per_call:,} per call for "
-        f"{estimate.extraction_model}, {estimate.output_tokens_per_call_source}, "
-        f"±{spread}%), at most {estimate.output_tokens_ceiling:,} ({ceiling}); "
-        f"up to {estimate.probe_cap + estimate.reconcile_probes} probe(s) at "
+        f"expected, assuming ~{estimate.output_tokens_per_source_char:.1f} output tokens per "
+        f"source character plus ~{estimate.output_tokens_per_call_base:,} per call for "
+        f"{estimate.extraction_model} ({estimate.output_basis}; ±{spread}%, a call past "
+        f"extraction.max_tokens billed in full and retried), at most "
+        f"{estimate.output_tokens_ceiling:,} ({ceiling}).{truncation} "
+        f"Up to {estimate.probe_cap + estimate.reconcile_probes} probe(s) at "
         f"~{audit_cfg.estimate_probe_input_tokens} in / "
         f"{audit_cfg.estimate_probe_output_tokens} out tokens each"
         + (

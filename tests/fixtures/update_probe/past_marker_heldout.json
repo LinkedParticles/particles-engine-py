@@ -1,0 +1,25 @@
+{
+  "about": "Held-out pairs for the past-value fallback that replaces the prompt guard, registered before any run: no model has been asked any of these rows. The fallback keeps today's gate (contradiction YES and a settled CHANGES) for a pair whose older claim carries a past-value marker, and lets the settled CHANGES decide alone otherwise. The marker list was written after the 2026-10-12 replays, so it is scored here on wording none of those sets used: other places, domains and date forms. 'past-marked' rows carry a marker in a form the earlier sets did not (sentence-initial 'Until 2024', 'formerly', 'no longer', 'Back in 2022', 'had been', a restatement's 'As of <date>, when', 'previously', 'Before 2025', 'used to') and must not be retired. 'present-dated' rows are present-tense claims carrying a date, one with an 'until' that names no year, and must still be retired. 'past-unmarked' rows record a past value in a form the marker does not catch; they are printed, never barred, and show what the fallback leaves to the update probe alone. Bars, from the acceptance plan (item 3d): on each model, fallback gate, shipped prompt, at least 4 of the 5 'present-dated' rows retired in two of three samples, and no retirement in any 'past-marked' sample.",
+  "labelled_by": "proposed and registered on 2026-10-12 by the session that revised the record, before any run. Labels to be confirmed by the owner before the record activates; a label the owner changes after the run is reported under both labellings.",
+  "rows": [
+    {"id": "ferry", "class": "past-marked", "older": "Until 2024 the user commuted by ferry.", "newer": "The user cycles to work, per a note from 2026-05-03.", "expected": "not_changes"},
+    {"id": "rowing-club", "class": "past-marked", "older": "The user was formerly a member of the Riverside rowing club.", "newer": "The user rows with the Harbour Rowing Club (noted 2026-04-11).", "expected": "not_changes"},
+    {"id": "bees", "class": "past-marked", "older": "The user no longer keeps bees.", "newer": "The user keeps chickens, as of 2026-06-01.", "expected": "not_changes"},
+    {"id": "bare-metal", "class": "past-marked", "older": "Back in 2022 the project was deployed on bare-metal servers.", "newer": "The project runs on Kubernetes (noted 2026-03-14).", "expected": "not_changes"},
+    {"id": "porto-alegre", "class": "past-marked", "older": "The user had been renting in Porto Alegre before moving abroad.", "newer": "The user rents a flat in Montevideo, per a note from 2026-07-20.", "expected": "not_changes"},
+    {"id": "night-shifts", "class": "past-marked", "older": "As of 2025-11-03, when the user worked night shifts, the user slept until noon.", "newer": "The user works day shifts at the depot (noted 2026-02-09).", "expected": "not_changes"},
+    {"id": "panda", "class": "past-marked", "older": "The user previously drove a Fiat Panda.", "newer": "The user drives a Skoda Fabia (noted 2026-05-30).", "expected": "not_changes"},
+    {"id": "on-call", "class": "past-marked", "older": "Before 2025 the team's on-call rota was weekly.", "newer": "The team's on-call rota is fortnightly, per a note from 2026-04-02.", "expected": "not_changes"},
+    {"id": "piano", "class": "past-marked", "older": "The user used to teach piano on weekends.", "newer": "The user tutors maths on Saturdays (noted 2026-03-21).", "expected": "not_changes"},
+
+    {"id": "cork-room", "class": "present-dated", "older": "The user is staying in a rented room in Cork until the end of June (noted 2026-03-01).", "newer": "The user signed a permanent lease in Cork on 2026-07-02 and lives there now.", "expected": "changes"},
+    {"id": "broadband", "class": "present-dated", "older": "The user's internet plan is 100 Mbps, as of 2026-01-10.", "newer": "The user upgraded their internet plan to 500 Mbps on 2026-05-05.", "expected": "changes"},
+    {"id": "planning-tool", "class": "present-dated", "older": "The team uses Trello for planning (noted 2026-02-02).", "newer": "The team moved its planning from Trello to Asana on 2026-06-18.", "expected": "changes"},
+    {"id": "dentist", "class": "present-dated", "older": "The user's dentist is Dr. Byrne, per a note from 2026-01-25.", "newer": "The user switched to Dr. Okafor as their dentist on 2026-04-30.", "expected": "changes"},
+    {"id": "galway", "class": "present-dated", "older": "The user lives in Galway (noted 2026-02-14).", "newer": "Since July 2026 the user has lived in Limerick.", "expected": "changes"},
+
+    {"id": "rent-in-2023", "class": "past-unmarked", "older": "In 2023 the user's rent was 640 euros a month.", "newer": "The user's rent is 720 euros a month (noted 2026-06-12).", "expected": "report"},
+    {"id": "first-car", "class": "past-unmarked", "older": "The user's first car was a Renault Clio.", "newer": "The user drives a Skoda Fabia (noted 2026-05-30).", "expected": "report"},
+    {"id": "cork-gp", "class": "past-unmarked", "older": "When the user lived in Cork, their GP was Dr. Walsh.", "newer": "The user lives in Limerick, as of 2026-04-15.", "expected": "report"}
+  ]
+}

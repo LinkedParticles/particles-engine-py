@@ -122,7 +122,9 @@ class _SlotProbe:
 
 @pytest.fixture
 def scripted_probe() -> Generator[None, None, None]:
-    with override_providers({"semantic_lint": _SlotProbe()}):
+    # ``verification`` serves the update probe's second reading.
+    probe = _SlotProbe()
+    with override_providers({"semantic_lint": probe, "verification": probe}):
         yield
 
 

@@ -1,0 +1,39 @@
+{
+ "description": "Known-answer pairs for the semantic_lint contradiction probe, reconstructed to the specification: 10 clear contradictions, 10 clear compatibles, 10 subtle (temporal qualification, different subject, scope). The originals were never committed; this set replaces them and is versioned so later runs measure the same pairs.",
+ "label_meaning": "contradicts: both claims cannot be true at once, read the way the production probe instruction defines it",
+ "authored": "2026-10-07",
+ "pairs": [
+  {"id": "c01", "tier": "clear_contradiction", "a": "The Eiffel Tower is located in Paris.", "b": "The Eiffel Tower is located in Rome.", "contradicts": true},
+  {"id": "c02", "tier": "clear_contradiction", "a": "The default embedding dimension in the store is 384.", "b": "The default embedding dimension in the store is 1536.", "contradicts": true},
+  {"id": "c03", "tier": "clear_contradiction", "a": "Water boils at 100 degrees Celsius at sea level.", "b": "At sea level, water boils at 70 degrees Celsius.", "contradicts": true},
+  {"id": "c04", "tier": "clear_contradiction", "a": "The project is licensed under Apache-2.0.", "b": "The project is licensed under GPL-3.0 only and under no other licence.", "contradicts": true},
+  {"id": "c05", "tier": "clear_contradiction", "a": "Alice has never visited Japan.", "b": "Alice visited Tokyo last spring.", "contradicts": true},
+  {"id": "c06", "tier": "clear_contradiction", "a": "The API server requires authentication on every endpoint.", "b": "The API server's /query endpoint can be called without any authentication.", "contradicts": true},
+  {"id": "c07", "tier": "clear_contradiction", "a": "Mount Everest is the tallest mountain above sea level on Earth.", "b": "K2 is taller above sea level than Mount Everest.", "contradicts": true},
+  {"id": "c08", "tier": "clear_contradiction", "a": "The meeting was cancelled and did not take place.", "b": "The meeting took place as scheduled and ran for two hours.", "contradicts": true},
+  {"id": "c09", "tier": "clear_contradiction", "a": "The SDK requires Python 3.11 or newer.", "b": "The SDK runs on Python 3.8.", "contradicts": true},
+  {"id": "c10", "tier": "clear_contradiction", "a": "Bob is allergic to peanuts.", "b": "Bob has no food allergies of any kind.", "contradicts": true},
+
+  {"id": "n01", "tier": "clear_compatible", "a": "The Eiffel Tower is located in Paris.", "b": "The Eiffel Tower is in the French capital.", "contradicts": false},
+  {"id": "n02", "tier": "clear_compatible", "a": "The store uses SQLite by default.", "b": "The store uses SQLite by default, through the aiosqlite driver.", "contradicts": false},
+  {"id": "n03", "tier": "clear_compatible", "a": "Alice speaks French.", "b": "Alice speaks Spanish.", "contradicts": false},
+  {"id": "n04", "tier": "clear_compatible", "a": "The project uses Pydantic v2 for schema validation.", "b": "The project uses SQLAlchemy 2.x for storage.", "contradicts": false},
+  {"id": "n05", "tier": "clear_compatible", "a": "The user owns a dog.", "b": "The user owns a golden retriever named Max.", "contradicts": false},
+  {"id": "n06", "tier": "clear_compatible", "a": "Confidence values are immutable after a particle is created.", "b": "A particle's stored confidence is never modified once it exists.", "contradicts": false},
+  {"id": "n07", "tier": "clear_compatible", "a": "The conference is held in Berlin.", "b": "The conference attracts about 2,000 attendees each year.", "contradicts": false},
+  {"id": "n08", "tier": "clear_compatible", "a": "Lint scans for staleness and contradictions.", "b": "Lint checks particles for staleness.", "contradicts": false},
+  {"id": "n09", "tier": "clear_compatible", "a": "The user runs every morning.", "b": "The user enjoys cooking Italian food.", "contradicts": false},
+  {"id": "n10", "tier": "clear_compatible", "a": "Mercury is the closest planet to the Sun.", "b": "Mercury has no moons.", "contradicts": false},
+
+  {"id": "s01", "tier": "subtle", "trap": "temporal_qualification", "a": "In 2019, the company's CEO was Maria Lopez.", "b": "The company's current CEO is David Chen.", "contradicts": false},
+  {"id": "s02", "tier": "subtle", "trap": "temporal_qualification", "a": "The user lived in Boston until 2021.", "b": "The user now lives in Denver.", "contradicts": false},
+  {"id": "s03", "tier": "subtle", "trap": "temporal_qualification", "a": "Version 1.0 of the SDK did not support vision input.", "b": "The SDK supports vision input as of version 1.60.", "contradicts": false},
+  {"id": "s04", "tier": "subtle", "trap": "different_subject", "a": "Paris is the capital of France.", "b": "Paris is a small city in Lamar County, Texas.", "contradicts": false},
+  {"id": "s05", "tier": "subtle", "trap": "different_subject", "a": "The Anki exporter writes one card per particle.", "b": "The Obsidian exporter writes one note per subject.", "contradicts": false},
+  {"id": "s06", "tier": "subtle", "trap": "different_subject", "a": "John Smith, the physicist, was born in 1950.", "b": "John Smith, the footballer, was born in 1988.", "contradicts": false},
+  {"id": "s07", "tier": "subtle", "trap": "same_time_numeric", "a": "As of March 2024, the team had 12 members.", "b": "In March 2024, the team had 20 members.", "contradicts": true},
+  {"id": "s08", "tier": "subtle", "trap": "scope_negation", "a": "All endpoints except /health require an API key.", "b": "The /health endpoint requires an API key.", "contradicts": true},
+  {"id": "s09", "tier": "subtle", "trap": "implied_exclusive", "a": "The user's only car is a 2015 Honda Civic.", "b": "The user drives a Tesla Model 3 that they own.", "contradicts": true},
+  {"id": "s10", "tier": "subtle", "trap": "temporal_overlap", "a": "The user worked at Google from 2015 to 2020 and at no other employer during that time.", "b": "The user worked full-time at Microsoft in 2017.", "contradicts": true}
+ ]
+}

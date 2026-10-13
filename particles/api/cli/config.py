@@ -52,8 +52,35 @@ def config_validate_cmd() -> None:
     else:
         typer.echo(f"Config valid — {path}")
 
+    errors = _echo_network_posture()
+
     for line in blob_reachability_lines():
         typer.echo(line, err=True)
+
+    if errors:
+        raise typer.Exit(1)
+
+
+def _echo_network_posture() -> int:
+    """Print the ``network.egress`` block; return the error count.
+
+    Under ``open`` it is one line. Under a refusing posture every configured
+    destination is listed: allowed ones on stdout, refusals as warnings on
+    stderr, and the refusals that make the install unusable (the remote
+    engine, the store) as errors that fail the command.
+    """
+    from particles.network_posture import posture
+
+    report = posture()
+    typer.echo(report.header())
+    if report.posture == "open":
+        return 0
+    for item in report.items:
+        if item.severity == "ok":
+            typer.echo(f"  {item.line()}")
+        else:
+            typer.echo(f"  {item.line()}", err=True)
+    return len(report.errors)
 
 
 def blob_reachability_lines() -> list[str]:

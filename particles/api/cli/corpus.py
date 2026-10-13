@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
+from particles.api.cli._progress import confirm
 from particles.db import session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
@@ -395,7 +396,7 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
         typer.echo(strip_line)
 
         if not yes:
-            typer.confirm("Delete this entry and all its data?", abort=True)
+            confirm("Delete this entry and all its data?", abort=True)
 
         result = await delete_entry(session, entry_id)
         await session.commit()
@@ -501,7 +502,7 @@ async def _corpus_retract(
         typer.echo("Nothing to retract.")
         return
     if not yes:
-        typer.confirm(
+        confirm(
             f"Retract {len(plan.retracted_ids)} particle(s) from this source?",
             abort=True,
         )
@@ -587,7 +588,7 @@ async def _corpus_prune_orphans(yes: bool) -> None:
             return
 
         if not yes:
-            typer.confirm(f"Delete {total} orphaned rows?", abort=True)
+            confirm(f"Delete {total} orphaned rows?", abort=True)
 
         await session.execute(delete(ParticleSubjectRow).where(dangling_join_q))
         await session.execute(delete(ParticleTagEdgeRow).where(dangling_tag_q))
@@ -688,7 +689,7 @@ async def _corpus_refresh_backfill(yes: bool) -> None:
     )
 
     if not yes:
-        typer.confirm(f"Demote {preview.demoted} particle(s)?", abort=True)
+        confirm(f"Demote {preview.demoted} particle(s)?", abort=True)
 
     async with session_scope(write=True) as session:
         applied = await backfill_superseded_generations(session, dry_run=False)
@@ -705,6 +706,7 @@ async def _corpus_refresh(
     from particles.api.cli._remote import ensure_local
     from particles.corpus.refresh_outcome import RefreshOutcome
     from particles.corpus.store import list_refreshable_local_entries, resolve_entry_id
+    from particles.egress import EgressRefused
     from particles.operations.corpus_refresh import refresh_entries
 
     if backfill_cascade:
@@ -731,12 +733,16 @@ async def _corpus_refresh(
             )
             return
 
-        changed = unchanged = missing = 0
+        changed = unchanged = missing = refused = 0
         async for result in refresh_entries(
             session, (target_id for target_id, _uri in targets), force=force
         ):
             short = result.entry_id[:8]
             match result.outcome:
+                case None if isinstance(result.error, EgressRefused):
+                    # A policy, not an outage: counted apart.
+                    refused += 1
+                    typer.echo(f"  {short}  refused (network.egress): {result.error}", err=True)
                 case None:
                     typer.echo(f"  {short}  error: {result.error}", err=True)
                 case RefreshOutcome.MISSING:
@@ -750,9 +756,10 @@ async def _corpus_refresh(
                         f"  {short}  changed → snapshot {(result.snapshot_id or '')[:8]} PENDING"
                     )
 
+    refused_note = f", {refused} refused (network.egress)" if refused else ""
     typer.echo(
         f"\nChecked {len(targets)} local source(s): {changed} changed, "
-        f"{unchanged} unchanged, {missing} missing."
+        f"{unchanged} unchanged, {missing} missing{refused_note}."
     )
     if changed:
         typer.echo("Run `particles extract --all-pending` to turn the new snapshots into beliefs.")

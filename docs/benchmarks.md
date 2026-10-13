@@ -639,7 +639,7 @@ answers:
 | World facts stated twice | 18 | 1 of 54 | 21 | 32 |
 | Values the user updated | 7 | 17 of 21 | 0 | 4 |
 | About the user, not clean updates | 4 | 3 of 12 | 2 | 7 |
-| Abstention claims | 4 | 0 of 9 | 0 | 9 |
+| Abstention claims | 4 (3 replayed) | 0 of 9 | 0 | 9 |
 
 The one "changes" among the world facts is one of three samples on the Razer
 Viper Mini's price. The Kawai ES110 now reads as a fixed slot in every

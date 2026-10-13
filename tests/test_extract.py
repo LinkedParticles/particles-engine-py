@@ -811,7 +811,7 @@ class TestContradictionSignalGate:
     async def test_contradiction_probe_asks_for_the_verdict_last_with_room_to_finish(
         self,
     ) -> None:
-        """claude-haiku-4-5 cut a 120-token reply once; the budget now fits a reason line."""
+        """claude-haiku-4-5 cut a 120-token reply, claude-haiku-5-5 thought through 250."""
         from particles.ingest import pipeline
 
         prompt = pipeline._contradiction_prompt("A.", "B.")
@@ -821,7 +821,7 @@ class TestContradictionSignalGate:
         with patch("particles.llm.complete", complete):
             assert await pipeline._llm_confirms_contradiction("A.", "B.") is True
         assert complete.await_args.kwargs["max_tokens"] == pipeline._CONTRADICTION_PROBE_MAX_TOKENS
-        assert pipeline._CONTRADICTION_PROBE_MAX_TOKENS >= 250
+        assert pipeline._CONTRADICTION_PROBE_MAX_TOKENS >= 4096
         complete.return_value = "REASON: The first claim says the port is 8080 while"
         with patch("particles.llm.complete", complete):
             assert await pipeline._llm_confirms_contradiction("A.", "B.") is None

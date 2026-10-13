@@ -654,7 +654,9 @@ class TestPassComposition:
             "extract",
             "reconcile",
             "reconcile_updates",
+            "paraphrases",  # after the update sweep, before re-anchoring
             "reanchor",  # pass 2c: after both sweeps, before the census
+            "release",  # pass 2d: after every autonomous retirement of the night
             "census",
             "disclose",  # pass 3b: zero-LLM, runs whatever the census did
             "curation",
@@ -780,6 +782,17 @@ class TestDegradation:
         report = await run_consolidation(db_session, structural_only=True)
         assert report.semantic_degraded is True
         assert report.semantic_degraded_reason == "--structural-only"
+
+    @pytest.mark.asyncio
+    async def test_structural_only_skips_the_release_pass(
+        self, db_session: AsyncSession, cycle_env: Path
+    ) -> None:
+        """the release pass is probe-bearing, so a degraded run skips it."""
+        report = await run_consolidation(db_session, structural_only=True)
+        release = next(p for p in report.passes if p.name == "release")
+        assert release.status == "skipped"
+        assert release.detail is not None and "LLM-priced" in release.detail
+        assert report.release is None
 
     @pytest.mark.asyncio
     async def test_structural_only_makes_zero_reconcile_probes(
@@ -1288,6 +1301,32 @@ class TestReconcileProbeCap:
         # The budget went highest-similarity-first (0.95, then 0.90).
         assert probed_contents == ["old claim 0", "old claim 1"]
 
+    def test_capped_update_probe_disclosed_in_report(self) -> None:
+        """The one line an operator reads when the update sweep hit its cap."""
+        report = ConsolidationReport(
+            completed_at=NOW,
+            update_candidate_pairs=1002,
+            update_probes_run=100,
+            update_probe_cap=100,
+            update_cap_reached=True,
+            update_not_reached=902,
+        )
+        rendered = render_consolidation_report(report)
+        assert "update probe: 100 of 1,002 pairs probed; cap 100 reached" in rendered
+        assert "consolidation.max_update_probes" in rendered
+        assert "content cosine, highest first" in rendered
+
+    def test_uncapped_update_probe_is_silent(self) -> None:
+        """Fewer probes than pairs is not by itself a cap: demoted members are skipped."""
+        report = ConsolidationReport(
+            completed_at=NOW,
+            update_candidate_pairs=12,
+            update_probes_run=10,
+            update_probe_cap=100,
+            update_cap_reached=False,
+        )
+        assert "update probe:" not in render_consolidation_report(report)
+
     def test_capped_reconcile_probe_disclosed_in_report(self) -> None:
         report = ConsolidationReport(
             completed_at=NOW,
@@ -1569,7 +1608,7 @@ class TestUtilityBudget:
         assert (report.utility_sessions_mined, report.utility_literal) == (3, 0)
         assert report.utility_behavioural_skipped is not None
         assert report.utility_behavioural_skipped.startswith(
-            "spent US$0.00 of US$0.00; pass 9's use judge skipped"
+            "spent US$0.00 of US$0.00; pass 11's use judge skipped"
         )
 
     @pytest.mark.asyncio
@@ -1650,7 +1689,12 @@ class TestRunRecord:
         assert payload["providers"]["extraction"].startswith("anthropic:")
         # Measured usage rides the run record; the cycle's passes are mocked,
         # so nothing was spent.
-        assert payload["llm_usage"] == {"rows": [], "cost_usd": 0.0, "unpriced": []}
+        assert payload["llm_usage"] == {
+            "rows": [],
+            "cost_usd": 0.0,
+            "unpriced": [],
+            "replayed_cost_usd": 0.0,
+        }
         assert report.llm_usage is not None
         assert "LLM usage: no LLM calls." in render_consolidation_report(report)
         pass_names = [p["name"] for p in payload["passes"]]
@@ -1659,7 +1703,9 @@ class TestRunRecord:
             "extract",
             "reconcile",
             "reconcile_updates",
+            "paraphrases",
             "reanchor",
+            "release",
             "census",
             "disclose",
             "curation",
@@ -1687,6 +1733,57 @@ class TestRunRecord:
             "curation_queue_total",
         ):
             assert key in census
+
+    @pytest.mark.asyncio
+    async def test_update_sweep_cap_in_run_record(
+        self, db_session: AsyncSession, cycle_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The run record states the update sweep's cap and order.
+
+        The counts plus a pointer to the probe-verdict ledger; the probed
+        pairs themselves live there and are not copied into the record.
+        """
+        monkeypatch.setattr(
+            consolidation_mod,
+            "reconcile_updates",
+            AsyncMock(
+                return_value={
+                    "demoted": 4,
+                    "probed": 100,
+                    "update_probed": 9,
+                    "candidate_pairs": 1002,
+                    "probe_cap": 100,
+                    "cap_reached": True,
+                    "not_reached": 902,
+                    "fixed_slot": 1,
+                    "previously_cleared": 7,
+                }
+            ),
+        )
+        report = await run_consolidation(db_session)
+        event = await latest_run_event(db_session)
+        assert event is not None
+        census = (event.payload or {})["census"]
+        assert census["update_candidate_pairs"] == 1002
+        assert census["update_probes_run"] == 100
+        assert census["update_probe_cap"] == 100
+        assert census["update_cap_reached"] is True
+        assert census["update_not_reached"] == 902
+        assert census["update_ordering"] == "content cosine, highest first"
+        assert census["update_probe_ledger"] == {
+            "table": "probe_verdicts",
+            "probe_kind": "update_slot",
+            "also": "reconcile_contradiction",
+            "keyed_by": "content hash of each claim",
+        }
+        assert census["update_demoted"] == 4
+        assert census["update_fixed_slot"] == 1
+        assert census["update_previously_cleared"] == 7
+        # Both probes count as the pass's LLM spend.
+        assert next(p for p in report.passes if p.name == "reconcile_updates").llm_calls == 109
+        rendered = render_consolidation_report(report)
+        assert "update sweep     retired 4 replaced claim(s)" in rendered
+        assert "update probe: 100 of 1,002 pairs probed; cap 100 reached" in rendered
 
     @pytest.mark.asyncio
     async def test_delta_report_against_prior_event(
@@ -2331,6 +2428,46 @@ class TestPassExtractPooled:
             ("c", "snap-5"),
         ]
         assert len(consolidation_mod._one_per_entry(pending, 20)) == 4
+
+    def test_priority_tags_fill_the_cap_first(self) -> None:
+        """Acceptance 4: rule and memory files ahead of the transcript queue."""
+        from particles.config import get_config
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_entries = 3
+        rule = frozenset({"rule-file", "project:x"})
+        memory = frozenset({"memory-file"})
+        pending = [
+            PendingSnapshot("chat-1", "c1", NOW, 0),
+            PendingSnapshot("chat-2", "c2", NOW, 0),
+            PendingSnapshot("rules", "r1", NOW, 0, tags=rule),
+            PendingSnapshot("chat-3", "c3", NOW, 0),
+            PendingSnapshot("memory", "m1", NOW, 0, tags=memory),
+        ]
+
+        pooled = consolidation_mod._extract_selection(pending, batching=True)
+        serial = consolidation_mod._extract_selection(pending, batching=False)
+
+        assert pooled == [("rules", "r1"), ("memory", "m1"), ("chat-1", "c1")]
+        assert serial == pooled
+
+    def test_empty_priority_tags_keeps_the_listing_order(self) -> None:
+        """Acceptance 4: ``priority_tags: []`` restores plain longest-owed order."""
+        from particles.config import get_config
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_entries = 2
+        get_config().consolidation.priority_tags = []
+        pending = [
+            PendingSnapshot("chat-1", "c1", NOW, 0),
+            PendingSnapshot("rules", "r1", NOW, 0, tags=frozenset({"rule-file"})),
+        ]
+
+        assert consolidation_mod._extract_selection(pending, batching=True) == [
+            ("chat-1", "c1"),
+            ("rules", "r1"),
+        ]
+        assert consolidation_mod._prioritised(pending) == pending
 
     @pytest.mark.asyncio
     async def test_pass_extract_resets_a_stranded_claim_and_extracts_it(
@@ -3197,7 +3334,7 @@ class TestSpendBudget:
         assert kwargs["semantic"] is False
         assert kwargs["contradiction_probe"] is None
         assert report.census_probe_skipped is not None
-        assert "pass 6's contradiction probe skipped" in report.census_probe_skipped
+        assert "pass 8's contradiction probe skipped" in report.census_probe_skipped
 
         # The zero-LLM passes are never budgeted.
         for name in ("disclose", "curation", "projection"):

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -663,6 +664,59 @@ class TestHookDoctor:
         get_config().claude_code.observer_scope = "project"
         assert "global beliefs plus its project's" in runner.invoke(app, ["hook", "doctor"]).stdout
 
+    def test_warns_about_a_session_end_hook_without_a_timeout(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An untimed SessionEnd hook is cancelled at 1.5 s; the doctor names it, non-fatally."""
+        from particles.api.cli._claude_code import (
+            build_hook_commands,
+            merge_particles_hook_entries,
+            render_settings_json,
+        )
+
+        monkeypatch.chdir(hook_home)  # keep the real repository's settings out of it
+        settings_path = hook_home / ".claude" / "settings.json"
+
+        # The fixture's install is the pre-timeout shape.
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert result.exit_code == 0, result.output
+        assert f"the SessionEnd hook in {settings_path} has no timeout" in result.stdout
+        assert "`particles init claude-code` to add one" in result.stdout
+
+        settings = json.loads(settings_path.read_text())
+        repaired = merge_particles_hook_entries(
+            settings, build_hook_commands("particles", "default")
+        )
+        settings_path.write_text(render_settings_json(repaired))
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert result.exit_code == 0, result.output
+        assert "hook timeout" not in result.stdout
+
+    def test_names_project_flag_for_a_project_scope_install(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests._claude_projects import make_repo
+
+        (hook_home / ".claude" / "settings.json").unlink()
+        repo = make_repo(tmp_path / "src" / "repo")
+        bind_hooks_to_store(repo, "sqlite+aiosqlite:////elsewhere.db")
+        monkeypatch.chdir(repo)
+
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+
+        assert result.exit_code == 0, result.output
+        assert f"the SessionEnd hook in {repo / '.claude' / 'settings.json'}" in result.stdout
+        assert "`particles init claude-code --project` to add one" in result.stdout
+
     def test_unreachable_blobs_warn_without_failing(
         self, runner: CliRunner, cli_db: Path, hook_home: Path
     ) -> None:
@@ -702,3 +756,175 @@ def _add_snapshot_with_blob() -> None:
             await session.commit()
 
     asyncio.run(_add())
+
+
+# ---------------------------------------------------------------------------
+# hook doctor: which install sessions run, and whether it has gone stale
+# ---------------------------------------------------------------------------
+
+_HOOK = (
+    "env PARTICLES_CONFIG=/cfg.yaml DATABASE_URL=sqlite+aiosqlite:////s.db "
+    "/pin/.venv/bin/particles hook stop --store default"
+)
+
+
+class TestParticlesExecutable:
+    def test_reads_the_executable_from_a_hook_command(self) -> None:
+        from particles.api.cli._claude_code import particles_executable
+
+        assert particles_executable(_HOOK) == "/pin/.venv/bin/particles"
+
+    def test_a_uv_run_server_names_no_executable(self) -> None:
+        from particles.api.cli._claude_code import particles_executable
+
+        argv = ["/opt/homebrew/bin/uv", "run", "--project", "/repo", "particles", "mcp", "serve"]
+        assert particles_executable(argv) is None
+        assert particles_executable(["/pin/.venv/bin/particles", "mcp", "serve"]) == (
+            "/pin/.venv/bin/particles"
+        )
+
+    def test_reads_user_scope_mcp_servers(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import particles_mcp_executables
+
+        (tmp_path / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "particles": {
+                            "command": "/pin/.venv/bin/particles",
+                            "args": ["mcp", "serve"],
+                        },
+                        "other": {"command": "/usr/bin/other", "args": []},
+                    }
+                }
+            )
+        )
+        assert particles_mcp_executables(tmp_path) == ["/pin/.venv/bin/particles"]
+
+
+class TestInstallReport:
+    def _report(self, pin: Any = None, **kw: Any) -> str:
+        from particles.api.cli._claude_code import install_report
+
+        args: dict[str, Any] = {
+            "root": Path("/pin"),
+            "version": "1.2.0",
+            "pin": pin,
+            "hook_commands": [_HOOK],
+            "mcp_exes": ["/pin/.venv/bin/particles"],
+            "running_exe": "/pin/.venv/bin/particles",
+        }
+        args.update(kw)
+        return "\n".join(install_report(**args))
+
+    @staticmethod
+    def _pin(branch: str | None = None, tag: str | None = None, newest: str | None = None) -> Any:
+        from particles.api.cli._claude_code import InstallPin
+
+        return InstallPin(branch=branch, tag=tag, newest_tag=newest)
+
+    def test_a_current_pin_is_not_a_warning(self) -> None:
+        out = self._report(self._pin(tag="v1.2.0", newest="v1.2.0"))
+        assert "pinned at v1.2.0, the newest tag fetched" in out
+        assert "⚠" not in out
+
+    def test_a_pin_behind_the_newest_tag_says_how_to_advance(self) -> None:
+        out = self._report(self._pin(tag="v1.2.0", newest="v1.3.0"))
+        assert "⚠ pinned at v1.2.0; v1.3.0 is the newest tag fetched" in out
+        assert "git -C /pin checkout --detach v1.3.0" in out
+        assert "uv sync --project /pin --frozen --no-dev" in out
+
+    def test_a_working_checkout_is_a_warning(self) -> None:
+        out = self._report(self._pin(branch="main", newest="v1.3.0"))
+        assert "⚠ runs from a working checkout (branch main)" in out
+
+    def test_a_detached_commit_that_is_no_tag(self) -> None:
+        assert "not a release tag" in self._report(self._pin(newest="v1.3.0"))
+
+    def test_an_installed_wheel_reports_only_its_version(self) -> None:
+        assert self._report() == "install:        Particles 1.2.0 at /pin"
+
+    def test_mcp_server_and_hooks_on_different_installs(self) -> None:
+        out = self._report(mcp_exes=["/dev/.venv/bin/particles"])
+        assert "⚠ the MCP server runs /dev/.venv/bin/particles but the hooks run" in out
+
+    def test_a_doctor_run_from_another_install_names_the_right_command(self) -> None:
+        out = self._report(self._pin(branch="main"), running_exe="/dev/.venv/bin/particles")
+        assert "not the install the hooks run" in out
+        assert (
+            "env PARTICLES_CONFIG=/cfg.yaml DATABASE_URL=sqlite+aiosqlite:////s.db "
+            "/pin/.venv/bin/particles hook doctor --store default" in out
+        )
+        assert "working checkout" not in out  # the branch is the doctor's, not the hooks'
+
+
+def test_install_pin_reads_a_real_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    import subprocess
+
+    from particles.api.cli.hook import _install_pin
+
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    # A git hook (pre-commit runs this suite) exports GIT_DIR / GIT_INDEX_FILE,
+    # which would aim every command below at the real repository instead of
+    # tmp_path; a run like that once flipped its core.bare. Clear them all.
+    for name in list(os.environ):
+        if name.startswith("GIT_"):
+            monkeypatch.delenv(name)
+    # The developer's own git config may sign every commit and tag.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    for n in (1, 2):
+        git("commit", "-q", "--allow-empty", "-m", str(n))
+        git("tag", f"v1.{n}.0")
+    assert _install_pin(tmp_path).branch == "main"  # type: ignore[union-attr]
+    git("checkout", "-q", "--detach", "v1.1.0")
+    pin = _install_pin(tmp_path)
+    assert pin is not None
+    assert (pin.branch, pin.tag, pin.newest_tag) == (None, "v1.1.0", "v1.2.0")
+    assert _install_pin(tmp_path / "not-a-checkout") is None
+
+
+class TestSchemaCheck:
+    def _stamp(self, db: Path, revision: str) -> None:
+        import sqlite3
+
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS alembic_version (version_num TEXT)")
+            conn.execute("DELETE FROM alembic_version")
+            conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
+
+    def test_a_migration_this_install_does_not_know(self, cli_db: Path) -> None:
+        from particles.api.cli.hook import _check_schema
+
+        self._stamp(cli_db, "f00dfeedbeef")
+        lines = _check_schema("default")
+        assert "⚠ the store is at migration f00dfeedbeef" in lines[0]
+
+    def test_a_known_migration_and_an_unstamped_store_say_nothing(self, cli_db: Path) -> None:
+        from alembic.script import ScriptDirectory
+
+        from particles.api.cli.hook import _check_schema
+        from particles.db import alembic_paths
+
+        assert _check_schema("default") == []  # create_all leaves no alembic_version
+        head = ScriptDirectory(str(alembic_paths()[1])).get_current_head()
+        assert head is not None
+        self._stamp(cli_db, head)
+        assert _check_schema("default") == []
+
+
+def test_doctor_reports_the_install(runner: CliRunner, cli_db: Path, hook_home: Path) -> None:
+    result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+    assert result.exit_code == 0, result.output
+    assert "install:        Particles " in result.stdout

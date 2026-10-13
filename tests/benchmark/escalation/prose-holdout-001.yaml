@@ -1,0 +1,1229 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Held-out prose suite for the chunk-level escalation measurement.
+#
+# ---------------------------------------------------------------------------
+# What this file is for, and why it lives in its own directory
+# ---------------------------------------------------------------------------
+#
+# The 2026-10-08 escalation result (docs/benchmarks/logprob-calibrator-2026-10-07.md)
+# picked its disagreement cut from three tried on the same 18 article-suite
+# chunks it was scored on. The follow-up asks for the cut to be fixed in advance
+# and scored on a suite that played no part in choosing it. This is
+# that suite.
+#
+# It sits in `tests/benchmark/escalation/`, a sibling of `suites/` and
+# `calibration/`, so neither `particles extractor benchmark` nor
+# `particles extractor calibrate` discovers it by default. A suite that a
+# default verb reads is a suite something will eventually be fitted on, and
+# then it is no longer held out. Run it explicitly:
+#
+#   uv run particles extractor benchmark general-extractor \
+#       --suites-dir tests/benchmark/escalation
+#
+# or through `scripts/measure_escalation_holdout.py`, which is what the
+# measurement uses.
+#
+# ---------------------------------------------------------------------------
+# How it was written
+# ---------------------------------------------------------------------------
+#
+# Ten cases, two genres, five each, because the rule under test is known to
+# behave differently on them:
+#
+#   hold-article-*, hold-essay-*, hold-interview-*, hold-report-*
+#       flat prose in the `prose-article-seed-001` register: engineering and
+#       civic reporting, an essay, an interview, a results note. Claims are
+#       stated flatly.
+#   hold-hedged-*
+#       prose in the `prose-calibration-001` register: graded certainty within
+#       the document (a suspected cause beside a confirmed one, a range with
+#       its reason, a disputed attribution, a printed correction, a forecast
+#       conditional on a vote).
+#
+# Every fixture is self-authored synthetic prose. Every company, person, place
+# and figure is invented except where a real place is named for colour.
+# Lengths match the earlier suites (one extraction call per case, well under
+# `extraction.html_chunk_size`), so "a chunk is a case" holds here as it did
+# there.
+#
+# Gold coverage is TOTAL, the `prose-calibration-001` rule: every claim a
+# fixture supports is named, so a spurious label means an over-emission or a
+# mis-read rather than a claim the author chose not to list. `confidence_min`
+# is 0.0 throughout, so the harness's full-match label and the calibration
+# label coincide on this suite.
+#
+# **The gold was frozen before any model read these fixtures.** No run, local
+# or hosted, was looked at while writing it, and no expectation was added or
+# reworded after a run, including the paraphrase twins the sibling suites
+# accumulated from observed emissions. The twins below are the ones an author
+# can foresee (a compound sentence a run may split; a claim a run may state
+# with or without its organisation's name). Adding a twin after seeing a
+# held-out run would tune the labels to the outputs, which is the thing this
+# suite exists to prevent. Any later edit bumps `version` and makes runs
+# against the earlier version incomparable.
+
+suite_id: prose-holdout-001
+name: Held-out prose suite (escalation; total gold coverage)
+version: 0.1.0
+domain: general prose
+source_types: [WEB_PAGE]
+published_by: anthropic/particles-sdk
+published_at: 2026-10-11T00:00:00+00:00
+
+cases:
+  # -------------------------------------------------------------------------
+  # Flat: an engineering post with two before/after metric pairs, a mechanism,
+  # an alternative rejected with its reason, and boilerplate.
+  # -------------------------------------------------------------------------
+  - case_id: hold-article-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000001"
+      captured_at: "2026-09-14T00:00:00+00:00"
+      content_hash: "d8482681a79a0f4de72e1be579af407af8b95165db51c1264815725148404dc9"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-14T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Moving dispatch off the nightly batch — Tamberly Freight Engineering</title>
+      </head>
+      <body>
+        <nav><a href="/">Home</a> · <a href="/blog">Engineering blog</a> · <a href="/jobs">Careers</a></nav>
+
+        <article>
+          <h1>Moving dispatch off the nightly batch</h1>
+          <p class="byline">By Ruth Abernethy-Lowe · 14 September 2026</p>
+
+          <p>Tamberly Freight runs 260 refrigerated trucks out of three depots in
+          the English Midlands. Until July 2026 our route planner ran once a
+          night, at 02:00, and drivers received the next day's routes on a
+          printed manifest.</p>
+
+          <p>In July we replaced the nightly batch with an event-driven planner
+          that re-plans a route whenever an order is added, cancelled or
+          delayed. Each change is published to a message queue, and the planner
+          recomputes only the routes that touch the affected depot.</p>
+
+          <p>The results after eight weeks: the average time from an order being
+          placed to it appearing on a driver's route fell from 19 hours to 40
+          minutes. Empty running, the share of kilometres driven with no load,
+          dropped from 23 percent to 17 percent.</p>
+
+          <p>We considered buying a commercial routing service instead. We
+          rejected it because none of the three vendors we spoke to supported
+          temperature-zone constraints, and every one of our loads has one.</p>
+
+          <p>The migration took a team of five engineers eleven weeks. Printed
+          manifests are still produced as a backup and will be retired in
+          January 2027.</p>
+        </article>
+
+        <footer>© 2026 Tamberly Freight Ltd · <a href="/tags/logistics">logistics</a> · <a href="/rss">RSS</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "Tamberly Freight runs 260 refrigerated trucks."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Tamberly Freight operates out of three depots in the English Midlands."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Tamberly Freight runs 260 refrigerated trucks out of three depots in the English Midlands."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Until July 2026, Tamberly Freight's route planner ran once a night at 02:00."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Until July 2026, Tamberly Freight drivers received the next day's routes on a printed manifest."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "In July 2026, Tamberly Freight replaced its nightly batch route planner with an event-driven planner."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The event-driven planner re-plans a route whenever an order is added, cancelled or delayed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Each order change is published to a message queue."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The planner recomputes only the routes that touch the affected depot."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The average time from an order being placed to it appearing on a driver's route fell from 19 hours to 40 minutes."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Empty running at Tamberly Freight dropped from 23 percent to 17 percent of kilometres driven."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Empty running is the share of kilometres driven with no load."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The results were measured after eight weeks of running the event-driven planner."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Tamberly Freight considered buying a commercial routing service instead of building its own planner."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Tamberly Freight rejected the commercial routing services because none of the three vendors supported temperature-zone constraints."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Every one of Tamberly Freight's loads has a temperature-zone constraint."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The migration took a team of five engineers eleven weeks."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Printed manifests are still produced as a backup."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Printed manifests will be retired in January 2027."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The post was written by Ruth Abernethy-Lowe and published on 14 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Flat: a civic news item. Numbers of several kinds (money, area, counts,
+  # hours, dates) and one attributed quote.
+  # -------------------------------------------------------------------------
+  - case_id: hold-article-002
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000002"
+      captured_at: "2026-09-20T00:00:00+00:00"
+      content_hash: "e6ed893e35218c6816107422afebff8bc8b8de1529e9b5058ad3d2035e7ec9f5"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-20T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Ashcombe Vale library reopens in former bus depot — Vale Courier</title>
+      </head>
+      <body>
+        <nav><a href="/">Vale Courier</a> · <a href="/local">Local</a> · <a href="/subscribe">Subscribe</a></nav>
+
+        <article>
+          <h1>Ashcombe Vale library reopens in former bus depot</h1>
+          <p class="byline">By Tobias Mwangi-Hart · 20 September 2026</p>
+
+          <p>Ashcombe Vale's public library reopened on Saturday in the town's
+          former bus depot on Quarry Road, two years after its old building on
+          the High Street closed because of subsidence.</p>
+
+          <p>The conversion cost £3.4 million, of which £1.1 million came from a
+          national lottery heritage grant and the rest from the district council.
+          The new library has 1,850 square metres of floor space, about twice
+          the old building's, and holds 46,000 books.</p>
+
+          <p>It is open seven days a week, from 9:00 to 20:00 on weekdays and
+          10:00 to 16:00 at weekends. The old library closed on Sundays.</p>
+
+          <p>The former depot's inspection pit has been kept under a glass floor
+          in the children's section. "We wanted people to see what the building
+          used to be," said head librarian Ines Calloway.</p>
+
+          <p>Around 1,200 people visited on the opening day. A café run by the
+          Vale Community Kitchen charity will open in the building in November.</p>
+        </article>
+
+        <footer>© 2026 Vale Courier · <a href="/tags/libraries">libraries</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "Ashcombe Vale's public library reopened in the town's former bus depot on Quarry Road."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ashcombe Vale's old library building on the High Street closed two years earlier because of subsidence."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The library conversion cost £3.4 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "£1.1 million of the conversion cost came from a national lottery heritage grant."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The rest of the conversion cost came from the district council."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The new library has 1,850 square metres of floor space."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The new library's floor space is about twice the old building's."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The new library holds 46,000 books."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The new library is open seven days a week."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The library is open from 9:00 to 20:00 on weekdays and 10:00 to 16:00 at weekends."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The old Ashcombe Vale library closed on Sundays."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The former depot's inspection pit has been kept under a glass floor in the children's section."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ines Calloway is the head librarian of Ashcombe Vale library."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Ines Calloway said the library wanted people to see what the building used to be."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Around 1,200 people visited the library on its opening day."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A café run by the Vale Community Kitchen charity will open in the library building in November."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The article was written by Tobias Mwangi-Hart and published on 20 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Flat: an essay. Facts carried inside narrative and contrast; the author's
+  # evaluative thesis is the one claim that must stay attributed.
+  # -------------------------------------------------------------------------
+  - case_id: hold-essay-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000003"
+      captured_at: "2026-08-30T00:00:00+00:00"
+      content_hash: "5ffeffbd503690fb6a6daa9195dfac6ac86ee086aa8d9c93a9930d7845e76666"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-08-30T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>The bakery that stayed small — Long Table Review</title>
+      </head>
+      <body>
+        <nav><a href="/">Long Table Review</a> · <a href="/essays">Essays</a></nav>
+
+        <article>
+          <h1>The bakery that stayed small</h1>
+          <p class="byline">By Odile Varga · 30 August 2026</p>
+
+          <p>Hearthwell Bakery was founded in 1994 as a cooperative by six
+          bakers who had all been laid off when the Morrow &amp; Pike flour mill
+          in Lindfield closed. Each member put in £2,000, and the cooperative
+          still pays every member the same hourly wage.</p>
+
+          <p>Its rivals grew. Crumbworth, which opened on the same street in
+          1996, now supplies 140 supermarkets from a factory outside the town.
+          Hearthwell has one shop and one oven, a wood-fired oven built in 1994
+          that is still in daily use.</p>
+
+          <p>The cooperative has twice voted against expansion: in 2008, when a
+          supermarket chain offered a supply contract, and in 2019, when the
+          council offered it a second unit at a reduced rent. Both votes were
+          unanimous.</p>
+
+          <p>Membership has grown only from six to eleven in thirty-two years.
+          The shop sells around 900 loaves on a Saturday and closes when they
+          are gone.</p>
+
+          <p>I think Hearthwell's refusal to grow is the reason it has
+          survived; a bakery that cannot be bought cheaply is a bakery nobody
+          tries to buy.</p>
+        </article>
+
+        <footer>© 2026 Long Table Review</footer>
+      </body>
+      </html>
+    expected:
+      - content: "Hearthwell Bakery was founded in 1994 as a cooperative."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Hearthwell Bakery was founded by six bakers who had been laid off when the Morrow & Pike flour mill in Lindfield closed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Each founding member of Hearthwell Bakery put in £2,000."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Hearthwell cooperative pays every member the same hourly wage."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Crumbworth opened on the same street as Hearthwell Bakery in 1996."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Crumbworth now supplies 140 supermarkets from a factory outside the town."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Hearthwell Bakery has one shop and one oven."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Hearthwell's wood-fired oven was built in 1994 and is still in daily use."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Hearthwell cooperative has twice voted against expansion."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "In 2008 the Hearthwell cooperative voted against a supply contract offered by a supermarket chain."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "In 2019 the Hearthwell cooperative voted against taking a second unit offered by the council at a reduced rent."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Both of the Hearthwell cooperative's votes against expansion were unanimous."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Hearthwell's membership has grown from six to eleven in thirty-two years."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Hearthwell shop sells around 900 loaves on a Saturday."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Hearthwell shop closes when its loaves are sold out."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Odile Varga thinks Hearthwell's refusal to grow is the reason it has survived."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The essay was written by Odile Varga and published on 30 August 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Flat: an interview transcript. Attribution is load-bearing; one answer is
+  # speaker-flagged speculation that must stay attributed.
+  # -------------------------------------------------------------------------
+  - case_id: hold-interview-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000004"
+      captured_at: "2026-09-02T00:00:00+00:00"
+      content_hash: "4f72d178c075b8d89af881d1e43ee392441968c73f32e3710da2b8f7c874a94e"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-02T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Five questions for Kofi Ansah-Brandt — Tideline Magazine</title>
+      </head>
+      <body>
+        <nav><a href="/">Tideline</a> · <a href="/interviews">Interviews</a></nav>
+
+        <article>
+          <h1>Five questions for Kofi Ansah-Brandt</h1>
+          <p class="byline">Interview by Saoirse Lindqvist · 2 September 2026</p>
+
+          <p><strong>Q: What does the Corran Point station do?</strong></p>
+          <p><strong>Ansah-Brandt:</strong> We measure sea level and water
+          temperature at the mouth of the Corran estuary every ten minutes. The
+          station has run without a gap since 1987, which makes it the longest
+          unbroken record on this coast.</p>
+
+          <p><strong>Q: What has changed since 1987?</strong></p>
+          <p><strong>Ansah-Brandt:</strong> Mean sea level at the station is 11
+          centimetres higher than it was in 1987. Summer surface temperature has
+          risen by 1.4 degrees over the same period.</p>
+
+          <p><strong>Q: Who runs the station?</strong></p>
+          <p><strong>Ansah-Brandt:</strong> The Corran Estuary Trust owns it. I
+          am the only full-time staff member; two volunteers check the sensors
+          each week.</p>
+
+          <p><strong>Q: What happens next?</strong></p>
+          <p><strong>Ansah-Brandt:</strong> We are adding a salinity sensor in
+          October. My own guess, and it is only a guess, is that the salt wedge
+          is moving further upstream each year, but we have no data to show
+          that yet.</p>
+        </article>
+
+        <footer>© 2026 Tideline Magazine</footer>
+      </body>
+      </html>
+    expected:
+      - content: "The Corran Point station measures sea level and water temperature at the mouth of the Corran estuary every ten minutes."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Corran Point station has run without a gap since 1987."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Corran Point station holds the longest unbroken record on its coast."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Mean sea level at the Corran Point station is 11 centimetres higher than in 1987."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Summer surface temperature at the Corran Point station has risen by 1.4 degrees since 1987."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Corran Estuary Trust owns the Corran Point station."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Kofi Ansah-Brandt is the only full-time staff member at the Corran Point station."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Two volunteers check the Corran Point station's sensors each week."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A salinity sensor is being added to the Corran Point station in October."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Kofi Ansah-Brandt guesses that the salt wedge is moving further upstream each year."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "There is no data yet to show that the salt wedge is moving upstream."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Saoirse Lindqvist interviewed Kofi Ansah-Brandt for Tideline Magazine on 2 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Flat: a results note, numeric-dense. Transcription fidelity is the test.
+  # -------------------------------------------------------------------------
+  - case_id: hold-report-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000005"
+      captured_at: "2026-07-28T00:00:00+00:00"
+      content_hash: "f2389dd989ef8ff928e05f1da526b9bd088d092f949b10aa18400b3add98720b"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-07-28T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>First-half results 2026 — Skerrin Island Ferries</title>
+      </head>
+      <body>
+        <nav><a href="/">Skerrin Island Ferries</a> · <a href="/investors">Investors</a> · <a href="/timetable">Timetable</a></nav>
+
+        <article>
+          <h1>First-half results 2026</h1>
+          <p class="byline">Published 28 July 2026</p>
+
+          <p>Skerrin Island Ferries carried 412,000 passengers in the six months
+          to 30 June 2026, up from 371,000 in the same period of 2025. Vehicle
+          crossings rose from 58,000 to 63,500.</p>
+
+          <p>Revenue for the half was £9.8 million and operating profit £1.2
+          million. Fuel was the largest single cost at £2.6 million.</p>
+
+          <p>The new hybrid vessel MV Aird Mhor entered service on 3 March and
+          now makes eight of the eighteen daily crossings. On those crossings it
+          uses 31 percent less diesel than the vessel it replaced.</p>
+
+          <p>Punctuality, measured as departures within five minutes of the
+          timetable, was 94.2 percent. Forty-one sailings were cancelled for
+          weather, against 66 in the first half of 2025.</p>
+
+          <p>The board has approved an order for a second hybrid vessel, due in
+          2028.</p>
+        </article>
+
+        <footer>© 2026 Skerrin Island Ferries plc · <a href="/contact">Contact</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "Skerrin Island Ferries carried 412,000 passengers in the six months to 30 June 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Skerrin Island Ferries carried 371,000 passengers in the first half of 2025."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Skerrin Island Ferries' passenger numbers rose from 371,000 to 412,000 between the first halves of 2025 and 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Skerrin Island Ferries' vehicle crossings rose from 58,000 to 63,500."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Skerrin Island Ferries' revenue for the first half of 2026 was £9.8 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Skerrin Island Ferries' operating profit for the first half of 2026 was £1.2 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Fuel was Skerrin Island Ferries' largest single cost at £2.6 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The hybrid vessel MV Aird Mhor entered service on 3 March 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "MV Aird Mhor makes eight of the eighteen daily crossings."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Skerrin Island Ferries operates eighteen daily crossings."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "MV Aird Mhor uses 31 percent less diesel than the vessel it replaced."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Skerrin Island Ferries' punctuality was 94.2 percent in the first half of 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Punctuality is measured as departures within five minutes of the timetable."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Forty-one sailings were cancelled for weather in the first half of 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Sixty-six sailings were cancelled for weather in the first half of 2025."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The Skerrin Island Ferries board has approved an order for a second hybrid vessel, due in 2028."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The results were published on 28 July 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Hedged: a preliminary incident review. A confirmed timeline beside a
+  # suspected cause, a ruled-out cause, and an open question.
+  # -------------------------------------------------------------------------
+  - case_id: hold-hedged-incident-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000006"
+      captured_at: "2026-09-08T00:00:00+00:00"
+      content_hash: "148f4ab913e3391996c72576c67a05347a5534463b895a537284d7e89f521aff"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-08T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Preliminary review: payments outage of 4 September — Quillon status</title>
+      </head>
+      <body>
+        <nav><a href="/">Quillon status</a> · <a href="/history">Incident history</a></nav>
+
+        <article>
+          <h1>Preliminary review: payments outage of 4 September</h1>
+          <p class="byline">Quillon Site Reliability · 8 September 2026</p>
+
+          <p>Card payments through Quillon failed for 47 minutes on 4 September,
+          from 14:12 to 14:59 UTC. That window is confirmed from our gateway
+          logs. Roughly 18,000 transactions were declined; the exact figure will
+          change as merchants report retries.</p>
+
+          <p>We do not yet know the cause. Our leading hypothesis is that a
+          certificate rotation on the card-network link at 14:10 left one of
+          three gateway nodes presenting an expired certificate. We think this
+          is likely but have not reproduced it.</p>
+
+          <p>We have ruled out a database fault: the payments database showed
+          normal latency throughout.</p>
+
+          <p>It is unclear why traffic was not drained from the affected node
+          automatically. The health check may have been testing the wrong
+          endpoint, but we have not confirmed that.</p>
+
+          <p>A full review will be published by 30 September. No customer card
+          data was exposed.</p>
+        </article>
+
+        <footer>© 2026 Quillon Payments · <a href="/subscribe">Subscribe to updates</a></footer>
+      </body>
+      </html>
+    expected:
+      - content: "Card payments through Quillon failed for 47 minutes on 4 September 2026, from 14:12 to 14:59 UTC."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The outage window is confirmed from Quillon's gateway logs."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Roughly 18,000 transactions were declined during the Quillon outage."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The exact number of declined transactions will change as merchants report retries."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The cause of the Quillon payments outage is not yet known."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Quillon's leading hypothesis is that a certificate rotation on the card-network link at 14:10 left one of three gateway nodes presenting an expired certificate."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A certificate rotation on the card-network link happened at 14:10."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Quillon has not reproduced the expired-certificate hypothesis."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Quillon has three gateway nodes."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Quillon has ruled out a database fault as the cause of the outage."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The payments database showed normal latency throughout the outage."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "It is unclear why traffic was not drained from the affected gateway node automatically."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The health check may have been testing the wrong endpoint, which has not been confirmed."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A full review of the outage will be published by 30 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "No customer card data was exposed in the Quillon outage."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+  # -------------------------------------------------------------------------
+  # Hedged: a field-trial note. Ranges with their reason, an effect that did
+  # not reach significance, a site excluded and why.
+  # -------------------------------------------------------------------------
+  - case_id: hold-hedged-trial-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000007"
+      captured_at: "2026-09-25T00:00:00+00:00"
+      content_hash: "f4b516712786c33897efb0d57035deb1180f4b6d3a48e88804b3d9b4e07624bf"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-25T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Clover undersowing trial: second-year results — Brackenridge Farm Network</title>
+      </head>
+      <body>
+        <nav><a href="/">Brackenridge Farm Network</a> · <a href="/trials">Trials</a></nav>
+
+        <article>
+          <h1>Clover undersowing trial: second-year results</h1>
+          <p class="byline">By Hamish Oyelaran · 25 September 2026</p>
+
+          <p>Nine member farms undersowed winter wheat with white clover in 2025
+          and 2026, leaving a matched strip on each farm without clover. A tenth
+          farm dropped out after its strip flooded in February and is excluded
+          from every figure here.</p>
+
+          <p>Across the nine farms, nitrogen fertiliser use on the clover strips
+          was 28 percent lower. Yields were between 4 percent lower and 2
+          percent higher than the matched strips; the range is wide because two
+          farms harvested late in wet weather.</p>
+
+          <p>Earthworm counts were higher on the clover strips on seven of the
+          nine farms, but the difference was not statistically significant and
+          we would not lean on it.</p>
+
+          <p>Our best estimate is that a farm adopting undersowing would break
+          even within three seasons, though that rests on this year's fertiliser
+          price and could easily be wrong.</p>
+
+          <p>A third year is planned if funding from the regional soils fund is
+          renewed in December.</p>
+        </article>
+
+        <footer>© 2026 Brackenridge Farm Network</footer>
+      </body>
+      </html>
+    expected:
+      - content: "Nine member farms undersowed winter wheat with white clover in 2025 and 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Each farm left a matched strip without clover for comparison."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A tenth farm dropped out of the trial after its strip flooded in February."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The tenth farm is excluded from every figure in the results."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Nitrogen fertiliser use on the clover strips was 28 percent lower across the nine farms."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Yields on the clover strips were between 4 percent lower and 2 percent higher than on the matched strips."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The yield range is wide because two farms harvested late in wet weather."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Earthworm counts were higher on the clover strips on seven of the nine farms."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The difference in earthworm counts was not statistically significant."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The network's best estimate is that a farm adopting undersowing would break even within three seasons."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The break-even estimate rests on this year's fertiliser price and could easily be wrong."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A third year of the trial is planned if funding from the regional soils fund is renewed in December."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The results were written by Hamish Oyelaran and published on 25 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+
+  # -------------------------------------------------------------------------
+  # Hedged: an archive catalogue note. A disputed attribution with each side's
+  # evidence, a dating given as a range, and a provenance gap.
+  # -------------------------------------------------------------------------
+  - case_id: hold-hedged-archive-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000008"
+      captured_at: "2026-08-12T00:00:00+00:00"
+      content_hash: "5ef2b8d89acfa30f4a14ae1e0b2dfbd1512019df8112e0494b367855d8b641db"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-08-12T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Catalogue note: the Penhallow letter (MS 1172) — Dunmere County Record Office</title>
+      </head>
+      <body>
+        <nav><a href="/">Dunmere Record Office</a> · <a href="/catalogue">Catalogue</a></nav>
+
+        <article>
+          <h1>Catalogue note: the Penhallow letter (MS 1172)</h1>
+          <p class="byline">Dunmere County Record Office · 12 August 2026</p>
+
+          <p>MS 1172 is a two-page letter describing the collapse of the Wheal
+          Tressa mine engine house. It is unsigned. It was given to the Record
+          Office in 1964 by a private donor, and nothing is known of where it
+          was before that.</p>
+
+          <p>The letter has traditionally been attributed to the mine captain
+          Josiah Penhallow. The handwriting is close to that of his surviving
+          account books, and the writer refers to "my men". Dr Lowenna Tresize
+          has argued instead that it was written by his daughter, Keziah, who
+          kept the mine's correspondence; she points out that the letter uses
+          spellings found in Keziah's letters and never in Josiah's.</p>
+
+          <p>The Record Office does not take a view. We catalogue the letter as
+          "attributed to Josiah Penhallow, attribution disputed".</p>
+
+          <p>The paper's watermark dates it to between 1838 and 1846. The
+          collapse it describes is usually dated to 1841, but no newspaper report
+          of it has been found.</p>
+        </article>
+
+        <footer>© 2026 Dunmere County Council</footer>
+      </body>
+      </html>
+    expected:
+      - content: "MS 1172 is a two-page letter describing the collapse of the Wheal Tressa mine engine house."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "MS 1172 is unsigned."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "MS 1172 was given to the Dunmere County Record Office in 1964 by a private donor."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Nothing is known of where MS 1172 was before 1964."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "MS 1172 has traditionally been attributed to the mine captain Josiah Penhallow."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Josiah Penhallow was the mine captain of Wheal Tressa."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The handwriting of MS 1172 is close to that of Josiah Penhallow's surviving account books."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The writer of MS 1172 refers to \"my men\"."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Dr Lowenna Tresize has argued that MS 1172 was written by Josiah Penhallow's daughter, Keziah."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Keziah Penhallow kept the mine's correspondence."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "MS 1172 uses spellings found in Keziah Penhallow's letters and never in Josiah's."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Dunmere County Record Office does not take a view on the attribution of MS 1172."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "MS 1172 is catalogued as \"attributed to Josiah Penhallow, attribution disputed\"."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The watermark of MS 1172's paper dates it to between 1838 and 1846."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The collapse of the Wheal Tressa engine house is usually dated to 1841."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "No newspaper report of the Wheal Tressa engine house collapse has been found."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+  # -------------------------------------------------------------------------
+  # Hedged: a budget forecast. Ranges, conditionals on a vote, and a figure the
+  # author calls optimistic.
+  # -------------------------------------------------------------------------
+  - case_id: hold-hedged-forecast-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000009"
+      captured_at: "2026-10-01T00:00:00+00:00"
+      content_hash: "ef7542f2ff3c214383f17be21deac0b5cc9ed3c177f01b89ab3611f00e6a8b34"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-10-01T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Budget outlook 2027–28 — Ferrisford Town Council</title>
+      </head>
+      <body>
+        <nav><a href="/">Ferrisford Town Council</a> · <a href="/budget">Budget</a></nav>
+
+        <article>
+          <h1>Budget outlook 2027–28</h1>
+          <p class="byline">Office of the Town Treasurer · 1 October 2026</p>
+
+          <p>The council's spending this year, 2026–27, is £14.2 million. For
+          2027–28 we forecast a gap of between £0.9 million and £1.6 million
+          between expected spending and expected income.</p>
+
+          <p>The width of that range is mostly the leisure centre. If councillors
+          vote in November to close the Ferrisford pool, the gap would fall by
+          about £0.5 million a year. If they keep it open, the pool's boiler is
+          expected to need replacing within two years, at an estimated cost of
+          £0.8 million.</p>
+
+          <p>We have assumed council tax rises by the maximum 4.99 percent
+          allowed without a local referendum. Each percentage point below that
+          adds roughly £85,000 to the gap.</p>
+
+          <p>Our income forecast assumes car-parking revenue returns to its
+          2019 level. Honestly, we think that is optimistic; it has recovered to
+          about 80 percent of that level so far.</p>
+
+          <p>A draft budget will go to full council on 9 February 2027.</p>
+        </article>
+
+        <footer>© 2026 Ferrisford Town Council</footer>
+      </body>
+      </html>
+    expected:
+      - content: "Ferrisford Town Council's spending in 2026–27 is £14.2 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Ferrisford Town Council forecasts a gap of between £0.9 million and £1.6 million between expected spending and income for 2027–28."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The width of the forecast budget gap range is mostly due to the leisure centre."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Councillors will vote in November on whether to close the Ferrisford pool."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "If councillors vote to close the Ferrisford pool, the budget gap would fall by about £0.5 million a year."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "If the Ferrisford pool is kept open, its boiler is expected to need replacing within two years at an estimated cost of £0.8 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Ferrisford pool's boiler is expected to need replacing within two years."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Replacing the Ferrisford pool's boiler has an estimated cost of £0.8 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "The budget forecast assumes council tax rises by 4.99 percent."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "4.99 percent is the maximum council tax rise allowed without a local referendum."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Each percentage point of council tax rise below 4.99 percent adds roughly £85,000 to the budget gap."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The income forecast assumes car-parking revenue returns to its 2019 level."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The Town Treasurer thinks the assumption that car-parking revenue returns to its 2019 level is optimistic."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Car-parking revenue has recovered to about 80 percent of its 2019 level so far."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A draft budget will go to full council on 9 February 2027."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+
+  # -------------------------------------------------------------------------
+  # Hedged: a news item with a printed correction and two accounts that
+  # disagree. The corrected figure supersedes the original; attribution of the
+  # disputed account is load-bearing.
+  # -------------------------------------------------------------------------
+  - case_id: hold-hedged-correction-001
+    source_snapshot:
+      snapshot_id: "d0000000-0000-0000-0000-000000000010"
+      captured_at: "2026-09-17T00:00:00+00:00"
+      content_hash: "39bc8d34ad45a05c65b0f7427d5fd2ae3a078050dbf2aa9c58a03b66c52269ca"
+      warc_record_type: RESPONSE
+      extraction_status: PENDING
+      content_published_at: "2026-09-17T00:00:00+00:00"
+    inline_content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <title>Harbour wall repair delayed again — Calderhaven Gazette</title>
+      </head>
+      <body>
+        <nav><a href="/">Calderhaven Gazette</a> · <a href="/news">News</a></nav>
+
+        <article>
+          <h1>Harbour wall repair delayed again</h1>
+          <p class="byline">By Nkechi Halvorsen · 17 September 2026</p>
+
+          <p class="correction"><em>Correction, 18 September: an earlier version
+          of this article said the repair would cost £2.1 million. The
+          contract value is £1.7 million; £2.1 million was the original
+          estimate.</em></p>
+
+          <p>Repairs to Calderhaven's north harbour wall, damaged in the storm of
+          January 2026, will not start until spring 2027, the harbour authority
+          said on Tuesday. Work had been due to start this month.</p>
+
+          <p>The authority blamed the delay on a shortage of the granite needed
+          to match the original wall. The contractor, Pendry Marine, said
+          instead that the authority had not yet approved the final design, and
+          that granite was available.</p>
+
+          <p>Fishing boats have been unable to use the north berths since
+          January. The harbourmaster estimates the closure has cost the fleet
+          "somewhere around £300,000" in lost landings, though he said the
+          figure was a rough one.</p>
+
+          <p>A public meeting will be held at the harbour office on 2 October.</p>
+        </article>
+
+        <footer>© 2026 Calderhaven Gazette</footer>
+      </body>
+      </html>
+    expected:
+      - content: "The contract value for the Calderhaven north harbour wall repair is £1.7 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The original estimate for the Calderhaven harbour wall repair was £2.1 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "An earlier version of the article wrongly said the repair would cost £2.1 million."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Calderhaven's north harbour wall was damaged in the storm of January 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Repairs to Calderhaven's north harbour wall will not start until spring 2027, according to the harbour authority."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Repair work on the north harbour wall had been due to start in September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The harbour authority blamed the delay on a shortage of the granite needed to match the original wall."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Pendry Marine is the contractor for the harbour wall repair."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false
+      - content: "Pendry Marine said the harbour authority had not yet approved the final design."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Pendry Marine said granite was available."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "Fishing boats have been unable to use Calderhaven's north berths since January 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The harbourmaster estimates the closure has cost the fishing fleet around £300,000 in lost landings."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The harbourmaster said the £300,000 figure was a rough one."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "A public meeting will be held at the harbour office on 2 October 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: true
+      - content: "The article was written by Nkechi Halvorsen and published on 17 September 2026."
+        confidence_min: 0.0
+        uncertainty_nature: EPISTEMIC
+        required: false

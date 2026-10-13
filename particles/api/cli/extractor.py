@@ -17,6 +17,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.conformance.types import ConformanceReport, FieldStat, FieldTier
 from particles.db import session_scope
 from particles.extraction.registry import get_extractors, selects
@@ -490,6 +491,11 @@ class _BenchmarkJudge(StrEnum):
     llm = "llm"
 
 
+class _CalibrationMethod(StrEnum):
+    temperature = "temperature"
+    isotonic = "isotonic"
+
+
 class _BenchmarkFailOn(StrEnum):
     none = "none"
     precision = "precision"
@@ -762,7 +768,7 @@ def _benchmark_cost_gate(
                 err=True,
             )
             raise typer.Exit(1)
-        if not typer.confirm(f"Proceed with ≥{cost.estimated_extraction_calls} extraction calls?"):
+        if not confirm(f"Proceed with ≥{cost.estimated_extraction_calls} extraction calls?"):
             typer.echo("Aborted.", err=True)
             raise typer.Exit(1)
 
@@ -1770,6 +1776,13 @@ def extractor_calibrate_cmd(
         "-y",
         help="Pre-confirm the cost gate for a pooled fit (--runs N)",
     ),
+    method: _CalibrationMethod = typer.Option(
+        _CalibrationMethod.temperature,
+        "--method",
+        help="The calibration form: one temperature (default), or an isotonic map "
+        "from stated confidence to observed hit rate, for an extractor "
+        "whose confidence needs a base-rate correction rather than a stretch",
+    ),
 ) -> None:
     """Fit a temperature-scaling calibration for an extractor.
 
@@ -1811,6 +1824,7 @@ def extractor_calibrate_cmd(
             regenerate,
             runs,
             yes,
+            method,
         )
     )
 
@@ -1825,6 +1839,7 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     regenerate: bool,
     runs: int,
     yes: bool,
+    method: _CalibrationMethod = _CalibrationMethod.temperature,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -1834,7 +1849,10 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     from particles.config import get_config
     from particles.core.schema import ExtractorCalibration
     from particles.extraction.calibration import (
+        TRANSFORM_ISOTONIC,
         TRANSFORM_LOGIT,
+        ConfidenceScaler,
+        IsotonicScaler,
         TemperatureScaler,
         calibration_error,
         heldout_check,
@@ -2024,7 +2042,11 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         )
         raise typer.Exit(1)
 
-    scaler = TemperatureScaler().fit(raw_values, labels)
+    scaler: ConfidenceScaler
+    if method is _CalibrationMethod.isotonic:
+        scaler = IsotonicScaler().fit(raw_values, labels)
+    else:
+        scaler = TemperatureScaler().fit(raw_values, labels)
     # ECE is measured over the *full* emitted population, saturated pairs
     # included: the calibration is applied to them too (unchanged), so this is
     # what the operator's store would actually experience. The fit deliberately
@@ -2066,18 +2088,20 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         provider_model=f"{sel_fit.provider}:{sel_fit.model}",
         exclude_suite_ids=set(suite_ids),
     )
-    heldout = heldout_check(scaler.temperature, heldout_raws, heldout_labels)
+    heldout = heldout_check(scaler, heldout_raws, heldout_labels)
     if diagnostics is not None:
         diagnostics = diagnostics.with_heldout(heldout)
 
     suite_id_label = "+".join(suite_ids)
     n_correct = sum(1 for c in labels if c)
-    typer.echo(
-        f"T={scaler.temperature:.4f}, ECE: {ece_before:.4f} → {ece_after:.4f}, "
-        f"sample N={sample_size}"
+    fitted_label = (
+        f"isotonic, {len(scaler.breakpoints)} breakpoint(s)"
+        if isinstance(scaler, IsotonicScaler)
+        else f"T={scaler.temperature:.4f}"
     )
+    typer.echo(f"{fitted_label}, ECE: {ece_before:.4f} → {ece_after:.4f}, sample N={sample_size}")
     typer.echo(f"  suites: {suite_id_label}")
-    if runs > 1:
+    if runs > 1 and isinstance(scaler, TemperatureScaler):
         # Disclose the spread pooling bought, and gate on the pooled fit only.
         # This mirrors the call already made for `--fail-on`:
         # requiring most individual runs to pass as well would make the gate
@@ -2153,8 +2177,9 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     # regressed from, not the wider set the ECE figures cover.
     sel = get_config().llm.for_purpose("extraction")
     calibration = ExtractorCalibration(
-        temperature=scaler.temperature,
-        transform=TRANSFORM_LOGIT,
+        temperature=scaler.temperature if isinstance(scaler, TemperatureScaler) else 1.0,
+        transform=TRANSFORM_ISOTONIC if isinstance(scaler, IsotonicScaler) else TRANSFORM_LOGIT,
+        breakpoints=scaler.breakpoints if isinstance(scaler, IsotonicScaler) else None,
         fitted_at=datetime.now(UTC),
         benchmark_suite_id=suite_id_label,
         sample_size=diagnostics.n_fitted if diagnostics is not None else sample_size,
@@ -2218,6 +2243,7 @@ def extractor_calibrations_cmd(
 
 
 async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path | None) -> None:
+    from particles.extraction.calibration import describe_calibration
     from particles.store.extractor_store import LEGACY_PROVIDER_MODEL, get_calibrations
 
     async with session_scope() as session:
@@ -2243,7 +2269,7 @@ async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path |
     unapplied_keys: list[str] = []
     for c in sorted(cals, key=lambda x: x.provider_model or ""):
         typer.echo(
-            f"  {c.provider_model or 'LEGACY':<34} T={c.temperature:.4f}  "
+            f"  {c.provider_model or 'LEGACY':<34} {describe_calibration(c)}  "
             f"ECE {c.calibration_error_before:.4f}→{c.calibration_error_after:.4f}  "
             f"N={c.sample_size}  fitted {c.fitted_at.isoformat()}  "
             f"under {c.extractor_version or 'unknown version'}  "
@@ -2324,6 +2350,7 @@ def extractor_calibration_forget_cmd(
 
 
 async def _extractor_calibration_forget(extractor_id: str, provider_model: str, yes: bool) -> None:
+    from particles.extraction.calibration import describe_calibration
     from particles.store.extractor_store import delete_calibration, get_calibration
 
     async with session_scope() as session:
@@ -2338,7 +2365,7 @@ async def _extractor_calibration_forget(extractor_id: str, provider_model: str, 
 
     typer.echo(f"About to retire the calibration for {extractor_id!r} / {provider_model}:")
     typer.echo(
-        f"  T={existing.temperature:.4f}  "
+        f"  {describe_calibration(existing)}  "
         f"ECE {existing.calibration_error_before:.4f}→{existing.calibration_error_after:.4f}  "
         f"N={existing.sample_size}  fitted {existing.fitted_at.isoformat()}"
     )
@@ -2348,7 +2375,7 @@ async def _extractor_calibration_forget(extractor_id: str, provider_model: str, 
         "particles already stored are unchanged."
     )
     if not yes:
-        typer.confirm("Retire it?", abort=True)
+        confirm("Retire it?", abort=True)
 
     async with session_scope() as session:
         removed = await delete_calibration(session, extractor_id, provider_model)

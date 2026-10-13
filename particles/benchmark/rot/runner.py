@@ -15,7 +15,9 @@ which is ordinary operator policy (skipped under ``trust_policy=False``).
 
 Three perception arms (§3): ``oracle`` scripts extraction *and* the §6.6
 contradiction probe (zero LLM calls, deterministic); ``probe`` scripts
-extraction and pays only for the live probe; ``live`` is the product. The
+extraction and pays only for the live probes (the contradiction probe and
+the update probe, whose second reading runs on ``verification``);
+``live`` is the product. The
 scripted arms route every purpose they must not pay for to a refusing
 provider through :func:`particles.llm.override_providers`, so the zero-spend
 property holds by construction and any unanticipated call is disclosed.
@@ -365,6 +367,23 @@ def estimate_rot_run(
             priced = False
         else:
             total += (est.probe_input_tokens * p[1] + est.probe_output_tokens * p[2]) / 1e6
+        # each would-be retirement is read again on ``verification``;
+        # at most one per value-bearing event.
+        audit = get_config().audit
+        second = events
+        v = _price("verification")
+        if v is None:
+            priced = False
+        else:
+            total += (
+                second * cfg.estimate_probe_input_tokens * v[1]
+                + second * audit.verify_max_tokens * v[2]
+            ) / 1e6
+        est.assumptions.append(
+            f"up to {second} second slot reading(s) on verification "
+            f"[{llm.for_purpose('verification').model}], priced at "
+            f"{cfg.estimate_probe_input_tokens} in / {audit.verify_max_tokens} out tokens each"
+        )
     est.cost_usd = total if priced else None
     return est
 
@@ -408,10 +427,15 @@ def _arm_routing(
     if arm == "oracle":
         probe = OracleProbeProvider(world)
         overrides["semantic_lint"] = probe
-    else:  # probe arm: the live contradiction probe is the one paid purpose
+        # The update probe's second reading asks the same question
+        # on ``verification``; the oracle answers it as it answers the first.
+        overrides["verification"] = probe
+    else:  # probe arm: the live probe, and its slot reading's second call, are paid
         del overrides["semantic_lint"]
-    # The arm pays for the probe alone, so the probe alone decides: the second
-    # reading on ``verification`` is off, as it is refused.
+        del overrides["verification"]
+    # The contradiction probe alone decides a contradiction: its second
+    # reading is switched off below, so ``verification`` serves only
+    # the update probe's second reading.
     extraction = get_config().extraction
     verify_before = extraction.verify_conflicts
     extraction.verify_conflicts = False

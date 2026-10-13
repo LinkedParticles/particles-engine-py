@@ -23,6 +23,7 @@ from typing import Any
 import yaml
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import egress
 from particles.config import get_config, resolve_store_adjacent_path
 from particles.core.observer_scope import EntryScope, classify_entry, project_keys, project_tag
 from particles.core.schema import (
@@ -231,6 +232,42 @@ def _parse_date_line(line: str) -> datetime | None:
             continue
         return parsed.replace(tzinfo=UTC)
     return None
+
+
+# A Markdown heading line (``#`` to ``######`` then a space).
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+# A candidate date token: a run of digits and date separators, bounded by
+# non-digits. Whether it is a date is decided by parsing it against
+# ``deposit_date.formats``, so the pattern only proposes.
+_DATE_TOKEN_RE = re.compile(r"(?<!\d)\d[\d./\-]*\d(?!\d)")
+
+
+def stated_date_line(line: str) -> datetime | None:
+    """The date a line states, as midnight UTC, else ``None``.
+
+    A line states a date when it is wholly a date (:func:`_parse_date_line`)
+    or when it is a Markdown heading holding **exactly one** token
+    that parses wholly against ``deposit_date.formats``
+    (``# Session 11 (2026-10-08): work trip``). A heading with two dates, a
+    first line that is not a heading, and a date in body prose state none.
+
+    Pure. The splitter keeps :func:`_parse_date_line` alone, so its
+    boundaries stay whole-line dates.
+    """
+    whole = _parse_date_line(line)
+    if whole is not None:
+        return whole
+    if not _HEADING_RE.match(line):
+        return None
+    dates: list[datetime] = []
+    for token in _DATE_TOKEN_RE.findall(line):
+        for fmt in get_config().deposit_date.formats:
+            try:
+                dates.append(datetime.strptime(token, fmt).replace(tzinfo=UTC))
+            except ValueError:
+                continue
+            break
+    return dates[0] if len(dates) == 1 else None
 
 
 def _detect_leading_date(content: bytes) -> datetime | None:
@@ -1213,6 +1250,16 @@ async def _maybe_follow_primary_url(
         return
     if not target_url:
         log.info("No primary URL found for %s; follow skipped", entry_id[:8])
+        return
+
+    if not egress.allows_url(target_url):
+        # A policy, not a failure: the primary deposit stands and
+        # the refused target is named, so the operator can deposit a saved copy.
+        log.warning(
+            "Follow skipped for %s: network.egress does not allow %s; primary deposit unaffected",
+            entry_id[:8],
+            target_url,
+        )
         return
 
     log.info("Following primary URL of %s: %s", entry_id[:8], target_url)

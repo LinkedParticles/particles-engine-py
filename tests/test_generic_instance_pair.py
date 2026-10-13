@@ -237,7 +237,9 @@ class TestPipelineSelection:
 
     def test_the_subject_pool_keeps_one_kind(self) -> None:
         generic, instance = _p(GENERIC), _p(INSTANCE_OTHER)
-        index = SubjectIndex.build([(generic, _emb(1, 0.01)), (instance, _emb(1, 0.05))])
+        index = SubjectIndex.build(
+            [(generic, _emb(1, 0.01)), (instance, _emb(1, 0.05))], speaker=None
+        )
         q = _emb(1, 0)
         assert index.candidates(["mammal"], q, floor=0.5, limit=3) == [generic, instance]
         assert index.candidates(["mammal"], q, floor=0.5, limit=3, generic=False) == [instance]

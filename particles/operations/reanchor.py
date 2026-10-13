@@ -20,7 +20,10 @@ Per trigger R, oldest retirement first after the cursor:
 
 1. **Candidates, zero-LLM** (§2): ACTIVE claims sharing a SOURCE snapshot and a
    subject with R, extractor-asserted and reconcilable, not observed after R,
-   inside R's observer scope, and not a restatement this pass wrote.
+   inside R's observer scope, and not a restatement this pass wrote. An
+   ALEATORY claim (a plan, a schedule) is a candidate like any other: a
+   restatement adjudicates nothing, so the rung 2.5 exclusion's reason does
+   not apply, and the restatement keeps the original's nature.
 2. **One probe** (the ``extraction`` purpose) returns HOLDS or DEPENDS with a
    restatement, per candidate.
 3. **A second reading** (the ``verification`` purpose) re-asks the dependency
@@ -60,6 +63,7 @@ from particles.core.reanchor import (
     build_restatement,
     decide_after_reading,
     decide_write,
+    exempts_winner,
     is_before_or_at,
     parse_probe_reply,
     parse_reading_reply,
@@ -68,10 +72,9 @@ from particles.core.schema import (
     JudgeVerdictKind,
     Particle,
     ProvenanceRefType,
-    UncertaintyNature,
 )
 from particles.core.status import Status, StatusReason
-from particles.corpus.deposit import load_blob
+from particles.corpus.deposit import load_blob, stated_date_line
 from particles.corpus.store import get_entry, get_snapshot
 from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
@@ -83,7 +86,12 @@ from particles.ingest.update_supersession import (
 )
 from particles.llm import data_fence_instruction, fence, make_nonce
 from particles.operations._llm import _llm_call, record_unusable_reply
-from particles.operations.source_passage import derive_passage, extractor_view_text
+from particles.operations.paraphrases import winner_of
+from particles.operations.source_passage import (
+    PassageMatch,
+    derive_passage,
+    extractor_view_text,
+)
 from particles.store.event_store import (
     EventRefKind,
     OperatorEventType,
@@ -108,9 +116,12 @@ Embedding = np.ndarray[Any, np.dtype[np.float32]]
 
 #: Output budgets. The probe and the reading run on purposes that may be routed
 #: to an adaptive-thinking model, whose thinking counts against ``max_tokens``
-#: (see :func:`particles.operations._llm._llm_call`), so both are generous.
-_PROBE_MAX_TOKENS = 4096
-_READING_MAX_TOKENS = 2048
+#: (see :func:`particles.operations._llm._llm_call`), so both are generous: at
+#: 4096 a claude-sonnet-5 probe over eight candidates was cut off mid-thought
+#: on 2026-10-04, and a failed probe stops the run. A ceiling costs nothing
+#: unless it is used.
+_PROBE_MAX_TOKENS = 16384
+_READING_MAX_TOKENS = 8192
 #: The passage the probe sees is capped; the located paragraphs of R and each
 #: candidate are what it needs, not the whole transcript.
 _PASSAGE_MAX_CHARS = 8000
@@ -141,6 +152,27 @@ _PROBE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+
+def _probe_schema(labels: list[str]) -> dict[str, Any]:
+    """The probe's reply schema, with ``claim`` held to this call's labels."""
+    item = _PROBE_SCHEMA["properties"]["claims"]["items"]
+    return {
+        **_PROBE_SCHEMA,
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    **item,
+                    "properties": {
+                        **item["properties"],
+                        "claim": {"type": "string", "enum": labels},
+                    },
+                },
+            }
+        },
+    }
+
+
 _READING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -166,6 +198,8 @@ class ReanchorReport(BaseModel):
     waiting: int = 0
     candidates: int = 0
     observer_declined: int = 0
+    #: Candidates the probe returned no verdict for, after one re-ask.
+    unanswered: int = 0
     probes: int = 0
     readings: int = 0
     duplicate_checks: int = 0
@@ -195,6 +229,7 @@ class ReanchorReport(BaseModel):
             "waiting": self.waiting,
             "candidates": self.candidates,
             "observer_declined": self.observer_declined,
+            "unanswered": self.unanswered,
             "probes": self.probes,
             "readings": self.readings,
             "holds": self.holds,
@@ -214,74 +249,155 @@ class ReanchorReport(BaseModel):
 
 _PROBE_SYSTEM = (
     "You maintain an agent's memory of claims extracted from sources. One claim "
-    "about the speaker's circumstances, the RETIRED claim, is no longer current: "
-    "a later source reported that the circumstance changed. The user message "
-    "shows the retired claim, the passage the numbered claims were extracted "
-    "from, and the passage's date. For each numbered claim decide:\n"
+    "about a current circumstance (of the speaker, another person, a project or "
+    "a system), the RETIRED claim, is no longer current: a later source reported "
+    "that the circumstance changed. The user message shows the retired claim, "
+    "the passage the numbered claims were extracted from, and the passage's "
+    "date. For each numbered claim decide:\n"
     "- HOLDS: the claim is true as stated whether or not the retired claim is "
     "still current. A claim that only shares a subject with the retired claim "
-    "holds. A lasting fact, preference or evaluation holds. A claim that names "
-    "the place or thing the retired claim described, without relying on it being "
-    "the speaker's current circumstance, holds (for example 'X is in <place>').\n"
+    "holds, even one about the same project at the same time. A lasting fact, "
+    "preference or evaluation holds. A claim that names the place or thing the "
+    "retired claim described, without relying on it being the current "
+    "circumstance, holds (for example 'X is in <place>').\n"
     "- DEPENDS: read as a statement about now, the claim refers to the "
-    "circumstance the retired claim described through a relative or possessive "
-    "reference (such as 'my flat', 'the user's flat', 'near my office', 'my "
-    "manager', 'nearby', 'here', 'local'), so it stopped being true when that "
-    "circumstance changed. A claim that names the place or person but still "
-    "presents it as the speaker's current circumstance ('the user's flat in "
-    "Lajpat Nagar', 'their manager Priya') depends too.\n"
+    "circumstance the retired claim described, so it stopped being true when "
+    "that circumstance changed. It refers to it in one of three ways. (a) A "
+    "relative or possessive reference (such as 'my flat', 'the user's flat', "
+    "'near my office', 'my manager', 'nearby', 'here', 'local'); a claim that "
+    "names the place or person but still presents it as the speaker's current "
+    "circumstance ('the user's flat in Lajpat Nagar', 'their manager Priya') "
+    "depends too. (b) A definite description that, in this passage, denotes the "
+    "thing the retired claim described ('the server' when the retired claim "
+    "says which server a project deploys to, 'the database' when it says which "
+    "database a project uses, 'the office'), or the passage itself gives the "
+    "retired circumstance as the claim's reason ('we deploy to a VM, so SSH in "
+    "first'). Such a description points at whatever the retired claim names, "
+    "the way 'my car' does, even though it does not name it. (c) The retired "
+    "claim describes a circumstance with a stated limit or as temporary ('for "
+    "a week', 'this month', 'until March', 'for the summer', 'until the "
+    "release'), and the claim states how that circumstance ends: a return from "
+    "it, its last day, a check-out, or the departure or reopening that ends it. "
+    "The tie must be in the claim's own words (a word that marks the event as a "
+    "return or an end, such as 'back', 'return', 'last day', 'check out', "
+    "'reopen') or in the passage, which presents the event as the end of that "
+    "circumstance. Such a claim describes the circumstance by its end, so when "
+    "the circumstance changed, how it ends changed too, even though the claim "
+    "names a place and a date. A plan that is only located where the "
+    "circumstance began or will end, a plan within it, another person's "
+    "travel, a later visit, or a dated event that already happened holds.\n"
+    "Judge from the claim's own words and the passage, never from what you know "
+    "about the world: a claim does not depend because you know a feature, tool "
+    "or format goes with the retired circumstance, only because the claim or "
+    "the passage ties it to that circumstance.\n"
     "For each DEPENDS claim write a restatement: one sentence that (1) is "
     "entailed by the passage, its date and the retired claim, with nothing from "
-    "anywhere else; (2) names the circumstance the retired claim described in "
-    "place of the relative reference; (3) is in the past tense and dated with "
-    "'as of <date>' ('… where the user lived as of <date>', '… took forty "
-    "minutes as of <date>'), using the date the passage itself states it was "
-    "written when it states one, else the date given. The date must scope what "
-    "the claim itself says, not only the circumstance: write 'Acme Analytics, "
-    "where the user worked, used Slack as of 2026-04-21', not 'Acme Analytics, "
-    "where the user worked as of 2026-04-21, used Slack'; (4) keeps everything else "
-    "the claim said, about the same thing it said it about; (5) is not a "
-    "restatement of the retired claim itself.\n"
+    "anywhere else; (2) names the circumstance the retired claim described, in "
+    "place of the relative reference or as the condition the claim held under "
+    "('…, when Orbit deployed to a VM on DigitalOcean, …'); (3) is in the past "
+    "tense and dated with 'as of <date>' ('… where the user lived as of "
+    "<date>', '… took forty minutes as of <date>'), using the date the passage "
+    "itself states it was written when it states one, else the date given. The "
+    "date must scope what the claim itself says, not only the circumstance: "
+    "write 'Acme Analytics, where the user worked, used Slack as of "
+    "2026-04-21', not 'Acme Analytics, where the user worked as of 2026-04-21, "
+    "used Slack'; (4) keeps everything else the claim said, about the same "
+    "thing it said it about; (5) is not a restatement of the retired claim "
+    "itself.\n"
     "Example. Retired: 'The user lives in Delhi, in Lajpat Nagar.' Claim: "
     "'Sandeep's Curry House is a ten-minute walk from the user's flat.' "
     "Restatement: 'Sandeep's Curry House was a ten-minute walk from the flat in "
     "Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.'\n"
+    "Example. Retired: 'Orbit deploys to a VM on DigitalOcean.' Claim: 'To "
+    "deploy Orbit, SSH into the server and run ./deploy.sh.' Restatement: 'As "
+    "of 2026-03-10, when Orbit deployed to a VM on DigitalOcean, deploying it "
+    "meant SSHing into the server and running ./deploy.sh.' From the same "
+    "passage, 'Orbit's deploy script is written in Bash' HOLDS: it is about the "
+    "script, and the passage ties it to no server.\n"
+    "Example. Retired: 'Tomás is on secondment to the Leeds office until "
+    "June.' Claim: 'Tomás returns to the London team on 2026-06-01.' "
+    "Restatement: 'As of 2026-03-02, when Tomás was on secondment to the Leeds "
+    "office until June, he was due to return to the London team on "
+    "2026-06-01.' From the same passage, 'The London team moves to the fourth "
+    "floor in July' HOLDS: it is about the place he returns to, and nothing "
+    "ties it to how the secondment ends.\n"
     'Return a JSON object: {"claims": [{"claim": "c1", "verdict": '
     '"HOLDS"|"DEPENDS", "restatement": "...", "reason": "one sentence"}]}, one '
     "entry per numbered claim; omit restatement for HOLDS.\n\n"
 )
 
 _READING_SYSTEM = (
-    "You check one proposed rewrite in an agent's memory. A claim about the "
-    "speaker's circumstances, the RETIRED claim, is no longer current: a later "
-    "source reported that the circumstance changed. The ORIGINAL claim was "
-    "extracted from the passage shown. An earlier reading judged that the "
-    "original depended on the retired claim being current and wrote the "
-    "RESTATEMENT. Answer two questions independently.\n"
+    "You check one proposed rewrite in an agent's memory. A claim about a "
+    "current circumstance (of the speaker, another person, a project or a "
+    "system), the RETIRED claim, is no longer current: a later source reported "
+    "that the circumstance changed. The ORIGINAL claim was extracted from the "
+    "passage shown. An earlier reading judged that the original depended on the "
+    "retired claim being current and wrote the RESTATEMENT. Answer two "
+    "questions independently.\n"
     "1. depended: read as a statement about now, did the ORIGINAL claim depend "
     "on the retired claim's circumstance still being current? It did when it "
     "refers to that circumstance through a relative or possessive reference: "
     "'my flat', 'near my office', 'my manager', 'here', or 'my car' or 'my "
     "phone' when the retired claim said which car or phone that was. Such a "
     "reference now points at the new circumstance, so the claim stopped being "
-    "true even though it names no model, place or person. A claim that is true "
-    "regardless, such as a lasting fact, preference or evaluation about the "
-    "speaker, did not depend.\n"
+    "true even though it names no model, place or person. A claim that names "
+    "the place or person but still presents it as the speaker's current "
+    "circumstance ('the user's flat in Lajpat Nagar', 'their manager Priya') "
+    "depended too: naming it does not make the claim lasting. It also did when it "
+    "refers to that circumstance through a definite description the passage "
+    "ties to it ('the server' when the retired claim says which server a "
+    "project deploys to, 'the database' when it says which database a project "
+    "uses), or when the passage itself gives the circumstance as the claim's "
+    "reason. Such a description points at whatever the retired claim names, "
+    "exactly as 'my car' points at the car it names: the claim need not name "
+    "the value, and after the change it points at whatever replaced it. For "
+    "example, with the retired claim 'Finch uses MySQL 8 as its database', the "
+    "original 'Before deploying Finch, back up the database with make dump' "
+    "depended: 'the database' is the MySQL 8 database, though the claim never "
+    "says MySQL. Judge from the claim and the passage only: knowing that a "
+    "feature, tool or format goes with the retired circumstance is not a "
+    "dependence. That rule is about what you know of the value's properties; "
+    "it never cancels a reference the claim makes by description. It also "
+    "depended when the retired claim describes a circumstance with a stated "
+    "limit or as temporary ('for a week', 'until March') and the original "
+    "states how that circumstance ends: a return from it, its last day, a "
+    "check-out, or the departure or reopening that ends it, marked by the "
+    "claim's own words ('back', 'return', 'last day', 'check out', 'reopen') "
+    "or presented by the passage as that circumstance's end. Such a claim "
+    "describes the circumstance by its end, so it stopped being current when "
+    "the circumstance changed, even though it names a place and a date. A plan "
+    "only located where the circumstance began or will end, a plan within it, "
+    "another person's travel, a later visit, or an event that already happened "
+    "did not depend. A "
+    "claim that is true regardless, such as a lasting fact, preference or "
+    "evaluation, or a fact about the same project that the passage ties to "
+    "nothing in the retired claim, did not depend.\n"
     "2. faithful: is the RESTATEMENT entailed by the passage, its date and the "
     "retired claim, with nothing from anywhere else; does it keep every other "
     "detail of the original; and does it no longer depend on the circumstance "
     "being current? The restatement is meant to name the circumstance the "
-    "retired claim described in place of the relative reference (for example "
-    "'the user's Skoda Octavia' for 'the user's car'): that detail comes from "
-    "the retired claim and is not an addition. It is also meant to be dated and "
-    "in the past tense ('… as of <date>'): that change of tense is not a change "
-    "of detail. The date must scope what the claim itself says, not only the "
-    "circumstance: in 'Acme Analytics, where the user worked as of 2026-04-21, "
-    "used Slack' the use of Slack is left undated, which is not faithful. Its "
-    "date should be the one the passage states it was written, "
-    "when it states one, else the date of the source record. A restatement that "
-    "adds anything else, or drops or changes any other detail, is not "
-    "faithful.\n"
+    "retired claim described, in place of the relative reference (for example "
+    "'the user's Skoda Octavia' for 'the user's car') or as the condition the "
+    "claim held under ('when Orbit deployed to a VM on DigitalOcean'): that "
+    "detail comes from the retired claim and is not an addition, but only when "
+    "the original refers to that circumstance, states how it ends, or the "
+    "passage gives it as the original's reason. Refers covers every way "
+    "question 1 counts, including a claim that names the place or person but "
+    "still presents it as the current circumstance; these three ties are not "
+    "a narrower test than question 1. A condition clause attached to "
+    "a claim that does none of these adds a link the source never made, and is "
+    "not faithful; on one that refers by description, or states how the "
+    "circumstance ends, it is the link the claim already made ('As of "
+    "<date>, when Finch used MySQL 8, deploying it meant backing up the "
+    "database with make dump first' is faithful). The "
+    "restatement is also meant to be dated and in the past tense ('… as of "
+    "<date>'): that change of tense is not a change of detail. The date must "
+    "scope what the claim itself says, not only the circumstance: in 'Acme "
+    "Analytics, where the user worked as of 2026-04-21, used Slack' the use of "
+    "Slack is left undated, which is not faithful. Its date should be the one "
+    "the passage states it was written, when it states one, else the date of "
+    "the source record. A restatement that adds anything else, or drops or "
+    "changes any other detail, is not faithful.\n"
     'Return a JSON object: {"depended": true|false, "faithful": true|false, '
     '"reason": "one sentence"}.\n\n'
 )
@@ -306,7 +422,7 @@ async def _probe(
         user,
         max_tokens=_PROBE_MAX_TOKENS,
         system=_PROBE_SYSTEM + data_fence_instruction(nonce),
-        response_schema=_PROBE_SCHEMA,
+        response_schema=_probe_schema(list(labels)),
         purpose="extraction",
         # A classification with a written answer: sampling spread only makes
         # the verdict and the wording vary between runs.
@@ -314,7 +430,7 @@ async def _probe(
     )
     if reply is None:
         return None
-    verdicts = parse_probe_reply(reply, labels)
+    verdicts = parse_probe_reply(reply, labels, {c.id: c.content for c in candidates})
     if verdicts is None:
         record_unusable_reply("re-anchor probe", reply)
     return verdicts
@@ -353,8 +469,15 @@ async def _read(
 # ---------------------------------------------------------------------------
 
 
-async def prior_cursor(session: AsyncSession, actor: str) -> Cursor | None:
-    """The cursor the last run of ``actor`` recorded, or ``None`` before the first."""
+async def prior_cursor(
+    session: AsyncSession, actor: str, block_name: str = "reanchor"
+) -> Cursor | None:
+    """The cursor the last run of ``actor`` recorded, or ``None`` before the first.
+
+    ``block_name`` is the run record's census block that holds it: ``reanchor``
+    for this pass, ``paraphrases`` for the paraphrases pass, which walks the
+    same update retirements with a cursor of its own.
+    """
     events = await list_events(
         session, event_type=OperatorEventType.CONSOLIDATION_RUN, limit=_CURSOR_LOOKBACK
     )
@@ -362,7 +485,7 @@ async def prior_cursor(session: AsyncSession, actor: str) -> Cursor | None:
         if event.actor != actor:
             continue
         census = (event.payload or {}).get("census")
-        block = census.get("reanchor") if isinstance(census, dict) else None
+        block = census.get(block_name) if isinstance(census, dict) else None
         if isinstance(block, dict) and block.get("cursor") is not None:
             return Cursor.from_payload(block.get("cursor"))
     return None
@@ -410,6 +533,7 @@ async def _passage_for(
     if not text.strip():
         return None
     found: dict[str, int] = {}
+    stated: list[str | None] = []
     for particle in [retired, *candidates]:
         chunk = next(
             (
@@ -419,8 +543,12 @@ async def _passage_for(
             ),
             None,
         )
-        _, passage, _ = derive_passage(text, content=particle.content, chunk_hash=chunk)
+        match, passage, _ = derive_passage(text, content=particle.content, chunk_hash=chunk)
         found.setdefault(passage, text.find(passage))
+        if match is PassageMatch.WHOLE or found[passage] < 0:
+            stated.append(_stated_date_of_whole(text))
+        else:
+            stated.append(_stated_date_above(text, found[passage]))
     # The source's opening line (a title, a dated header) rides along: it is
     # where a note or transcript usually says when it was written, and the
     # restatement is dated from the passage before the record's dates.
@@ -429,8 +557,42 @@ async def _passage_for(
         found.setdefault(opening, -1)
     ordered = sorted(found, key=lambda p: found[p])
     joined = "\n…\n".join(ordered)
-    date = anchor_date(snapshot.content_published_at or snapshot.captured_at)
+    # when every paragraph was located and they all sit under the
+    # same dated line, that is the date both calls are given, so the model
+    # has no second date to choose between. Otherwise, the record's dates.
+    if stated and None not in stated and len(set(stated)) == 1:
+        date = stated[0]
+    else:
+        date = anchor_date(snapshot.content_published_at or snapshot.captured_at)
     return joined[:_PASSAGE_MAX_CHARS], date
+
+
+def _stated_date_of_whole(text: str) -> str | None:
+    """The one date the whole text sits under, else ``None``.
+
+    For a paragraph that was not located, only a text that opens with a dated
+    line and states no other date is dated: a multi-entry note's first heading
+    must not date every section.
+    """
+    first = next((line for line in text.splitlines() if line.strip()), "")
+    opening = stated_date_line(first)
+    if opening is None:
+        return None
+    for line in text.splitlines():
+        found = stated_date_line(line)
+        if found is not None and found.date() != opening.date():
+            return None
+    return opening.date().isoformat()
+
+
+def _stated_date_above(text: str, offset: int) -> str | None:
+    """The date of the nearest line at or above ``offset`` that states one."""
+    lines = text[: offset + 1].splitlines()
+    for line in reversed(lines):
+        found = stated_date_line(line)
+        if found is not None:
+            return found.date().isoformat()
+    return None
 
 
 async def _is_restatement(session: AsyncSession, particle: Particle) -> bool:
@@ -482,8 +644,6 @@ async def _candidates(
         if not set(particle.subject_ids) & subjects:
             continue
         if not (is_extractor_asserted(particle) and is_reconcilable(particle)):
-            continue
-        if particle.uncertainty_nature is UncertaintyNature.ALEATORY:
             continue
         if not is_before_or_at(await latest_source_date(session, particle, dates), retired_date):
             continue
@@ -608,6 +768,8 @@ async def _conflicting(
     retired: Particle,
     index: _Pool,
     report: ReanchorReport,
+    *,
+    exempt: str | None = None,
 ) -> tuple[bool, str | None]:
     """Whether the restatement contradicts a standing claim: ``(conflict, with_id)``.
 
@@ -616,6 +778,9 @@ async def _conflicting(
     original and R, and excluding a claim of the other kind when one side is
     generic and the other an instance claim. A probe that fails is
     a conflict: a restatement is written only when the check ran clean.
+    ``exempt`` is the claim that retired R, when the restatement is dated
+    before it (:func:`~particles.core.reanchor.exempts_winner`):
+    a dated past state cannot contradict the change that ended it.
     """
     # Deferred import: the breaker-seam probe, patched at its source module by
     # tests/test_reanchor.py (tests/AGENTS.md § Mocking strategy).
@@ -623,7 +788,7 @@ async def _conflicting(
 
     cfg = get_config()
     update_cfg = cfg.reconciliation.update_supersession
-    exclude = {original.id, retired.id}
+    exclude = {original.id, retired.id} | ({exempt} if exempt is not None else set())
     pool = index.nearest(
         list(dict.fromkeys([*original.subject_ids, *retired.subject_ids])),
         embedding,
@@ -643,6 +808,20 @@ async def _conflicting(
         if signal:
             return True, particle.id
     return False, None
+
+
+async def _exempt_winner(session: AsyncSession, retired: Particle, date: str | None) -> str | None:
+    """The claim that retired R, when the restatement dated ``date`` precedes it.
+
+    R's winner is read as the paraphrases pass reads it, so the two
+    passes cannot disagree about which claim retired R.
+    """
+    winner = await winner_of(session, retired)
+    if winner is None:
+        return None
+    if not exempts_winner(date, await latest_source_date(session, winner)):
+        return None
+    return winner.id
 
 
 async def _record(
@@ -752,7 +931,16 @@ async def _settle(
     conflict, conflict_id = (
         (False, None)
         if duplicate is not None
-        else await _conflicting(session, restatement, embedding, original, retired, index, report)
+        else await _conflicting(
+            session,
+            restatement,
+            embedding,
+            original,
+            retired,
+            index,
+            report,
+            exempt=await _exempt_winner(session, retired, date),
+        )
     )
     outcome = decide_write(duplicate_of=duplicate, conflict=conflict)
 
@@ -917,6 +1105,22 @@ async def run_reanchor(
             # Keep the cursor before this trigger, so the next run asks again.
             report.warnings.append(f"the probe for {retired.id[:8]} failed; retried next run")
             break
+        answered = {v.candidate_id for v in verdicts}
+        missing = [c for c in chosen if c.id not in answered]
+        if missing:
+            # A candidate with no verdict would never be asked again once the
+            # cursor passes this trigger, so it is asked once more on its own.
+            report.probes += 1
+            again = await _probe(retired, passage, date, missing)
+            verdicts = [*verdicts, *(again or [])]
+            answered |= {v.candidate_id for v in again or []}
+            left = sum(1 for c in missing if c.id not in answered)
+            if left:
+                report.unanswered += left
+                report.warnings.append(
+                    f"the probe gave no verdict for {left} candidate(s) of {retired.id[:8]} "
+                    "after a second ask; they were not examined"
+                )
         by_id = {c.id: c for c in chosen}
         if index is None:
             index = _Pool(await get_active_particles_with_embeddings(session))

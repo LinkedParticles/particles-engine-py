@@ -1,0 +1,53 @@
+{
+  "about": "Labelled pairs for which question admits a pair to rung 2.5. Each row is a same-subject, same-lineage pair rung 2.5 could date, 'older' stated first. Many carry a date in the claim text, the form claude-sonnet-5-5's extractor writes ('as of <date>', 'as stated in a session dated <date>'), which is the form the contradiction probe clears because two dated claims can both be true at their own times. 'expected' is what rung 2.5 should do with the pair: 'changes' (the newer claim gives the slot a new value, so the older one is retired), 'not_changes' (both stay current: a second value that coexists, a separate event, added detail, a past value, a decision not yet carried out, a bounded stay after a lasting value, a claim that relied on the old value, or a fixed fact), or 'report' (printed, never barred). Class 'case' holds the trip case's own pairs as the extractors wrote them in the end-to-end runs of 2026-10-12; they are reported apart from the general classes. Bars, from the acceptance plan (item 2): on each model, under the proposed gate, every barred 'changes' row settled CHANGES (both readings) in at least two of three samples, and no settled CHANGES in any 'not_changes' sample. The shipped gate (contradiction probe YES and settled CHANGES) is computed from the same samples and reported beside it.",
+  "labelled_by": "proposed and registered on 2026-10-12 by the session that wrote the record, before any run: no model has been asked any of these rows. Labels to be confirmed by the owner before the first run.",
+  "rows": [
+    {"id": "res-dated-newer", "class": "dated-update", "older": "The user lives in Antwerp.", "newer": "The user moved to Ghent, as stated in a session dated 2026-05-02.", "expected": "changes"},
+    {"id": "res-dated-both", "class": "dated-update", "older": "The user lives in Antwerp, as of 2026-01-10.", "newer": "The user lives in Ghent, as of 2026-05-02.", "expected": "changes"},
+    {"id": "employer-dated", "class": "dated-update", "older": "The user works at Halvorsen Logistics, as of 2026-01-15.", "newer": "The user started a new job at Brightwater Labs on 2026-03-02.", "expected": "changes"},
+    {"id": "manager-dated", "class": "dated-update", "older": "The user's manager is Priya, as of 2026-02-03.", "newer": "The user's manager is now Ines, as stated in a session dated 2026-04-11.", "expected": "changes"},
+    {"id": "diet-since", "class": "dated-update", "older": "The user eats meat.", "newer": "The user has been vegan since 2026-06-01.", "expected": "changes"},
+    {"id": "phone-dated", "class": "dated-update", "older": "The user uses an iPhone 13.", "newer": "The user switched to a Pixel 9, as stated in a session dated 2026-07-19.", "expected": "changes"},
+    {"id": "host-dated", "class": "dated-update", "older": "The billing service is hosted on Render, as of 2026-03-02.", "newer": "The billing service was migrated to DigitalOcean on 2026-04-15.", "expected": "changes"},
+    {"id": "count-dated", "class": "dated-update", "older": "The user has run 3 marathons, as of 2026-01-05.", "newer": "The user has run 4 marathons, as stated in a session dated 2026-10-01.", "expected": "changes"},
+    {"id": "stay-to-home-dated", "class": "dated-update", "older": "The user is in Montreal for a two-week conference, as of 2026-05-10.", "newer": "The user relocated to Montreal, as stated in a session dated 2026-05-20.", "expected": "changes"},
+    {"id": "gym-dated", "class": "dated-update", "older": "The user's gym is FitHub on Elm Street, as of 2026-02-01.", "newer": "The user cancelled FitHub and now trains at Ironworks Gym, as stated in a session dated 2026-05-09.", "expected": "changes"},
+
+    {"id": "pets", "class": "coexisting", "older": "The user has a cat named Miso.", "newer": "The user adopted a dog named Pepper, as stated in a session dated 2026-06-02.", "expected": "not_changes"},
+    {"id": "languages", "class": "coexisting", "older": "The user speaks French, as of 2026-01-20.", "newer": "The user is learning Japanese, as stated in a session dated 2026-04-03.", "expected": "not_changes"},
+    {"id": "hobbies", "class": "coexisting", "older": "The user plays tennis on Saturdays, as of 2026-02-01.", "newer": "The user joined a climbing gym on 2026-04-09.", "expected": "not_changes"},
+    {"id": "stack", "class": "coexisting", "older": "The project uses Redis for caching.", "newer": "The project added PostgreSQL for its user accounts on 2026-05-03.", "expected": "not_changes"},
+    {"id": "accounts", "class": "coexisting", "older": "The user has a savings account with Nordbank.", "newer": "The user opened a current account with Kestrel Bank, as stated in a session dated 2026-03-14.", "expected": "not_changes"},
+
+    {"id": "trips", "class": "separate-events", "older": "The user took a five-day trip to Rome in March 2026.", "newer": "The user spent a weekend in Vienna, as stated in a session dated 2026-06-14.", "expected": "not_changes"},
+    {"id": "purchases", "class": "separate-events", "older": "The user paid $90 for running shoes, as of 2026-02-02.", "newer": "The user bought a rain jacket for $120 on 2026-04-20.", "expected": "not_changes"},
+    {"id": "races", "class": "separate-events", "older": "The user ran a half marathon in Bruges on 2026-03-08.", "newer": "The user ran a 10K in Leuven, as stated in a session dated 2026-05-17.", "expected": "not_changes"},
+
+    {"id": "flat-detail", "class": "added-detail", "older": "The user lives in Antwerp.", "newer": "The user's flat in Antwerp has a small balcony, as stated in a session dated 2026-05-02.", "expected": "not_changes"},
+    {"id": "role-detail", "class": "added-detail", "older": "The user works at Halvorsen Logistics.", "newer": "The user leads the routing team at Halvorsen Logistics, as of 2026-04-01.", "expected": "not_changes"},
+
+    {"id": "lived-until", "class": "past-value", "older": "The user lived in Utrecht until 2025.", "newer": "The user lives in Ghent, as of 2026-05-02.", "expected": "not_changes"},
+    {"id": "manager-previously", "class": "past-value", "older": "The user's manager was previously Priya.", "newer": "The user's manager is Ines, as stated in a session dated 2026-04-11.", "expected": "not_changes"},
+    {"id": "dated-history", "class": "past-value", "older": "As of 2026-03-01, when the user lived in Antwerp, the user commuted by tram.", "newer": "The user lives in Ghent, as stated in a session dated 2026-05-02.", "expected": "not_changes"},
+
+    {"id": "decided-move", "class": "decided-not-done", "older": "The user lives in Antwerp.", "newer": "The user has decided to move to Ghent next spring, as stated in a session dated 2026-05-02.", "expected": "not_changes"},
+
+    {"id": "home-then-visit", "class": "lasting-then-temporary", "older": "The user lives in Antwerp.", "newer": "The user is in Ghent for three days for a wedding, as stated in a session dated 2026-05-02.", "expected": "not_changes"},
+    {"id": "job-then-secondment", "class": "lasting-then-temporary", "older": "The user works full-time at Halvorsen Logistics.", "newer": "The user is on a two-month secondment to the Oslo office, as of 2026-04-01.", "expected": "not_changes"},
+
+    {"id": "deploy-step", "class": "relied-on", "older": "Deploy the billing service with `render deploy`.", "newer": "The billing service was migrated to DigitalOcean on 2026-04-15.", "expected": "not_changes"},
+    {"id": "commute", "class": "relied-on", "older": "The user's commute to the Halvorsen office is a 15-minute bike ride.", "newer": "The user moved to Ghent, as stated in a session dated 2026-05-02.", "expected": "not_changes"},
+
+    {"id": "kettle-price", "class": "fixed", "older": "The Brightwater X2 kettle costs $49.", "newer": "The Brightwater X2 kettle costs $59, as stated in a review dated 2026-05-02.", "expected": "not_changes"},
+
+    {"id": "case-trip-5-5-r2", "class": "case", "older": "The user is in Mumbai for a week for work, as of 2026-10-08.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "changes"},
+    {"id": "case-trip-5-5-r1", "class": "case", "older": "The user is in Mumbai for a week on a work trip, as of 2026-10-08.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "changes"},
+    {"id": "case-residence-5-5-r2", "class": "case", "older": "The user lives in Lajpat Nagar, Delhi.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "changes"},
+    {"id": "case-residence-5-5-r1", "class": "case", "older": "The user lives in a flat in Lajpat Nagar, Delhi.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "changes"},
+    {"id": "case-home-5-5", "class": "case", "older": "The user's home is in Delhi.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "changes"},
+    {"id": "case-trip-4-6", "class": "case", "older": "The user is in Mumbai for a week for work.", "newer": "The user moved to Mumbai.", "expected": "changes"},
+    {"id": "case-trip-alone", "class": "case", "older": "The user lives in Lajpat Nagar, Delhi.", "newer": "The user is in Mumbai for a week for work, as of 2026-10-08.", "expected": "not_changes"},
+    {"id": "case-flight", "class": "case", "older": "The user flies from Mumbai back to Delhi on Thursday 2026-10-15.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "report"},
+    {"id": "case-hotel", "class": "case", "older": "The user is staying at a hotel in Bandra, Mumbai.", "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.", "expected": "report"}
+  ]
+}

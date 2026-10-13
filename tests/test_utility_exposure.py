@@ -4,7 +4,8 @@
 
 """what a session was shown, read as of its start, and the re-mine.
 
-Acceptance unit tests 1, 2, 6, 7 and 8 of the record, over a file-backed store
+Acceptance unit tests 1, 2, 6, 7 (as amended) and 8 of the record,
+and unit tests 2 to 7, over a file-backed store
 so the entry points that open their own ``session_scope`` see the same rows.
 Tests 3, 4 and 5 (the ruling and its evidence) live in
 ``tests/test_utility_mining.py``.
@@ -17,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
@@ -35,6 +36,7 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.corpus.store import CorpusEntryRow, SnapshotRow
+from particles.operations.query.as_of import AsOfView, RetirementIndex
 from particles.operations.utility_exposure import (
     ExposureReader,
     RuleFile,
@@ -42,7 +44,13 @@ from particles.operations.utility_exposure import (
     rule_files_in_view,
     session_frame,
 )
-from particles.store.particle_store import insert_particle
+from particles.store.event_store import (
+    EventRefKind,
+    OperatorEventRow,
+    OperatorEventType,
+    record_event,
+)
+from particles.store.particle_store import ParticleRow, insert_particle
 from particles.store.session_exposure_store import (
     SessionExposure,
     ShownBelief,
@@ -147,9 +155,15 @@ async def _conversation(session: AsyncSession, session_id: str) -> None:
     await _snapshot(session, f"{entry_id}-s1", entry_id, START + timedelta(hours=1))
 
 
-async def _shown(session: AsyncSession, session_id: str, action_lines: list[str]) -> set[str]:
+async def _shown(
+    session: AsyncSession,
+    session_id: str,
+    action_lines: list[str],
+    *,
+    start: datetime = START,
+) -> set[str]:
     frame = await session_frame(
-        session, session_id, entry_tags=[f"project:{KEY}"], first_captured_at=START
+        session, session_id, entry_tags=[f"project:{KEY}"], first_captured_at=start
     )
     assert frame is not None
     reader = await ExposureReader.load(session)
@@ -259,7 +273,11 @@ class TestExposure:
     async def test_exposure_is_read_as_of_the_session_start(
         self, file_db_session: AsyncSession
     ) -> None:
-        """Unit test 7: a later belief, or one only a later snapshot states, is not shown."""
+        """Unit test 7, amended: only a later snapshot's beliefs are hidden.
+
+        A belief extracted after the start from the snapshot current at it
+        (``p-late``) is shown; one only a later snapshot states is not.
+        """
         s = file_db_session
         await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
         # A September generation of the same MUTABLE rule file.
@@ -283,7 +301,7 @@ class TestExposure:
         )
         await s.commit()
 
-        assert await _shown(s, "july", []) == {"p-july"}
+        assert await _shown(s, "july", []) == {"p-july", "p-late"}
 
     @pytest.mark.asyncio
     async def test_an_unshown_belief_is_not_a_candidate(
@@ -317,6 +335,194 @@ class TestExposure:
         assert result.candidates == 1  # only the rule file's belief was shown
         assert all("8 times" not in p for p in prompts)
         assert await _events(s) == {("p-rule", "now", "literal", "mined")}
+
+
+# ---------------------------------------------------------------------------
+# the snapshot current at the start, not the extraction time
+# ---------------------------------------------------------------------------
+
+
+class TestLateExtraction:
+    @pytest.mark.asyncio
+    async def test_a_belief_out_of_validity_at_the_start_is_not_shown(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """unit test 2."""
+        s = file_db_session
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        late = START + timedelta(days=3)
+        lapsed = await _belief(s, "p-lapsed", "Lapsed", "agents", "agents-s1", asserted_at=late)
+        await s.execute(
+            update(ParticleRow)
+            .where(ParticleRow.id == lapsed.id)
+            .values(valid_until=START - timedelta(days=1))
+        )
+        await _belief(s, "p-valid", "Still valid", "agents", "agents-s1", asserted_at=late)
+        await s.commit()
+
+        assert await _shown(s, "x", []) == {"p-valid"}
+
+    @pytest.mark.asyncio
+    async def test_a_session_inside_the_extraction_lag_sees_that_generation(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """unit test 3: captured before the start, extracted after it."""
+        s = file_db_session
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        await _snapshot(s, "agents-s2", "agents", START - timedelta(days=2))
+        await _belief(s, "p-old", "Only the first generation", "agents", "agents-s1")
+        await _belief(
+            s,
+            "p-new",
+            "The second generation",
+            "agents",
+            "agents-s2",
+            asserted_at=START + timedelta(days=40),
+        )
+        await s.commit()
+
+        # Before this session was shown nothing from the file.
+        assert await _shown(s, "x", []) == {"p-new"}
+
+    @pytest.mark.asyncio
+    async def test_a_promoted_loser_is_shown_and_the_quarantined_row_is_not(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """unit test 4."""
+        from particles.core.status import StatusReason
+        from particles.operations._quarantine import promote_quarantined
+
+        s = file_db_session
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        loser = Particle(
+            id="p-loser",
+            content="The quarantined claim",
+            confidence=Confidence(value=0.8, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            asserted_by="test",
+            asserted_at=START - timedelta(days=20),
+            status=Status.PROVENANCE_STALE,
+            status_reason=StatusReason.CONFLICT_PENDING,
+            provenance=[
+                ProvenanceRef(
+                    type=ProvenanceRefType.SOURCE,
+                    corpus_entry_id="agents",
+                    snapshot_id="agents-s1",
+                )
+            ],
+        )
+        await insert_particle(s, loser)
+        promoted = await promote_quarantined(s, loser)
+        await s.commit()
+
+        assert promoted.asserted_at > START
+        assert await _shown(s, "x", []) == {promoted.id}
+
+    @pytest.mark.asyncio
+    async def test_a_cascaded_previous_generation_is_not_shown(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """unit test 5."""
+        s = file_db_session
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        await _snapshot(s, "agents-s2", "agents", START - timedelta(days=2))
+        extracted = START + timedelta(days=10)
+        dropped = await _belief(s, "p-dropped", "Dropped by the edit", "agents", "agents-s1")
+        await s.execute(
+            update(ParticleRow)
+            .where(ParticleRow.id == dropped.id)
+            .values(status=Status.PROVENANCE_STALE.value, retired_at=extracted)
+        )
+        await _belief(s, "p-kept", "Kept", "agents", "agents-s2", asserted_at=extracted)
+        await s.commit()
+
+        assert await _shown(s, "x", []) == {"p-kept"}
+
+    @pytest.mark.asyncio
+    async def test_an_explicitly_retracted_claim_is_not_shown_after_its_retraction(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """unit test 6: condition 5, by normalized content."""
+        s = file_db_session
+        await _entry(s, "old", "file:///notes/old.md", [f"project:{KEY}"])
+        await _snapshot(s, "old-s1", "old", START - timedelta(days=30))
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        retracted = await _belief(
+            s,
+            "p-retracted",
+            "Use the DEVELOPER_DIR workaround.",
+            "old",
+            "old-s1",
+            asserted_at=START - timedelta(days=29),
+        )
+        cascaded = await _belief(
+            s,
+            "p-cascaded",
+            "Run the linter first.",
+            "old",
+            "old-s1",
+            asserted_at=START - timedelta(days=29),
+        )
+        when = START - timedelta(days=5)
+        event = await record_event(
+            s,
+            actor="operator",
+            event_type=OperatorEventType.PARTICLE_RETRACTED,
+            refs=[(EventRefKind.PARTICLE, retracted.id)],
+        )
+        await s.execute(
+            update(OperatorEventRow)
+            .where(OperatorEventRow.event_id == event.event_id)
+            .values(occurred_at=when)
+        )
+        for pid, reason in (
+            (retracted.id, "EXPLICIT_RETRACTION"),
+            (cascaded.id, "RETRACTED_DEPENDENCY"),
+        ):
+            await s.execute(
+                update(ParticleRow)
+                .where(ParticleRow.id == pid)
+                .values(status=Status.RETRACTED.value, status_reason=reason, retired_at=when)
+            )
+        late = START + timedelta(days=3)
+        await _belief(
+            s,
+            "p-again",
+            "Use the  DEVELOPER_DIR   workaround",
+            "agents",
+            "agents-s1",
+            asserted_at=late,
+        )
+        await _belief(
+            s, "p-cascade-copy", "Run the linter first.", "agents", "agents-s1", asserted_at=late
+        )
+        await s.commit()
+
+        # After the retraction: the explicit one's copy is hidden, the cascade's is not.
+        assert await _shown(s, "after", []) == {"p-cascade-copy"}
+        # A session that started before the retraction was shown both copies.
+        before = START - timedelta(days=10)
+        assert await _shown(s, "before", [], start=before) == {"p-again", "p-cascade-copy"}
+
+
+def test_the_query_lens_still_hides_a_belief_asserted_after_its_instant() -> None:
+    """unit test 7: ``evaluate`` is unchanged; only ``in_force`` drops the instant."""
+    view = AsOfView(
+        as_of=START,
+        index=RetirementIndex(successor_by_predecessor={}, event_retired_at={}),
+    )
+    later = Particle(
+        id="p-later",
+        content="Asserted after the instant",
+        confidence=Confidence(value=0.8, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        asserted_by="test",
+        asserted_at=START + timedelta(days=1),
+        status=Status.ACTIVE,
+        provenance=[ProvenanceRef(type=ProvenanceRefType.SOURCE, corpus_entry_id="e")],
+    )
+    assert view.evaluate(later, None).visible is False
+    assert view.in_force(later, None) is True
 
 
 async def _events(session: AsyncSession) -> set[tuple[str, str, str | None, str]]:

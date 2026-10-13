@@ -90,7 +90,7 @@ def http_backend(
     real_async_client = httpx.AsyncClient
 
     def _asgi_client(
-        *, base_url: str, timeout: float, headers: dict[str, str]
+        *, base_url: str, timeout: float, headers: dict[str, str], purpose: str = ""
     ) -> httpx.AsyncClient:
         return real_async_client(
             transport=httpx.ASGITransport(app=fastapi_app),
@@ -98,7 +98,8 @@ def http_backend(
             headers=headers,
         )
 
-    monkeypatch.setattr(httpx, "AsyncClient", _asgi_client)
+    # HttpBackend builds its client through egress_client.
+    monkeypatch.setattr("particles.api.client.http.egress_client", _asgi_client)
     yield HttpBackend()
 
 
@@ -156,13 +157,14 @@ def _wire_unreachable_engine(monkeypatch: pytest.MonkeyPatch, base_url: str) -> 
         raise httpx.ConnectError("All connection attempts failed", request=request)
 
     def _refusing_client(
-        *, base_url: str, timeout: float, headers: dict[str, str]
+        *, base_url: str, timeout: float, headers: dict[str, str], purpose: str = ""
     ) -> httpx.AsyncClient:
         return real_async_client(
             transport=httpx.MockTransport(_refuse), base_url=base_url, headers=headers
         )
 
-    monkeypatch.setattr(httpx, "AsyncClient", _refusing_client)
+    # HttpBackend builds its client through egress_client.
+    monkeypatch.setattr("particles.api.client.http.egress_client", _refusing_client)
 
 
 class TestHttpBackendUnreachable:

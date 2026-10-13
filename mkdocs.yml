@@ -196,6 +196,7 @@ nav:
       - Remote engine: operator-guide/remote-engine.md
       - Running in a container: operator-guide/container-deployment.md
       - Observability: operator-guide/observability.md
+      - Running with no egress: operator-guide/no-egress.md
       - Scheduled consolidation (dream cycle): operator-guide/scheduled-consolidation.md
       - Refreshing mutable local sources: operator-guide/mutable-local-sources.md
       - Structured claims: operator-guide/structured-claims.md

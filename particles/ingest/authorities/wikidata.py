@@ -36,12 +36,13 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from particles import egress
 from particles.config import get_config
 from particles.core.schema import ApplicabilityClause, ExternalRef
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.http import get_capped, particles_client
 from particles.ingest.authorities._shared import _RateLimiter, get_limiter
-from particles.ingest.authorities.registry import AuthorityResolution
+from particles.ingest.authorities.registry import AuthorityResolution, AuthorityUnreachable
 from particles.ingest.authorities.wikidata_judge import (
     Judgement,
     is_ambiguous,
@@ -186,13 +187,13 @@ def _is_prefix_expansion(query: str, label: str, aliases: Collection[str] = ()) 
     return bool(rest) and rest[0] in (":", "-", "–", "—")
 
 
-async def _continuation_aliases(qids: Sequence[str]) -> dict[str, frozenset[str]]:
+async def _continuation_aliases(qids: Sequence[str]) -> dict[str, frozenset[str]] | None:
     """Each QID's English and language-neutral aliases, in one ``wbgetentities`` call.
 
     Read only for the word-continuation candidates of a search, so a
-    name with none costs no extra call. A failed read returns nothing, which
-    leaves every continuation rejected: the filter's behaviour before the
-    alias rescue existed.
+    name with none costs no extra call. A failed read returns None, which the
+    caller reads as no aliases, leaving every continuation rejected: the
+    filter's behaviour before the alias rescue existed.
     """
     if not qids:
         return {}
@@ -224,7 +225,7 @@ async def _continuation_aliases(qids: Sequence[str]) -> dict[str, frozenset[str]
             return result
     except Exception as exc:
         log.warning("Wikidata continuation alias fetch failed for %s: %s", qids, exc)
-        return {}
+        return None
 
 
 def _usable_hits(
@@ -290,8 +291,13 @@ async def _wikidata_candidates(name: str, *, limit: int = GATE_LIMIT) -> list[di
     that alias read cover every hit the search returned, however deep. Each
     kept hit carries its ``rank`` in the response, so :func:`gate_hits` can
     recover the first-five view from a deeper search. An empty list (and thus
-    a bare local Subject) when no candidate survives the filter or the search
-    fails.
+    a bare local Subject) when no candidate survives the filter.
+
+    Raises:
+        AuthorityUnreachable: the search failed, or the alias read failed and
+            the hits it would have rescued were all that the search returned.
+            Either way Wikidata was not asked the whole question, so the empty
+            answer would be a guess.
     """
     await _wikidata_limiter().acquire()
     try:
@@ -312,13 +318,17 @@ async def _wikidata_candidates(name: str, *, limit: int = GATE_LIMIT) -> list[di
             results: list[dict[str, object]] = data.get("search", [])
     except Exception as exc:
         log.warning("Wikidata search failed for %r: %s", name, exc)
-        return []
+        raise AuthorityUnreachable(f"Wikidata search failed for {name!r}") from exc
     continuations = [
         str(hit.get("id", ""))
         for hit in results
         if _is_word_continuation(name, str(hit.get("label", "")))
     ]
-    return _usable_hits(name, results, await _continuation_aliases(continuations))
+    aliases = await _continuation_aliases(continuations)
+    usable = _usable_hits(name, results, aliases or {})
+    if aliases is None and continuations and not usable:
+        raise AuthorityUnreachable(f"Wikidata alias read failed for {name!r}")
+    return usable
 
 
 async def _wikidata_aliases(qid: str) -> list[str]:
@@ -472,6 +482,9 @@ class WikidataAuthority:
     NAMESPACE = "wikidata"
     PRIORITY = 30
     LIVE = True
+    # The host every live call reaches, so the resolver can skip this authority
+    # rather than ask it under a posture that refuses the host.
+    EGRESS_HOST = egress.WIKIDATA_HOST
     DEFAULT_LINK_CONFIDENCE = 1.0
     APPLICABILITY: list[ApplicabilityClause] = []  # broad: applies to all domains
 
@@ -500,7 +513,10 @@ class WikidataAuthority:
         # other selection read the first five of it, so what they decide is
         # what a five-hit search would have given them.
         limit = cfg.wikidata_judge_search_limit if judging else GATE_LIMIT
-        candidates = await _wikidata_candidates(name, limit=limit)
+        try:
+            candidates = await _wikidata_candidates(name, limit=limit)
+        except AuthorityUnreachable:
+            return AuthorityResolution(unreachable=True)
         gated = gate_hits(candidates) if limit > GATE_LIMIT else candidates
         compare = cfg.wikidata_candidate_selection == "best_description"
         scores = _score_candidates(gated if compare else gated[:1], particle_content)

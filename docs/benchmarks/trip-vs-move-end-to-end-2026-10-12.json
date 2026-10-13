@@ -1,0 +1,759 @@
+{
+ "about": "Acceptance item 5: tests/fixtures/trip_vs_move/ by particles audit, then particles memory consolidate --scope store, every purpose on one model, the implementation at commit bf7d25af with same_slot_admits on. The judge-free checks are the record's: (i) no ACTIVE non-restatement claim names Delhi with a residence or flight word, and every ACTIVE restatement naming a flight carries an 'as of' ISO date and a past-tense verb; (ii) no restatement kept back for contradicting its anchor's winner, and every restatement written is ACTIVE; (iii) no ACTIVE non-restatement session-11 claim matches 'for a week' or 'work trip'. Trip alone: an ACTIVE session-4 claim names Delhi with live, lives or home.",
+ "spend_usd": 1.4639,
+ "runs": {
+  "claude-sonnet-4-6-alone-1": {
+   "model": "claude-sonnet-4-6",
+   "trip_alone": true,
+   "cost_usd": 0.1112,
+   "checks": {
+    "residence_active": true,
+    "residence_claims": [
+     "The user lives in Delhi, in Lajpat Nagar."
+    ],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is in or near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The assistant confirmed the user is in Bandra until Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The assistant said it would look for vegetarian places near the user's hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user considers Sandeep's Curry House's paneer tikka the best paneer tikka they have had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is flying back home to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for a week for work.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user lives in Delhi, in Lajpat Nagar.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's favourite place to eat is Sandeep's Curry House.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's hotel is in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    }
+   ]
+  },
+  "claude-sonnet-4-6-alone-2": {
+   "model": "claude-sonnet-4-6",
+   "trip_alone": true,
+   "cost_usd": 0.108,
+   "checks": {
+    "residence_active": true,
+    "residence_claims": [
+     "The user lives in Lajpat Nagar, Delhi."
+    ],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "Bandra is a location in Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is located in or near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user considers Sandeep's Curry House's paneer tikka the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies back home to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for a week for work.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for work (a work trip).",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's favourite place to eat is Sandeep's Curry House.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    }
+   ]
+  },
+  "claude-sonnet-4-6-move-1": {
+   "model": "claude-sonnet-4-6",
+   "trip_alone": false,
+   "cost_usd": 0.2163,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, they were due to fly back home to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "As of 2026-10-08, while the user was staying at a hotel in Bandra, Mumbai, they wanted a vegetarian restaurant for dinner on the evening of 2026-10-08 in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "Sandeep's Curry House is located near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies back to Delhi on Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user is in Mumbai for a week for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Delhi, in Lajpat Nagar.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user wants a vegetarian restaurant for dinner on the evening of 2026-10-08 in Bandra, Mumbai.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user's trip to Mumbai is for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  },
+  "claude-sonnet-4-6-move-2": {
+   "model": "claude-sonnet-4-6",
+   "trip_alone": false,
+   "cost_usd": 0.2406,
+   "checks": {
+    "i_delhi_residence_or_flight": [
+     "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi."
+    ],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": false
+   },
+   "rows": [
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, they were due to fly back home to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House serves paneer tikka.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies back home to Delhi on Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user is in Bandra, Mumbai until Thursday, 2026-10-15.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user is in Mumbai for a week for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Delhi, in Lajpat Nagar.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's home city is Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user's trip to Mumbai is for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  },
+  "claude-sonnet-4-6-move-3": {
+   "model": "claude-sonnet-4-6",
+   "trip_alone": false,
+   "cost_usd": 0.2348,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, the assistant confirmed the user was in Bandra until Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "As of 2026-10-08, when the user's trip to Mumbai was for work, the user was due to fly back to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "Sandeep's Curry House is located in or near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House was a ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The assistant confirmed the user is in Bandra until Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user considers Sandeep's Curry House's paneer tikka to be the best paneer tikka they have had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies back to Delhi on Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user is in Mumbai for a week for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Delhi, in Lajpat Nagar.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user wants a vegetarian restaurant for dinner on the evening of 2026-10-08 in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's favourite place to eat is Sandeep's Curry House.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user's trip to Mumbai is for work.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  },
+  "claude-sonnet-5-5-alone-1": {
+   "model": "claude-sonnet-5-5",
+   "trip_alone": true,
+   "cost_usd": 0.0757,
+   "checks": {
+    "residence_active": true,
+    "residence_claims": [
+     "The user lives in Lajpat Nagar, Delhi."
+    ],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is in or near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies from Mumbai back to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for a week for work, on a trip that began around 2026-10-08.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user lives in Delhi (home is Delhi).",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    }
+   ]
+  },
+  "claude-sonnet-5-5-alone-2": {
+   "model": "claude-sonnet-5-5",
+   "trip_alone": true,
+   "cost_usd": 0.0747,
+   "checks": {
+    "residence_active": true,
+    "residence_claims": [
+     "The user lives in Lajpat Nagar, Delhi."
+    ],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is in the Lajpat Nagar area of Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House's paneer tikka is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user flies back home to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's favourite place to eat is Sandeep's Curry House.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    }
+   ]
+  },
+  "claude-sonnet-5-5-move-1": {
+   "model": "claude-sonnet-5-5",
+   "trip_alone": false,
+   "cost_usd": 0.1347,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, they planned to fly back to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House's paneer tikka is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user plans to fly back to Delhi on Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user was in Mumbai for a week for work on a trip in the week of 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  },
+  "claude-sonnet-5-5-move-2": {
+   "model": "claude-sonnet-5-5",
+   "trip_alone": false,
+   "cost_usd": 0.1384,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user planned to fly from Mumbai back to Delhi on the following Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House's paneer tikka is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Delhi, in Lajpat Nagar.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai, as reported in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user plans to fly from Mumbai back to Delhi on the Thursday following 2026-10-08, i.e. 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  },
+  "claude-sonnet-5-5-move-3": {
+   "model": "claude-sonnet-5-5",
+   "trip_alone": false,
+   "cost_usd": 0.1296,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_active": [],
+    "pass": true
+   },
+   "rows": [
+    {
+     "content": "As of 2026-09-04, Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, they planned to fly back from Mumbai to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "Sandeep's Curry House is in the Lajpat Nagar area of Delhi.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Delhi (the user's home is in Delhi).",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    },
+    {
+     "content": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null
+    },
+    {
+     "content": "The user plans to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR"
+    },
+    {
+     "content": "The user was in Mumbai for a week for work as of 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE"
+    }
+   ]
+  }
+ }
+}

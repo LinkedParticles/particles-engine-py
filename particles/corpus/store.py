@@ -884,6 +884,34 @@ class PendingSnapshot:
     captured_at: datetime
     attempts: int
     """Times extraction has claimed it before (``extraction_attempts``)."""
+    owed_since: datetime | None = None
+    """When the entry began owing extraction; ``None`` reads as ``captured_at``."""
+    tags: frozenset[str] = frozenset()
+    """The corpus entry's tags, for the pass-1 priority class."""
+
+    @property
+    def waiting_since(self) -> datetime:
+        """The queue key's time: owed-since when known, else the capture time."""
+        return self.owed_since if self.owed_since is not None else self.captured_at
+
+
+def owed_since(
+    pending: Sequence[datetime],
+    collapsed: Sequence[datetime],
+    last_extracted: datetime | None,
+) -> datetime:
+    """When an entry began owing extraction. Pure (D2).
+
+    The earliest capture among the entry's PENDING RESPONSE snapshots and the
+    collapsed ones captured after its newest extracted generation.
+    A collapse moves the work to the newest snapshot, whose own capture time
+    is recent; without the collapsed rows an entry edited more often than the
+    queue drains would go to the back on every edit and never be extracted.
+    ``pending`` must be non-empty.
+    """
+    owed = list(pending)
+    owed.extend(c for c in collapsed if last_extracted is None or c > last_extracted)
+    return min(owed)
 
 
 async def get_snapshot_content_hashes(
@@ -907,7 +935,7 @@ async def get_snapshot_content_hashes(
 async def list_pending_snapshots_for_catchup(
     session: AsyncSession,
 ) -> list[PendingSnapshot]:
-    """PENDING snapshots in the consolidation catch-up order: least-tried, then oldest.
+    """PENDING snapshots in the consolidation catch-up order: least-tried, then longest owed.
 
     The extract catch-up drains the backlog oldest first, so the
     oldest deposits are never starved by newer ones. Ordering on
@@ -916,31 +944,85 @@ async def list_pending_snapshots_for_catchup(
     cut at the output budget, a batch that never finishes) is handed back
     PENDING, and on capture time alone it would be first in line again the
     next night, and every night after, ahead of everything deposited since.
-    ``snapshot_id`` breaks capture-time ties deterministically.
+
+    "Oldest" is the entry's :func:`owed_since`, not the snapshot's capture
+    time: the collapse leaves a ``MUTABLE`` entry one
+    pending snapshot dated at its latest edit, and keying on that sent a rule
+    file to the back of the queue on every edit. Within one entry, which only
+    an ``APPEND_ONLY`` entry can have several of, ``captured_at`` orders the
+    snapshots oldest first, as delta reads and rule 4
+    require; ``snapshot_id`` (a random ``uuid4``) breaks only exact ties.
     """
-    result = await session.execute(
-        select(
-            SnapshotRow.entry_id,
-            SnapshotRow.snapshot_id,
-            SnapshotRow.captured_at,
-            SnapshotRow.extraction_attempts,
-        )
+    pending_entries = (
+        select(SnapshotRow.entry_id)
         .where(SnapshotRow.extraction_status == ExtractionStatus.PENDING.value)
-        .order_by(
-            SnapshotRow.extraction_attempts,
-            SnapshotRow.captured_at,
-            SnapshotRow.snapshot_id,
+        .scalar_subquery()
+    )
+    pending_rows = (
+        await session.execute(
+            select(
+                SnapshotRow.entry_id,
+                SnapshotRow.snapshot_id,
+                SnapshotRow.captured_at,
+                SnapshotRow.extraction_attempts,
+                CorpusEntryRow.tags_json,
+            )
+            .join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id)
+            .where(SnapshotRow.extraction_status == ExtractionStatus.PENDING.value)
+        )
+    ).all()
+    extracted = await session.execute(
+        select(SnapshotRow.entry_id, func.max(SnapshotRow.captured_at))
+        .where(
+            SnapshotRow.entry_id.in_(pending_entries),
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.extraction_status == ExtractionStatus.COMPLETE.value,
+            SnapshotRow.superseded_by_snapshot_id.is_(None),
+        )
+        .group_by(SnapshotRow.entry_id)
+    )
+    last_extracted: dict[str, datetime] = {str(e): at for e, at in extracted.all()}
+    collapsed_rows = await session.execute(
+        select(SnapshotRow.entry_id, SnapshotRow.captured_at).where(
+            SnapshotRow.entry_id.in_(pending_entries),
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            SnapshotRow.superseded_by_snapshot_id.is_not(None),
         )
     )
-    return [
+    collapsed: dict[str, list[datetime]] = {}
+    for entry_id, captured_at in collapsed_rows.all():
+        collapsed.setdefault(str(entry_id), []).append(captured_at)
+    pending_captures: dict[str, list[datetime]] = {}
+    for row in pending_rows:
+        pending_captures.setdefault(str(row[0]), []).append(row[2])
+    owed = {
+        entry_id: owed_since(captures, collapsed.get(entry_id, []), last_extracted.get(entry_id))
+        for entry_id, captures in pending_captures.items()
+    }
+    listed = [
         PendingSnapshot(
             entry_id=str(entry_id),
             snapshot_id=str(snapshot_id),
             captured_at=captured_at,
             attempts=int(attempts or 0),
+            owed_since=owed[str(entry_id)],
+            tags=_parse_tags(tags_json),
         )
-        for entry_id, snapshot_id, captured_at, attempts in result.all()
+        for entry_id, snapshot_id, captured_at, attempts, tags_json in pending_rows
     ]
+    listed.sort(key=lambda p: (p.attempts, p.waiting_since, p.captured_at, p.snapshot_id))
+    return listed
+
+
+def _parse_tags(tags_json: str | None) -> frozenset[str]:
+    """A corpus entry's stored tag list as a set; malformed JSON reads as no tags."""
+    try:
+        tags = json.loads(tags_json or "[]")
+    except json.JSONDecodeError:
+        return frozenset()
+    if not isinstance(tags, list):
+        return frozenset()
+    return frozenset(t for t in tags if isinstance(t, str))
 
 
 async def list_entry_ids_created_since(session: AsyncSession, since: datetime) -> list[str]:
@@ -1099,6 +1181,26 @@ async def clear_partial_reads(session: AsyncSession, entry_id: str) -> list[str]
         cleared.append(row.snapshot_id)
     await session.flush()
     return cleared
+
+
+async def reopen_snapshot(session: AsyncSession, snapshot_id: str) -> None:
+    """Hand a snapshot back as wholly unextracted: PENDING, no offset, marker or record.
+
+    For a read whose claims stay but which must not vouch for its text: an
+    agent-extraction submission below the coverage floor on an install whose
+    background extractor will read the span again. A plain
+    PENDING write would keep the offset, which the partial-read rule then
+    reads as a partial read and resumes past. Caller commits.
+    """
+    row = await session.get(SnapshotRow, snapshot_id)
+    if row is None:
+        return
+    row.extraction_status = ExtractionStatus.PENDING.value
+    row.extracted_through = None
+    row.resume_whole = False
+    row.extraction_components_json = None
+    row.extraction_started_at = None
+    await session.flush()
 
 
 async def get_partial_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:

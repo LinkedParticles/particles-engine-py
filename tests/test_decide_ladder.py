@@ -335,3 +335,63 @@ class TestEffectiveSingleTrustOrder:
         self, override: bool | None, store_mode: str, expected: bool
     ) -> None:
         assert effective_single_trust_order(override, store_mode) is expected
+
+
+class TestSameSlotUpdate:
+    """rung 2.5 rests on the update probe's settled CHANGES."""
+
+    def test_a_settled_update_retires_with_no_contradiction_signal(self) -> None:
+        from particles.core.conflict_resolution import ConflictVerdict, resolve_conflict
+
+        a, b = _particle("The user lives in Delhi."), _particle("The user moved to Mumbai.")
+        assert (
+            resolve_conflict(
+                a, b, has_contradiction_signal=False, update_order=1, same_slot_update=True
+            )
+            is ConflictVerdict.UPDATE_SUPERSEDES
+        )
+        assert (
+            resolve_conflict(a, b, has_contradiction_signal=False, update_order=1)
+            is ConflictVerdict.CORROBORATES
+        )
+        # No trust rung without a signal: an update answer never picks between sources.
+        assert (
+            resolve_conflict(
+                a,
+                b,
+                has_contradiction_signal=False,
+                update_order=1,
+                same_slot_update=True,
+                trust_score_existing=0.9,
+                trust_score_new=0.1,
+            )
+            is ConflictVerdict.UPDATE_SUPERSEDES
+        )
+
+    def test_the_rung_inputs_are_gathered_for_a_settled_update(self) -> None:
+        from particles.core.conflict_resolution import needs_rung_inputs
+
+        reconcile = PairPrecondition.RECONCILE
+        assert needs_rung_inputs(
+            False, fail_closed=False, precondition=reconcile, same_slot_update=True
+        )
+        assert not needs_rung_inputs(False, fail_closed=False, precondition=reconcile)
+        assert not needs_rung_inputs(
+            False, fail_closed=False, precondition=PairPrecondition.DECLINE, same_slot_update=True
+        )
+
+    @pytest.mark.parametrize(
+        ("slot", "action"),
+        [
+            (SlotVerdict.CHANGES, SweepAction.DEMOTE),
+            (SlotVerdict.FIXED, None),
+            (SlotVerdict.DIFFERENT, SweepAction.KEEP),
+            (None, SweepAction.KEEP),
+        ],
+    )
+    def test_the_sweep_asks_the_contradiction_probe_only_for_a_fixed_slot(
+        self, slot: SlotVerdict | None, action: SweepAction | None
+    ) -> None:
+        from particles.core.conflict_resolution import sweep_action_first
+
+        assert sweep_action_first(slot) is action

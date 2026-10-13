@@ -115,3 +115,15 @@ class TestPersistentLabelCache:
         # The own-session write committed — visible from an independent session.
         async with session_scope() as other:
             assert await get_label(other, "Q1055") == "Hamburg"
+
+    @pytest.mark.asyncio
+    async def test_failed_fetch_is_passed_through_and_not_persisted(self, db_session: Any) -> None:
+        """A None from ``fetch_live`` is an outage, not a label."""
+        from unittest.mock import AsyncMock
+
+        fetch_live = AsyncMock(return_value=None)
+        assert await _persistent_label_cache("Q42", fetch_live, db_session) is None
+        assert await get_label(db_session, "Q42") is None
+        # A failed own-session lookup writes nothing either.
+        assert await _persistent_label_cache("P571", fetch_live, None) is None
+        assert await get_label(db_session, "P571") is None

@@ -175,7 +175,8 @@ _PARTICLES_ROOT = Path(particles.__file__).resolve().parent
 #                         client.stream; get_with_retry now delegates to it).
 #   llm/adapters/openai_compat.py — completion POST to an operator-configured
 #                         endpoint (loopback or hosted), not a
-#                         corpus fetch; uses its own short-lived httpx client.
+#                         corpus fetch; its short-lived client comes from
+#                         particles.http.egress_client.
 #   exporters/notion.py — outbound writes to the Notion API (a trusted export
 #                         target), not untrusted-content ingestion.
 #   api/client/http.py  — the Python SDK calling *our own* engine, not the web.
@@ -306,6 +307,11 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
         "exemption class 3, local-only: rev-parse / add / diff / "
         "commit against a local working tree; adds no remote and pushes nothing",
     ),
+    ("api/cli/hook.py", "_git", "git"): (
+        1,
+        "exemption class 3, local-only: the doctor's rev-parse / "
+        "describe / tag --list over the install's own checkout; never fetches",
+    ),
 }
 
 
@@ -416,3 +422,55 @@ class TestSubprocessEgressInventory:
             assert "resolve_and_pin" in _SUBPROCESS_EGRESS_ALLOWLIST[key][1]
             source = (_PARTICLES_ROOT / key[0]).read_text()
             assert "resolve_and_pin" in source, f"{key[0]} no longer pins its egress"
+
+
+# ---------------------------------------------------------------------------
+# Client-construction ratchet (item 4)
+# ---------------------------------------------------------------------------
+
+
+def _client_constructions() -> list[tuple[str, int, str, ast.Call]]:
+    """Every ``httpx.AsyncClient(`` / ``httpx.Client(`` / ``anthropic.Anthropic(`` call."""
+    found: list[tuple[str, int, str, ast.Call]] = []
+    for path in _PARTICLES_ROOT.rglob("*.py"):
+        rel = path.relative_to(_PARTICLES_ROOT).as_posix()
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            receiver = node.func.value
+            if not isinstance(receiver, ast.Name):
+                continue
+            name = f"{receiver.id}.{node.func.attr}"
+            if name in {"httpx.AsyncClient", "httpx.Client", "anthropic.Anthropic"}:
+                found.append((rel, node.lineno, name, node))
+    return found
+
+
+class TestClientConstructionRatchet:
+    def test_httpx_clients_are_built_only_in_the_chokepoint(self) -> None:
+        """Every outbound httpx client carries the no-egress check.
+
+        ``particles_client`` (the SSRF transport) and ``egress_client`` (the
+        egress-only transport) both live in ``particles/http.py``. A client built
+        anywhere else would reach the network with neither.
+        """
+        offenders = [
+            f"{rel}:{line} {name}("
+            for rel, line, name, _ in _client_constructions()
+            if name.startswith("httpx.") and rel != "http.py"
+        ]
+        assert offenders == [], (
+            "httpx client constructed outside particles/http.py; use "
+            f"particles_client() or egress_client() instead: {offenders}"
+        )
+
+    def test_anthropic_client_carries_the_egress_hook(self) -> None:
+        """The SDK runs on httpx2, so the check rides its own client's request hook."""
+        calls = [c for c in _client_constructions() if c[2] == "anthropic.Anthropic"]
+        assert calls, "expected llm/client.py to build the Anthropic client"
+        for rel, line, _name, node in calls:
+            keywords = {kw.arg for kw in node.keywords}
+            assert "http_client" in keywords, (
+                f"{rel}:{line} builds anthropic.Anthropic without http_client=; pass "
+                "anthropic.DefaultHttpxClient(event_hooks={'request': [egress_request_hook(...)]})"
+            )
