@@ -73,8 +73,10 @@ class ExtractorRow(Base):
 
 
 # A calibration fitted before the provider_model key existed is keyed
-# under the historical default model so it still applies under that pairing and
-# is correctly missed by any swap away from it.
+# under the model it was fitted on, so it still applies under that pairing and
+# is correctly missed by any swap away from it. A fact about the past, never the
+# compiled default: it stays claude-sonnet-4-6 after the default moved in 1.189.0,
+# and tests/test_calibration_integration.py pins it.
 LEGACY_PROVIDER_MODEL = "anthropic:claude-sonnet-4-6"
 
 

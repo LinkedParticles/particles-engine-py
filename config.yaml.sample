@@ -423,30 +423,35 @@ agent_memory:  # [engine]
 # extraction pass, 16 for the benchmark judge) and lives with each call site
 # (extraction.max_tokens, query.answer_max_tokens, wiki.max_tokens).
 llm:  # [client]
+  # The compiled default is claude-sonnet-5-5 since 1.189.0 (it was
+  # claude-sonnet-4-6 before). This block writes it out, so a config.yaml copied
+  # from this file pins the model and a later change of the compiled default
+  # does not move it. To keep the old model, set `model: claude-sonnet-4-6`.
+  # `particles config validate` prints the default in force and where it came from.
   default:
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
   # Optional per-purpose overrides. Uncomment and edit to route a purpose to a
   # different model — e.g. cheap high-volume extraction, hosted synthesis.
   # extraction:
   #   provider: anthropic
   #   model: claude-haiku-4-5
   # semantic_lint:     # lint detectors + the reconcile-ladder contradiction check
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # query_response:
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # synthesis:         # wiki / obsidian / logseq article prose + the citation judge
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # benchmark:         # the equivalence eval's LLM judge (also the answer judge)
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # benchmark_answer:  # the memory-benchmark answering model — one pinned
-  #   model: claude-sonnet-4-6    # model across QA conditions ii–iv (runner-enforced)
+  #   model: claude-sonnet-5-5    # model across QA conditions ii–iv (runner-enforced)
   # abstraction:       # abstraction-promotion synthesis + entailment/dedup judges
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # verification:      # the audit's second reading of each flagged contradiction
-  #   model: claude-sonnet-4-6
+  #   model: claude-sonnet-5-5
   # subject_resolution: # the Wikidata candidate judge, when subjects.wikidata_candidate_selection
-  #   model: claude-sonnet-4-6    # is llm_judge
+  #   model: claude-sonnet-5-5    # is llm_judge
   # use_judge:          # the utility-mining use judge. Compiled default
   #   provider: anthropic # is Sonnet: the activation gate measured a Haiku-class judge
   #   model: claude-sonnet-5-5  # short of its bar and Sonnet well over it.
@@ -772,6 +777,14 @@ modality_regeneration:  # [engine]
   batch_limit: 200
   # How often a run commits.
   commit_interval: 25
+
+validity_backfill:  # [engine]
+  # Defaults for `particles validity`, which dates ACTIVE claims
+  # from the absolute dates already in their prose (`on <date>`, `since
+  # <date>`, `as of <date>`, `in <year>`) and sets `valid_from` + `valid_kind`
+  # for the window route (`query --during`). No model call, so no rate limit.
+  # How often a run commits.
+  commit_interval: 200
 
 extraction_stance:  # [client]
   # When true (default), the general extractor flags a candidate
@@ -1398,7 +1411,10 @@ subjects:  # [engine]
   # and model. Every other name takes the top hit. Measured
   # 2026-10-01: accuracy 0.971 against 0.914 for top_hit, and 0.898 to 0.918
   # against 0.735 on ordinary prose, at US$0.08 to 0.20 per 100 names; see
-  # docs/benchmarks/subject-resolution-judge-2026-10-01.md. With no LLM key or
+  # docs/benchmarks/subject-resolution-judge-2026-10-01.md. Re-measured
+  # 2026-10-13 on claude-sonnet-5-5, the compiled default since 1.189.0: 1.000
+  # and 0.939, no correct link lost, at the same cost (see
+  # docs/benchmarks/default-model-adr0317-2026-10-13.md). With no LLM key or
   # an unusable reply it takes the top hit; set top_hit for no model call at all.
   wikidata_candidate_selection: llm_judge
   # Output budget of one llm_judge call. The reply is one short JSON object;
@@ -2040,6 +2056,9 @@ audit:  # [engine]
   # than claude-sonnet-5, keyed like llm.price_per_mtok. The 2026-09 provider
   # survey measured about 0.55 of sonnet's output on claude-haiku-4-5:
   #   estimate_output_scale_by_model: {claude-haiku-4-5: 0.55}
+  # Two entries ship and stay unless an entry here names the same key (ADR
+  # 0317): claude-sonnet-5-5 at 0.534 and claude-sonnet-4-6 at 0.800, both
+  # measured on identical extraction calls.
   estimate_output_scale_by_model: {}
   # The expected range takes every call at (1 - spread) up to every call at
   # (1 + spread) of its figure. A call whose output passes
@@ -2400,6 +2419,9 @@ benchmark_memory:  # [engine]
   #   estimate_output_tokens_per_extraction_call_by_model:
   #     claude-sonnet-5: 6700
   #     claude-haiku-4-5: 3600
+  # Two entries ship and stay unless an entry here names the same key (ADR
+  # 0317): claude-sonnet-5-5 at 3578 and claude-sonnet-4-6 at 5363, the 6,700
+  # scaled by each model's measured output against claude-sonnet-5.
   estimate_output_tokens_per_extraction_call_by_model: {}
   # Characters per INPUT token — what the estimate and the pre-flight
   # context-window check divide prompt bytes by. The scalar is the classic
@@ -2422,6 +2444,10 @@ benchmark_memory:  # [engine]
   #   chars_per_token_by_model:
   #     claude-sonnet-5: 2.92
   #     claude-haiku-4-5: 4.0
+  # One entry ships and stays unless an entry here names the same key (ADR
+  # 0317): claude-sonnet-5-5 at 2.98, the 4.0 divided by its measured 1.3437x
+  # the tokens of claude-sonnet-4-6 (token-counting endpoint, 2026-10-13). The
+  # scalar stays 4.0, so every model without an entry keeps its factor.
   chars_per_token: 4.0
   chars_per_token_by_model: {}
   # The batch discount --pooled / --batch-qa apply is llm.batch_discount
@@ -2542,6 +2568,23 @@ benchmark_leakage:  # [engine]
   estimate_judge_output_tokens: 120
   # Ask before spending above this many projected LLM calls (--yes skips).
   confirm_call_threshold: 50
+
+# The trip-versus-move case and the update-gate pair sets:
+# `particles benchmark trip-vs-move` and `particles benchmark update-gate`.
+# Run counts and safety margins only; the pipeline under test runs the compiled
+# defaults with every purpose pinned to the chosen model. Every live run asks
+# before its first call (there is no free live path, so no threshold).
+benchmark_update_gate:  # [engine]
+  # The record's protocol: the bar is stated only for these run counts.
+  move_runs: 3
+  trip_alone_runs: 2
+  # Samples per pair in the update-gate replay (the sets were registered at 3).
+  samples: 3
+  # --max-usd defaults to this multiple of a measured per-run estimate; an
+  # upper-bound estimate is used as is.
+  max_usd_multiplier: 4.0
+  # One run's child is stopped and reported incomplete after this long.
+  run_timeout_seconds: 1800.0
 
 # Benchmark-harness run persistence (family).
 benchmark:  # [engine]

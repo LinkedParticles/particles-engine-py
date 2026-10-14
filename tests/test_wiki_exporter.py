@@ -154,8 +154,8 @@ class TestRegistration:
         # pinned defaults
         assert cfg.min_particles == 3
         # the synthesis model moved from wiki.model into the per-purpose
-        # llm config; the pinned default is unchanged.
-        assert get_config().llm.for_purpose("synthesis").model == "claude-sonnet-4-6"
+        # llm config, where it follows the compiled default.
+        assert get_config().llm.for_purpose("synthesis").model == "claude-sonnet-5-5"
         assert cfg.max_tokens == 4096
         assert cfg.encyclopedic_tone is True
         assert cfg.layer_b_enabled is True

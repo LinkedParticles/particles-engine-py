@@ -21,7 +21,7 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.187.3"
+version = "1.190.0"
 description = "Auditable, provenance-tracked memory for AI agents — the Particles engine and its API, CLI, and MCP surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -69,7 +69,7 @@ classifiers = [
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.187.3",
+    "linkedparticles-core==1.190.0",
     # `[asyncio]` because 2.1 stopped installing greenlet by default and every
     # `sqlalchemy.ext.asyncio` import needs it. Bounded below the next minor:
     # 2.1 changed ORM and typing behaviour this code depends on, so a 2.2 must
@@ -170,6 +170,20 @@ packages = ["particles"]
 "alembic/env.py" = "particles/_alembic/env.py"
 "alembic/script.py.mako" = "particles/_alembic/script.py.mako"
 "alembic.ini" = "particles/_alembic/alembic.ini"
+
+# Ship the fixtures `particles benchmark trip-vs-move` and `particles benchmark
+# update-gate` read: the case's three notes and the four registered pair sets.
+# They stay in tests/fixtures/, which other tests read, and are resolved at
+# runtime packaged copy first (`particles.benchmark.update_gate.fixtures`).
+# Listed per file, as the migrations are, because force-include bypasses the
+# exclude patterns.
+"tests/fixtures/trip_vs_move/session-04.md" = "particles/_artifacts/benchmarks/trip_vs_move/session-04.md"
+"tests/fixtures/trip_vs_move/session-11.md" = "particles/_artifacts/benchmarks/trip_vs_move/session-11.md"
+"tests/fixtures/trip_vs_move/session-12-moved.md" = "particles/_artifacts/benchmarks/trip_vs_move/session-12-moved.md"
+"tests/fixtures/update_probe/gate_pairs.json" = "particles/_artifacts/benchmarks/update_probe/gate_pairs.json"
+"tests/fixtures/update_probe/gate_pairs_heldout.json" = "particles/_artifacts/benchmarks/update_probe/gate_pairs_heldout.json"
+"tests/fixtures/update_probe/past_value_pairs.json" = "particles/_artifacts/benchmarks/update_probe/past_value_pairs.json"
+"tests/fixtures/update_probe/past_marker_heldout.json" = "particles/_artifacts/benchmarks/update_probe/past_marker_heldout.json"
 
 # Allowlist only what a source build / install needs. The hatch default sweeps
 # the whole repo into the sdist; keep this an explicit include, not an exclude.

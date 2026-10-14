@@ -42,6 +42,8 @@ from particles.core.schema import (
     StructuredClaim,
     TermKind,
     VocabularyReport,
+    WindowCoverage,
+    WindowHit,
 )
 from particles.core.stance import has_stance_marker
 from particles.db import DEFAULT_STORE, StoreHandle, session_scope
@@ -61,6 +63,7 @@ from .effective_confidence import score_effective_confidence
 from .observer_scope import filter_visible, merged_scope_note
 from .source_trust import TrustPolicy, load_trust_policy
 from .vocabulary_report import VocabularyInputs, gather_vocabulary_inputs, vocabulary_report
+from .window import WindowGather, gather_window_candidates
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +130,9 @@ class _Gathered:
     excluded_undatable: int = 0
     active_total: int = 0
     with_claims: int = 0
+    # the window readings and coverage when the request set one.
+    window_hits: dict[str, WindowHit] = field(default_factory=dict)
+    window_coverage: WindowCoverage | None = None
 
 
 async def _candidate_claims(
@@ -134,6 +140,7 @@ async def _candidate_claims(
     request: QueryRequest,
     *,
     scope_notes: list[ObserverScopeNote] | None = None,
+    window_out: WindowGather | None = None,
 ) -> tuple[list[tuple[Particle, StructuredClaim]], dict[str, AsOfNote], int]:
     """Load and default-filter one store's claim-carrying candidates.
 
@@ -144,7 +151,15 @@ async def _candidate_claims(
     """
     as_of_notes: dict[str, AsOfNote] = {}
     excluded_undatable = 0
-    if request.as_of is None:
+    if request.window is not None:
+        # filters intersect; the window cuts first, across
+        # statuses, the same gather the semantic path runs.
+        gather = window_out if window_out is not None else WindowGather()
+        admitted, excluded_undatable = await gather_window_candidates(
+            session, request, gather, require_claim=True, as_of_notes=as_of_notes
+        )
+        particles = [p for p, _, _ in admitted]
+    elif request.as_of is None:
         particles = await get_active_particles_with_claims(
             session, request.min_confidence, subject_id=request.subject_id
         )
@@ -214,8 +229,9 @@ async def _gather_store(
 ) -> _Gathered:
     """Filter and score one store's claims; used by both the single-store and
     federated paths (federation passes the viewer's policies)."""
+    window_gather = WindowGather() if request.window is not None else None
     pairs, as_of_notes, excluded_undatable = await _candidate_claims(
-        session, request, scope_notes=scope_notes
+        session, request, scope_notes=scope_notes, window_out=window_gather
     )
     filters = claim_filters_from_request(request)
     matched: list[tuple[Particle, StructuredClaim]] = []
@@ -250,6 +266,10 @@ async def _gather_store(
         excluded_undatable=excluded_undatable,
         active_total=counts["active"],
         with_claims=counts["annotated"],
+        window_hits=window_gather.hits if window_gather is not None else {},
+        window_coverage=(
+            await window_gather.coverage(session) if window_gather is not None else None
+        ),
     )
 
 
@@ -369,6 +389,8 @@ async def _assemble(
             claim_coverage=_coverage(gathered, below_min=below_min),
             as_of=request.as_of,
             as_of_excluded_undatable=gathered.excluded_undatable,
+            window=request.window,
+            window_coverage=gathered.window_coverage,
         )
 
     # Deterministic listing (§2.1 mode three): effective_confidence descending,
@@ -394,6 +416,13 @@ async def _assemble(
         as_of=request.as_of,
         as_of_notes=as_of_notes,
         as_of_excluded_undatable=gathered.excluded_undatable,
+        window=request.window,
+        window_hits=(
+            [gathered.window_hits.get(p.id) for p, _, _ in top]
+            if request.window is not None
+            else []
+        ),
+        window_coverage=gathered.window_coverage,
     )
 
 

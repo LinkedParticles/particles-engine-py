@@ -312,6 +312,13 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
         "exemption class 3, local-only: the doctor's rev-parse / "
         "describe / tag --list over the install's own checkout; never fetches",
     ),
+    ("benchmark/update_gate/case.py", "run_one", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: starts this interpreter "
+        "(sys.executable -m the SDK's own child entry) for one isolated benchmark "
+        "run; the child's own calls go through the SDK's checked "
+        "transports under the operator's network.egress, copied into its config",
+    ),
 }
 
 

@@ -170,6 +170,37 @@ async def test_unstamped_particles_never_match(db_session) -> None:  # type: ign
     assert await get_active_particles_with_provider_model(db_session, _LUNA) == []
 
 
+@pytest.mark.asyncio
+async def test_latest_pairing_is_the_newest_stamped_claim_of_that_extractor(db_session) -> None:  # type: ignore[no-untyped-def]
+    """the pairing a store extracts with, read from what it last minted.
+
+    Unstamped claims and claims from another extractor never answer, including
+    one whose id contains this extractor's id as a substring.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from particles.store.particle_store import latest_extraction_provider_model
+
+    t0 = datetime(2026, 10, 1, tzinfo=UTC)
+    old = _particle(content="Old.", provider_model=_CLAUDE)
+    old.asserted_at = t0
+    old.extractor_ref = ExtractorRef(name="general-extractor", version="0.16.0")
+    new = _particle(content="New.", provider_model=_LUNA)
+    new.asserted_at = t0 + timedelta(days=1)
+    new.extractor_ref = ExtractorRef(name="general-extractor", version="0.17.0")
+    unstamped = _particle(content="Unstamped.")
+    unstamped.asserted_at = t0 + timedelta(days=2)
+    unstamped.extractor_ref = ExtractorRef(name="general-extractor", version="0.17.0")
+    other = _particle(content="Other.", provider_model="anthropic:claude-sonnet-5-5")
+    other.asserted_at = t0 + timedelta(days=3)
+    other.extractor_ref = ExtractorRef(name="x-general-extractor", version="0.1.0")
+    for p in (old, new, unstamped, other):
+        await insert_particle(db_session, p)
+
+    assert await latest_extraction_provider_model(db_session, "general-extractor") == _LUNA
+    assert await latest_extraction_provider_model(db_session, "journal-extractor") is None
+
+
 # ---------------------------------------------------------------------------
 # 4. The call-site stamp
 # ---------------------------------------------------------------------------

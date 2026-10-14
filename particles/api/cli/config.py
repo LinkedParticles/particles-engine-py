@@ -6,9 +6,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import typer
 
 from particles.api.cli import app
+
+if TYPE_CHECKING:
+    from particles.config import LLMConfig
 
 config_app = typer.Typer(
     help="Inspect and validate Particles configuration.",
@@ -52,6 +57,9 @@ def config_validate_cmd() -> None:
     else:
         typer.echo(f"Config valid — {path}")
 
+    for line in model_lines(_cfg.llm):
+        typer.echo(line)
+
     errors = _echo_network_posture()
 
     for line in blob_reachability_lines():
@@ -59,6 +67,24 @@ def config_validate_cmd() -> None:
 
     if errors:
         raise typer.Exit(1)
+
+
+def model_lines(llm: LLMConfig) -> list[str]:
+    """The model in force: the default and where it came from, then each purpose routed elsewhere.
+
+    A zero-config install and one whose ``config.yaml`` has no ``llm.default``
+    both run the compiled default, which a release can move, so
+    the line says which of the two the operator is on.
+    """
+    default = llm.default
+    lines = [
+        f"  llm.default: {default.provider}:{default.model} ({llm.selection_source('default')})"
+    ]
+    for purpose, sel in llm.routed_elsewhere().items():
+        lines.append(
+            f"  llm.{purpose}: {sel.provider}:{sel.model} ({llm.selection_source(purpose)})"
+        )
+    return lines
 
 
 def _echo_network_posture() -> int:

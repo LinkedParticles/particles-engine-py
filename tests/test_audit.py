@@ -125,6 +125,11 @@ class TestEstimate:
 class TestEstimatePricing:
     """The dollar range: list price over the token projection, or an honest refusal."""
 
+    @pytest.fixture(autouse=True)
+    def _unscaled(self) -> None:
+        """Measure the per-call model unscaled; the shipped scale has its own test."""
+        get_config().audit.estimate_output_scale_by_model = {}
+
     def test_price_range_arithmetic(self) -> None:
         cost = price_range(
             input_tokens=1_000_000,
@@ -180,6 +185,26 @@ class TestEstimatePricing:
         assert est.ceiling_retries == 1
         assert est.output_tokens_ceiling == 4 * extraction.max_tokens + extraction.retry_max_tokens
         assert est.output_tokens_low <= est.output_tokens_high <= est.output_tokens_ceiling
+
+    def test_the_default_models_shipped_scale_applies_and_merges_under_operator_entries(
+        self,
+    ) -> None:
+        """the compiled default is estimated with its measured scale."""
+        from particles.config import AuditConfig, ProviderSelection
+
+        audit = get_config().audit
+        audit.estimate_output_scale_by_model = AuditConfig().estimate_output_scale_by_model
+        audit.estimate_output_tokens_per_call_base = 1000
+        audit.estimate_output_tokens_per_source_char = 2.0
+        audit.estimate_output_spread = 0.0
+        audit.estimate_extraction_retry_rate = 0.0
+        scale = audit.estimate_output_scale_by_model[ProviderSelection().model]
+        assert estimate_extraction([2_000]).output_tokens_expected == round(5_000 * scale)
+        merged = AuditConfig.model_validate(
+            {"estimate_output_scale_by_model": {"claude-haiku-4-5": 0.55}}
+        ).estimate_output_scale_by_model
+        assert merged["claude-haiku-4-5"] == 0.55
+        assert merged[ProviderSelection().model] == scale
 
     def test_no_retries_expected_when_the_retry_is_disabled(self) -> None:
         extraction = get_config().extraction

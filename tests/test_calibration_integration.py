@@ -40,6 +40,7 @@ from typer.testing import CliRunner
 from particles.api.cli import app
 from particles.benchmark.equivalence import EquivalenceJudge
 from particles.benchmark.runner import BenchmarkReport, CaseResult
+from particles.config import ProviderSelection
 from particles.core.schema import (
     Confidence,
     ExtractorCalibration,
@@ -61,6 +62,11 @@ def runner() -> CliRunner:
 
 def _invoke(runner: CliRunner, args: list[str]) -> object:
     return runner.invoke(app, args, catch_exceptions=False)
+
+
+#: The pairing an unconfigured `extractor calibrate` fits under: the compiled
+#: default, which moves in a release, so never spelled out here.
+_DEFAULT_PAIRING = f"anthropic:{ProviderSelection().model}"
 
 
 #: Sentinel for "the running extractor's version" in the seeding helper.
@@ -590,9 +596,7 @@ class TestCalibrateCLI:
             from particles.store.extractor_store import get_calibration
 
             async with session_scope() as session:
-                return await get_calibration(
-                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
-                )
+                return await get_calibration(session, "numista-coin-extractor", _DEFAULT_PAIRING)
 
         assert asyncio.run(_read()) is None
 
@@ -625,9 +629,7 @@ class TestCalibrateCLI:
             from particles.store.extractor_store import get_calibration
 
             async with session_scope() as session:
-                return await get_calibration(
-                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
-                )
+                return await get_calibration(session, "numista-coin-extractor", _DEFAULT_PAIRING)
 
         calibration = asyncio.run(_read())
         assert calibration is not None
@@ -813,9 +815,7 @@ class TestCalibrateCLI:
             from particles.store.extractor_store import get_calibration
 
             async with session_scope() as session:
-                cal = await get_calibration(
-                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
-                )
+                cal = await get_calibration(session, "numista-coin-extractor", _DEFAULT_PAIRING)
             assert cal is not None
             return cal.fitted_at
 
@@ -873,9 +873,7 @@ class TestCalibrateCLI:
             from particles.store.extractor_store import get_calibration
 
             async with session_scope() as session:
-                return await get_calibration(
-                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
-                )
+                return await get_calibration(session, "numista-coin-extractor", _DEFAULT_PAIRING)
 
         assert asyncio.run(_read()) is None, "a refused fit must leave nothing behind"
 
@@ -929,7 +927,7 @@ class TestCalibrateCLI:
         result = _invoke(runner, ["extractor", "calibrations", "numista-coin-extractor"])
         assert result.exit_code == 0, result.output
         # The default extraction model pairing is listed.
-        assert "anthropic:claude-sonnet-4-6" in result.output
+        assert _DEFAULT_PAIRING in result.output
         # A freshly-fitted record is applicable — no refusal note.
         assert "NOT APPLIED" not in result.output
 
@@ -1051,9 +1049,7 @@ class TestPooledCalibrationRuns:
             from particles.store.extractor_store import get_calibration
 
             async with session_scope() as session:
-                return await get_calibration(
-                    session, "numista-coin-extractor", "anthropic:claude-sonnet-4-6"
-                )
+                return await get_calibration(session, "numista-coin-extractor", _DEFAULT_PAIRING)
 
         record = asyncio.run(_read())
         assert record is not None
@@ -1430,7 +1426,7 @@ class TestHeldOutGuardCLI:
     ) -> None:
         _init_extractor_records_sync(cli_db)
         _seed_calibration_sync(
-            "numista-coin-extractor", "anthropic:claude-sonnet-4-6", "numismatic-calibration-001"
+            "numista-coin-extractor", _DEFAULT_PAIRING, "numismatic-calibration-001"
         )
         result = _invoke(runner, ["extractor", "calibrations", "numista-coin-extractor"])
         assert result.exit_code == 0, result.output
@@ -1444,6 +1440,54 @@ class TestHeldOutGuardCLI:
         result = _invoke(runner, ["extractor", "calibrations", "numista-coin-extractor"])
         assert "held-out ECE" in result.output
         assert "NOT CHECKED OUT OF SAMPLE" not in result.output
+
+
+def test_legacy_pairing_stays_the_model_the_unkeyed_records_were_fitted_on() -> None:
+    """the compiled default moved, the legacy key did not.
+
+    A record persisted before the provider_model key existed was fitted on
+    claude-sonnet-4-6. Re-keying it to whatever the default is today would apply
+    an old model's temperature to a new model's confidences.
+    """
+    from particles.store.extractor_store import LEGACY_PROVIDER_MODEL
+
+    assert LEGACY_PROVIDER_MODEL == "anthropic:claude-sonnet-4-6"
+    assert LEGACY_PROVIDER_MODEL != _DEFAULT_PAIRING
+
+
+class TestUnreachedNote:
+    """a record the configured extraction route never reaches is said so."""
+
+    def _cal(self, provider_model: str | None) -> ExtractorCalibration:
+        return ExtractorCalibration(
+            temperature=2.0,
+            fitted_at=datetime.now(UTC),
+            benchmark_suite_id="prose-calibration-001",
+            sample_size=100,
+            calibration_error_before=0.2,
+            calibration_error_after=0.05,
+            provider_model=provider_model,
+        )
+
+    def test_a_record_for_the_configured_route_carries_no_note(self) -> None:
+        from particles.api.cli.extractor import _unreached_note
+
+        assert _unreached_note(self._cal("anthropic:m"), "anthropic:m") is None
+
+    def test_a_record_for_another_pairing_is_unreached(self) -> None:
+        from particles.api.cli.extractor import _unreached_note
+
+        note = _unreached_note(self._cal("anthropic:old"), "anthropic:new")
+        assert note is not None
+        assert note.startswith("UNREACHED")
+        assert "anthropic:new" in note
+
+    def test_a_legacy_record_reads_as_the_legacy_pairing(self) -> None:
+        from particles.api.cli.extractor import _unreached_note
+        from particles.store.extractor_store import LEGACY_PROVIDER_MODEL
+
+        assert _unreached_note(self._cal(None), LEGACY_PROVIDER_MODEL) is None
+        assert _unreached_note(self._cal(None), "anthropic:other") is not None
 
 
 class TestExtractorVersionKey:

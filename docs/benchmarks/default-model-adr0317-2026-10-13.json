@@ -1,0 +1,361 @@
+{
+  "adr": "0317",
+  "registered": "2026-10-13",
+  "run_date": "2026-10-13",
+  "extractor_version": "0.17.0",
+  "item_1_tokenizer": {
+    "calls": 6,
+    "characters": 90286,
+    "models": {
+      "claude-sonnet-4-6": {
+        "input_tokens": 24913,
+        "chars_per_token": 3.624,
+        "ratio_vs_sonnet_4_6": 1.0
+      },
+      "claude-sonnet-5": {
+        "input_tokens": 33463,
+        "chars_per_token": 2.698,
+        "ratio_vs_sonnet_4_6": 1.3432
+      },
+      "claude-sonnet-5-5": {
+        "input_tokens": 33475,
+        "chars_per_token": 2.697,
+        "ratio_vs_sonnet_4_6": 1.3437
+      }
+    }
+  },
+  "item_2_extraction": {
+    "arms": {
+      "claude-sonnet-4-6": {
+        "extractor_version": "0.17.0",
+        "runs": {
+          "recall": [
+            0.88,
+            0.9,
+            0.88
+          ],
+          "precision": [
+            0.863,
+            0.8378,
+            0.8243
+          ],
+          "calibration_error": [
+            0.0573,
+            0.0836,
+            0.0965
+          ]
+        },
+        "mean": {
+          "recall": 0.8867,
+          "precision": 0.8417,
+          "calibration_error": 0.0791
+        },
+        "emitted": [
+          146,
+          148,
+          148
+        ],
+        "zero_claim_cases": 0
+      },
+      "claude-sonnet-5-5": {
+        "extractor_version": "0.17.0",
+        "runs": {
+          "recall": [
+            0.72,
+            0.74,
+            0.68
+          ],
+          "precision": [
+            0.77,
+            0.7979,
+            0.7742
+          ],
+          "calibration_error": [
+            0.0805,
+            0.0649,
+            0.0875
+          ]
+        },
+        "mean": {
+          "recall": 0.7133,
+          "precision": 0.7807,
+          "calibration_error": 0.0776
+        },
+        "emitted": [
+          100,
+          94,
+          93
+        ],
+        "zero_claim_cases": 0
+      }
+    },
+    "n_required": 50,
+    "n_2b_items": 40,
+    "n_2c_items": 60,
+    "seed": 20261013
+  },
+  "item_2_usage": {
+    "claude-sonnet-4-6": {
+      "cost_usd": 1.89193725,
+      "rows": [
+        {
+          "purpose": "extraction",
+          "model": "claude-sonnet-4-6",
+          "calls": 18,
+          "input_tokens": 36833,
+          "cache_creation_tokens": 2105,
+          "cache_read_tokens": 35785,
+          "output_tokens": 111662,
+          "max_tokens_stops": 0,
+          "cost_usd": 1.80405825
+        },
+        {
+          "purpose": "subject_resolution",
+          "model": "claude-sonnet-4-6",
+          "calls": 42,
+          "input_tokens": 26728,
+          "cache_creation_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 513,
+          "max_tokens_stops": 0,
+          "cost_usd": 0.087879
+        }
+      ]
+    },
+    "claude-sonnet-5-5": {
+      "cost_usd": 0.9543932,
+      "rows": [
+        {
+          "purpose": "extraction",
+          "model": "claude-sonnet-5-5",
+          "calls": 18,
+          "input_tokens": 48701,
+          "cache_creation_tokens": 2868,
+          "cache_read_tokens": 48756,
+          "output_tokens": 74494,
+          "max_tokens_stops": 0,
+          "cost_usd": 0.8592632
+        },
+        {
+          "purpose": "subject_resolution",
+          "model": "claude-sonnet-5-5",
+          "calls": 42,
+          "input_tokens": 34565,
+          "cache_creation_tokens": 0,
+          "cache_read_tokens": 0,
+          "output_tokens": 2600,
+          "max_tokens_stops": 0,
+          "cost_usd": 0.09513
+        }
+      ]
+    }
+  },
+  "item_3_subject_resolution": {
+    "seed_top_hit": {
+      "resolution_accuracy": 0.9142857142857143,
+      "resolution_wrong_ref": 0.05714285714285714,
+      "resolution_bare_local": 0.02857142857142857
+    },
+    "seed_pass_1": {
+      "metrics": {
+        "resolution_accuracy": 1.0,
+        "resolution_wrong_ref": 0.0,
+        "resolution_bare_local": 0.0
+      },
+      "judge_model": "anthropic/claude-sonnet-5-5",
+      "judge_search_limit": 7,
+      "judged": 14,
+      "lost_vs_top_hit": [],
+      "usage": {
+        "cost_usd": 0.03098,
+        "rows": [
+          {
+            "purpose": "subject_resolution",
+            "model": "claude-sonnet-5-5",
+            "calls": 14,
+            "input_tokens": 11575,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 783,
+            "max_tokens_stops": 0,
+            "cost_usd": 0.03098
+          }
+        ]
+      }
+    },
+    "seed_pass_2": {
+      "metrics": {
+        "resolution_accuracy": 1.0,
+        "resolution_wrong_ref": 0.0,
+        "resolution_bare_local": 0.0
+      },
+      "judge_model": "anthropic/claude-sonnet-5-5",
+      "judge_search_limit": 7,
+      "judged": 14,
+      "lost_vs_top_hit": [],
+      "usage": {
+        "cost_usd": 0.03047,
+        "rows": [
+          {
+            "purpose": "subject_resolution",
+            "model": "claude-sonnet-5-5",
+            "calls": 14,
+            "input_tokens": 11495,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 748,
+            "max_tokens_stops": 0,
+            "cost_usd": 0.03047
+          }
+        ]
+      }
+    },
+    "prose_top_hit": {
+      "resolution_accuracy": 0.7346938775510204,
+      "resolution_wrong_ref": 0.04081632653061224,
+      "resolution_bare_local": 0.22448979591836735
+    },
+    "prose_pass_1": {
+      "metrics": {
+        "resolution_accuracy": 0.9387755102040817,
+        "resolution_wrong_ref": 0.02040816326530612,
+        "resolution_bare_local": 0.04081632653061224
+      },
+      "judge_model": "anthropic/claude-sonnet-5-5",
+      "judge_search_limit": 7,
+      "judged": 45,
+      "lost_vs_top_hit": [],
+      "usage": {
+        "cost_usd": 0.095734,
+        "rows": [
+          {
+            "purpose": "subject_resolution",
+            "model": "claude-sonnet-5-5",
+            "calls": 45,
+            "input_tokens": 38477,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 1878,
+            "max_tokens_stops": 0,
+            "cost_usd": 0.095734
+          }
+        ]
+      }
+    },
+    "prose_pass_2": {
+      "metrics": {
+        "resolution_accuracy": 0.9387755102040817,
+        "resolution_wrong_ref": 0.02040816326530612,
+        "resolution_bare_local": 0.04081632653061224
+      },
+      "judge_model": "anthropic/claude-sonnet-5-5",
+      "judge_search_limit": 7,
+      "judged": 45,
+      "lost_vs_top_hit": [],
+      "usage": {
+        "cost_usd": 0.097336,
+        "rows": [
+          {
+            "purpose": "subject_resolution",
+            "model": "claude-sonnet-5-5",
+            "calls": 45,
+            "input_tokens": 38613,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 2011,
+            "max_tokens_stops": 0,
+            "cost_usd": 0.097336
+          }
+        ]
+      }
+    }
+  },
+  "item_4_probe_and_coevidential": {
+    "probe_run_1": {
+      "correct": 30,
+      "n": 30,
+      "clear_compatible": "10/10",
+      "clear_contradiction": "10/10",
+      "subtle": "10/10",
+      "unanswered": [],
+      "cost_usd": 0.05141
+    },
+    "probe_run_2": {
+      "correct": 30,
+      "n": 30,
+      "clear_compatible": "10/10",
+      "clear_contradiction": "10/10",
+      "subtle": "10/10",
+      "unanswered": [],
+      "cost_usd": 0.051066
+    },
+    "probe_run_3": {
+      "correct": 30,
+      "n": 30,
+      "clear_compatible": "10/10",
+      "clear_contradiction": "10/10",
+      "subtle": "10/10",
+      "unanswered": [],
+      "cost_usd": 0.052452
+    },
+    "coevidential": {
+      "natural_at_default": {
+        "precision": 0.991,
+        "recall": 0.942,
+        "agreement": 0.951,
+        "kappa": 0.881,
+        "false_links": 1,
+        "missed": 7
+      },
+      "unsure": 9,
+      "calls": 8,
+      "usage": {
+        "cost_usd": 0.053138,
+        "rows": [
+          {
+            "purpose": "semantic_lint",
+            "model": "claude-sonnet-5-5",
+            "calls": 8,
+            "input_tokens": 15564,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 2201,
+            "max_tokens_stops": 0,
+            "cost_usd": 0.053138
+          }
+        ]
+      }
+    }
+  },
+  "total_cost_usd": 3.3089,
+  "item_2b_2c": {
+    "claude-sonnet-4-6": {
+      "items_2b": 9,
+      "stated": 3,
+      "stated_compound": 1,
+      "stated_alone": 2,
+      "adjusted_recall": 0.9067,
+      "items_2c": 30,
+      "unsupported": 0
+    },
+    "claude-sonnet-5-5": {
+      "items_2b": 31,
+      "stated": 29,
+      "stated_compound": 17,
+      "stated_alone": 12,
+      "adjusted_recall": 0.9066,
+      "items_2c": 30,
+      "unsupported": 1
+    },
+    "adjusted_recall_gap": 0.0001,
+    "bar_2b_pass": true,
+    "bar_2c_pass": true,
+    "audit": {
+      "reviewed": 19,
+      "audit_items": 10,
+      "audit_overturned": 0,
+      "unreviewed_prelabels_stand": true,
+      "reviewed_on": "2026-10-13"
+    }
+  }
+}

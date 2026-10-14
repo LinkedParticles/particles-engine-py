@@ -3148,6 +3148,7 @@
           "VOCABULARY_RULED",
           "MODALITY_RECLASSIFIED",
           "MODALITY_GRANT_QUEUED",
+          "PARTICLE_DATED",
           "AGENT_EXTRACTION_ASKED",
           "AGENT_EXTRACTION_CONTINUED",
           "AGENT_EXTRACTION_SUBMITTED"
@@ -3454,6 +3455,28 @@
           },
           "uncertainty_nature": {
             "$ref": "#/components/schemas/UncertaintyNature"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValidKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "valid_until": {
             "anyOf": [
@@ -4333,6 +4356,16 @@
                 "type": "null"
               }
             ]
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimeWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "QueryRequest",
@@ -4584,6 +4617,40 @@
                 "type": "null"
               }
             ]
+          },
+          "window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimeWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "window_coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WindowCoverage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "window_hits": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WindowHit"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Window Hits",
+            "type": "array"
           }
         },
         "required": [
@@ -6234,6 +6301,37 @@
         "title": "TermKind",
         "type": "string"
       },
+      "TimeWindow": {
+        "description": "An interval of world time a query asks about.\n\nEither end may be open; a window with both ends equal is a point, the\n``--on`` form. Timezone-naive values are read as UTC, the store's\nconvention.",
+        "properties": {
+          "end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          }
+        },
+        "title": "TimeWindow",
+        "type": "object"
+      },
       "TrustRuleRequest": {
         "description": "A source-trust rule. ``scope`` is ``\"domain\"`` (use ``score``)\nor ``\"url_pattern\"`` (use ``modifier``).",
         "properties": {
@@ -6346,6 +6444,15 @@
           "EPISTEMIC"
         ],
         "title": "UncertaintyNature",
+        "type": "string"
+      },
+      "ValidKind": {
+        "description": "How a claim's world-time interval is read.\n\nAn ``EVENT`` is a moment: its interval is the point ``[valid_from,\nvalid_from]``, and it never carries a ``valid_until``. A ``STATE`` is a\nspan from ``valid_from`` until it closes (its own ``valid_until``, or for a\nretired claim the close rule), either end open.",
+        "enum": [
+          "EVENT",
+          "STATE"
+        ],
+        "title": "ValidKind",
         "type": "string"
       },
       "ValidationError": {
@@ -6637,6 +6744,134 @@
           "REVISIT"
         ],
         "title": "WarcRecordType",
+        "type": "string"
+      },
+      "WindowCoverage": {
+        "description": "What a window read could and could not judge.\n\nDisclosure only. ``undated`` are candidates with no ``valid_from``;\n``unkinded`` carry a date but no kind and so match the ``BEGAN`` reading\nonly; ``retired_admitted`` is how many retired claims the window let in;\n``restated`` how many of those yielded to a successor in the set.",
+        "properties": {
+          "admitted": {
+            "title": "Admitted",
+            "type": "integer"
+          },
+          "candidates": {
+            "title": "Candidates",
+            "type": "integer"
+          },
+          "restated": {
+            "title": "Restated",
+            "type": "integer"
+          },
+          "retired_admitted": {
+            "title": "Retired Admitted",
+            "type": "integer"
+          },
+          "undated": {
+            "title": "Undated",
+            "type": "integer"
+          },
+          "unkinded": {
+            "title": "Unkinded",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "candidates",
+          "admitted",
+          "undated",
+          "unkinded",
+          "retired_admitted",
+          "restated"
+        ],
+        "title": "WindowCoverage",
+        "type": "object"
+      },
+      "WindowHit": {
+        "description": "How one hit sits in the requested world-time window (\u00a74).\n\nA **response model, not particle substrate**: computed at read time,\nnever stored. ``closed_at`` and ``close_basis`` say when a STATE's\ninterval ended and which rule said so (its own ``valid_until``, its\nsuccessor's ``valid_from``, or its retirement instant); both None for an\nopen interval and for an EVENT. ``retired`` carries the note for\na retired claim admitted for the period it held. ``restates`` names the\nretired original this hit stood in for.",
+        "properties": {
+          "close_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "valid_until",
+                  "successor",
+                  "retired_at"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Basis"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "reading": {
+            "$ref": "#/components/schemas/WindowReading"
+          },
+          "restates": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restates"
+          },
+          "retired": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AsOfNote"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "valid_from": {
+            "format": "date-time",
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValidKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "reading",
+          "valid_from"
+        ],
+        "title": "WindowHit",
+        "type": "object"
+      },
+      "WindowReading": {
+        "description": "Why a claim is in a world-time window.\n\n``BEGAN``: its ``valid_from`` lies in the window, whatever its kind; what\n\"what happened in the week\" asks. ``IN_FORCE``: a STATE that started\nbefore the window and had not closed. ``HELD_AT``: a STATE whose start is\nunknown but which is known to hold at its anchor (basis ``as-of``), read as\nin force from there. ``WITHIN``: a claim anchored to a coarse unit (an\nEVENT somewhere in a month or a year, or a STATE spanning one) whose unit\nintersects the window.",
+        "enum": [
+          "BEGAN",
+          "IN_FORCE",
+          "HELD_AT",
+          "WITHIN"
+        ],
+        "title": "WindowReading",
         "type": "string"
       }
     },

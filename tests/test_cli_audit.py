@@ -1014,11 +1014,11 @@ class TestMeasuredUsage:
         finally:
             set_client(None)
 
-    # 3 probes x (100k in, 2k out) on the default claude-sonnet-4-6 ($3/$15 per
-    # MTok): 0.90 + 0.09.
+    # 3 probes x (100k in, 2k out) on the default claude-sonnet-5-5 ($2/$10 per
+    # MTok): 0.60 + 0.06.
     LINE = (
-        "LLM usage: 3 semantic lint calls (claude-sonnet-4-6), 300k input, 6k output "
-        "tokens; ≈ $0.99 at list price."
+        "LLM usage: 3 semantic lint calls (claude-sonnet-5-5), 300k input, 6k output "
+        "tokens; ≈ $0.66 at list price."
     )
 
     def test_markdown_report_ends_with_the_usage_line(self, seeded: Path) -> None:
@@ -1030,11 +1030,11 @@ class TestMeasuredUsage:
         result = self._invoke("--format", "json")
         assert result.exit_code == 0, result.output
         usage = json.loads(result.stdout)["llm_usage"]
-        assert usage["cost_usd"] == pytest.approx(0.99)
+        assert usage["cost_usd"] == pytest.approx(0.66)
         [row] = usage["rows"]
         assert (row["purpose"], row["model"], row["calls"]) == (
             "semantic_lint",
-            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
             3,
         )
         assert (row["input_tokens"], row["output_tokens"]) == (300_000, 6_000)
@@ -1055,7 +1055,7 @@ class TestMeasuredUsage:
 
         usage = asyncio.run(_payload())["llm_usage"]
         assert isinstance(usage, dict)
-        assert usage["cost_usd"] == pytest.approx(0.99)
+        assert usage["cost_usd"] == pytest.approx(0.66)
         assert usage["rows"][0]["calls"] == 3
 
 

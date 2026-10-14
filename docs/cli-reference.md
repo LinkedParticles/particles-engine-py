@@ -31,6 +31,7 @@ $ particles [OPTIONS] COMMAND [ARGS]...
 * `audit`: Audit an agent-memory directory: harvest,...
 * `structure`: Annotate particles with a structured...
 * `modality`: Reclassify claims whose adjudicability...
+* `validity`: Date claims from the absolute dates...
 * `subjects`: Manage subjects (canonical real-world...
 * `benchmark`: Whole-pipeline system benchmarks (ADR...
 * `config`: Inspect and validate Particles...
@@ -172,6 +173,8 @@ $ particles query [OPTIONS] [question]
 * `--vocabulary`: Report the store's vocabulary: each canonical predicate with its surface forms, claim count, object value shapes, the subject classes it attaches to, and its alignment, under a header of subject alignment and class counts and confirmed modelling decisions. Computed at read time, never stored. No question, no LLM call.
 * `--format <str>`: Output format for --vocabulary: 'table' (default) or 'json'.  [default: table]
 * `--grounded / --ungrounded`: Grounded answer: every sentence cites the retrieved particle ids it rests on, and a sentence the model added is labelled [inference] (drawn over cited claims) or [background] (from nothing in the store). Cited ids are checked against the retrieved set and nothing is dropped. Default: query.grounded_answers.
+* `--during <str>`: Answer about a period of world time, START..END (ISO-8601 dates, inclusive; either side may be empty: 2026-10-10.. or ..2026-10-16). Selects the claims that began in the window or were in force during it, before ranking; without a question, lists them in date order. A retired claim is admitted for the period it held, marked. Reads valid_from; undated claims are counted, never placed.
+* `--on <str>`: The point form of --during: what held or happened on this date (ISO-8601). An EVENT on the date, a STATE whose interval covers it.
 * `--as-of <str>`: Answer as of this past instant (ISO-8601; a bare date means the start of that day, UTC): what did the store believe at T, and why did it stop believing it? Retired hits carry their supersession crossing; retirements the store cannot date are excluded with a disclosure line. A future instant is rejected.
 * `--help`: Show this message and exit.
 
@@ -523,6 +526,34 @@ $ particles modality [OPTIONS]
 * `--debug`: Debug logging.
 * `--help`: Show this message and exit.
 
+## `particles validity`
+
+Date claims from the absolute dates already in their prose.
+
+Each ACTIVE claim with no `valid_from` is read for one anchoring date
+behind a recognised cue (`on <date>`, `since <date>`, `as of <date>`,
+`in <year>`), and the cue fixes the kind: a moment (EVENT) or a span
+(STATE). The pass makes no model call and never changes a claim's
+content, confidence, provenance, status or `valid_until`. A value the
+extractor stated or an operator set is never overwritten; a default from
+an earlier rule is regenerated. The window route (`particles query
+--during`) reads what this writes; an undated claim is disclosed there,
+never placed.
+
+**Usage**:
+
+```console
+$ particles validity [OPTIONS]
+```
+
+**Options**:
+
+* `--limit <int>`: Max claims to date this run. Default: the whole scope, which is safe, because the pass commits as it goes.
+* `--dry-run`: Report the scope, what the cue rules would set, and the coverage census; write nothing.
+* `-v, --verbose`: Print per-claim progress.
+* `--debug`: Debug logging.
+* `--help`: Show this message and exit.
+
 ## `particles subjects`
 
 Manage subjects (canonical real-world entities).
@@ -589,6 +620,8 @@ $ particles benchmark [OPTIONS] COMMAND [ARGS]...
 * `memory`: The LongMemEval agent-memory benchmark...
 * `rot`: The memory-rot benchmark.
 * `relevance-floor`: The relevance-floor benchmark: how often...
+* `trip-vs-move`: The trip-versus-move case end to end,...
+* `update-gate`: The registered update-gate pair sets...
 
 ### `particles benchmark observer`
 
@@ -854,6 +887,104 @@ $ particles benchmark relevance-floor resweep [OPTIONS] {report}
 **Options**:
 
 * `--floor <float>`: A floor to evaluate; repeat for several (default: benchmark_relevance_floor.floors).
+* `--help`: Show this message and exit.
+
+### `particles benchmark trip-vs-move`
+
+The trip-versus-move case end to end, judge-free.
+
+**Usage**:
+
+```console
+$ particles benchmark trip-vs-move [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--model <str>`: The model every purpose runs on (default: llm.default's model). The page's headline run names claude-sonnet-5-5, the model of the record's passing row.
+* `--provider <str>`: The provider of --model: anthropic or an llm.providers entry (default: llm.default's provider).
+* `--pin <str>`: PURPOSE=MODEL: run one purpose on another model of the same provider. Repeatable. The report names the mixture.
+* `--move-runs <int range>`: Move-case runs (default: 3, the record's protocol).  [x>=0]
+* `--trip-alone-runs <int range>`: Trip-alone runs (default: 2, the record's protocol).  [x>=0]
+* `--arm <live|scripted>`: live (the model's own answers, which costs money) or scripted (every answer from the package's table: free and key-free, a test of the harness only).  [default: live]
+* `--same-slot-admits / --no-same-slot-admits`: --no-same-slot-admits runs the gate before 1.187.0, which reproduces the failure the fix addressed.  [default: same-slot-admits]
+* `--max-usd <float range>`: Per-run ceiling in US$ at list price (default: four times a measured estimate), checked against measured spend before each step. A run that reaches it stops and is reported incomplete.  [x>=0.0]
+* `--estimate`: Print the estimate and exit before any LLM call.
+* `-y, --yes`: Confirm the live spend in advance.
+* `-o, --output <path>`: Write the JSON report of record here.
+* `--format <table|json>`: table (default) or json (the report of record).  [default: table]
+* `--store-dir <path>`: Keep each run's scratch store here (must be absent or empty). Without it the runs live in a temporary directory that is removed.
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `rescore`: Re-run the checks over a saved report's...
+
+#### `particles benchmark trip-vs-move rescore`
+
+Re-run the checks over a saved report's rows and events, with no LLM call.
+
+**Usage**:
+
+```console
+$ particles benchmark trip-vs-move rescore [OPTIONS] {report_path}
+```
+
+**Arguments**:
+
+* `report_path`: A saved report.  [required]
+
+**Options**:
+
+* `--checks-version <int>`: Checks version to score under (default: the current one).
+* `-o, --output <path>`: Write the re-scored report.
+* `--format <table|json>`: table or json.  [default: table]
+* `--help`: Show this message and exit.
+
+### `particles benchmark update-gate`
+
+The registered update-gate pair sets through the production probes.
+
+**Usage**:
+
+```console
+$ particles benchmark update-gate [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--model <str>`: The model both probes run on (default: llm.default's model).
+* `--provider <str>`: The provider of --model (default: llm.default's provider).
+* `--set <gate|gate-heldout|past|past-marker>`: A pair set to replay; repeatable (default: all four).
+* `--samples <int range>`: Samples per pair (default: 3, as registered).  [x>=1]
+* `--estimate`: Print the estimate and exit before any LLM call.
+* `-y, --yes`: Confirm the live spend in advance.
+* `-o, --output <path>`: Write the JSON report of record here.
+* `--format <table|json>`: table (default) or json (the report of record).  [default: table]
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `rescore`: Re-score a saved report's samples under...
+
+#### `particles benchmark update-gate rescore`
+
+Re-score a saved report's samples under the current marker and bars, with no LLM call.
+
+**Usage**:
+
+```console
+$ particles benchmark update-gate rescore [OPTIONS] {report_path}
+```
+
+**Arguments**:
+
+* `report_path`: A saved report.  [required]
+
+**Options**:
+
+* `-o, --output <path>`: Write the re-scored report.
+* `--format <table|json>`: table or json.  [default: table]
 * `--help`: Show this message and exit.
 
 ## `particles config`
@@ -2938,6 +3069,7 @@ $ particles particle [OPTIONS] COMMAND [ARGS]...
 * `untag`: Remove taxonomy tags from a particle (ADR...
 * `retract`: Retract one belief under operator...
 * `reclassify`: Set one claim's adjudicability default by...
+* `date`: Set one claim's world-time start by...
 * `search`: List particles sharing a context...
 
 ### `particles particle show`
@@ -3111,6 +3243,41 @@ $ particles particle reclassify [OPTIONS] {particle_id}
 
 * `--modality <str>`: The new default: FALSIFIABLE, EVALUATIVE, EXPERIENTIAL, or CONSTITUTIVE  [required]
 * `--reason <str>`: Why the default is wrong; recorded in the event log  [required]
+* `--dry-run`: Show the plan without writing
+* `--help`: Show this message and exit.
+
+### `particles particle date`
+
+Set one claim's world-time start by operator verdict.
+
+`valid_from` and `valid_kind` say when a claim begins to hold and whether
+it is a moment or a span; `particles query --during` reads them. The
+extractor sets them when the source states a start, and `particles
+validity` reads a default off the dates in a claim's prose; this verb
+corrects one claim. The verdict is pinned: `particles validity` never
+overwrites it. The event log records a PARTICLE_DATED event with the
+reason and the values.
+
+Content, confidence, provenance, status and `valid_until` do not change.
+An EVENT cannot be set on a claim that carries a `valid_until`: a moment
+has one end.
+
+**Usage**:
+
+```console
+$ particles particle date [OPTIONS] {particle_id}
+```
+
+**Arguments**:
+
+* `particle_id`: Particle ID (prefix OK, first 8 chars)  [required]
+
+**Options**:
+
+* `--from <str>`: The date the claim begins to hold (ISO-8601; a bare date means the start of that day, UTC). Omit with --clear to remove the record.
+* `--kind <str>`: EVENT (a moment: the claim is about that date and no other) or STATE (a span: it holds from that date until it closes).
+* `--reason <str>`: Why the record is being set; recorded in the event log  [required]
+* `--clear`: Remove the world-time record
 * `--dry-run`: Show the plan without writing
 * `--help`: Show this message and exit.
 

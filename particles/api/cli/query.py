@@ -19,7 +19,9 @@ from particles.core.schema import (
     QueryRequest,
     QueryResponse,
     StructuralGroupBy,
+    TimeWindow,
     VocabularyReport,
+    WindowHit,
 )
 
 #: Per-cause operator advice for a failed answer call. The provider's own
@@ -227,6 +229,22 @@ def query_cmd(
         "are checked against the retrieved set and nothing is dropped. Default: "
         "query.grounded_answers.",
     ),
+    during: str | None = typer.Option(
+        None,
+        "--during",
+        help="Answer about a period of world time, START..END (ISO-8601 dates, "
+        "inclusive; either side may be empty: 2026-10-10.. or ..2026-10-16). "
+        "Selects the claims that began in the window or were in force during "
+        "it, before ranking; without a question, lists them in date order. A "
+        "retired claim is admitted for the period it held, marked. Reads "
+        "valid_from; undated claims are counted, never placed.",
+    ),
+    on: str | None = typer.Option(
+        None,
+        "--on",
+        help="The point form of --during: what held or happened on this date "
+        "(ISO-8601). An EVENT on the date, a STATE whose interval covers it.",
+    ),
     as_of: str | None = typer.Option(
         None,
         "--as-of",
@@ -247,6 +265,7 @@ def query_cmd(
         typer.echo("--format json applies to --vocabulary only.", err=True)
         raise typer.Exit(1)
     backend = get_backend()
+    window = _parse_window(during, on)
     as_of_dt: datetime | None = None
     if as_of is not None:
         try:
@@ -302,6 +321,7 @@ def query_cmd(
             assertion_modality=modality,
             include_contestedness=contestedness,
             as_of=as_of_dt,
+            window=window,
             predicate=predicate,
             object_eq=object_eq,
             object_gt=object_gt,
@@ -344,8 +364,14 @@ def query_cmd(
         if result.vocabulary_report is not None:
             typer.echo(result.vocabulary_report.model_dump_json(indent=2))
         return
+    if req.is_window_listing:
+        _render_window_listing(result)
+        if show_source:
+            _render_sources(backend, result)
+        return
     if req.is_structural_mode:
         _render_structural(result, req)
+        _render_window_notes(result)
         if show_source:
             _render_sources(backend, result)
         return
@@ -450,6 +476,7 @@ def query_cmd(
                 "as-of view.",
                 err=True,
             )
+    _render_window_notes(result)
     if result.truncation_warning:
         typer.echo(f"\n⚠  {result.truncation_warning}", err=True)
     if result.coverage_gaps:
@@ -459,6 +486,109 @@ def query_cmd(
         )
     if show_source:
         _render_sources(backend, result)
+
+
+def _parse_window(during: str | None, on: str | None) -> TimeWindow | None:
+    """Parse ``--during START..END`` / ``--on DATE`` into a window."""
+    from datetime import datetime
+
+    from particles.core.validity import window_end_of_day, window_for_day
+
+    if during is not None and on is not None:
+        typer.echo("--during and --on are alternatives; pass one.", err=True)
+        raise typer.Exit(1)
+    if on is not None:
+        try:
+            return window_for_day(datetime.fromisoformat(on))
+        except ValueError:
+            typer.echo(f"Invalid --on value {on!r}: expected an ISO-8601 date.", err=True)
+            raise typer.Exit(1) from None
+    if during is None:
+        return None
+    if ".." not in during:
+        typer.echo(
+            f"Invalid --during value {during!r}: expected START..END (either side may "
+            "be empty, e.g. 2026-10-10..2026-10-16 or 2026-10-10..).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    raw_start, raw_end = during.split("..", 1)
+    try:
+        start = datetime.fromisoformat(raw_start) if raw_start else None
+        end = window_end_of_day(datetime.fromisoformat(raw_end)) if raw_end else None
+    except ValueError:
+        typer.echo(
+            f"Invalid --during value {during!r}: the bounds must be ISO-8601 dates.", err=True
+        )
+        raise typer.Exit(1) from None
+    try:
+        return TimeWindow(start=start, end=end)
+    except ValueError as exc:
+        typer.echo(f"Invalid --during value: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+
+def _window_hit_label(hit: WindowHit) -> str:
+    label = hit.reading.value.lower().replace("_", " ")
+    span = hit.valid_from.date().isoformat()
+    if hit.closed_at is not None:
+        span += f" → {hit.closed_at.date().isoformat()} [{hit.close_basis}]"
+    elif hit.valid_kind is not None and hit.valid_kind.value == "STATE":
+        span += " → open"
+    return f"{label}: {span}"
+
+
+def _render_window_listing(result: QueryResponse) -> None:
+    """Render the deterministic window listing: date order, readings."""
+    typer.echo(f"{'FROM':<10}  {'READING':<9}  {'KIND':<6}  {'EFF':>5}  CONTENT")
+    typer.echo("-" * 100)
+    for p, eff, hit in zip(
+        result.particles, result.effective_confidences, result.window_hits, strict=False
+    ):
+        if hit is None:
+            continue
+        kind = hit.valid_kind.value if hit.valid_kind else "?"
+        reading = hit.reading.value.lower().replace("_", " ")
+        marker = ""
+        if hit.retired is not None:
+            marker = f"  [retired {hit.retired.status.value}]"
+        if hit.restates is not None:
+            marker += f"  [restates p-{hit.restates[:8]}]"
+        typer.echo(
+            f"{hit.valid_from.date().isoformat():<10}  {reading:<9}  {kind:<6}  "
+            f"{eff:>5.2f}  {p.content[:55]}{marker}"
+        )
+    typer.echo("")
+    typer.echo(result.answer)
+    _render_window_notes(result)
+
+
+def _render_window_notes(result: QueryResponse) -> None:
+    """The per-hit window readings on a question path and the coverage footer."""
+    if result.window is None:
+        return
+    if result.window_hits and result.particles and result.answer:
+        for p, hit in zip(result.particles, result.window_hits, strict=False):
+            if hit is None:
+                continue
+            line = f"↳ {p.content[:60]} — {_window_hit_label(hit)}"
+            if hit.retired is not None:
+                reason = hit.retired.status_reason
+                line += f"; retired {hit.retired.status.value}"
+                if reason is not None:
+                    line += f" ({reason.value})"
+                if hit.retired.successor is not None:
+                    line += f", superseded by {hit.retired.successor.id[:8]}"
+            if hit.restates is not None:
+                line += f"; restates p-{hit.restates[:8]}"
+            typer.echo(line)
+    cov = result.window_coverage
+    if cov is not None:
+        typer.echo(
+            f"Window: {cov.admitted} of {cov.candidates} dated claims admitted; "
+            f"{cov.undated} ACTIVE claims undated, {cov.unkinded} unkinded, "
+            f"{cov.retired_admitted} retired admitted, {cov.restated} restated."
+        )
 
 
 def _render_sources(backend: Backend, result: QueryResponse) -> None:

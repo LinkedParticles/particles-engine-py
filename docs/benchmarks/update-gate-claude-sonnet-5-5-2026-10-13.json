@@ -1,0 +1,2216 @@
+{
+ "suite": "update-gate",
+ "report_version": 1,
+ "sdk_version": "1.189.0",
+ "run_at": "2026-10-14T00:18:46.757254Z",
+ "model": "anthropic:claude-sonnet-5-5",
+ "samples_per_pair": 3,
+ "fixture": [
+  {
+   "name": "gate_pairs.json",
+   "sha256": "c5e9dab550c1b0749942bec99f0d2a3cc29af2ea999a66a28a5cdc41b51a82f4"
+  },
+  {
+   "name": "gate_pairs_heldout.json",
+   "sha256": "601037083cf2612ba980bc469206be1f53ae8daf43e6cd7641e0422b5a5720e5"
+  },
+  {
+   "name": "past_value_pairs.json",
+   "sha256": "98d80e6bc0edabca97cbfe4fa187d09ca048d6c42305d4e03c6d62fee8e18f79"
+  },
+  {
+   "name": "past_marker_heldout.json",
+   "sha256": "da7c903628fd35eca5967eef75c288a5f1aed48babadcfbbd12d4843f608d534"
+  }
+ ],
+ "sets": {
+  "gate": {
+   "rows": [
+    {
+     "id": "res-dated-newer",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user lives in Antwerp.",
+     "newer": "The user moved to Ghent, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "res-dated-both",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user lives in Antwerp, as of 2026-01-10.",
+     "newer": "The user lives in Ghent, as of 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "employer-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user works at Halvorsen Logistics, as of 2026-01-15.",
+     "newer": "The user started a new job at Brightwater Labs on 2026-03-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "manager-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user's manager is Priya, as of 2026-02-03.",
+     "newer": "The user's manager is now Ines, as stated in a session dated 2026-04-11.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "diet-since",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user eats meat.",
+     "newer": "The user has been vegan since 2026-06-01.",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": null,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "phone-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user uses an iPhone 13.",
+     "newer": "The user switched to a Pixel 9, as stated in a session dated 2026-07-19.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "host-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The billing service is hosted on Render, as of 2026-03-02.",
+     "newer": "The billing service was migrated to DigitalOcean on 2026-04-15.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "count-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user has run 3 marathons, as of 2026-01-05.",
+     "newer": "The user has run 4 marathons, as stated in a session dated 2026-10-01.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "stay-to-home-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user is in Montreal for a two-week conference, as of 2026-05-10.",
+     "newer": "The user relocated to Montreal, as stated in a session dated 2026-05-20.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "gym-dated",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user's gym is FitHub on Elm Street, as of 2026-02-01.",
+     "newer": "The user cancelled FitHub and now trains at Ironworks Gym, as stated in a session dated 2026-05-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "pets",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user has a cat named Miso.",
+     "newer": "The user adopted a dog named Pepper, as stated in a session dated 2026-06-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "languages",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user speaks French, as of 2026-01-20.",
+     "newer": "The user is learning Japanese, as stated in a session dated 2026-04-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "hobbies",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user plays tennis on Saturdays, as of 2026-02-01.",
+     "newer": "The user joined a climbing gym on 2026-04-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "stack",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The project uses Redis for caching.",
+     "newer": "The project added PostgreSQL for its user accounts on 2026-05-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "accounts",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user has a savings account with Nordbank.",
+     "newer": "The user opened a current account with Kestrel Bank, as stated in a session dated 2026-03-14.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "trips",
+     "class": "separate-events",
+     "expected": "not_changes",
+     "older": "The user took a five-day trip to Rome in March 2026.",
+     "newer": "The user spent a weekend in Vienna, as stated in a session dated 2026-06-14.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "purchases",
+     "class": "separate-events",
+     "expected": "not_changes",
+     "older": "The user paid $90 for running shoes, as of 2026-02-02.",
+     "newer": "The user bought a rain jacket for $120 on 2026-04-20.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "races",
+     "class": "separate-events",
+     "expected": "not_changes",
+     "older": "The user ran a half marathon in Bruges on 2026-03-08.",
+     "newer": "The user ran a 10K in Leuven, as stated in a session dated 2026-05-17.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "flat-detail",
+     "class": "added-detail",
+     "expected": "not_changes",
+     "older": "The user lives in Antwerp.",
+     "newer": "The user's flat in Antwerp has a small balcony, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "role-detail",
+     "class": "added-detail",
+     "expected": "not_changes",
+     "older": "The user works at Halvorsen Logistics.",
+     "newer": "The user leads the routing team at Halvorsen Logistics, as of 2026-04-01.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "lived-until",
+     "class": "past-value",
+     "expected": "not_changes",
+     "older": "The user lived in Utrecht until 2025.",
+     "newer": "The user lives in Ghent, as of 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "manager-previously",
+     "class": "past-value",
+     "expected": "not_changes",
+     "older": "The user's manager was previously Priya.",
+     "newer": "The user's manager is Ines, as stated in a session dated 2026-04-11.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "dated-history",
+     "class": "past-value",
+     "expected": "not_changes",
+     "older": "As of 2026-03-01, when the user lived in Antwerp, the user commuted by tram.",
+     "newer": "The user lives in Ghent, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "decided-move",
+     "class": "decided-not-done",
+     "expected": "not_changes",
+     "older": "The user lives in Antwerp.",
+     "newer": "The user has decided to move to Ghent next spring, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "home-then-visit",
+     "class": "lasting-then-temporary",
+     "expected": "not_changes",
+     "older": "The user lives in Antwerp.",
+     "newer": "The user is in Ghent for three days for a wedding, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "job-then-secondment",
+     "class": "lasting-then-temporary",
+     "expected": "not_changes",
+     "older": "The user works full-time at Halvorsen Logistics.",
+     "newer": "The user is on a two-month secondment to the Oslo office, as of 2026-04-01.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "deploy-step",
+     "class": "relied-on",
+     "expected": "not_changes",
+     "older": "Deploy the billing service with `render deploy`.",
+     "newer": "The billing service was migrated to DigitalOcean on 2026-04-15.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "commute",
+     "class": "relied-on",
+     "expected": "not_changes",
+     "older": "The user's commute to the Halvorsen office is a 15-minute bike ride.",
+     "newer": "The user moved to Ghent, as stated in a session dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "kettle-price",
+     "class": "fixed",
+     "expected": "not_changes",
+     "older": "The Brightwater X2 kettle costs $49.",
+     "newer": "The Brightwater X2 kettle costs $59, as stated in a review dated 2026-05-02.",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      },
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      },
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      }
+     ]
+    },
+    {
+     "id": "case-trip-5-5-r2",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-trip-5-5-r1",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user is in Mumbai for a week on a work trip, as of 2026-10-08.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-residence-5-5-r2",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user lives in Lajpat Nagar, Delhi.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": null,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-residence-5-5-r1",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user lives in a flat in Lajpat Nagar, Delhi.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-home-5-5",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user's home is in Delhi.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-trip-4-6",
+     "class": "case",
+     "expected": "changes",
+     "older": "The user is in Mumbai for a week for work.",
+     "newer": "The user moved to Mumbai.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "case-trip-alone",
+     "class": "case",
+     "expected": "not_changes",
+     "older": "The user lives in Lajpat Nagar, Delhi.",
+     "newer": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "case-flight",
+     "class": "case",
+     "expected": "report",
+     "older": "The user flies from Mumbai back to Delhi on Thursday 2026-10-15.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "case-hotel",
+     "class": "case",
+     "expected": "report",
+     "older": "The user is staying at a hotel in Bandra, Mumbai.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "gates": {
+     "production": {
+      "positives_retired": 10,
+      "positives": 10,
+      "positive_misses": [],
+      "control_retirements": 0,
+      "control_samples": 57,
+      "control_rows_retired": [],
+      "ok": true
+     },
+     "changes-only": {
+      "positives_retired": 10,
+      "positives": 10,
+      "positive_misses": [],
+      "control_retirements": 3,
+      "control_samples": 57,
+      "control_rows_retired": [
+       "lived-until"
+      ],
+      "ok": false
+     },
+     "before-1.187": {
+      "positives_retired": 1,
+      "positives": 10,
+      "positive_misses": [
+       "res-dated-newer",
+       "res-dated-both",
+       "employer-dated",
+       "manager-dated",
+       "phone-dated",
+       "host-dated",
+       "count-dated",
+       "stay-to-home-dated",
+       "gym-dated"
+      ],
+      "control_retirements": 0,
+      "control_samples": 57,
+      "control_rows_retired": [],
+      "ok": false
+     }
+    },
+    "bar": true,
+    "regression": true,
+    "controls_added_by_production": [],
+    "reported": {
+     "case-trip-5-5-r2": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-trip-5-5-r1": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-residence-5-5-r2": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-residence-5-5-r1": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-home-5-5": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-trip-4-6": {
+      "class": "case",
+      "expected": "changes",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-trip-alone": {
+      "class": "case",
+      "expected": "not_changes",
+      "production": 0,
+      "changes-only": 0,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-flight": {
+      "class": "case",
+      "expected": "report",
+      "production": 0,
+      "changes-only": 0,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-hotel": {
+      "class": "case",
+      "expected": "report",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     }
+    }
+   }
+  },
+  "gate-heldout": {
+   "rows": [
+    {
+     "id": "tartu-tallinn",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user rents an apartment in Tartu.",
+     "newer": "Since August 2026 the user has lived in Tallinn.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "car",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user drives a 2015 Honda Civic (noted 2026-02-11).",
+     "newer": "The user sold the Civic and now drives a Kia EV6, per a note from 2026-08-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "standup",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The team's daily standup is at 9:30.",
+     "newer": "On 2026-07-01 the team moved its daily standup to 10:15.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "isp",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user's internet provider is Telenet.",
+     "newer": "The user changed internet provider to Proximus on 14 June 2026.",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": true,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "laptop",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user's main laptop is a ThinkPad X1 (noted 2026-01-09).",
+     "newer": "The user replaced the ThinkPad with a MacBook Air on 2026-06-22.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "rent",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user's monthly rent is 950 euros.",
+     "newer": "From 2026-09-01 the user's rent went up to 1,020 euros a month.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "krakow-let",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The user is staying in a short-let flat in Krakow for May 2026.",
+     "newer": "The user signed a permanent lease in Krakow on 2026-06-02 and lives there now.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "ci",
+     "class": "dated-update",
+     "expected": "changes",
+     "older": "The repository's CI runs on Travis CI.",
+     "newer": "The repository's CI was switched to GitHub Actions on 2026-03-30.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "bikes",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user owns a road bike.",
+     "newer": "The user bought a gravel bike on 2026-07-12.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "volunteering",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The user volunteers at a food bank on Sundays.",
+     "newer": "Since June 2026 the user has also coached a youth football team.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "backend-lang",
+     "class": "coexisting",
+     "expected": "not_changes",
+     "older": "The project's backend is written in Go.",
+     "newer": "On 2026-04-02 the team added a Python service for report generation.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "shows",
+     "class": "separate-events",
+     "expected": "not_changes",
+     "older": "The user saw Hamlet at the National Theatre on 2026-02-14.",
+     "newer": "The user went to a jazz concert at the Barbican on 2026-05-30.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "donations",
+     "class": "separate-events",
+     "expected": "not_changes",
+     "older": "The user donated 50 euros to a hospice in January 2026.",
+     "newer": "The user donated 30 euros to a wildlife charity on 2026-04-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "floor",
+     "class": "added-detail",
+     "expected": "not_changes",
+     "older": "The user rents an apartment in Tartu.",
+     "newer": "The user's apartment in Tartu is on the fourth floor (noted 2026-03-05).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "used-to",
+     "class": "past-value",
+     "expected": "not_changes",
+     "older": "The user used to work night shifts at a bakery.",
+     "newer": "The user works as a data analyst at Kestrel Insurance, per a note from 2026-08-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "planning-house",
+     "class": "decided-not-done",
+     "expected": "not_changes",
+     "older": "The user rents an apartment in Tartu.",
+     "newer": "On 2026-08-03 the user said they plan to buy a house in Tallinn next year.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "riga-course",
+     "class": "lasting-then-temporary",
+     "expected": "not_changes",
+     "older": "The user lives in Tartu.",
+     "newer": "From 2026-08-01 the user is spending ten days in Riga for a training course.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "town-hall-walk",
+     "class": "relied-on",
+     "expected": "not_changes",
+     "older": "The user's apartment is a five-minute walk from Tartu's Town Hall Square.",
+     "newer": "Since August 2026 the user has lived in Tallinn.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": true,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "battery",
+     "class": "fixed",
+     "expected": "not_changes",
+     "older": "The Kia EV6 has a 77.4 kWh battery.",
+     "newer": "The Kia EV6's battery is 84 kWh, per a review dated 2026-05-11.",
+     "samples": [
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      },
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      },
+      {
+       "contradiction": true,
+       "slot": "fixed"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "gates": {
+     "production": {
+      "positives_retired": 8,
+      "positives": 8,
+      "positive_misses": [],
+      "control_retirements": 0,
+      "control_samples": 33,
+      "control_rows_retired": [],
+      "ok": true
+     },
+     "changes-only": {
+      "positives_retired": 8,
+      "positives": 8,
+      "positive_misses": [],
+      "control_retirements": 0,
+      "control_samples": 33,
+      "control_rows_retired": [],
+      "ok": true
+     },
+     "before-1.187": {
+      "positives_retired": 1,
+      "positives": 8,
+      "positive_misses": [
+       "tartu-tallinn",
+       "car",
+       "standup",
+       "laptop",
+       "rent",
+       "krakow-let",
+       "ci"
+      ],
+      "control_retirements": 0,
+      "control_samples": 33,
+      "control_rows_retired": [],
+      "ok": false
+     }
+    },
+    "bar": true,
+    "regression": true,
+    "controls_added_by_production": [],
+    "reported": {}
+   }
+  },
+  "past": {
+   "rows": [
+    {
+     "id": "worked-until",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "The user worked at Lindqvist & Berg until March 2025.",
+     "newer": "The user works at Ostrava Robotics, per a note from 2026-06-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "before-2024",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "Before 2024 the user's team used Jira.",
+     "newer": "The team tracks its work in Linear (noted 2026-04-18).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "restated-pool",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "As of 2026-02-10, when the user lived in Bremen, the user swam at the Sudbad pool.",
+     "newer": "Since May 2026 the user has lived in Hanover.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "back-in-2023",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "Back in 2023 the user drove a Volvo V60.",
+     "newer": "The user drives a Tesla Model 3 (noted 2026-07-01).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "had-been",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "The user had been vegetarian for ten years until 2025.",
+     "newer": "The user eats fish, per a note from 2026-03-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "restated-backups",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "As of 2026-04-01, when the project used MySQL, backups ran nightly with mysqldump.",
+     "newer": "On 2026-06-10 the project moved its database to PostgreSQL.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "restated-rent",
+     "class": "past-ended",
+     "expected": "not_changes",
+     "older": "As of 2026-01-20, when the user rented in Bremen, the user's rent was 780 euros a month.",
+     "newer": "The user's rent is 910 euros a month (noted 2026-08-14).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "lives-dated",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user lives in Bremen, as of 2026-02-10.",
+     "newer": "Since May 2026 the user has lived in Hanover.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "works-noted",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user is working at Lindqvist & Berg (noted 2026-01-05).",
+     "newer": "The user joined Ostrava Robotics on 2026-05-20.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "course-to-home",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user is in Lyon for a three-week course, as of 2026-03-02.",
+     "newer": "The user signed a lease in Lyon on 2026-04-01 and lives there now.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "tracker-noted",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The team tracks its work in Jira, per a note from 2026-01-12.",
+     "newer": "The team switched from Jira to Linear on 2026-04-18.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "phone-plan",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user's phone plan is with Vodafone, as of 2026-02-01.",
+     "newer": "The user moved their phone plan to Lebara on 2026-06-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "manager-history",
+     "class": "past-then-past",
+     "expected": "not_changes",
+     "older": "The user's manager was previously Henrik.",
+     "newer": "The user's manager was previously Sofia.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "case-restated-flight",
+     "class": "case",
+     "expected": "not_changes",
+     "older": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was due to fly back home to Delhi on Thursday 2026-10-15.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "case-restated-hotel",
+     "class": "case",
+     "expected": "not_changes",
+     "older": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was staying at a hotel in Bandra, Mumbai.",
+     "newer": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": null
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "gates": {
+     "production": {
+      "positives_retired": 5,
+      "positives": 5,
+      "positive_misses": [],
+      "control_retirements": 0,
+      "control_samples": 24,
+      "control_rows_retired": [],
+      "ok": true
+     },
+     "changes-only": {
+      "positives_retired": 5,
+      "positives": 5,
+      "positive_misses": [],
+      "control_retirements": 9,
+      "control_samples": 24,
+      "control_rows_retired": [
+       "worked-until",
+       "back-in-2023",
+       "restated-rent"
+      ],
+      "ok": false
+     },
+     "before-1.187": {
+      "positives_retired": 0,
+      "positives": 5,
+      "positive_misses": [
+       "lives-dated",
+       "works-noted",
+       "course-to-home",
+       "tracker-noted",
+       "phone-plan"
+      ],
+      "control_retirements": 0,
+      "control_samples": 24,
+      "control_rows_retired": [],
+      "ok": false
+     }
+    },
+    "bar": true,
+    "regression": true,
+    "controls_added_by_production": [],
+    "reported": {
+     "case-restated-flight": {
+      "class": "case",
+      "expected": "not_changes",
+      "production": 0,
+      "changes-only": 0,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "case-restated-hotel": {
+      "class": "case",
+      "expected": "not_changes",
+      "production": 0,
+      "changes-only": 2,
+      "before-1.187": 0,
+      "of": 3
+     }
+    }
+   }
+  },
+  "past-marker": {
+   "rows": [
+    {
+     "id": "ferry",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "Until 2024 the user commuted by ferry.",
+     "newer": "The user cycles to work, per a note from 2026-05-03.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "rowing-club",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "The user was formerly a member of the Riverside rowing club.",
+     "newer": "The user rows with the Harbour Rowing Club (noted 2026-04-11).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bees",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "The user no longer keeps bees.",
+     "newer": "The user keeps chickens, as of 2026-06-01.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "bare-metal",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "Back in 2022 the project was deployed on bare-metal servers.",
+     "newer": "The project runs on Kubernetes (noted 2026-03-14).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "porto-alegre",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "The user had been renting in Porto Alegre before moving abroad.",
+     "newer": "The user rents a flat in Montevideo, per a note from 2026-07-20.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "night-shifts",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "As of 2025-11-03, when the user worked night shifts, the user slept until noon.",
+     "newer": "The user works day shifts at the depot (noted 2026-02-09).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "panda",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "The user previously drove a Fiat Panda.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "on-call",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "Before 2025 the team's on-call rota was weekly.",
+     "newer": "The team's on-call rota is fortnightly, per a note from 2026-04-02.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": null
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "piano",
+     "class": "past-marked",
+     "expected": "not_changes",
+     "older": "The user used to teach piano on weekends.",
+     "newer": "The user tutors maths on Saturdays (noted 2026-03-21).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-room",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user is staying in a rented room in Cork until the end of June (noted 2026-03-01).",
+     "newer": "The user signed a permanent lease in Cork on 2026-07-02 and lives there now.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "broadband",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user's internet plan is 100 Mbps, as of 2026-01-10.",
+     "newer": "The user upgraded their internet plan to 500 Mbps on 2026-05-05.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "planning-tool",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The team uses Trello for planning (noted 2026-02-02).",
+     "newer": "The team moved its planning from Trello to Asana on 2026-06-18.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "dentist",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user's dentist is Dr. Byrne, per a note from 2026-01-25.",
+     "newer": "The user switched to Dr. Okafor as their dentist on 2026-04-30.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "galway",
+     "class": "present-dated",
+     "expected": "changes",
+     "older": "The user lives in Galway (noted 2026-02-14).",
+     "newer": "Since July 2026 the user has lived in Limerick.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "rent-in-2023",
+     "class": "past-unmarked",
+     "expected": "report",
+     "older": "In 2023 the user's rent was 640 euros a month.",
+     "newer": "The user's rent is 720 euros a month (noted 2026-06-12).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      },
+      {
+       "contradiction": false,
+       "slot": "changes"
+      }
+     ]
+    },
+    {
+     "id": "first-car",
+     "class": "past-unmarked",
+     "expected": "report",
+     "older": "The user's first car was a Renault Clio.",
+     "newer": "The user drives a Skoda Fabia (noted 2026-05-30).",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    },
+    {
+     "id": "cork-gp",
+     "class": "past-unmarked",
+     "expected": "report",
+     "older": "When the user lived in Cork, their GP was Dr. Walsh.",
+     "newer": "The user lives in Limerick, as of 2026-04-15.",
+     "samples": [
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      },
+      {
+       "contradiction": false,
+       "slot": "different"
+      }
+     ]
+    }
+   ],
+   "bars": {
+    "gates": {
+     "production": {
+      "positives_retired": 5,
+      "positives": 5,
+      "positive_misses": [],
+      "control_retirements": 0,
+      "control_samples": 27,
+      "control_rows_retired": [],
+      "ok": true
+     },
+     "changes-only": {
+      "positives_retired": 5,
+      "positives": 5,
+      "positive_misses": [],
+      "control_retirements": 2,
+      "control_samples": 27,
+      "control_rows_retired": [
+       "bare-metal"
+      ],
+      "ok": false
+     },
+     "before-1.187": {
+      "positives_retired": 0,
+      "positives": 5,
+      "positive_misses": [
+       "cork-room",
+       "broadband",
+       "planning-tool",
+       "dentist",
+       "galway"
+      ],
+      "control_retirements": 0,
+      "control_samples": 27,
+      "control_rows_retired": [],
+      "ok": false
+     }
+    },
+    "bar": true,
+    "regression": true,
+    "controls_added_by_production": [],
+    "reported": {
+     "rent-in-2023": {
+      "class": "past-unmarked",
+      "expected": "report",
+      "production": 3,
+      "changes-only": 3,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "first-car": {
+      "class": "past-unmarked",
+      "expected": "report",
+      "production": 0,
+      "changes-only": 0,
+      "before-1.187": 0,
+      "of": 3
+     },
+     "cork-gp": {
+      "class": "past-unmarked",
+      "expected": "report",
+      "production": 0,
+      "changes-only": 0,
+      "before-1.187": 0,
+      "of": 3
+     }
+    }
+   }
+  }
+ },
+ "spend": {
+  "estimate_source": "bound",
+  "estimate_usd": null,
+  "estimate_calls": null,
+  "cost_usd": 1.753162,
+  "priced_cost_usd": 1.753162,
+  "unpriced": [],
+  "ceiling_usd": null
+ },
+ "notes": []
+}

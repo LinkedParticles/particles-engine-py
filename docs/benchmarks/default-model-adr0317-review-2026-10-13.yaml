@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Owner review for the default-model measurement, item 2d: 19 items.
+#
+# For each item set `decision:` to `agree`, or to the label you would give instead
+#   2b: stated_alone / stated_compound / not_stated
+#   2c: supported / unsupported
+# 9 items are flagged because their pre-label can move a bar; 10 are a random audit of
+# the other 91. If at most 1 of the 10 audit items is overturned, the 81 unreviewed
+# pre-labels stand. Arms are not shown.
+items:
+- id: 2b-008
+  why: 'flagged: can move a bar'
+  required: Halcyon Grid Cooperative members saw their monthly electric bills fall by between $8 and $23
+    in 2025.
+  nearest_emitted:
+  - Depending on subscription size, Halcyon members saw monthly electric bills fall by between $8 and
+    $23, with an average saving of $14 a month.
+  - Halcyon Grid Cooperative's 2025 revenue was $1.62 million against operating costs of $940,000.
+  - Subscribers buy generation credits from Halcyon Grid Cooperative at 8.9 cents per kilowatt-hour.
+  prelabel: not_stated
+  prelabel_reason: Claim 1 gives the $8-to-$23 monthly bill reduction for Halcyon members but never says
+    it happened in 2025, so it is only a partial version of the required fact, and no other claim supplies
+    the savings range.
+  decision: agree
+- id: 2b-014
+  why: random audit
+  required: In a normal week the shift-scheduling system at Bracken & Doyle processed roughly 30,000 shift
+    assignments.
+  nearest_emitted:
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In 2021 Bracken & Doyle approved a full rewrite of the shift-scheduling system, budgeted at eighteen
+    months.
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that the Bracken & Doyle shift-scheduling system processed roughly 30,000
+    shift assignments in a normal week, and it adds no other fact of substance.
+  decision: agree
+- id: 2b-015
+  why: 'flagged: can move a bar'
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle spent roughly $2 million and shipped
+    nothing to production.
+  - In 2021, Bracken & Doyle approved a full rewrite of the shift-scheduling system, budgeted at eighteen
+    months.
+  prelabel: not_stated
+  prelabel_reason: 'The fact is split across claims: claim 1 has the cancellation after fourteen months
+    but no cost, and claim 2 has the roughly $2 million spend but no cancellation or duration, so no single
+    claim states the whole fact.'
+  decision: agree
+- id: 2b-016
+  why: 'flagged: can move a bar'
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle cost roughly $2 million and shipped
+    nothing to production.
+  - The production incident count for the shift-scheduling system at Bracken & Doyle fell from 31 in the
+    quarter the rewrite started to 6 in the quarter it was cancelled.
+  prelabel: not_stated
+  prelabel_reason: 'The required fact is split across claims: claim 1 gives the cancellation after fourteen
+    months without the roughly $2 million cost, and claim 2 gives the cost without the cancellation, so
+    no single claim states the whole fact.'
+  decision: agree
+- id: 2b-017
+  why: 'flagged: can move a bar'
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle had roughly $2 million spent on it.
+  - The production incident count for the shift-scheduling system at Bracken & Doyle fell from 31 in the
+    quarter the rewrite started to 6 in the quarter it was cancelled.
+  prelabel: not_stated
+  prelabel_reason: The fourteen-month cancellation and the roughly $2 million spend are split between
+    claims 1 and 2, and no single claim states both parts of the required fact.
+  decision: agree
+- id: 2b-025
+  why: 'flagged: can move a bar'
+  required: Kaldestad believes the Meridian Rose was lost in a storm rather than by grounding.
+  nearest_emitted:
+  - The Meridian Rose was lost in a storm rather than by grounding; the hull shows no strike damage and
+    she settled upright.
+  - Kaldestad's team is confident the Meridian Rose went down in or shortly after 1687, based on dendrochronology
+    and coin dates.
+  - A colleague of Kaldestad reads the same evidence as indicating the Meridian Rose was overloaded.
+  prelabel: not_stated
+  prelabel_reason: Claim 1 states that the Meridian Rose was lost in a storm rather than by grounding
+    but never attributes this view to Kaldestad, and no other claim gives Kaldestad's view on the cause
+    of loss.
+  decision: agree
+- id: 2b-030
+  why: random audit
+  required: Lantern's standalone app will keep working until at least June 2027.
+  nearest_emitted:
+  - Lantern's standalone app will keep working until at least June 2027.
+  - Lantern launched in 2022.
+  - Harbor plans to build Lantern's shared notebooks into its payroll dashboard by the end of 2026, so
+    an accountant can attach a note to an individual pay run.
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that Lantern's standalone app will keep working until at least June
+    2027, and it adds no other fact.
+  decision: agree
+- id: 2b-032
+  why: 'flagged: can move a bar'
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a company with approximately 90 employees.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  prelabel: not_stated
+  prelabel_reason: Claim 1 gives the dispatch and billing software for regional trucking firms and claim
+    2 gives the roughly 90-person headcount, but no single claim states both parts of the required fact
+    together.
+  decision: agree
+- id: 2b-033
+  why: 'flagged: can move a bar'
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a 90-person company.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  prelabel: not_stated
+  prelabel_reason: The 90-person headcount and the dispatch and billing software are split across claims
+    1 and 2, and no single claim states the whole fact.
+  decision: agree
+- id: 2b-034
+  why: 'flagged: can move a bar'
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a 90-person company.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  prelabel: not_stated
+  prelabel_reason: The required fact is split across claims 1 and 2, but no single claim states both the
+    90-person size and the dispatch and billing software for regional trucking firms.
+  decision: agree
+- id: 2c-009
+  why: random audit
+  claim: Reading configuration from the environment without declaring it was the single most common source
+    of cache misses found at Fernwood Systems.
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source calls undeclared environment configuration the single most common source
+    of cache misses they found.
+  decision: agree
+- id: 2c-026
+  why: random audit
+  claim: The rewrite of the shift-scheduling system at Bracken & Doyle cost roughly $2 million and shipped
+    nothing to production.
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says roughly $2 million was spent and nothing was shipped to production.
+  decision: agree
+- id: 2c-041
+  why: random audit
+  claim: Fernwood Systems expects to revisit the remote execution decision once the cache hit rate stops
+    improving.
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: This repeats claim 3, which the source states directly.
+  decision: agree
+- id: 2c-053
+  why: random audit
+  claim: Halcyon Grid Cooperative expects to open enrollment to the waitlist once the fourth array clears
+    its interconnection study.
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the cooperative expects to open enrollment to the waitlist once the
+    fourth array clears its interconnection study.
+  decision: agree
+- id: 2c-036
+  why: 'flagged: can move a bar'
+  claim: The Meridian Rose was lost in a storm rather than by grounding; the hull shows no strike damage
+    and she settled upright.
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: unsupported
+  prelabel_reason: Kaldestad says the storm explanation is her reading of the evidence rather than a finding,
+    and a colleague disagrees, so it cannot be stated as fact.
+  decision: agree
+- id: 2c-027
+  why: random audit
+  claim: The old shift-scheduling system at Bracken & Doyle's real specification lived in a decade of
+    accumulated fixes that no document recorded.
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the old system's real specification lived in a decade of accumulated,
+    undocumented fixes.
+  decision: agree
+- id: 2c-010
+  why: random audit
+  claim: The interview with Dr. Maren Kaldestad was conducted after her team's second field season on
+    the Meridian Rose.
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the interview took place after the second field season.
+  decision: agree
+- id: 2c-054
+  why: random audit
+  claim: The Bracken & Doyle shift-scheduling system is still running as of November 2025.
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The essay, dated 4 November 2025, says the scheduling system is still running.
+  decision: agree
+- id: 2c-007
+  why: random audit
+  claim: The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the rewrite was cancelled after fourteen months.
+  decision: agree

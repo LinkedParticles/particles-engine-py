@@ -1,0 +1,503 @@
+{
+ "version": 1,
+ "extraction": [
+  {
+   "note": "session-04.md",
+   "sha256": "057b9ae0f1c09f0207175a7b64c089b3a8647865842510e4fe8d6a60c089dffc",
+   "candidates": [
+    {
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "subjects": [
+      "the user",
+      "Lajpat Nagar"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "lives in",
+      "object": "Lajpat Nagar, Delhi"
+     }
+    },
+    {
+     "content": "The user's home is in Delhi.",
+     "subjects": [
+      "the user",
+      "Delhi"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "has home in",
+      "object": "Delhi"
+     }
+    },
+    {
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "subjects": [
+      "Sandeep's Curry House",
+      "the user"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "Sandeep's Curry House",
+      "predicate": "is favourite place to eat of",
+      "object": "the user"
+     }
+    },
+    {
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "subjects": [
+      "Sandeep's Curry House",
+      "the user"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "Sandeep's Curry House",
+      "predicate": "is a ten-minute walk from",
+      "object": "the user's flat"
+     }
+    },
+    {
+     "content": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+     "subjects": [
+      "Sandeep's Curry House",
+      "Lajpat Nagar"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "Sandeep's Curry House",
+      "predicate": "is in",
+      "object": "Lajpat Nagar, Delhi"
+     }
+    },
+    {
+     "content": "The user is vegetarian.",
+     "subjects": [
+      "the user"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "is",
+      "object": "vegetarian"
+     }
+    }
+   ]
+  },
+  {
+   "note": "session-11.md",
+   "sha256": "5680e17d392a8d4d2b42ee7717e267d3e2d93acc42a4d5700c91250b04c230f4",
+   "candidates": [
+    {
+     "content": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+     "subjects": [
+      "the user",
+      "Mumbai"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "is in",
+      "object": "Mumbai for a week for work"
+     }
+    },
+    {
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "subjects": [
+      "the user",
+      "Bandra"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "is staying at",
+      "object": "a hotel in Bandra, Mumbai"
+     }
+    },
+    {
+     "content": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+     "subjects": [
+      "the user",
+      "Delhi"
+     ],
+     "confidence_value": 0.8,
+     "uncertainty_nature": "ALEATORY",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "plans to fly back to",
+      "object": "Delhi"
+     }
+    }
+   ]
+  },
+  {
+   "note": "session-12-moved.md",
+   "sha256": "fed4870fd8da4f6ff361bdec9e85f96608998151c551d06b00fcd984cc5ebd3f",
+   "candidates": [
+    {
+     "content": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "subjects": [
+      "the user",
+      "Mumbai"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "moved to",
+      "object": "Mumbai"
+     }
+    }
+   ]
+  }
+ ],
+ "contradiction": [
+  {
+   "a": "The user lives in Lajpat Nagar, Delhi.",
+   "b": "The user's home is in Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user's home is in Delhi.",
+   "b": "The user lives in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "b": "The user is staying at a hotel in Bandra, Mumbai.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is staying at a hotel in Bandra, Mumbai.",
+   "b": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is the user's favourite place to eat.",
+   "b": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is the user's favourite place to eat.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is the user's favourite place to eat.",
+   "b": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is the user's favourite place to eat.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "b": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "b": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is staying at a hotel in Bandra, Mumbai.",
+   "b": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "b": "The user is staying at a hotel in Bandra, Mumbai.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "b": "The user lives in Lajpat Nagar, Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user lives in Lajpat Nagar, Delhi.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "b": "The user's home is in Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user's home is in Delhi.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "b": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "b": "The user is staying at a hotel in Bandra, Mumbai.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is staying at a hotel in Bandra, Mumbai.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "b": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "NO"
+  }
+ ],
+ "update": [
+  {
+   "a": "The user lives in Lajpat Nagar, Delhi.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user's home is in Delhi.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user is staying at a hotel in Bandra, Mumbai.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user lives in Lajpat Nagar, Delhi.",
+   "b": "The user's home is in Delhi.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user's home is in Delhi.",
+   "b": "The user lives in Lajpat Nagar, Delhi.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "b": "The user is staying at a hotel in Bandra, Mumbai.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user is staying at a hotel in Bandra, Mumbai.",
+   "b": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "b": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "DIFFERENT"
+  }
+ ],
+ "embedding": [
+  {
+   "text": "The user lives in Lajpat Nagar, Delhi.",
+   "features": [
+    "user",
+    "residence",
+    "residence",
+    "delhi",
+    "lajpat"
+   ]
+  },
+  {
+   "text": "The user's home is in Delhi.",
+   "features": [
+    "user",
+    "residence",
+    "residence",
+    "delhi"
+   ]
+  },
+  {
+   "text": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+   "features": [
+    "user",
+    "residence",
+    "mumbai",
+    "mumbai",
+    "move"
+   ]
+  },
+  {
+   "text": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "features": [
+    "user",
+    "mumbai",
+    "stay",
+    "trip",
+    "work"
+   ]
+  },
+  {
+   "text": "The user is staying at a hotel in Bandra, Mumbai.",
+   "features": [
+    "user",
+    "mumbai",
+    "stay",
+    "hotel",
+    "bandra"
+   ]
+  },
+  {
+   "text": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "features": [
+    "user",
+    "trip",
+    "flight",
+    "delhi",
+    "return"
+   ]
+  },
+  {
+   "text": "Sandeep's Curry House is the user's favourite place to eat.",
+   "features": [
+    "sandeep",
+    "restaurant",
+    "favourite"
+   ]
+  },
+  {
+   "text": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "features": [
+    "sandeep",
+    "restaurant",
+    "residence",
+    "lajpat",
+    "walk"
+   ]
+  },
+  {
+   "text": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "features": [
+    "sandeep",
+    "restaurant",
+    "lajpat",
+    "location"
+   ]
+  },
+  {
+   "text": "The user is vegetarian.",
+   "features": [
+    "user",
+    "diet",
+    "vegetarian"
+   ]
+  }
+ ],
+ "reanchor": [
+  {
+   "retired": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "claim": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "verdict": "DEPENDS",
+   "restatement": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was due to fly back home to Delhi on Thursday, 2026-10-15."
+  },
+  {
+   "retired": "The user is staying at a hotel in Bandra, Mumbai.",
+   "claim": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
+   "verdict": "DEPENDS",
+   "restatement": "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was due to fly back home to Delhi on Thursday, 2026-10-15."
+  },
+  {
+   "retired": "The user lives in Lajpat Nagar, Delhi.",
+   "claim": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "DEPENDS",
+   "restatement": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04."
+  },
+  {
+   "retired": "The user lives in Lajpat Nagar, Delhi.",
+   "claim": "Sandeep's Curry House is the user's favourite place to eat.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user lives in Lajpat Nagar, Delhi.",
+   "claim": "The user is vegetarian.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user lives in Lajpat Nagar, Delhi.",
+   "claim": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user's home is in Delhi.",
+   "claim": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "DEPENDS",
+   "restatement": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04."
+  },
+  {
+   "retired": "The user's home is in Delhi.",
+   "claim": "Sandeep's Curry House is the user's favourite place to eat.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user's home is in Delhi.",
+   "claim": "The user is vegetarian.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user's home is in Delhi.",
+   "claim": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user is in Mumbai for a week for work, on a trip that began on 2026-10-08.",
+   "claim": "The user is vegetarian.",
+   "verdict": "HOLDS"
+  },
+  {
+   "retired": "The user is staying at a hotel in Bandra, Mumbai.",
+   "claim": "The user is vegetarian.",
+   "verdict": "HOLDS"
+  }
+ ]
+}

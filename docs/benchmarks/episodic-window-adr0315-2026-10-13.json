@@ -1,0 +1,2881 @@
+{
+ "about": "acceptance (2026-10-13): the window route (query --during / --on) asked the owner-confirmed window questions of tests/fixtures/trip_vs_move/window_questions.json on freshly built scratch stores, after particles validity. Verdicts are the implementing session's against the confirmed labels. Per question: the window arm's admitted count, which gold claims the hits contained (term match), the per-hit readings, and the answer. Full probe outputs are not committed (they dump every particle); the per-run summaries here are what the record cites.",
+ "runs": {
+  "item1_r1": {
+   "description": "padded store, claude-sonnet-5-5, before the as-of amendment (backfilled; window arm re-asked)",
+   "cost_usd_list": 3.49,
+   "validity_census": {
+    "total": 334,
+    "dated": 11,
+    "undated": 323,
+    "coverage": 0.0329,
+    "by_basis": {
+     "stated": 11
+    },
+    "by_kind": {
+     "EVENT": 11
+    },
+    "stale": 0,
+    "rule": "ed8e2262f925"
+   },
+   "backfill": null,
+   "questions": [
+    {
+     "id": "w1-week-after-move",
+     "question": "What happened in the week after the user moved to Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Pali Hill",
+      "Carter Road",
+      "first day",
+      "Ananya travelled",
+      "Movers"
+     ],
+     "gold_terms_total": 6,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 24,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika, the user's colleague, showed the user around the Mumbai office and took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The movers delivered the user's belongings from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user flies back to Delhi on Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and their sister Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user spent the evening of 2026-10-15 unpacking books.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base has fragments of this week, though it doesn't say exactly when the move happened. Some dates may be inconsistent, and the retrieved information is not fully validated, so treat this as possibly incomplete.\n\nTimeline from the particles:\n\n- **2026-10-08:** The user was in Mumbai for a week for work.\n- **2026-10-10:** They checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** They walked the whole of Carter Road in the evening. On the way back they found Gauri's Thali on Hill Road.\n- **2026-10-12:** They had their first day at the Mumbai office. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** Their sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** The movers delivered their belongings from Delhi. They spent the evening unpacking books.\n\n**Conflict:** One particle says the user flies back to Delhi on Thursday, 2026-10-15, the same day the movers delivered their belongings in Mumbai and they spent the evening unpacking. The particles don't resolve this, so the user's whereabouts on that day are unclear. It's also unclear whether the trip was a permanent move or a work stay, since one particle describes it as \"a week for work.\"",
+     "today_answer": "The particles give a partial timeline for the week, but they are inconsistent in places.\n\n**Dated events**\n- **2026-10-08:** The user was in Mumbai for a week for work, staying at a hotel in Bandra.\n- **2026-10-10:** The user checked out of the hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra. The flat is about fifteen minutes from the hotel.\n- **2026-10-11:** In the evening, the user walked the whole of Carter Road.\n- **2026-10-12:** The user had their first day at the Mumbai office in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** The user's sister Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** The movers delivered the user's belongings from Delhi, and the user spent the evening unpacking books.\n\n**Conflicting details**\n- One particle says the user flies back to Delhi on Thursday, 2026-10-15, which is also the day the movers delivered their belongings and they unpacked books. The particles don't reconcile this.\n- Other particles say the user's home is in Delhi (Lajpat Nagar), while others say they moved to a new flat in Mumbai. The Delhi particles may be older or may reflect the work-trip framing.\n\n**Undated items**\nSeveral home-life events have no date, so I can't place them in that week. They include cooking rajma chawal and dal makhani, watching a film at home, buying a monstera for the balcony, and playing Cartel Drift with Neha. I also can't date a 6 km run along the harbour wall.\n\nI have left out the many particles about trips to other cities, because nothing ties them to this week."
+    },
+    {
+     "id": "w2-staying-on-1008",
+     "question": "Where was the user staying on 2026-10-08?",
+     "window": {
+      "on": "2026-10-08"
+     },
+     "verdict": "wrong",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 13,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the tenant router at the user's workplace was split out into its own repository.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-15, the user pays 249 rupees a month for a password manager.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-03, the user pays 149 rupees a month for a cloud storage plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-03-14, the user pays 299 rupees a month for a newspaper digital subscription.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user reported having finished reading The Apprentice Archivist by Zoe Lindgren (the same message also says they did not finish it, so the statement is self-contradictory).",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "On 2026-10-08, the user was in Mumbai for a week for work. The knowledge base doesn't say where they were lodging there (hotel, guesthouse, etc.), only the city. The retrieved particles also have low overall confidence, so this may be incomplete.",
+     "today_answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. One particle says they were in Mumbai for a week for work as of that date, and another says they were staying at a hotel in Bandra. The user checked out of that hotel on the morning of 2026-10-10, and picked up the keys to their new flat in Pali Hill, Bandra, that same day.\n\nThe particles don't explicitly tie the hotel stay to 2026-10-08, so this is an inference from the surrounding dates. The user's home is listed as Lajpat Nagar, Delhi, but nothing suggests they were there on that date."
+    },
+    {
+     "id": "w3-first-weekend",
+     "question": "What did the user do on their first weekend in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-11"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "picked up the keys",
+      "Carter Road",
+      "found Gauri"
+     ],
+     "gold_terms_total": 3,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 17,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on the evening of 2026-10-11, on the way back from walking Carter Road.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-15, the user pays 249 rupees a month for a password manager.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-03-14, the user pays 299 rupees a month for a newspaper digital subscription.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Going by the knowledge base, the user's first weekend in Mumbai (around 2026-10-10 and 2026-10-11) included the following:\n\n- **Saturday, 2026-10-10:** They checked out of their hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **Sunday, 2026-10-11 (evening):** They walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road.\n\nCaveats: the knowledge base notes that its coverage of this topic has not been fully validated, so this may be incomplete. The particles also don't say that these dates are the user's *first* weekend. They only say the user was in Mumbai for a week for work as of 2026-10-08. The particles also don't say what the user did on the rest of those days.",
+     "today_answer": "Based on the particles, the best-supported detail is that the user walked the whole of Carter Road on the evening of 2026-10-11. That date falls right after the user checked out of their hotel on the morning of 2026-10-10 and just before their first day at the Mumbai office on 2026-10-12 (a Monday). It was therefore probably during their first weekend in Mumbai.\n\nSome caveats:\n- No particle explicitly labels anything as \"the first weekend,\" so the link is inferred from the dates.\n- The user also checked out of their hotel on 2026-10-10 and has a new flat in Pali Hill, about fifteen minutes from the hotel. They may have moved in that weekend, but the particles don't say so.\n- The knowledge base doesn't say what else they did that weekend."
+    },
+    {
+     "id": "w4-visitor-first-week",
+     "question": "Who visited the user during their first week in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Ananya travelled"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 24,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika, the user's colleague, showed the user around the Mumbai office and took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user flies back to Delhi on Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and their sister Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The movers delivered the user's belongings from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-15, the user pays 249 rupees a month for a password manager.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the particles, two people appear to have been involved during the user's first week in Mumbai (which started around 2026-10-12 at the office):\n\n- **Ritika**, the user's colleague, showed the user around the Mumbai office and took them to lunch on 2026-10-12. This was more of a hosting or guiding role at the office than a visit to the user.\n- **Ananya**, the user's sister, travelled from Pune to visit the user on 2026-10-14. The two had dinner at Gauri's that day.\n\nAnanya is the one who clearly \"visited\" the user. Ritika was a colleague showing the user around, not a visitor in the usual sense.\n\nThe knowledge base is thin on this topic, and it may not list everyone who visited, so this answer could be incomplete.",
+     "today_answer": "Based on the knowledge base, the user's sister Ananya travelled from Pune to visit them on 2026-10-14, and they had dinner together at Gauri's that evening.\n\nRitika, the user's colleague, also spent time with them on their first day at the Mumbai office (2026-10-12). She showed the user around and took them to lunch. However, this was at the office, so it is unclear whether it counts as a \"visit\" to the user. Ananya is the only person described as visiting.\n\nThe records are not fully consistent about the timeline. One says the user was in Mumbai for a week for work, another says they moved there, and another says they fly back to Delhi on 2026-10-15. Because of this, I can't say for certain what counts as the user's \"first week.\""
+    },
+    {
+     "id": "w5-living-on-1001",
+     "question": "Where was the user living on 2026-10-01?",
+     "window": {
+      "on": "2026-10-01"
+     },
+     "verdict": "empty",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 12,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "As of 2025-09-08, the tenant router at the user's workplace was split out into its own repository.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-03, the user pays 149 rupees a month for a cloud storage plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-03-14, the user pays 299 rupees a month for a newspaper digital subscription.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-15, the user pays 249 rupees a month for a password manager.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-09-04, when Ledgerly used PostgreSQL 16 as its database, running Ledgerly's pytest test suite without first starting the database container (`docker compose up -d db`) caused pytest to fail to connect to the database.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user reported having finished reading The Apprentice Archivist by Zoe Lindgren (the same message also says they did not finish it, so the statement is self-contradictory).",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base holds nothing relevant to where the user was living on 2026-10-01. The particles cover subscription costs, a workplace repository change, a database/test setup note, and a book-reading report. None of them mention the user's residence or location.",
+     "today_answer": "Most likely in Delhi (Lajpat Nagar), though the particles leave some uncertainty.\n\n- Several particles say the user's home is in Delhi, specifically Lajpat Nagar.\n- As of 2026-10-08, the user was in Mumbai for a week for work and staying at a hotel in Bandra. That is after 2026-10-01, so it doesn't directly cover that date.\n- The user picked up keys to a new flat in Pali Hill, Bandra, on 2026-10-10, checked out of the hotel that day, and started at the Mumbai office on 2026-10-12. The movers delivered their belongings from Delhi on 2026-10-15. The particles say the user \"moved to Mumbai\", but the evidence points to that move happening around 2026-10-10 to 2026-10-15, not before 2026-10-01.\n\nSo on 2026-10-01 the user was probably still living in Delhi. No particle states their residence on that exact date, so this is an inference from the surrounding timeline. The undated \"lives in Lajpat Nagar, Delhi\" and \"moved to Mumbai\" particles also conflict, which fits a move that happened later in October."
+    },
+    {
+     "id": "w6-oct-12-to-14",
+     "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+     "window": {
+      "during_start": "2026-10-12",
+      "during_end": "2026-10-14"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "dinner at Gauri"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 17,
+      "undated": 306,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika, the user's colleague, showed the user around the Mumbai office and took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and their sister Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-15, the user pays 249 rupees a month for a password manager.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-06-03, the user pays 149 rupees a month for a cloud storage plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the available particles, here is what the user did between 2026-10-12 and 2026-10-14:\n\n- **2026-10-12:** The user had their first day at the Mumbai office. Their colleague Ritika showed them around the office and took them to lunch.\n- **2026-10-14:** The user's sister Ananya travelled from Pune to visit them, and the two had dinner at Gauri's.\n\nNothing is recorded for 2026-10-13. Earlier, as of 2026-10-08, the user was noted as being in Mumbai for a week for work, which fits with these events. The knowledge base has not been fully validated on this topic, so this account may be incomplete.",
+     "today_answer": "The knowledge base has a few relevant entries for 2026-10-12 and 2026-10-14. It has nothing for 2026-10-13.\n\n**2026-10-12:** The user had their first day at the Mumbai office. Their colleague Ritika showed them around the office and took them to lunch.\n\n**2026-10-13:** I found no particles covering this day, so what the user did is unknown.\n\n**2026-10-14:** The user's sister Ananya travelled from Pune to visit them. The two had dinner at Gauri's.\n\nOther particles give context. The user was in Mumbai for about a week for work. They picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10, and they flew back to Delhi on 2026-10-15, the day the movers delivered their belongings. My answer may be incomplete, since the 13th is entirely missing and other activities on the 12th and 14th may not be recorded."
+    }
+   ]
+  },
+  "item2_r1": {
+   "description": "trip case, claude-sonnet-4-6, before the as-of amendment (backfilled; window arm re-asked)",
+   "cost_usd_list": 1.13,
+   "validity_census": {
+    "total": 42,
+    "dated": 18,
+    "undated": 24,
+    "coverage": 0.4286,
+    "by_basis": {
+     "stated": 18
+    },
+    "by_kind": {
+     "EVENT": 14,
+     "STATE": 4
+    },
+    "stale": 0,
+    "rule": "ed8e2262f925"
+   },
+   "backfill": null,
+   "questions": [
+    {
+     "id": "w1-week-after-move",
+     "question": "What happened in the week after the user moved to Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "Movers"
+     ],
+     "gold_terms_total": 6,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 17,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user lives in Mumbai as of 2026-10-09.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on the user's first day at the Mumbai office (2026-10-12).",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya came over from Pune on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's hotel is in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The movers delivered the user's things from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is flying back to Delhi on Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Here's a picture of what happened in the week after the user moved to Mumbai (arriving around 2026-10-09):\n\n**Day 1 (Oct 9) \u2013 Arrival**\nThe user moved to Mumbai, initially staying at a hotel in Bandra.\n\n**Oct 10 \u2013 Keys & New Home**\nThe user checked out of the hotel and picked up the keys to their new flat in Pali Hill \u2014 quite a busy day getting settled.\n\n**Oct 11 \u2013 Exploring the Neighbourhood**\nThe user walked the whole of Carter Road in the evening and discovered Gauri's Thali on Hill Road \u2014 a promising start to getting to know the area.\n\n**Oct 12 \u2013 First Day at the Office**\nThe user's first day at the Mumbai office arrived. Colleague Ritika showed them around and took them out to lunch, which sounds like a warm welcome.\n\n**Oct 14 \u2013 A Visit from Family**\nThe user's sister Ananya came over from Pune, and the two of them had dinner at Gauri's together \u2014 likely a welcome bit of family connection amid all the change.\n\n**Oct 15 \u2013 Belongings Arrive**\nThe movers delivered the user's things from Delhi, and the user spent that evening unpacking books.\n\nSo overall, it was a packed week \u2014 moving into the new flat, starting a new job, exploring the neighbourhood, and reuniting with family, all culminating in finally getting their belongings from Delhi.",
+     "today_answer": "Here's a picture of what happened in the week after the user moved to Mumbai, based on the available information:\n\nThe move appears to have taken place around **9 October 2026**. In the days that followed:\n\n- **10 October**: The user checked out of their hotel in Bandra and picked up the keys to their new flat in Pali Hill \u2014 about fifteen minutes from where they'd been staying.\n\n- **11 October**: The user walked the whole of Carter Road in the evening, and discovered Gauri's Thali on Hill Road \u2014 an entirely vegetarian restaurant that they felt might even replace Sandeep's Curry House in Delhi as their favourite restaurant.\n\n- **12 October**: The user's first day at the Mumbai office in Kamala Mills, Lower Parel. A colleague named Ritika showed them around and took them out to lunch.\n\n- **14 October**: The user's sister Ananya came over from Pune to visit, and the two of them had dinner together at Gauri's \u2014 apparently a second visit to the restaurant the user had only just discovered.\n\n- **15 October**: The movers delivered the user's belongings from Delhi. The user spent that evening unpacking books.\n\nIt was, by the looks of it, a fairly eventful first week \u2014 settling into a new flat, starting a new office, reconnecting with family, and finding a promising new favourite restaurant, all within a few days."
+    },
+    {
+     "id": "w2-staying-on-1008",
+     "question": "Where was the user staying on 2026-10-08?",
+     "window": {
+      "on": "2026-10-08"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "hotel in Bandra"
+     ],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 5,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 2,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user wants a vegetarian restaurant for dinner on 2026-10-08.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for a work trip.",
+       "reading": "BEGAN",
+       "retired": true,
+       "close_basis": "successor",
+       "restates": null
+      },
+      {
+       "content": "The user's hotel is in Bandra, Mumbai.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's trip to Mumbai is for work.",
+       "reading": "BEGAN",
+       "retired": true,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "On 2026-10-08, the user was staying at a hotel in **Bandra, Mumbai**, where they were visiting for a work trip.",
+     "today_answer": "On 2026-10-08, the user was staying at a hotel in Bandra, Mumbai. The particles establish that the user was staying at a hotel in Bandra, and they checked out of that hotel on 2026-10-10, so on 2026-10-08 they would still have been there."
+    },
+    {
+     "id": "w3-first-weekend",
+     "question": "What did the user do on their first weekend in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-11"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "picked up the keys",
+      "Carter Road",
+      "found Gauri"
+     ],
+     "gold_terms_total": 3,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 8,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user lives in Mumbai as of 2026-10-09.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's hotel is in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's new flat is in Pali Hill.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the available particles, I can piece together what the user did on their first weekend in Mumbai (around 2026-10-10 to 2026-10-11):\n\n- On **Saturday, October 10th**, they checked out of their hotel in Bandra and picked up the keys to their new flat in Pali Hill.\n- On **Sunday, October 11th**, they discovered **Gauri's Thali on Hill Road** and spent the evening walking the entirety of **Carter Road**.\n\nIt sounds like a fairly eventful first weekend \u2014 moving into a new place and beginning to explore the local neighbourhood on foot!",
+     "today_answer": "The user arrived in Mumbai on or around 2026-10-09. Their first weekend there would have been the weekend of 2026-10-11 and 2026-10-12 \u2014 though 2026-10-12 (a Monday) was actually their first day in the office, so the weekend activity centres on Saturday, 2026-10-11.\n\nOn that first weekend, the user:\n\n- **Discovered Gauri's Thali on Hill Road** \u2014 a fully vegetarian restaurant \u2014 on the evening of 2026-10-11.\n- **Walked the entirety of Carter Road** that same evening.\n\nIt sounds like it was a pleasant exploratory evening in the Bandra neighbourhood, and the user was clearly impressed by Gauri's \u2014 they've noted it might even replace Sandeep's Curry House in Delhi as their favourite restaurant."
+    },
+    {
+     "id": "w4-visitor-first-week",
+     "question": "Who visited the user during their first week in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 17,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on the user's first day at the Mumbai office (2026-10-12).",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in Mumbai as of 2026-10-09.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's hotel is in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya came over from Pune on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is flying back to Delhi on Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The movers delivered the user's things from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the provided particles, two people visited the user during their first week in Mumbai:\n\n1. **Ritika** \u2013 the user's colleague, who showed the user around the Mumbai office and took them to lunch on their first day at the office, **2026-10-12**.\n\n2. **Ananya** \u2013 the user's sister, who came over from Pune on **2026-10-14** and had dinner with the user at Gauri's that evening.",
+     "today_answer": "Based on the available information, the user's sister **Ananya** visited during their first week in Mumbai. Ananya came over from Pune on **2026-10-14**, and the two of them had dinner together at Gauri's that evening.\n\nThe user moved to Mumbai around 2026-10-09, so Ananya's visit on the 14th would fall within that first week of settling in."
+    },
+    {
+     "id": "w5-living-on-1001",
+     "question": "Where was the user living on 2026-10-01?",
+     "window": {
+      "on": "2026-10-01"
+     },
+     "verdict": "empty",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 0,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [],
+     "answer": "No relevant particles found for this question in the current knowledge base.",
+     "today_answer": "On 2026-10-01, the user was most likely staying at a hotel in Bandra, Mumbai. The particles indicate the user checked out of the hotel and picked up the keys to their new flat in Pali Hill on 2026-10-10, and they were already in Mumbai (staying at that hotel) before that date \u2014 for instance, they were looking for a vegetarian restaurant on 2026-10-08. Their previous home was in Lajpat Nagar, Delhi, and their belongings were moved from Delhi, but they had already relocated to Mumbai by early October 2026."
+    },
+    {
+     "id": "w6-oct-12-to-14",
+     "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+     "window": {
+      "during_start": "2026-10-12",
+      "during_end": "2026-10-14"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "dinner at Gauri"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 24,
+      "admitted": 9,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's sister Ananya came over from Pune on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in Mumbai as of 2026-10-09.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on the user's first day at the Mumbai office (2026-10-12).",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's new flat is in Pali Hill.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's hotel is in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Here is what the knowledge base shows about the user's activities between 2026-10-12 and 2026-10-14:\n\n**2026-10-12 (First day at the Mumbai office)**\n- It was the user's first day at their new Mumbai office. Their colleague Ritika showed them around the office and took them out to lunch that day.\n\n**2026-10-13**\n- There are no recorded details about what the user did on this specific day.\n\n**2026-10-14**\n- The user's sister Ananya came over from Pune to visit. The two of them had dinner together at a restaurant called Gauri's.\n\nAs a note, the knowledge base also indicates the user had recently relocated to Mumbai (as of 2026-10-09) and was staying at a hotel in Bandra during this period, with a new flat in Pali Hill. \u26a0\ufe0f *Please bear in mind that the confidence values on some of these details are provisional, so minor specifics may be subject to revision.*",
+     "today_answer": "Here is what the particles tell us about the user's activities between 2026-10-12 and 2026-10-14:\n\n**2026-10-12 (Monday) \u2014 First day at the Mumbai office**\n- This was the user's first day at the Mumbai office, located in Kamala Mills, Lower Parel. Their colleague Ritika showed them around the office and also took them out to lunch.\n\n**2026-10-13**\n- The particles don't contain any specific information about what the user did on this particular day.\n\n**2026-10-14 (Wednesday)**\n- The user's sister Ananya came over from Pune to visit. The two of them had dinner together at Gauri's Thali on Hill Road \u2014 an entirely vegetarian restaurant that the user had discovered a few days earlier on 2026-10-11.\n\nSo in summary, the period was bookended by a significant professional milestone (starting at the new Mumbai office) and a family visit, with a gap on the 13th for which there's no recorded activity in the available information."
+    }
+   ]
+  },
+  "item6_r1": {
+   "description": "hard padding, claude-sonnet-5-5, before the as-of amendment (backfilled; window arm re-asked)",
+   "cost_usd_list": 4.45,
+   "validity_census": {
+    "total": 275,
+    "dated": 12,
+    "undated": 263,
+    "coverage": 0.0436,
+    "by_basis": {
+     "stated": 12
+    },
+    "by_kind": {
+     "EVENT": 12
+    },
+    "stale": 0,
+    "rule": "ed8e2262f925"
+   },
+   "backfill": null,
+   "questions": [
+    {
+     "id": "w1-week-after-move",
+     "question": "What happened in the week after the user moved to Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Carter Road",
+      "first day",
+      "Movers"
+     ],
+     "gold_terms_total": 6,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 12,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Movers delivered the user's belongings from Delhi on 2026-10-15, after a delay (the user says 'finally').",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya, the user's sister, travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user spent the evening of 2026-10-15 unpacking books.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on the way back from the Carter Road walk on 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The particles don't give an exact move date, so I've taken the week to be roughly 10\u201315 October 2026. One particle says that as of 8 October the user was in Mumbai for about a week for work. These events are likely what happened in the following days:\n\n- **10 October:** The user checked out of their hotel in the morning and picked up the keys to their new flat.\n- **11 October:** In the evening the user walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road.\n- **12 October:** The user had their first day at the Mumbai office. Ritika showed them around and took them to lunch.\n- **14 October:** The user's sister Ananya travelled from Pune to visit. The two had dinner at Gauri's.\n- **15 October:** Movers finally delivered the user's belongings from Delhi after a delay. The user spent the evening unpacking books.\n\nNothing is recorded for 13 October, and the particles may not cover everything that happened that week.",
+     "today_answer": "Based on the retrieved particles, the week after the move went roughly like this:\n\n- **2026-10-09:** The user said in a session that they had moved to Mumbai. A particle dated a day earlier (2026-10-08) says they were in Mumbai for only about a week for work and staying at a hotel in Bandra. So it is unclear whether this was a permanent move or a work stay.\n- **2026-10-10:** The user checked out of their hotel in the morning.\n- **2026-10-12:** The user had their first day at the Mumbai office, and Ritika showed them around.\n- **2026-10-14:** Ananya, the user's sister, travelled from Pune to visit.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi after a delay. The user said \"finally.\"\n\nThe user also visited Ritika for an afternoon in Colaba, but that particle has no date, so I can't place it in this week.\n\nOther particles mention Lajpat Nagar, Connaught Place (Delhi) and Koregaon Park (Pune), covering runs, rain, bookshops, talks, meetups and calls. None of them is dated or tied to Mumbai, so I haven't treated them as part of this week. Some also conflict with the move, such as saying the user lives in Delhi. The timeline above may therefore be incomplete."
+    },
+    {
+     "id": "w2-staying-on-1008",
+     "question": "Where was the user staying on 2026-10-08?",
+     "window": {
+      "on": "2026-10-08"
+     },
+     "verdict": "wrong",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 1,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "On 2026-10-08, the user was likely in Mumbai. They were there for about a week for work. The knowledge base doesn't say where in Mumbai they were staying, such as a hotel or a particular neighborhood. Also, the underlying record is provisional and uncalibrated, so treat it with some caution.",
+     "today_answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. Several particles support this:\n\n- The user is described as staying at a hotel in Bandra, Mumbai.\n- As of 2026-10-08, the user was in Mumbai for about a week for work.\n- The user checked out of the hotel on the morning of 2026-10-10, so they were still there before then.\n- The user's new flat in Pali Hill is described as about fifteen minutes from the hotel where they had been staying. They picked up the keys to the flat on 2026-10-10, so they had not yet moved in on 2026-10-08.\n\nThe particles do not give the hotel's name. One particle has the user saying on 2026-10-09 that they had moved to Mumbai, but this does not change where they were staying on the 8th."
+    },
+    {
+     "id": "w3-first-weekend",
+     "question": "What did the user do on their first weekend in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-11"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "picked up the keys",
+      "Carter Road",
+      "found Gauri"
+     ],
+     "gold_terms_total": 3,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 5,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on the way back from the Carter Road walk on 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base doesn't say outright which weekend was their first, but the dates point to 10-11 October 2026 (Saturday and Sunday). The user was already in Mumbai on 8 October, so this was probably their first weekend there. On those days they:\n\n- **Saturday, 10 October:** checked out of their hotel in the morning and picked up the keys to their new flat.\n- **Sunday, 11 October:** walked the whole of Carter Road in the evening. On the way back they found Gauri's Thali on Hill Road.\n\nThe particles don't say whether they did anything else on those days, and they don't confirm that this was the first weekend rather than a later one.",
+     "today_answer": "The knowledge base doesn't say directly what the user did on their first weekend in Mumbai, so I can't answer this with confidence.\n\nWhat it does contain:\n- The user was in Mumbai for about a week for work as of 2026-10-08, and was staying at a hotel in Bandra.\n- The user checked out of that hotel on the morning of 2026-10-10, which was a Saturday.\n- The user's first day at the Mumbai office was Monday 2026-10-12, when Ritika showed them around.\n- Some Mumbai activities have no dates attached: visiting Ritika for an afternoon in Colaba, getting caught in the rain at Colaba, and getting caught in the rain at Kamala Mills in Lower Parel. Any of these could have happened that weekend, but nothing confirms it.\n\nMost of the other particles concern Delhi (Connaught Place, Lajpat Nagar) or Pune (Koregaon Park). They are also undated and don't bear on the Mumbai weekend.\n\nThe only firmly dated weekend detail is the hotel checkout on 2026-10-10. The afternoon with Ritika in Colaba is a plausible but unconfirmed candidate for what the user did."
+    },
+    {
+     "id": "w4-visitor-first-week",
+     "question": "Who visited the user during their first week in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 12,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya, the user's sister, travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of their hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Movers delivered the user's belongings from Delhi on 2026-10-15, after a delay (the user says 'finally').",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on the way back from the Carter Road walk on 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user spent the evening of 2026-10-15 unpacking books.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The particles point to one clear visitor: Ananya, the user's sister, who travelled from Pune to visit on 2026-10-14. They had dinner together at Gauri's that day.\n\nRitika is also mentioned. She showed the user around the Mumbai office and took them to lunch on 2026-10-12, which was the user's first day at the office. That sounds like a colleague hosting the user at work rather than someone visiting, so I wouldn't count her as a visitor.\n\nThe movers delivered the user's belongings from Delhi on 2026-10-15, but they were making a delivery, not a visit.\n\nThe week's exact boundaries are unclear. The user was in Mumbai by 2026-10-08, and the first office day was 2026-10-12. Ananya's visit on 2026-10-14 falls within a week of the office start and within a week or so of arriving in Mumbai.",
+     "today_answer": "The particles point to one likely visitor, though they don't settle it fully.\n\n- Ananya, the user's sister, travelled from Pune to visit the user on 2026-10-14. That falls within the first week after the user's first day at the Mumbai office on 2026-10-12.\n- Ritika showed the user around the Mumbai office on 2026-10-12. That was a tour of the office, not a visit to the user, so it probably doesn't count as a visit.\n\nMany other particles describe the user visiting or meeting Ritika, Gauri, Sandeep and Ananya in places such as Bandra, Pune and Delhi. They carry no dates, so I can't tie them to the user's first week in Mumbai. The dates also leave some ambiguity about when \"the first week\" begins. One particle says the user was in Mumbai for about a week as of 2026-10-08, and another says they had moved there by 2026-10-09.\n\nBased on the dated information, Ananya is the only person recorded as visiting the user. The knowledge base may be incomplete about other visitors."
+    },
+    {
+     "id": "w5-living-on-1001",
+     "question": "Where was the user living on 2026-10-01?",
+     "window": {
+      "on": "2026-10-01"
+     },
+     "verdict": "empty",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 0,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [],
+     "answer": "No relevant particles found for this question in the current knowledge base.",
+     "today_answer": "The user was most likely living in Delhi, in Lajpat Nagar, on 2026-10-01. The knowledge base has no particle dated to that day, so this is an inference.\n\n- **Delhi base:** One particle says the user lives in Lajpat Nagar, Delhi. It is undated, so I can't confirm it applied on 2026-10-01.\n- **Mumbai trip:** As of 2026-10-08, the user was in Mumbai for about a week for work. They were staying in a hotel and planned to fly \"home\" to Delhi on 2026-10-15. This suggests Delhi was still home in early October.\n- **The move:** The move to Mumbai appears to have come after 2026-10-01. The user said on 2026-10-09 that they had moved to Mumbai, and they picked up the keys to a new flat in Pali Hill on 2026-10-10. Their belongings were delivered from Delhi on 2026-10-15, and their first day at the Mumbai office was 2026-10-12.\n\nThe sources conflict slightly. The 2026-10-08 particles describe a short work trip with a flight home to Delhi, while the later ones describe a permanent move. Neither suggests the user lived in Mumbai as early as 2026-10-01."
+    },
+    {
+     "id": "w6-oct-12-to-14",
+     "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+     "window": {
+      "during_start": "2026-10-12",
+      "during_end": "2026-10-14"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "dinner at Gauri"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 15,
+      "admitted": 6,
+      "undated": 260,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user had their first day at the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya, the user's sister, travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base covers only some of the days in that window, so this answer is probably incomplete.\n\n**2026-10-12:**\n- The user had their first day at the Mumbai office.\n- Ritika showed the user around the office.\n- Ritika also took the user to lunch.\n\n**2026-10-14:**\n- The user's sister Ananya travelled from Pune to visit them.\n- The user and Ananya had dinner at Gauri's.\n\n**2026-10-13:** The particles contain nothing about this day.\n\nThe user was in Mumbai for about a week for work, as of 2026-10-08, which fits with these events.",
+     "today_answer": "Based on the particles, here is what the user did in that window (2026-10-12 to 2026-10-14):\n\n**2026-10-12**\n- The user had their first day at the Mumbai office.\n- Ritika showed the user around the office and took them to lunch.\n\n**2026-10-13**\n- The knowledge base holds nothing about this date.\n\n**2026-10-14**\n- The user's sister, Ananya, travelled from Pune to visit them.\n- The user and Ananya had dinner at Gauri's.\n\nOther particles fall just outside the window, so they don't answer the question. They include the Carter Road walk on 10-11 and the movers' delivery and book unpacking on 10-15. Other particles are undated or give dates in other years or months, so I can't place them in this window.\n\nThis answer may be incomplete. Nothing was recorded for 2026-10-13, and the user may have done other things on the other days that aren't captured."
+    }
+   ]
+  },
+  "item1_r2": {
+   "description": "padded store, claude-sonnet-5-5, after the as-of amendment",
+   "cost_usd_list": 3.37,
+   "validity_census": {
+    "total": 338,
+    "dated": 25,
+    "undated": 313,
+    "coverage": 0.074,
+    "by_basis": {
+     "as-of": 10,
+     "coarse": 1,
+     "prose": 1,
+     "stated": 13
+    },
+    "by_kind": {
+     "EVENT": 14,
+     "STATE": 11
+    },
+    "stale": 0,
+    "rule": "ed8e2262f925"
+   },
+   "backfill": {
+    "set": 12,
+    "by_basis": {
+     "as-of": 10,
+     "coarse": 1,
+     "prose": 1
+    },
+    "by_kind": {
+     "EVENT": 1,
+     "STATE": 11
+    },
+    "skipped": {
+     "no_cue": 5,
+     "no_date": 300,
+     "several_dates": 1
+    }
+   },
+   "questions": [
+    {
+     "id": "w1-week-after-move",
+     "question": "What happened in the week after the user moved to Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Pali Hill",
+      "Carter Road",
+      "first day",
+      "Ananya travelled",
+      "Movers"
+     ],
+     "gold_terms_total": 6,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 22,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in a flat in Lajpat Nagar, Delhi.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Movers delivered the user's belongings from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base doesn't give an exact move date, so this timeline is pieced together from dated events in early to mid October 2026.\n\n- **Around 8 Oct:** The user was in Mumbai for about a week for work.\n- **10 Oct:** They checked out of the hotel in the morning and picked up the keys to their new flat in Pali Hill, Bandra.\n- **11 Oct:** In the evening they walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road.\n- **12 Oct:** This was their first day at the Mumbai office. Ritika showed them around and took them to lunch.\n- **14 Oct:** Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **15 Oct:** Movers delivered the user's belongings from Delhi. The user spent that evening unpacking books.\n\nOne particle says the user lives in a flat in Lajpat Nagar, Delhi. That is probably the earlier home they moved from, but the particles don't say so directly. The other particles, on subscriptions, Jenkins and Ledgerly, don't bear on this period.",
+     "today_answer": "Based on the dated particles, this is the likely sequence after the move (reported in a session dated 2026-10-09):\n\n- **2026-10-10:** The user checked out of the hotel in Bandra in the morning. They picked up the keys to their new flat in Pali Hill, Bandra, which is about fifteen minutes from the hotel.\n- **2026-10-11:** The user walked the whole of Carter Road in the evening.\n- **2026-10-12:** This was the user's first day at the Mumbai office in Kamala Mills, Lower Parel. Their colleague Ritika showed them around and took them to lunch.\n- **2026-10-14:** Ananya travelled from Pune to visit, and the two had dinner at Gauri's.\n- **2026-10-15:** Movers delivered the user's belongings from Delhi. The user spent the evening unpacking books.\n\n**Possible conflict:** An earlier session (2026-10-08) said the user was in Mumbai for about a week for work and would fly back to Delhi on Thursday 2026-10-15. That is the same day the movers delivered their belongings and they unpacked books. The particles don't say whether the flight happened or was changed.\n\n**Undated events:** Several other events have no dates, so I can't place them in that week. The user bought a monstera and a calathea for the balcony, cooked rajma chawal and dal makhani for the first time, and ran 6 km along the harbour wall. They also played Cartel Drift with Neha, which ended in a draw, and watched *An Evening in Ostrava* at home. They may have happened in this week, but the particles don't say.\n\nThe particles also list many other trips, such as Ahmedabad, Kolkata and Lisbon, with no dates. I can't tie them to this week."
+    },
+    {
+     "id": "w2-staying-on-1008",
+     "question": "Where was the user staying on 2026-10-08?",
+     "window": {
+      "on": "2026-10-08"
+     },
+     "verdict": "wrong",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 11,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in a flat in Lajpat Nagar, Delhi.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "Jenkins no longer runs the staging deployment as of 2024-06-10.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-09-04, when Ledgerly used PostgreSQL 16 as its database, running its pytest test suite without first starting the database container with `docker compose up -d db` caused pytest to fail to connect to the database.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "On 2026-10-08, the user was most likely in Mumbai. One particle says they were there for about a week for work as of that date. Their home is a flat in Lajpat Nagar, Delhi, so they were probably staying temporarily away from it. The particles don't say where in Mumbai they stayed (for example, a hotel or a particular neighborhood).",
+     "today_answer": "On 2026-10-08, the user was most likely staying at a hotel in Bandra, Mumbai. The particles say the user was in Mumbai for about a week for work as of that date and was staying at a hotel in Bandra. They also say the user checked out of the hotel on the morning of 2026-10-10, which fits that timeline.\n\nThe particles don't name the hotel. The new Pali Hill flat is described as about fifteen minutes from the hotel, so the hotel was not in Pali Hill itself. The user picked up the keys to the flat on 2026-10-10."
+    },
+    {
+     "id": "w3-first-weekend",
+     "question": "What did the user do on their first weekend in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-11"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "picked up the keys",
+      "Carter Road",
+      "found Gauri"
+     ],
+     "gold_terms_total": 3,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 15,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for about a week for work as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in a flat in Lajpat Nagar, Delhi.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on 2026-10-11, on the way back from walking Carter Road.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The knowledge base doesn't say outright what the user did across their first weekend in Mumbai, but a few related facts are recorded.\n\n- As of 2026-10-08, the user was in Mumbai for about a week for work.\n- On the morning of 2026-10-10, they checked out of the hotel, and on the same date they picked up the keys to their new flat in Pali Hill, Bandra.\n- On the evening of 2026-10-11, they walked the whole of Carter Road. On the way back they found Gauri's Thali on Hill Road.\n\nIf \"first weekend\" means 10\u201311 October 2026, those are the activities recorded: checking out, collecting the flat keys, and walking Carter Road. The dates are inferred, and the records don't say whether this was the user's first weekend in the city. Other things they did that weekend may not be captured.",
+     "today_answer": "Based on the dates in the knowledge base, the user's first weekend in Mumbai was probably 10\u201311 October 2026. That is the weekend before their first day at the Mumbai office on Monday 12 October. The particles don't describe the weekend directly, so this is pieced together from dated items:\n\n- **Saturday, 10 October:** The user checked out of their hotel in the morning. They had a new flat in Pali Hill, about fifteen minutes from the hotel in Bandra, so this was likely their move into the flat.\n- **Sunday, 11 October:** In the evening, the user walked the whole of Carter Road.\n\nOther items might also belong to this weekend, such as buying a monstera for the balcony. But none of them are dated, so I can't say when they happened. This answer may be incomplete."
+    },
+    {
+     "id": "w4-visitor-first-week",
+     "question": "Who visited the user during their first week in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Ananya travelled"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 22,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user's first day at the Mumbai office was 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for about a week for work as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on the morning of 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in a flat in Lajpat Nagar, Delhi.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Movers delivered the user's belongings from Delhi on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The particles point to two people connected to the user's first week in Mumbai, with different roles:\n\n- **Ananya** travelled from Pune to visit the user on 2026-10-14, and they had dinner together at Gauri's that day.\n- **Ritika** showed the user around the Mumbai office and took them to lunch on 2026-10-12, which was the user's first day at the office. This was a colleague hosting the user at work rather than a visit to the user.\n\nOnly Ananya is described as visiting. The movers who delivered the user's belongings from Delhi on 2026-10-15 are not described as visitors in the way Ananya is.",
+     "today_answer": "The knowledge base points to one visitor: Ananya. She travelled from Pune to visit the user on 2026-10-14, and the two had dinner at Gauri's that day.\n\nRitika, a colleague at the Mumbai office, showed the user around the office and took them to lunch on 2026-10-12, the user's first day there. She was a colleague on the job rather than someone who came to visit, so she probably doesn't count as a visitor.\n\nThe particles don't say exactly when the user's first week in Mumbai began, so Ananya's visit on 2026-10-14 falls within it only if the week is counted from the 2026-10-12 first office day. The particles also don't mention any other visitors."
+    },
+    {
+     "id": "w5-living-on-1001",
+     "question": "Where was the user living on 2026-10-01?",
+     "window": {
+      "on": "2026-10-01"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Lajpat Nagar"
+     ],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 10,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user lives in a flat in Lajpat Nagar, Delhi.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Jenkins no longer runs the staging deployment as of 2024-06-10.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-09-04, when Ledgerly used PostgreSQL 16 as its database, running its pytest test suite without first starting the database container with `docker compose up -d db` caused pytest to fail to connect to the database.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The user was most likely living in a flat in Lajpat Nagar, Delhi on 2026-10-01. One particle states this directly, without a date. Another confirms the same flat as of 2026-09-04, which is less than a month earlier. Nothing in the particles suggests a move between those dates, but none of them speaks to 2026-10-01 itself.",
+     "today_answer": "On 2026-10-01 the user was most likely living in Delhi, though the particles don't state this directly.\n\n- As of 2026-10-08, the user was in Mumbai for about a week for work, staying at a hotel in Bandra. That suggests Mumbai was a temporary work trip at that point.\n- The user is reported as having moved to Mumbai in a session dated 2026-10-09. They picked up the keys to their new flat in Pali Hill, Bandra, on 2026-10-10, and checked out of the hotel that morning.\n- Movers delivered the user's belongings from Delhi on 2026-10-15, and the user flew back to Delhi that same Thursday. Their belongings were still in Delhi until then, so Delhi was probably their home before the move.\n\nThe particles never say where the user lived on 2026-10-01 specifically, so this answer is an inference and could be incomplete."
+    },
+    {
+     "id": "w6-oct-12-to-14",
+     "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+     "window": {
+      "during_start": "2026-10-12",
+      "during_end": "2026-10-14"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "dinner at Gauri"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 26,
+      "admitted": 16,
+      "undated": 313,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user's first day at the Mumbai office was 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya travelled from Pune to visit the user on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-13, the user pays 179 rupees a month for a note-taking app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for about a week for work as of 2026-10-08.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-09-08, the user pays 599 rupees a month for a language-learning app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-06-07, the user pays 349 rupees a month for a code-hosting plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-04-18, the user pays 199 rupees a month for a music streaming plan.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-05-23, the user pays 649 rupees a month for a video streaming service.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2025-10-01, the user pays 499 rupees a month for a meditation app.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the particles, here is what the user did over those dates:\n\n- **2026-10-12:** This was the user's first day at the Mumbai office. Ritika showed the user around the office and took the user to lunch.\n- **2026-10-14:** Ananya travelled from Pune to visit the user, and the two had dinner at Gauri's.\n\nNothing is recorded for 2026-10-13. The particles also indicate the user was in Mumbai for about a week for work, as of 2026-10-08, which fits with these events. The account may be incomplete, since only some of the days and activities are covered.",
+     "today_answer": "Based on the particles, here is what the user did in that window:\n\n- **2026-10-12:** This was the user's first day at the Mumbai office. Ritika showed them around the office and took them to lunch.\n- **2026-10-14:** Ananya travelled from Pune to visit the user, and the two had dinner at Gauri's.\n- **2026-10-13:** Nothing in the knowledge base covers this date, so I can't say what the user did.\n\nThe particles also place the user in Mumbai for work around this time. The nearby events (walking Carter Road on 2026-10-11, flying back to Delhi and the movers arriving on 2026-10-15) fall outside the window you asked about. This answer may be incomplete, since the particles say little about the days in between."
+    }
+   ]
+  },
+  "item2_r2": {
+   "description": "trip case, claude-sonnet-4-6, after the as-of amendment",
+   "cost_usd_list": 0.91,
+   "validity_census": {
+    "total": 46,
+    "dated": 26,
+    "undated": 20,
+    "coverage": 0.5652,
+    "by_basis": {
+     "as-of": 3,
+     "coarse": 2,
+     "stated": 21
+    },
+    "by_kind": {
+     "EVENT": 15,
+     "STATE": 11
+    },
+    "stale": 0,
+    "rule": "ed8e2262f925"
+   },
+   "backfill": {
+    "set": 5,
+    "by_basis": {
+     "as-of": 3,
+     "coarse": 2
+    },
+    "by_kind": {
+     "STATE": 5
+    },
+    "skipped": {
+     "no_cue": 1,
+     "no_date": 17
+    }
+   },
+   "questions": [
+    {
+     "id": "w1-week-after-move",
+     "question": "What happened in the week after the user moved to Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "Movers"
+     ],
+     "gold_terms_total": 6,
+     "exclude_terms_in_hits": [
+      "Powai"
+     ],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 25,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 2,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for work (not leisure).",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user's Mumbai office is located in Kamala Mills in Lower Parel.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in Delhi, in Lajpat Nagar.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user flies back home to Delhi on Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya reminded the user that the user had lived in Powai before on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's things were delivered by movers on 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "The particles here present some conflicting signals \u2014 some suggest the user was in Mumbai temporarily for work (flying back to Delhi on 2026-10-15), while others suggest a permanent move to a new flat in Pali Hill, Bandra. Piecing together the most coherent picture from the evidence:\n\nIt appears the user **moved to Mumbai**, picking up the keys to their new flat in Pali Hill, Bandra on **2026-10-10**. In the week that followed:\n\n- On the **evening of 2026-10-10**, after picking up the keys, the user was still staying at a hotel in Bandra.\n- On **2026-10-11**, the user walked the whole of Carter Road in the evening, and also discovered **Gauri's Thali on Hill Road** \u2014 a vegetarian restaurant nearby.\n- On **2026-10-12**, the user's first day at the Mumbai office in Kamala Mills, Lower Parel, their colleague **Ritika** showed them around and took them to lunch.\n- On **2026-10-14**, a friend named **Ananya** came over from Pune to visit. Ananya reminded the user that they had lived in Powai before, and the two of them had dinner at **Gauri's** together that evening.\n- On **2026-10-15**, the user's belongings were delivered by movers from Delhi, and the user spent that evening **unpacking books**.\n\nSo the first week was a mix of settling into a new neighbourhood, starting at a new office, reconnecting with an old friend, and finally getting their things delivered and beginning to unpack.",
+     "today_answer": "Here's a picture of what happened in the week after the user moved to Mumbai, pieced together from the available information:\n\n**Key dates and events:**\n\n- **2026-10-10:** The user checked out of the hotel and picked up the keys to their new flat in Pali Hill, Bandra.\n- **2026-10-11:** The user walked the whole of Carter Road in the evening and discovered Gauri's Thali on Hill Road \u2014 an all-vegetarian restaurant.\n- **2026-10-12:** The user's first day at the Mumbai office in Kamala Mills, Lower Parel. A colleague named Ritika showed the user around the office and took them to lunch.\n- **2026-10-14:** The user's sister Ananya came over from Pune. She reminded the user that they had lived in Powai before (the user had spent six months there as an intern in 2019). The user and Ananya had dinner at Gauri's Thali on Hill Road.\n- **2026-10-15:** The movers delivered the user's belongings from Delhi. The user spent the evening unpacking books.\n\nIt's worth noting a slight tension in the particles \u2014 one indicates the user flies back home to Delhi on Thursday, 2026-10-15, while others suggest the user was unpacking in the new flat that same evening. It's possible the \"flies back to Delhi\" detail refers to an earlier, shorter work trip rather than a permanent move, but the overall picture strongly suggests the user was settling into Pali Hill by the 15th."
+    },
+    {
+     "id": "w2-staying-on-1008",
+     "question": "Where was the user staying on 2026-10-08?",
+     "window": {
+      "on": "2026-10-08"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "hotel in Bandra"
+     ],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 7,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The assistant (A) confirmed that the user is in Bandra until Thursday, 2026-10-15.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user wants a vegetarian restaurant for dinner on 2026-10-08.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "BEGAN",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for a week for work.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for work (not leisure).",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-10-08, when the user was staying at a hotel in Bandra, Mumbai, the assistant said it would look for vegetarian places near that hotel in Bandra, Mumbai.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "On 2026-10-08, the user was staying at a hotel in **Bandra, Mumbai**.",
+     "today_answer": "On 2026-10-08, the user was staying at a hotel in Bandra, Mumbai. This is confirmed by the particle noting that, as of that date, the assistant was looking for vegetarian places near the user's hotel in Bandra, Mumbai. The user later checked out of that hotel on 2026-10-10 and picked up the keys to their new flat in Pali Hill, Bandra on the same day."
+    },
+    {
+     "id": "w3-first-weekend",
+     "question": "What did the user do on their first weekend in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-11"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "picked up the keys",
+      "Carter Road",
+      "found Gauri"
+     ],
+     "gold_terms_total": 3,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 13,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 1,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for work (not leisure).",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "As of 2026-10-08, when the user was staying at a hotel in Bandra, Mumbai, the assistant said it would look for vegetarian places near that hotel in Bandra, Mumbai.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's new flat is in Pali Hill, Bandra.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user found Gauri's Thali on Hill Road on 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user picked up the keys to their new flat on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user wants a vegetarian restaurant for dinner on 2026-10-08.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The assistant (A) confirmed that the user is in Bandra until Thursday, 2026-10-15.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the available particles, the first weekend in Mumbai appears to have fallen around 2026-10-11 (a Saturday or Sunday), and here's what can be pieced together:\n\n- The user **walked the whole of Carter Road** on the evening of 2026-10-11.\n- The user **found Gauri's Thali on Hill Road** on 2026-10-11.\n\nIt's also worth noting that by that point, the user had already picked up the keys to their new flat in Pali Hill, Bandra on 2026-10-10 and checked out of their hotel on the same day, so the weekend was spent settling into the new neighbourhood.\n\nBeyond those two activities \u2014 the Carter Road walk and discovering Gauri's Thali \u2014 the particles don't reveal anything else the user did that first weekend.",
+     "today_answer": "Based on the available particles, the user's first weekend in Mumbai appears to have fallen around 10\u201311 October 2026. Here is what the record shows:\n\n- On **2026-10-10**, the user checked out of their hotel and picked up the keys to their new flat in Pali Hill, Bandra.\n- On the evening of **2026-10-11**, the user walked the whole of Carter Road and also discovered **Gauri's Thali** \u2014 an all-vegetarian restaurant on Hill Road.\n\nSo it seems the first weekend involved settling into the new flat, exploring the neighbourhood on foot along Carter Road, and finding a new place to eat. The particles don't describe much else from that weekend beyond these activities."
+    },
+    {
+     "id": "w4-visitor-first-week",
+     "question": "Who visited the user during their first week in Mumbai?",
+     "window": {
+      "during_start": "2026-10-10",
+      "during_end": "2026-10-16"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 25,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 2,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user is in Mumbai for a week for work.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for work (not leisure).",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is staying at a hotel in Bandra, Mumbai.",
+       "reading": "IN_FORCE",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user checked out of the hotel on 2026-10-10.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in Delhi, in Lajpat Nagar.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya reminded the user that the user had lived in Powai before on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's Mumbai office is located in Kamala Mills in Lower Parel.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user walked the whole of Carter Road on the evening of 2026-10-11.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the available particles, two people visited or spent time with the user during their first week in Mumbai:\n\n1. **Ritika** (a colleague) \u2014 she showed the user around the Mumbai office and took them to lunch on 2026-10-12, the user's first day at the office.\n\n2. **Ananya** \u2014 she came over from Pune on 2026-10-14, reminded the user that they had previously lived in Powai, and the two had dinner together at Gauri's that evening.",
+     "today_answer": "During the user's first week in Mumbai, their sister **Ananya** visited \u2014 she came over from Pune on 2026-10-14. The two had dinner together at Gauri's that evening, and Ananya also reminded the user that they had previously lived in Powai.\n\nAdditionally, the user's colleague **Ritika** was present during that first week, showing the user around the Mumbai office and taking them to lunch on 2026-10-12 (the user's first day at the office), though Ritika was a workplace colleague rather than a visitor in the social sense."
+    },
+    {
+     "id": "w5-living-on-1001",
+     "question": "Where was the user living on 2026-10-01?",
+     "window": {
+      "on": "2026-10-01"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "Lajpat Nagar"
+     ],
+     "gold_terms_total": 1,
+     "exclude_terms_in_hits": [],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 1,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 0,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "Sandeep's Curry House was a ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      }
+     ],
+     "answer": "Based on the available information, the user was likely living in a flat in **Lajpat Nagar, Delhi** around that time. As of 2026-09-04, that was their residence, and 2026-10-01 is only about four weeks later \u2014 so it's probable they were still there, though I can't confirm with certainty that no move occurred in the intervening period.",
+     "today_answer": "On 2026-10-01, the user was likely staying at a hotel in Bandra, Mumbai. The particles indicate that as of 2026-10-08 the user was staying at a hotel in Bandra, that they checked out of the hotel and picked up the keys to their new flat on 2026-10-10, and that the new flat is in Pali Hill, Bandra. Since 2026-10-01 falls before both the check-out date and the move into the new flat, the user was most probably already at (or en route to) that Bandra hotel \u2014 though the particles don't explicitly confirm the hotel stay extended as far back as October 1st.\n\nIt's also worth noting that as of 2026-09-04 the user was living in Lajpat Nagar, Delhi, so if the hotel stay hadn't begun yet by October 1st, they may still have been in Delhi at that point."
+    },
+    {
+     "id": "w6-oct-12-to-14",
+     "question": "What did the user do between 2026-10-12 and 2026-10-14?",
+     "window": {
+      "during_start": "2026-10-12",
+      "during_end": "2026-10-14"
+     },
+     "verdict": "correct",
+     "gold_terms_in_hits": [
+      "first day",
+      "dinner at Gauri"
+     ],
+     "gold_terms_total": 2,
+     "exclude_terms_in_hits": [
+      "Powai"
+     ],
+     "coverage": {
+      "candidates": 28,
+      "admitted": 17,
+      "undated": 20,
+      "unkinded": 0,
+      "retired_admitted": 2,
+      "restated": 0
+     },
+     "hits": [
+      {
+       "content": "The user's colleague Ritika took the user to lunch on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's first day at the Mumbai office was on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user's colleague Ritika showed the user around the Mumbai office on 2026-10-12.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user and Ananya had dinner at Gauri's on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya reminded the user that the user had lived in Powai before on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user wants a vegetarian restaurant for dinner on 2026-10-08.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The assistant (A) confirmed that the user is in Bandra until Thursday, 2026-10-15.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Ananya came over from Pune on 2026-10-14.",
+       "reading": "BEGAN",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for a week for work.",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user is in Mumbai for work (not leisure).",
+       "reading": "IN_FORCE",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "Sandeep's is (or was as of 2026-10-11) the user's favourite restaurant.",
+       "reading": "HELD_AT",
+       "retired": false,
+       "close_basis": null,
+       "restates": null
+      },
+      {
+       "content": "The user lives in Delhi, in Lajpat Nagar.",
+       "reading": "HELD_AT",
+       "retired": true,
+       "close_basis": "retired_at",
+       "restates": null
+      }
+     ],
+     "answer": "Here is a summary of what the user did between 2026-10-12 and 2026-10-14:\n\n**2026-10-12**\nIt was the user's first day at the Mumbai office (located in Kamala Mills, Lower Parel). A colleague named Ritika showed the user around the office and also took them out to lunch that day.\n\n**2026-10-14**\nThe user's friend Ananya came over from Pune to visit. They had dinner together at a restaurant called Gauri's. During the evening, Ananya reminded the user that they had previously lived in Powai.\n\nThere are no specific particles covering **2026-10-13**, so it's not possible to say what the user did on that particular day. It was likely a regular workday given that the user was in Mumbai for work that week, but that's only an inference.",
+     "today_answer": "Here's what the user was up to between 2026-10-12 and 2026-10-14:\n\n**2026-10-12**\nIt was the user's first day at the Mumbai office, located at Kamala Mills in Lower Parel. Colleague Ritika showed the user around the office and also took the user out to lunch that day.\n\n**2026-10-13**\nThe particles don't contain any specific information about what the user did on 2026-10-13, so that day isn't accounted for in the available knowledge.\n\n**2026-10-14**\nThe user's sister Ananya came over from Pune to visit. That evening, Ananya and the user had dinner together at Gauri's Thali on Hill Road \u2014 an all-vegetarian restaurant, which suits the user's vegetarian diet. During the visit, Ananya reminded the user that they had actually lived in Powai before (prior to their 2019 internship there)."
+    }
+   ]
+  }
+ }
+}

@@ -12,6 +12,7 @@ id on decode (source UUID is origin metadata only), and JSONL round-tripping.
 from __future__ import annotations
 
 import pathlib
+from datetime import UTC, datetime
 
 import pytest
 
@@ -25,6 +26,7 @@ from particles.core.schema import (
     ProvenanceRefType,
     Subject,
     UncertaintyNature,
+    ValidKind,
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.extraction.polarity import (
@@ -79,6 +81,8 @@ def _particle() -> Particle:
         context_fingerprint="fp123",
         subject_ids=["sid-water", "sid-bare"],
         assertion_modality=AssertionModality.EXPERIENTIAL,
+        valid_from=datetime(2026, 10, 10, tzinfo=UTC),
+        valid_kind=ValidKind.STATE,
     )
 
 
@@ -145,6 +149,8 @@ def test_round_trip_preserves_substrate() -> None:
     assert rp.provenance[0].location == "p3"
     assert rp.provenance[0].chunk_hash == "abc"
     assert rp.tags == ["physics/chemistry"]
+    assert rp.valid_from == datetime(2026, 10, 10, tzinfo=UTC)  # world time
+    assert rp.valid_kind is ValidKind.STATE
     assert rp.properties == {"nmo:hasWeight": 0.75}
     assert rp.context_fingerprint == "fp123"
     assert rp.extractor_ref == ExtractorRef(name="general-extractor", version="0.6.0")

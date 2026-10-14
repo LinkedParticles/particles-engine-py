@@ -1697,6 +1697,25 @@ def _version_note(calibration: Any, running_version: str) -> str | None:
     )
 
 
+def _unreached_note(calibration: Any, configured: str) -> str | None:
+    """One-line note for a record the configured extraction route does not reach.
+
+    Keyed records are correct: a record applies to its own pairing and to no
+    other. The silence was the defect. A record fitted for one model while the
+    store extracts with another calibrates nothing, and a change of the
+    compiled default strands every fit made for the old one.
+    """
+    from particles.store.extractor_store import LEGACY_PROVIDER_MODEL
+
+    key = calibration.provider_model or LEGACY_PROVIDER_MODEL
+    if key == configured:
+        return None
+    return (
+        f"UNREACHED: extraction here is configured as {configured}, so no run "
+        "under this configuration applies this record."
+    )
+
+
 def _heldout_note(calibration: Any) -> str:
     """One-line account of a stored record's out-of-sample check."""
     if calibration.heldout_sample_size is None:
@@ -1865,6 +1884,7 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         get_extractor_record,
         upsert_calibration,
     )
+    from particles.store.particle_store import latest_extraction_provider_model
 
     # Locate extractor
     extractor = next((e for e in get_extractors() if extractor_id == e.EXTRACTOR_ID), None)
@@ -2207,10 +2227,26 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
             raise typer.Exit(1)
         await upsert_calibration(session, extractor_id, calibration)
         await session.commit()
+        latest = await latest_extraction_provider_model(session, extractor_id)
     typer.echo(
         f"Calibration persisted for {extractor_id!r} {fitted_version} "
         f"({calibration.provider_model})."
     )
+    # the record applies only to extraction under its own pairing.
+    # A fit made under a one-off configuration against a store that extracts
+    # with another model calibrates nothing there, and used to say nothing.
+    typer.echo(
+        f"It applies only to extraction that runs under {calibration.provider_model}; "
+        "every other pairing keeps minting EXTRACTOR_DIRECT."
+    )
+    if latest is not None and latest != calibration.provider_model:
+        typer.echo(
+            f"warning: this store's most recent {extractor_id} claim was extracted "
+            f"under {latest}, which this record does not calibrate. Unless the "
+            f"store's own configuration extracts under {calibration.provider_model}, "
+            "it will apply to no claim here.",
+            err=True,
+        )
 
 
 @extractor_app.command("calibrations")
@@ -2243,6 +2279,7 @@ def extractor_calibrations_cmd(
 
 
 async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path | None) -> None:
+    from particles.config import get_config
     from particles.extraction.calibration import describe_calibration
     from particles.store.extractor_store import LEGACY_PROVIDER_MODEL, get_calibrations
 
@@ -2264,7 +2301,9 @@ async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path |
     # extractor registered (a record left behind by one that was removed).
     selected = _selected_suite_ids(extractor, suites_dir) if extractor is not None else None
 
-    typer.echo(f"Calibrations for {extractor_id!r}:")
+    sel = get_config().llm.for_purpose("extraction")
+    configured = f"{sel.provider}:{sel.model}"
+    typer.echo(f"Calibrations for {extractor_id!r} (extraction is configured as {configured}):")
     stale_keys: list[str] = []
     unapplied_keys: list[str] = []
     for c in sorted(cals, key=lambda x: x.provider_model or ""):
@@ -2287,6 +2326,8 @@ async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path |
             unapplied_keys.append(c.provider_model or LEGACY_PROVIDER_MODEL)
         else:
             typer.echo(f"  {'':<34} {_heldout_note(c)}")
+            if (unreached := _unreached_note(c, configured)) is not None:
+                typer.echo(f"  {'':<34} {unreached}")
         if selected is None:
             continue
         note = _staleness_note(c, selected)

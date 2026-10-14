@@ -52,6 +52,7 @@ from particles.core.schema import (
     ProvenanceRefType,
     StructuredClaim,
     UncertaintyNature,
+    ValidKind,
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
@@ -110,6 +111,11 @@ class ParticleRow(Base):
         String, nullable=False, default="FALSIFIABLE", server_default="FALSIFIABLE"
     )
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # the world-time start of the claim and whether it is a moment
+    # (EVENT) or a span (STATE). Core fields, carried on the model; the crumbs
+    # that say how they were set ride in ``properties_json``. Migration 051.
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     supersedes: Mapped[str | None] = mapped_column(String, nullable=True)
     # transaction-time end of the belief — the instant the
     # particle FIRST left ACTIVE. Write-once: stamped by update_particle_status
@@ -234,6 +240,9 @@ class ParticleRow(Base):
         Index("ix_particles_status_provider_model", "status", "extraction_provider_model"),
         # the regeneration scope and the census read the stamp.
         Index("ix_particles_status_modality_classifier", "status", "modality_classifier"),
+        # the window route selects dated claims across statuses,
+        # and the backfill's scope is "ACTIVE and undated".
+        Index("ix_particles_status_valid_from", "status", "valid_from"),
     )
 
     def to_model(self) -> Particle:
@@ -267,6 +276,8 @@ class ParticleRow(Base):
             particle_type=ParticleType(self.particle_type),
             assertion_modality=AssertionModality(self.assertion_modality),
             valid_until=self.valid_until,
+            valid_from=self.valid_from,
+            valid_kind=ValidKind(self.valid_kind) if self.valid_kind else None,
             supersedes=self.supersedes,
             extractor_ref=self._extractor_ref_to_model(),
             extraction_provider_model=self.extraction_provider_model,
@@ -381,6 +392,8 @@ class ParticleRow(Base):
             particle_type=p.particle_type.value,
             assertion_modality=p.assertion_modality.value,
             valid_until=p.valid_until,
+            valid_from=p.valid_from,
+            valid_kind=p.valid_kind.value if p.valid_kind else None,
             supersedes=p.supersedes,
             # Row creation: a sanctioned provenance_json write (D1).
             provenance_json=json.dumps(prov_list),
@@ -1669,6 +1682,30 @@ async def get_active_particles_with_provider_model(
     return [row.to_model() for row in result.scalars()]
 
 
+async def latest_extraction_provider_model(session: AsyncSession, extractor_id: str) -> str | None:
+    """The pairing that minted this store's most recent claim from ``extractor_id``.
+
+    Reads the newest stamped particles first and exact-matches the parsed
+    extractor name in Python, for the substring reason the helpers above give.
+    ``None`` when the extractor has minted no stamped claim here. Any status:
+    the question is which model the store extracts with, not which claims
+    survive.
+    """
+    stmt = (
+        select(ParticleRow.extractor_ref_json, ParticleRow.extraction_provider_model)
+        .where(
+            ParticleRow.extraction_provider_model.is_not(None),
+            ParticleRow.extractor_ref_json.contains(extractor_id),
+        )
+        .order_by(ParticleRow.asserted_at.desc())
+        .limit(200)
+    )
+    for ref_json, provider_model in (await session.execute(stmt)).all():
+        if _extractor_name(ref_json) == extractor_id:
+            return str(provider_model)
+    return None
+
+
 async def get_active_particles_for_chunk_hash(
     session: AsyncSession,
     corpus_entry_id: str,
@@ -2001,6 +2038,235 @@ async def get_superseding_particle(session: AsyncSession, superseded_id: str) ->
     )
     row = result.scalars().first()
     return row.to_model() if row else None
+
+
+async def get_particles_in_window_scope(
+    session: AsyncSession,
+    min_confidence: float = 0.0,
+    subject_id: str | None = None,
+    *,
+    require_embedding: bool = False,
+    require_claim: bool = False,
+) -> list[tuple[Particle, np.ndarray[Any, np.dtype[np.float32]] | None, datetime | None]]:
+    """The candidate loader for the window route (§4).
+
+    Every **dated** particle (``valid_from`` set) **across statuses**: a
+    window read admits a retired claim for the period it held, and the
+    predicate in :mod:`particles.core.validity` decides membership. The
+    born-retired exclusion and the close rule are the Engine's job in
+    ``operations/query/window.py``; this loader is deliberately mechanical,
+    the shape of :func:`get_particles_with_embeddings_as_of`.
+
+    ``require_embedding`` is the semantic path (vectors embedded under another
+    model are skipped, as every cosine loader does); ``require_claim`` the
+    structural path; neither is the listing. Returns ``(particle, embedding or
+    None, retired_at)`` triples, ``retired_at`` being the storage column the
+    close rule reads.
+    """
+    from particles.store.subject_store import ParticleSubjectRow
+
+    q = select(ParticleRow).where(
+        ParticleRow.confidence_value >= min_confidence,
+        ParticleRow.valid_from.isnot(None),
+    )
+    if require_embedding:
+        q = q.where(ParticleRow.embedding_json.isnot(None))
+    if require_claim:
+        q = q.where(ParticleRow.structured_claim_json.isnot(None))
+    if subject_id is not None:
+        q = q.join(
+            ParticleSubjectRow,
+            ParticleSubjectRow.particle_id == ParticleRow.id,
+        ).where(ParticleSubjectRow.subject_id == subject_id)
+    result = await session.execute(q)
+    current_id = get_embedding_model_id()
+    out: list[tuple[Particle, np.ndarray[Any, np.dtype[np.float32]] | None, datetime | None]] = []
+    skipped = 0
+    for row in result.scalars().all():
+        emb: np.ndarray[Any, np.dtype[np.float32]] | None = None
+        if require_embedding:
+            stored_id = row.embedding_model_id or LEGACY_EMBEDDING_MODEL_ID
+            if stored_id != current_id:
+                skipped += 1
+                continue
+            emb = np.array(json.loads(row.embedding_json), dtype=np.float32)  # type: ignore[arg-type]
+        out.append((row.to_model(), emb, row.retired_at))
+    if skipped:
+        log.warning(
+            "Skipped %d dated particle(s) whose embedding model id != %r during a "
+            "window search — their vectors live in a different embedding space "
+            ".",
+            skipped,
+            current_id,
+        )
+    return out
+
+
+async def count_active_undated(session: AsyncSession) -> int:
+    """How many ACTIVE particles carry no ``valid_from`` (disclosure)."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(ParticleRow)
+        .where(ParticleRow.status == Status.ACTIVE.value, ParticleRow.valid_from.is_(None))
+    )
+    return int(result.scalar_one())
+
+
+async def load_valid_from_by_ids(
+    session: AsyncSession, particle_ids: Collection[str]
+) -> dict[str, tuple[datetime | None, str | None]]:
+    """``{id: (valid_from, valid_from_basis)}`` for the ids given.
+
+    The close rule reads a successor's start under every basis but ``coarse``;
+    the basis rides in ``properties_json``, so both come back together.
+    """
+    from particles.core.validity import VALID_FROM_BASIS_KEY
+
+    ids = list(particle_ids)
+    out: dict[str, tuple[datetime | None, str | None]] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i : i + 500]
+        result = await session.execute(
+            select(ParticleRow.id, ParticleRow.valid_from, ParticleRow.properties_json).where(
+                ParticleRow.id.in_(chunk)
+            )
+        )
+        for pid, valid_from, props_json in result.all():
+            basis: str | None = None
+            if props_json:
+                try:
+                    raw = json.loads(props_json).get(VALID_FROM_BASIS_KEY)
+                    basis = str(raw) if raw is not None else None
+                except ValueError:
+                    basis = None
+            if valid_from is not None and valid_from.tzinfo is None:
+                valid_from = valid_from.replace(tzinfo=UTC)
+            out[pid] = (valid_from, basis)
+    return out
+
+
+@dataclass(frozen=True)
+class ValidityRecordRow:
+    """One particle's validity record as stored."""
+
+    particle_id: str
+    status: str
+    content: str
+    valid_from: datetime | None
+    valid_kind: str | None
+    valid_until: datetime | None
+    basis: str | None
+    rule: str | None
+
+
+async def get_validity_records(
+    session: AsyncSession, *, statuses: Sequence[Status] = (Status.ACTIVE,)
+) -> list[ValidityRecordRow]:
+    """Column-only read of every particle's validity record, for the backfill's scope."""
+    from particles.core.validity import VALID_FROM_BASIS_KEY, VALID_FROM_RULE_KEY
+
+    result = await session.execute(
+        select(
+            ParticleRow.id,
+            ParticleRow.status,
+            ParticleRow.content,
+            ParticleRow.valid_from,
+            ParticleRow.valid_kind,
+            ParticleRow.valid_until,
+            ParticleRow.properties_json,
+        ).where(ParticleRow.status.in_([s.value for s in statuses]))
+    )
+    rows: list[ValidityRecordRow] = []
+    for pid, status, content, valid_from, valid_kind, valid_until, props_json in result.all():
+        basis = rule = None
+        if props_json:
+            try:
+                props = json.loads(props_json)
+                basis = props.get(VALID_FROM_BASIS_KEY)
+                rule = props.get(VALID_FROM_RULE_KEY)
+            except ValueError:
+                pass
+        rows.append(
+            ValidityRecordRow(
+                particle_id=pid,
+                status=status,
+                content=content,
+                valid_from=valid_from,
+                valid_kind=valid_kind,
+                valid_until=valid_until,
+                basis=str(basis) if basis is not None else None,
+                rule=str(rule) if rule is not None else None,
+            )
+        )
+    return rows
+
+
+async def set_validity_record(
+    session: AsyncSession,
+    particle_id: str,
+    *,
+    valid_from: datetime | None,
+    valid_kind: ValidKind | None,
+    basis: str,
+    cue: str | None = None,
+    confidence: float | None = None,
+    granularity: str | None = None,
+    rule: str | None = None,
+    preserve: Collection[str] = (),
+) -> bool:
+    """Write a particle's world-time record and its crumbs. Flushes.
+
+    The one writer the backfill and the operator verb share.
+    Touches ``valid_from``, ``valid_kind`` and the ``extraction:valid_from_*``
+    properties and nothing else: never ``content``, ``confidence``,
+    provenance, ``status`` or ``valid_until``. ``preserve`` names
+    the bases that must not be overwritten (the backfill passes ``stated`` and
+    ``operator``); the row is re-read here, at write time, so a verdict
+    recorded after a run computed its scope is never overwritten. Returns
+    whether anything was written.
+
+    Raises:
+        ValueError: If the particle is missing, or an EVENT is given while the
+            row carries a ``valid_until`` (a moment has one end).
+    """
+    from particles.core.validity import (
+        VALID_FROM_BASIS_KEY,
+        VALID_FROM_CONFIDENCE_KEY,
+        VALID_FROM_CUE_KEY,
+        VALID_FROM_GRANULARITY_KEY,
+        VALID_FROM_PROPERTY_KEYS,
+        VALID_FROM_RULE_KEY,
+    )
+
+    row = await session.get(ParticleRow, particle_id)
+    if row is None:
+        raise ValueError(f"set_validity_record: particle {particle_id} not found")
+    await session.refresh(row, ["properties_json", "valid_until"])
+    properties = json.loads(row.properties_json) if row.properties_json else {}
+    if preserve and properties.get(VALID_FROM_BASIS_KEY) in set(preserve):
+        return False
+    if valid_kind is ValidKind.EVENT and row.valid_until is not None:
+        raise ValueError(
+            f"set_validity_record: particle {particle_id} carries a valid_until; "
+            "an EVENT is a moment and has one end"
+        )
+    for key in VALID_FROM_PROPERTY_KEYS:
+        properties.pop(key, None)
+    row.valid_from = valid_from
+    row.valid_kind = valid_kind.value if valid_kind else None
+    if valid_from is not None:
+        properties[VALID_FROM_BASIS_KEY] = basis
+        if cue:
+            properties[VALID_FROM_CUE_KEY] = cue
+        if confidence is not None:
+            properties[VALID_FROM_CONFIDENCE_KEY] = confidence
+        if granularity:
+            properties[VALID_FROM_GRANULARITY_KEY] = granularity
+        if rule:
+            properties[VALID_FROM_RULE_KEY] = rule
+    row.properties_json = json.dumps(properties) if properties else None
+    await session.flush()
+    return True
 
 
 async def get_active_particles_with_valid_until(session: AsyncSession) -> list[Particle]:
