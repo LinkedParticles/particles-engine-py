@@ -759,7 +759,12 @@ class TestMatcherReplyParsing:
 
 def test_the_use_judge_is_its_own_purpose_defaulting_to_sonnet() -> None:
     """the gate measured a Haiku-class judge short of its bar."""
+    from particles.config import ProviderSelection
+
     llm = get_config().llm
     assert llm.for_purpose("use_judge").model == "claude-sonnet-5-5"
-    llm.semantic_lint = None
-    assert llm.for_purpose("use_judge") != llm.for_purpose("semantic_lint")
+    # Its own selection: routing the default or semantic_lint elsewhere
+    # does not move it (kept it when the default joined it on 5-5).
+    llm.default = ProviderSelection(model="claude-haiku-5-5")
+    llm.semantic_lint = ProviderSelection(model="claude-haiku-5-5")
+    assert llm.for_purpose("use_judge").model == "claude-sonnet-5-5"

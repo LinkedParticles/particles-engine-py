@@ -16,7 +16,9 @@ trust × age decay). See [Concepts → confidence](concepts.md#confidence).
 
 To ask what the store believed at a **past instant**, and see what replaced
 each since-retired belief and when, pass `--as-of`. See
-[As-of time travel](as-of.md) for the full walkthrough.
+[As-of time travel](as-of.md) for the full walkthrough. To ask what
+**happened or held during a period of world time**, pass `--during` or
+`--on`. See [Asking about a period](windows.md).
 
 ## Seeing the source passage
 
@@ -256,7 +258,8 @@ Every structural result ends with a coverage footer ("matched against
 the N of M ACTIVE particles carrying a structured claim") because the
 filter only ever saw the annotated fraction of the store: absence of a
 hit is not absence of a belief. All of this composes with `--store`,
-`--as-of`, `--tag`, `--subject`, and `--min-confidence` unchanged.
+`--as-of`, `--during` / `--on`, `--tag`, `--subject`, and `--min-confidence`
+unchanged.
 
 ## MCP server
 

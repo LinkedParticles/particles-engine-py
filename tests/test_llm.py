@@ -129,8 +129,8 @@ class TestCompletionPort:
         reset_config()
         provider = get_provider("synthesis")
         assert isinstance(provider, AnthropicProvider)
-        assert provider.model == "claude-sonnet-4-6"
-        assert provider.provider_model == "anthropic:claude-sonnet-4-6"
+        assert provider.model == "claude-sonnet-5-5"
+        assert provider.provider_model == "anthropic:claude-sonnet-5-5"
 
     def test_complete_routes_through_set_client_seam(self) -> None:
         from particles.llm import complete
@@ -141,7 +141,7 @@ class TestCompletionPort:
         assert out == "hello from the model"
         mock.messages.create.assert_called_once()
         # The configured model for the extraction purpose was used.
-        assert mock.messages.create.call_args.kwargs["model"] == "claude-sonnet-4-6"
+        assert mock.messages.create.call_args.kwargs["model"] == "claude-sonnet-5-5"
 
     def test_complete_passes_optional_kwargs_only_when_set(self) -> None:
         from anthropic import omit

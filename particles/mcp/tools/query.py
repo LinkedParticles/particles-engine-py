@@ -16,7 +16,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from particles.core.schema import AudienceHint, QueryRequest, StructuralGroupBy
+from particles.core.schema import AudienceHint, QueryRequest, StructuralGroupBy, TimeWindow
+from particles.core.validity import window_end_of_day, window_for_day
 from particles.mcp.observer import observer_for, scope_disclosure
 
 
@@ -29,6 +30,9 @@ async def query(
     audience: str = "GENERAL",
     summary: bool = False,
     as_of: str | None = None,
+    during_start: str | None = None,
+    during_end: str | None = None,
+    on: str | None = None,
     predicate: str | None = None,
     object_eq: str | None = None,
     object_gt: str | None = None,
@@ -66,6 +70,20 @@ async def query(
             retirement instant + basis, and the superseding belief);
             ``as_of_excluded_undatable`` discloses retirements the store
             cannot date. A future instant is rejected.
+        during_start: With ``during_end``, a window of world time (ISO-8601
+            dates, inclusive; either may be omitted for an open end): answer
+            about what began in, or was in force during, that period.
+            The window prefilters the candidate set before ranking;
+            with no question it returns the claims in date order, each with a
+            ``window_hits`` reading (``BEGAN``, ``IN_FORCE``, ``HELD_AT``,
+            ``WITHIN``). A retired claim is admitted for the period it held,
+            marked with its retirement and its close. Reads ``valid_from``;
+            ``window_coverage`` discloses the undated and unkinded claims the
+            window could not judge. Resolve the anchor first ("when did the
+            user move?"), then ask with dates: the anchor step is the caller's.
+        during_end: The inclusive end date of the window; see ``during_start``.
+        on: The point form: what held or happened on this date (ISO-8601).
+            Alternative to ``during_start`` / ``during_end``.
         predicate: Structural filter — claims whose predicate term
             equals this string (case-insensitive, exact: a CURIE and its
             expanded IRI are different strings; discover terms with
@@ -147,6 +165,21 @@ async def query(
         except ValueError:
             valid = ", ".join(g.value for g in StructuralGroupBy)
             raise ValueError(f"Unknown group_by axis {group_by!r}. Valid: {valid}.") from None
+    window: TimeWindow | None = None
+    if on is not None and (during_start is not None or during_end is not None):
+        raise ValueError("on and during_start / during_end are alternatives; pass one form.")
+    try:
+        if on is not None:
+            window = window_for_day(datetime.fromisoformat(on))
+        elif during_start is not None or during_end is not None:
+            window = TimeWindow(
+                start=datetime.fromisoformat(during_start) if during_start else None,
+                end=window_end_of_day(datetime.fromisoformat(during_end)) if during_end else None,
+            )
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid window: {exc}. Expected ISO-8601 dates (e.g. 2026-10-10)."
+        ) from None
     req = QueryRequest(
         question=question,
         tags=list(tags or []),
@@ -155,6 +188,7 @@ async def query(
         top_k=top_k,
         audience=AudienceHint(audience),
         as_of=as_of_dt,
+        window=window,
         predicate=predicate,
         object_eq=object_eq,
         object_gt=object_gt,

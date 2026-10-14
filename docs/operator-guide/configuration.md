@@ -100,12 +100,22 @@ name's Wikidata candidates during extraction):
 llm:
   default:
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
   # Route a single purpose to a different model, e.g. a cheaper model for
   # high-volume extraction while synthesis stays on the default.
   # extraction:
   #   model: claude-haiku-4-5
 ```
+
+The compiled default is `claude-sonnet-5-5` (since 1.189.0; it was
+`claude-sonnet-4-6` before). It applies to every purpose your configuration
+does not set, on an install whose `config.yaml` has no `llm.default` block,
+a zero-configuration install included. A `config.yaml` copied from the sample
+writes `llm.default` out and keeps its model when the compiled default changes.
+To stay on the previous model, set `llm.default.model: claude-sonnet-4-6`.
+`particles config validate` prints the default in force, where it came from,
+and each purpose routed elsewhere, and `particles hook doctor` names the model
+the hooks extract with and whether a calibration applies to it.
 
 `provider` is `anthropic` (the native adapter) or the name of any entry in
 `llm.providers` (see the next section). `max_tokens` is **not**
@@ -136,7 +146,7 @@ with zero configuration.
 llm:
   default:
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
   extraction:                # send only extraction to a cheaper vendor
     provider: openai
     model: gpt-5.6-luna

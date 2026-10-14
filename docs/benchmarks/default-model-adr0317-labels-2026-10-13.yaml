@@ -1,0 +1,1356 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Owner labels for the default-model measurement, items 2b and 2c. Bars registered 2026-10-13, before any run.
+#
+# Fill in every `label:` and leave everything else as it is.
+#
+# item_2b: does any claim under nearest_emitted state the `required` fact?
+#   stated_alone     one emitted claim states it and nothing else of substance
+#   stated_compound  one emitted claim states it alongside at least one other fact
+#   not_stated       none of them states it
+#   Both arms appear (31 items on claude-sonnet-5-5, 9 on claude-sonnet-4-6), so the
+#   adjusted recall is computed the same way for each.
+#
+# item_2c: is `claim` supported by the case's source text (path in `source`)?
+#   supported / unsupported
+#   The two arms are shuffled together; the arm field is kept for scoring.
+#
+# Bars: if item 2's recall bar fails (it did: 0.713 against 0.887 on 4-6), 5-5's
+# adjusted recall must be within 0.05 of 4-6's (2b), and 5-5's unsupported count
+# no more than 4-6's plus 2 (2c). Compound matches are counted as recall and
+# reported per arm beside the bar.
+#
+# Pre-labelled by claude-opus-5-5 (item 2d). `label` stays empty until the owner's review
+# is merged: a reviewed item takes the owner's decision, an unreviewed one its pre-label
+# if the audit passes.
+seed: 20261013
+item_2b:
+- id: 2b-001
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-001
+  required: The migration required rewriting 41 build files to declare their inputs explicitly.
+  nearest_emitted:
+  - The migration to a content-addressed cache at Fernwood Systems required rewriting 41 build files to
+    declare their inputs explicitly.
+  - Roughly a third of the 41 rewritten build files at Fernwood Systems were reading configuration from
+    the environment without declaring it.
+  - Fernwood Systems' old build cache keyed each artifact on the modification time of the files that produced
+    it.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: 'Claim 1 states that the migration required rewriting 41 build files to declare their
+    inputs explicitly, and it also adds a separate fact: the migration was to a content-addressed cache
+    at Fernwood Systems.'
+  review: null
+- id: 2b-002
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-article-001
+  required: The migration required rewriting 41 build files to declare their inputs explicitly.
+  nearest_emitted:
+  - The migration to content-addressed caching at Fernwood Systems required rewriting 41 build files to
+    declare their inputs explicitly.
+  - Roughly a third of the 41 rewritten build files at Fernwood Systems were reading configuration from
+    the environment without declaring it.
+  - Fernwood Systems' old build cache keyed each artifact on the modification time of the files that produced
+    it.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that the migration required rewriting 41 build files to declare their
+    inputs explicitly, and its added detail only identifies which migration is meant rather than adding
+    a separate fact.
+  review: null
+- id: 2b-003
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-001
+  required: The migration required rewriting 41 build files to declare their inputs explicitly.
+  nearest_emitted:
+  - The migration to a content-addressed build cache at Fernwood Systems required rewriting 41 build files
+    to declare their inputs explicitly.
+  - Roughly a third of the 41 build files at Fernwood Systems were reading configuration from the environment
+    without declaring it.
+  - The migration to a content-addressed build cache at Fernwood Systems took six weeks of one engineer's
+    time.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that the migration required rewriting 41 build files to declare their
+    inputs explicitly, and its added detail only names which migration it was rather than adding a separate
+    fact.
+  review: null
+- id: 2b-004
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-001
+  required: Fernwood Systems is a 40-person infrastructure company.
+  nearest_emitted:
+  - Fernwood Systems is a 40-person infrastructure company based in Halifax, Nova Scotia.
+  - Fernwood Systems' storage costs rose from $310 to $1,900 per month after the migration.
+  - The cache hit rate on Fernwood Systems' main branch is 82 percent, measured over the eight weeks since
+    the cutover.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that Fernwood Systems is a 40-person infrastructure company and also
+    adds a separate fact, that it is based in Halifax, Nova Scotia.
+  review: null
+- id: 2b-005
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-001
+  required: Fernwood Systems is a 40-person infrastructure company.
+  nearest_emitted:
+  - Fernwood Systems is a 40-person infrastructure company based in Halifax, Nova Scotia.
+  - The migration required rewriting 41 build files at Fernwood Systems to declare their inputs explicitly.
+  - Fernwood Systems' storage costs rose from $310 to $1,900 per month after the migration.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 says Fernwood Systems is a 40-person infrastructure company and adds a separate
+    fact, that it is based in Halifax, Nova Scotia.
+  review: null
+- id: 2b-006
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-001
+  required: Fernwood Systems is a 40-person infrastructure company.
+  nearest_emitted:
+  - Fernwood Systems is a 40-person infrastructure company based in Halifax, Nova Scotia.
+  - Fernwood Systems' storage costs rose from $310 to $1,900 per month after the migration.
+  - The cache hit rate on Fernwood Systems' main branch is 82 percent, measured over the eight weeks since
+    the cutover.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that Fernwood Systems is a 40-person infrastructure company and also
+    adds that it is based in Halifax, Nova Scotia.
+  review: null
+- id: 2b-007
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-002
+  required: Halcyon Grid Cooperative members saw their monthly electric bills fall by between $8 and $23
+    in 2025.
+  nearest_emitted:
+  - Depending on subscription size, Halcyon members saw monthly electric bills fall by between $8 and
+    $23, with the average member saving $14 a month.
+  - Halcyon Grid Cooperative's operating costs for 2025 were $940,000.
+  - Halcyon Grid Cooperative's revenue for 2025 was $1.62 million.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that Halcyon members' monthly electric bills fell by between $8 and
+    $23, and adds a separate fact about the $14 average monthly saving, though it does not explicitly
+    mention 2025.
+  review: null
+- id: 2b-008
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-002
+  required: Halcyon Grid Cooperative members saw their monthly electric bills fall by between $8 and $23
+    in 2025.
+  nearest_emitted:
+  - Depending on subscription size, Halcyon members saw monthly electric bills fall by between $8 and
+    $23, with an average saving of $14 a month.
+  - Halcyon Grid Cooperative's 2025 revenue was $1.62 million against operating costs of $940,000.
+  - Subscribers buy generation credits from Halcyon Grid Cooperative at 8.9 cents per kilowatt-hour.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: Claim 1 gives the $8-to-$23 monthly bill reduction for Halcyon members but never says
+    it happened in 2025, so it is only a partial version of the required fact, and no other claim supplies
+    the savings range.
+  review: required
+  owner_decision: agree
+- id: 2b-009
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-002
+  required: Halcyon Grid Cooperative members saw their monthly electric bills fall by between $8 and $23
+    in 2025.
+  nearest_emitted:
+  - Depending on subscription size, Halcyon members saw monthly electric bills fall by between $8 and
+    $23, with the average member saving $14 a month.
+  - Halcyon Grid Cooperative's operating costs for 2025 were $940,000.
+  - Halcyon Grid Cooperative's revenue for 2025 was $1.62 million.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 gives the $8–$23 monthly bill reduction for Halcyon members but adds the separate
+    fact of a $14 average saving, though it does not explicitly mention 2025.
+  review: null
+- id: 2b-010
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-essay-001
+  required: The shift-scheduling system at Bracken & Doyle operated across 23 sites.
+  nearest_emitted:
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - Priya Raghunathan maintained the shift-scheduling system at Bracken & Doyle for four years, from 2019
+    to 2023.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that the Bracken & Doyle shift-scheduling system operated across 23
+    sites, but it also adds that the system assigned shifts to about 9,000 warehouse workers.
+  review: null
+- id: 2b-011
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-essay-001
+  required: The shift-scheduling system at Bracken & Doyle operated across 23 sites.
+  nearest_emitted:
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - Priya Raghunathan maintained the shift-scheduling system at Bracken & Doyle for four years, from 2019
+    to 2023.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 says the system operated across 23 sites and also adds that it assigned shifts
+    to about 9,000 warehouse workers.
+  review: null
+- id: 2b-012
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  required: The shift-scheduling system at Bracken & Doyle operated across 23 sites.
+  nearest_emitted:
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - Priya Raghunathan maintained the shift-scheduling system at Bracken & Doyle for four years, from 2019
+    to 2023.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that the system operated across 23 sites, but it also gives a separate
+    fact, that it assigned shifts to about 9,000 warehouse workers.
+  review: null
+- id: 2b-013
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-essay-001
+  required: In a normal week the shift-scheduling system at Bracken & Doyle processed roughly 30,000 shift
+    assignments.
+  nearest_emitted:
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In 2021 Bracken & Doyle approved a full rewrite of the shift-scheduling system, budgeted at eighteen
+    months.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that the Bracken & Doyle shift-scheduling system processed roughly 30,000
+    shift assignments in a normal week, and it adds no other fact.
+  review: null
+- id: 2b-014
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  required: In a normal week the shift-scheduling system at Bracken & Doyle processed roughly 30,000 shift
+    assignments.
+  nearest_emitted:
+  - In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  - The Bracken & Doyle shift-scheduling system assigned shifts to about 9,000 warehouse workers across
+    23 sites.
+  - In 2021 Bracken & Doyle approved a full rewrite of the shift-scheduling system, budgeted at eighteen
+    months.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that the Bracken & Doyle shift-scheduling system processed roughly 30,000
+    shift assignments in a normal week, and it adds no other fact of substance.
+  review: audit
+  owner_decision: agree
+- id: 2b-015
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-essay-001
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle spent roughly $2 million and shipped
+    nothing to production.
+  - In 2021, Bracken & Doyle approved a full rewrite of the shift-scheduling system, budgeted at eighteen
+    months.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: 'The fact is split across claims: claim 1 has the cancellation after fourteen months
+    but no cost, and claim 2 has the roughly $2 million spend but no cancellation or duration, so no single
+    claim states the whole fact.'
+  review: required
+  owner_decision: agree
+- id: 2b-016
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-essay-001
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle cost roughly $2 million and shipped
+    nothing to production.
+  - The production incident count for the shift-scheduling system at Bracken & Doyle fell from 31 in the
+    quarter the rewrite started to 6 in the quarter it was cancelled.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: 'The required fact is split across claims: claim 1 gives the cancellation after fourteen
+    months without the roughly $2 million cost, and claim 2 gives the cost without the cancellation, so
+    no single claim states the whole fact.'
+  review: required
+  owner_decision: agree
+- id: 2b-017
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-essay-001
+  required: The rewrite of the shift-scheduling system was cancelled after fourteen months, with roughly
+    $2 million spent.
+  nearest_emitted:
+  - The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  - The rewrite of the shift-scheduling system at Bracken & Doyle had roughly $2 million spent on it.
+  - The production incident count for the shift-scheduling system at Bracken & Doyle fell from 31 in the
+    quarter the rewrite started to 6 in the quarter it was cancelled.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: The fourteen-month cancellation and the roughly $2 million spend are split between
+    claims 1 and 2, and no single claim states both parts of the required fact.
+  review: required
+  owner_decision: agree
+- id: 2b-018
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-essay-001
+  required: The production incident count fell from 31 in the quarter the rewrite started to 6 in the
+    quarter it was cancelled.
+  nearest_emitted:
+  - Production incidents on the Bracken & Doyle scheduling system fell from 31 in the quarter the rewrite
+    started to 6 in the quarter it was cancelled.
+  - The rewrite failed because the old system's real specification lived in a decade of accumulated fixes
+    that no document recorded.
+  - The rewrite of the Bracken & Doyle shift-scheduling system was cancelled after fourteen months, with
+    roughly $2 million spent and nothing shipped to production.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that production incidents fell from 31 in the quarter the rewrite started
+    to 6 in the quarter it was cancelled, and naming the Bracken & Doyle system only identifies the subject
+    rather than adding a separate fact.
+  review: null
+- id: 2b-019
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-essay-001
+  required: The production incident count fell from 31 in the quarter the rewrite started to 6 in the
+    quarter it was cancelled.
+  nearest_emitted:
+  - Production incidents on the Bracken & Doyle scheduling system fell from 31 in the quarter the rewrite
+    started to 6 in the quarter it was cancelled.
+  - The rewrite failed because the old system's real specification lived in a decade of accumulated fixes
+    that no document recorded.
+  - The rewrite of the Bracken & Doyle shift-scheduling system was cancelled after fourteen months, with
+    roughly $2 million spent and nothing shipped to production.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states the drop in production incidents from 31 in the quarter the rewrite
+    started to 6 in the quarter it was cancelled, and naming the system only identifies it rather than
+    adding a separate fact.
+  review: null
+- id: 2b-020
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-interview-001
+  required: The Meridian Rose was discovered in 2023 during a routine sonar survey.
+  nearest_emitted:
+  - The Meridian Rose is a seventeenth-century merchant wreck discovered in 2023 during a routine sonar
+    survey.
+  - A third Meridian Rose excavation season is planned for the summer of 2027.
+  - The Meridian Rose went down in or shortly after 1687, based on dendrochronology and coin dates.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that the Meridian Rose was discovered in 2023 during a routine sonar
+    survey, and it also says the wreck is a seventeenth-century merchant ship.
+  review: null
+- id: 2b-021
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-interview-001
+  required: The Meridian Rose was discovered in 2023 during a routine sonar survey.
+  nearest_emitted:
+  - The Meridian Rose is a seventeenth-century merchant wreck that was discovered in 2023 during a routine
+    sonar survey.
+  - The Meridian Rose went down in or shortly after 1687, based on the dendrochronology and coin dates.
+  - A third Meridian Rose field season is planned for the summer of 2027.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states the 2023 discovery during a routine sonar survey, and it also says the
+    Meridian Rose is a seventeenth-century merchant wreck.
+  review: null
+- id: 2b-022
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-interview-001
+  required: The Meridian Rose was discovered in 2023 during a routine sonar survey.
+  nearest_emitted:
+  - The Meridian Rose is a seventeenth-century merchant wreck discovered in 2023 during a routine sonar
+    survey.
+  - Kaldestad's team is confident the Meridian Rose went down in or shortly after 1687, based on dendrochronology
+    and coin dates.
+  - The Meridian Rose finds are contracted to go on public display at the maritime museum in Bergen in
+    2028.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that the Meridian Rose was discovered in 2023 during a routine sonar
+    survey, and it also says the ship is a seventeenth-century merchant wreck.
+  review: null
+- id: 2b-023
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-interview-001
+  required: Kaldestad believes the Meridian Rose was lost in a storm rather than by grounding.
+  nearest_emitted:
+  - The Meridian Rose was lost in a storm rather than by grounding; this is Kaldestad's reading of the
+    evidence, not a finding.
+  - A colleague of Kaldestad reads the same evidence and thinks the Meridian Rose was overloaded.
+  - The Meridian Rose was never salvaged and never trawled, because of the depth at which it lies.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 says the Meridian Rose was lost in a storm rather than by grounding and attributes
+    this to Kaldestad's reading of the evidence, which is the required belief; 'not a finding' only confirms
+    it is a belief rather than adding a separate fact.
+  review: null
+- id: 2b-024
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-interview-001
+  required: Kaldestad believes the Meridian Rose was lost in a storm rather than by grounding.
+  nearest_emitted:
+  - The Meridian Rose was lost in a storm rather than by grounding; Kaldestad says this is her reading
+    of the evidence, not a finding.
+  - A colleague of Kaldestad reads the same evidence and thinks the Meridian Rose was overloaded.
+  - The Meridian Rose's cargo manifest, if one ever existed, has not survived.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 attributes the storm-rather-than-grounding explanation to Kaldestad as her
+    own reading of the evidence, and its "not a finding" qualifier only restates that this is her belief
+    rather than adding a separate fact.
+  review: null
+- id: 2b-025
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-interview-001
+  required: Kaldestad believes the Meridian Rose was lost in a storm rather than by grounding.
+  nearest_emitted:
+  - The Meridian Rose was lost in a storm rather than by grounding; the hull shows no strike damage and
+    she settled upright.
+  - Kaldestad's team is confident the Meridian Rose went down in or shortly after 1687, based on dendrochronology
+    and coin dates.
+  - A colleague of Kaldestad reads the same evidence as indicating the Meridian Rose was overloaded.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: Claim 1 states that the Meridian Rose was lost in a storm rather than by grounding
+    but never attributes this view to Kaldestad, and no other claim gives Kaldestad's view on the cause
+    of loss.
+  review: required
+  owner_decision: agree
+- id: 2b-026
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-003
+  required: Harbor has acquired Lantern.
+  nearest_emitted:
+  - The Lantern acquisition is Harbor's second acquisition.
+  - Harbor, a payroll software company, has acquired Lantern, a note-taking app.
+  - Lantern's twelve staff are joining Harbor.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 2 says Harbor has acquired Lantern, and it also adds that Harbor is a payroll
+    software company and Lantern is a note-taking app.
+  review: null
+- id: 2b-027
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-003
+  required: Harbor has acquired Lantern.
+  nearest_emitted:
+  - Lantern is Harbor's second acquisition.
+  - Harbor, a payroll software company based in Manchester, has acquired Lantern, a note-taking app.
+  - Lantern's twelve staff are joining Harbor.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 2 states that Harbor has acquired Lantern, but it also describes Harbor as a
+    Manchester-based payroll software company and Lantern as a note-taking app.
+  review: null
+- id: 2b-028
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-003
+  required: Harbor has acquired Lantern.
+  nearest_emitted:
+  - The Lantern acquisition is Harbor's second acquisition.
+  - Harbor, a payroll software company, has acquired Lantern, a note-taking app.
+  - Lantern's twelve staff are joining Harbor.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 2 states that Harbor has acquired Lantern, but it also adds that Harbor is a
+    payroll software company and Lantern is a note-taking app.
+  review: null
+- id: 2b-029
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-003
+  required: Lantern's standalone app will keep working until at least June 2027.
+  nearest_emitted:
+  - Lantern's standalone app will keep working until at least June 2027.
+  - Lantern launched in 2022.
+  - Harbor, a payroll software company, has acquired Lantern, a note-taking app.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that Lantern's standalone app will keep working until at least June
+    2027, and it adds no other fact.
+  review: null
+- id: 2b-030
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-003
+  required: Lantern's standalone app will keep working until at least June 2027.
+  nearest_emitted:
+  - Lantern's standalone app will keep working until at least June 2027.
+  - Lantern launched in 2022.
+  - Harbor plans to build Lantern's shared notebooks into its payroll dashboard by the end of 2026, so
+    an accountant can attach a note to an individual pay run.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that Lantern's standalone app will keep working until at least June
+    2027, and it adds no other fact.
+  review: audit
+  owner_decision: agree
+- id: 2b-031
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-003
+  required: Lantern's standalone app will keep working until at least June 2027.
+  nearest_emitted:
+  - Lantern's standalone app will keep working until at least June 2027.
+  - Lantern launched in 2022.
+  - Harbor, a payroll software company, has acquired Lantern, a note-taking app.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states that Lantern's standalone app will keep working until at least June
+    2027 and adds no other fact.
+  review: null
+- id: 2b-032
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-004
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a company with approximately 90 employees.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: Claim 1 gives the dispatch and billing software for regional trucking firms and claim
+    2 gives the roughly 90-person headcount, but no single claim states both parts of the required fact
+    together.
+  review: required
+  owner_decision: agree
+- id: 2b-033
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-article-004
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a 90-person company.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: The 90-person headcount and the dispatch and billing software are split across claims
+    1 and 2, and no single claim states the whole fact.
+  review: required
+  owner_decision: agree
+- id: 2b-034
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-004
+  required: Ostrander Freight is a 90-person company that builds dispatch and billing software for regional
+    trucking firms.
+  nearest_emitted:
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  - Ostrander Freight is a 90-person company.
+  - Ostrander Freight's dispatch service is currently written in Python.
+  label: not_stated
+  prelabel: not_stated
+  prelabel_reason: The required fact is split across claims 1 and 2, but no single claim states both the
+    90-person size and the dispatch and billing software for regional trucking firms.
+  review: required
+  owner_decision: agree
+- id: 2b-035
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-004
+  required: Ostrander Freight's billing records are stored in Postgres.
+  nearest_emitted:
+  - Ostrander Freight's billing records still live in Postgres; the rewrite did not change the database.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 states that Ostrander Freight's billing records live in Postgres, and it also
+    adds a separate fact that the rewrite did not change the database.
+  review: null
+- id: 2b-036
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-004
+  required: Ostrander Freight's billing records are stored in Postgres.
+  nearest_emitted:
+  - Ostrander Freight's billing records still live in Postgres; the rewrite did not change the database.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight is a 90-person company that builds dispatch and billing software for regional trucking
+    firms.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 says the billing records live in Postgres, but it also adds a separate fact
+    that the rewrite did not change the database.
+  review: null
+- id: 2b-037
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-004
+  required: Ostrander Freight's billing records are stored in Postgres.
+  nearest_emitted:
+  - Ostrander Freight's billing records still live in Postgres; the rewrite did not change the database.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight is a 90-person company that builds dispatch and billing software for regional trucking
+    firms.
+  label: stated_compound
+  prelabel: stated_compound
+  prelabel_reason: Claim 1 says the billing records live in Postgres, but it also adds the separate fact
+    that the rewrite did not change the database.
+  review: null
+- id: 2b-038
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-004
+  required: Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter
+    of 2026.
+  nearest_emitted:
+  - Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter of
+    2026.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight builds dispatch and billing software for regional trucking firms.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 states exactly the required fact, Ostrander Freight's plan to move its dispatch
+    service off Python starting in Q1 2026, and adds nothing else of substance.
+  review: null
+- id: 2b-039
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-004
+  required: Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter
+    of 2026.
+  nearest_emitted:
+  - Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter of
+    2026.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight is a 90-person company that builds dispatch and billing software for regional trucking
+    firms.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 matches the required fact exactly, stating the plan to move the dispatch service
+    off Python beginning in Q1 2026, and it adds no other fact.
+  review: null
+- id: 2b-040
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-004
+  required: Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter
+    of 2026.
+  nearest_emitted:
+  - Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter of
+    2026.
+  - In spring 2025, Ostrander Freight rewrote its billing service, originally written in Python, in Go.
+  - Ostrander Freight is a 90-person company that builds dispatch and billing software for regional trucking
+    firms.
+  label: stated_alone
+  prelabel: stated_alone
+  prelabel_reason: Claim 1 repeats the required fact word for word, Python, Q1 2026 start and all, and
+    adds nothing else of substance.
+  review: null
+item_2c:
+- id: 2c-030
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: The maritime museum where Meridian Rose finds will be displayed is located in Bergen.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the finds will go on display at the maritime museum in Bergen.
+  review: null
+- id: 2c-023
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-interview-001
+  claim: The Meridian Rose site is guarded because of the amount of specie recovered.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the remarkable amount of specie is why the site is guarded.
+  review: null
+- id: 2c-057
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-001
+  claim: The cache hit rate on Fernwood Systems' main branch is 82 percent, measured over the eight weeks
+    since the cutover.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the main-branch hit rate sits at 82 percent, measured over the eight
+    weeks since the cutover.
+  review: null
+- id: 2c-020
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-interview-001
+  claim: The interview with Dr. Maren Kaldestad was conducted after her team's second field season on
+    the Meridian Rose.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the interview took place after her team's second field season.
+  review: null
+- id: 2c-022
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: Kaldestad's team is confident the Meridian Rose went down in or shortly after 1687, based on
+    dendrochronology and coin dates.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the dendrochronology combined with the coin dates makes them confident
+    the ship went down in or shortly after 1687.
+  review: null
+- id: 2c-006
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-essay-001
+  claim: The essay 'In praise of the maintainer' was written by Priya Raghunathan.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The byline reads 'By Priya Raghunathan' and the footer credits her copyright.
+  review: null
+- id: 2c-016
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-003
+  claim: The company that made Lantern is based in Leeds.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source describes Lantern as made by a twelve-person company in Leeds.
+  review: null
+- id: 2c-011
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-003
+  claim: The article about Harbor acquiring Lantern was written by Wendell Asquith.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The byline reads 'By Wendell Asquith'.
+  review: null
+- id: 2c-060
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-interview-001
+  claim: A colleague of Kaldestad reads the same evidence as indicating the Meridian Rose was overloaded.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says a respected colleague reads the same evidence and thinks the ship was
+    overloaded.
+  review: null
+- id: 2c-009
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-001
+  claim: Reading configuration from the environment without declaring it was the single most common source
+    of cache misses found at Fernwood Systems.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source calls undeclared environment configuration the single most common source
+    of cache misses they found.
+  review: audit
+  owner_decision: agree
+- id: 2c-044
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-004
+  claim: Ostrander Freight's billing records still live in Postgres; the rewrite did not change the database.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source says billing records still live in Postgres and that the rewrite changed
+    the code, not the database.
+  review: null
+- id: 2c-008
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-essay-001
+  claim: The rewrite of the shift-scheduling system at Bracken & Doyle shipped nothing to production.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the rewrite was cancelled with 'nothing shipped to production.'
+  review: null
+- id: 2c-048
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-003
+  claim: Harbor, a payroll software company, has acquired Lantern, a note-taking app.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source states that Harbor, a payroll software company, has acquired Lantern, a
+    note-taking app.
+  review: null
+- id: 2c-004
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: Over two field seasons, Kaldestad's team recovered 612 silver coins from the Meridian Rose.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says 612 silver coins were recovered over the two seasons.
+  review: null
+- id: 2c-033
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-interview-001
+  claim: The Meridian Rose went down in or shortly after 1687, based on dendrochronology and coin dates.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad lists this dating among the things she is sure of and bases it on dendrochronology
+    and coin dates.
+  review: null
+- id: 2c-045
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-001
+  claim: Fernwood Systems expects to revisit the remote execution decision once the cache hit rate stops
+    improving.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says they expect to revisit the remote execution decision once the cache
+    hit rate stops improving.
+  review: null
+- id: 2c-001
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: The Meridian Rose was never salvaged because its depth of 41 meters was sufficient to protect
+    it.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the wreck at 41 meters is deep enough that it was never salvaged.
+  review: null
+- id: 2c-032
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-004
+  claim: Ostrander Freight plans to move its dispatch service off Python, starting in the first quarter
+    of 2026.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source says the company plans next to move the dispatch service off Python, starting
+    in the first quarter of 2026.
+  review: null
+- id: 2c-025
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-003
+  claim: The article about Harbor's acquisition of Lantern was written by Wendell Asquith.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The byline credits Wendell Asquith as the author.
+  review: null
+- id: 2c-047
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-essay-001
+  claim: The rewrite failed because the old system's real specification lived in a decade of accumulated
+    fixes that no document recorded.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the rewrite failed because the old system's real specification lived
+    in a decade of accumulated fixes that no document recorded.
+  review: null
+- id: 2c-021
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: The transcript of the interview with Dr. Maren Kaldestad was edited for length.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the transcript has been edited for length.
+  review: null
+- id: 2c-026
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-essay-001
+  claim: The rewrite of the shift-scheduling system at Bracken & Doyle cost roughly $2 million and shipped
+    nothing to production.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says roughly $2 million was spent and nothing was shipped to production.
+  review: audit
+  owner_decision: agree
+- id: 2c-040
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-001
+  claim: Roughly a third of the 41 rewritten build files at Fernwood Systems were reading configuration
+    from the environment without declaring it, the single most common source of cache misses found.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says roughly a third of the 41 rewritten files read undeclared environment
+    configuration, which was the most common source of misses.
+  review: null
+- id: 2c-012
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-003
+  claim: The company that made Lantern is based in Leeds.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source says Lantern is made by a company in Leeds.
+  review: null
+- id: 2c-018
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-article-004
+  claim: Rust was declined as the language for the Ostrander Freight billing service rewrite.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source says the team considered Rust and chose Go, so Rust was not chosen.
+  review: null
+- id: 2c-037
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-003
+  claim: Harbor, a payroll software company based in Manchester, has acquired Lantern, a note-taking app.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source describes Harbor as a payroll software company based in Manchester that
+    acquired the note-taking app Lantern.
+  review: null
+- id: 2c-041
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-001
+  claim: Fernwood Systems expects to revisit the remote execution decision once the cache hit rate stops
+    improving.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: This repeats claim 3, which the source states directly.
+  review: audit
+  owner_decision: agree
+- id: 2c-059
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  claim: Stewardship compounds while novelty mostly does not.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The essay states 'stewardship compounds and novelty mostly does not' as its lesson.
+  review: null
+- id: 2c-053
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-002
+  claim: Halcyon Grid Cooperative expects to open enrollment to the waitlist once the fourth array clears
+    its interconnection study.
+  label: supported
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the cooperative expects to open enrollment to the waitlist once the
+    fourth array clears its interconnection study.
+  review: audit
+  owner_decision: agree
+- id: 2c-017
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: The Meridian Rose site is guarded due to the remarkable quantity of specie recovered.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the remarkable amount of specie is why the site is guarded.
+  review: null
+- id: 2c-036
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-interview-001
+  claim: The Meridian Rose was lost in a storm rather than by grounding; the hull shows no strike damage
+    and she settled upright.
+  label: unsupported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: unsupported
+  prelabel_reason: Kaldestad says the storm explanation is her reading of the evidence rather than a finding,
+    and a colleague disagrees, so it cannot be stated as fact.
+  review: required
+  owner_decision: agree
+- id: 2c-050
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  claim: The rewrite failed because the old system's real specification lived in a decade of accumulated
+    fixes that no document recorded.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source gives this exact reason for the rewrite's failure.
+  review: null
+- id: 2c-055
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-interview-001
+  claim: The Meridian Rose's hold carried salt and copper ingots, which the team has physically recovered.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the hold carried salt and copper ingots that the team has physically
+    recovered.
+  review: null
+- id: 2c-038
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-002
+  claim: Halcyon Grid Cooperative's audited financials for 2025 will follow in April 2026.
+  label: supported
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: The annual summary, posted 10 February 2026, says the audited financials will follow
+    in April, which can only be April 2026.
+  review: null
+- id: 2c-019
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-interview-001
+  claim: The excavation team is confident the Meridian Rose went down in or shortly after 1687.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says they are confident the ship went down in or shortly after 1687.
+  review: null
+- id: 2c-052
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-article-002
+  claim: Halcyon Grid Cooperative's audited financials for 2025 will follow in April 2026.
+  label: supported
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: This repeats claim 2; the post dated February 2026 says the audited financials will
+    follow in April.
+  review: null
+- id: 2c-051
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  claim: In a normal week the Bracken & Doyle shift-scheduling system processed roughly 30,000 shift assignments.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says that in a normal week it processed roughly 30,000 shift assignments.
+  review: null
+- id: 2c-056
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-003
+  claim: Lantern's standalone app will keep working until at least June 2027.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source states the standalone app will keep working until at least June 2027.
+  review: null
+- id: 2c-015
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-001
+  claim: The migration to a content-addressed cache at Fernwood Systems required rewriting 41 build files
+    to declare their inputs explicitly.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the migration required rewriting 41 build files to declare their
+    inputs explicitly.
+  review: null
+- id: 2c-013
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-interview-001
+  claim: Over the two field seasons on the Meridian Rose, 612 silver coins were recovered.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says 612 silver coins were recovered over the two seasons.
+  review: null
+- id: 2c-024
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-essay-001
+  claim: Over the same fourteen months that the rewrite ran, Priya Raghunathan's three-person maintenance
+    team shipped 41 releases of the shift-scheduling system.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says that over the same fourteen months the author's three-person maintenance
+    team shipped 41 releases.
+  review: null
+- id: 2c-014
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-002
+  claim: The local utility's residential electricity rate in Duluth, Minnesota is 10.5 cents per kilowatt-hour.
+  label: supported
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: The cooperative is in Duluth, Minnesota, and the source gives the local utility's residential
+    rate as 10.5 cents per kilowatt-hour.
+  review: null
+- id: 2c-027
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-essay-001
+  claim: The old shift-scheduling system at Bracken & Doyle's real specification lived in a decade of
+    accumulated fixes that no document recorded.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the old system's real specification lived in a decade of accumulated,
+    undocumented fixes.
+  review: audit
+  owner_decision: agree
+- id: 2c-046
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-001
+  claim: Fernwood Systems evaluated moving to a remote execution cluster alongside the cache migration
+    and decided against it for now, because the cache alone recovered most of the wall-clock win and remote
+    execution would have added a second failure domain to every build.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source describes the evaluation, the decision against it for now, and both reasons
+    given.
+  review: null
+- id: 2c-028
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-essay-001
+  claim: This essay was written by Priya Raghunathan and published on 4 November 2025.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The byline gives Priya Raghunathan and the date 4 November 2025.
+  review: null
+- id: 2c-002
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-article-001
+  claim: The blog post about content-addressed build caching at Fernwood Systems was published on 12 March
+    2026.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The byline gives the date 12 March 2026.
+  review: null
+- id: 2c-034
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-essay-001
+  claim: Production incidents on the Bracken & Doyle scheduling system fell from 31 in the quarter the
+    rewrite started to 6 in the quarter it was cancelled.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states incidents fell from 31 in the starting quarter to 6 in the cancellation
+    quarter.
+  review: null
+- id: 2c-010
+  arm: claude-sonnet-4-6
+  run: 3
+  case: web-interview-001
+  claim: The interview with Dr. Maren Kaldestad was conducted after her team's second field season on
+    the Meridian Rose.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the interview took place after the second field season.
+  review: audit
+  owner_decision: agree
+- id: 2c-054
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-essay-001
+  claim: The Bracken & Doyle shift-scheduling system is still running as of November 2025.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The essay, dated 4 November 2025, says the scheduling system is still running.
+  review: audit
+  owner_decision: agree
+- id: 2c-035
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-interview-001
+  claim: A colleague of Kaldestad reads the same evidence and thinks the Meridian Rose was overloaded.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says a colleague reads the same evidence and thinks the ship was overloaded.
+  review: null
+- id: 2c-031
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-001
+  claim: Roughly a third of the 41 rewritten build files were reading configuration from the environment
+    without declaring it, the single most common source of cache misses Fernwood Systems found.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: This matches the source's statement about roughly a third of the 41 files and the most
+    common source of misses.
+  review: null
+- id: 2c-005
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-interview-001
+  claim: The maritime museum where Meridian Rose finds will be displayed is in Bergen.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source names the maritime museum in Bergen as the display venue.
+  review: null
+- id: 2c-043
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-004
+  claim: Ostrander Freight chose Go because four of the six engineers on the billing team already knew
+    it.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: The source says Go was chosen because four of the six engineers on the billing team
+    already knew it.
+  review: null
+- id: 2c-029
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-article-001
+  claim: Fernwood Systems determined that the content-addressed cache alone recovered most of the wall-clock
+    build time win, without remote execution.
+  label: supported
+  source: tests/conformance/fixtures/web-article-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the cache alone recovered most of the wall-clock win, without moving
+    to remote execution.
+  review: null
+- id: 2c-058
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-essay-001
+  claim: The rewrite failed because the old system's real specification lived in a decade of accumulated
+    fixes that no document recorded.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source gives this exact reason for the rewrite's failure.
+  review: null
+- id: 2c-003
+  arm: claude-sonnet-4-6
+  run: 2
+  case: web-interview-001
+  claim: The transcript of the interview with Dr. Maren Kaldestad has been edited for length.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the transcript has been edited for length.
+  review: null
+- id: 2c-049
+  arm: claude-sonnet-5-5
+  run: 2
+  case: web-interview-001
+  claim: The Meridian Rose's hold also carried salt and copper ingots, which the team has physically recovered.
+  label: supported
+  source: tests/conformance/fixtures/web-interview-001/content.bin
+  prelabel: supported
+  prelabel_reason: Kaldestad says the hold also carried salt and copper ingots, which have been physically
+    recovered.
+  review: null
+- id: 2c-042
+  arm: claude-sonnet-5-5
+  run: 3
+  case: web-article-002
+  claim: Halcyon Grid Cooperative expects to energize its fourth array in 2027 if interconnection approval
+    arrives on schedule.
+  label: supported
+  source: tests/conformance/fixtures/web-article-002/content.bin
+  prelabel: supported
+  prelabel_reason: The source states the fourth array is expected to be energized in 2027 if interconnection
+    approval arrives on schedule.
+  review: null
+- id: 2c-039
+  arm: claude-sonnet-5-5
+  run: 1
+  case: web-article-003
+  claim: Harbor's customers kept their explanations in one tool and their numbers in another, according
+    to Odile Fanshawe.
+  label: supported
+  source: inline_content in tests/benchmark/suites/prose-article-seed-001.yaml
+  prelabel: supported
+  prelabel_reason: Odile Fanshawe is quoted saying customers kept their explanations in one tool and their
+    numbers in another.
+  review: null
+- id: 2c-007
+  arm: claude-sonnet-4-6
+  run: 1
+  case: web-essay-001
+  claim: The rewrite of the shift-scheduling system at Bracken & Doyle was cancelled after fourteen months.
+  label: supported
+  source: tests/conformance/fixtures/web-essay-001/content.bin
+  prelabel: supported
+  prelabel_reason: The source says the rewrite was cancelled after fourteen months.
+  review: audit
+  owner_decision: agree
+prelabeller:
+  model: claude-opus-5-5
+  temperature: 0.0
+  usage_cost_usd: 0.28788
+audit:
+  reviewed: 19
+  audit_items: 10
+  audit_overturned: 0
+  unreviewed_prelabels_stand: true
+  reviewed_on: '2026-10-13'

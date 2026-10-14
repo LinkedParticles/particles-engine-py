@@ -240,6 +240,11 @@ class OperatorEventType(StrEnum):
     # ruled. Lint reads it back as MODALITY_GRANT_PENDING until an operator
     # verdict, a later value, or a rule change settles it.
     MODALITY_GRANT_QUEUED = "MODALITY_GRANT_QUEUED"
+    # an operator set (or cleared) one claim's world-time record
+    # (``valid_from`` / ``valid_kind``; one PARTICLE ref, the reason, the
+    # values in the payload). Basis ``operator``, which the ``particles
+    # validity`` prose default never overwrites.
+    PARTICLE_DATED = "PARTICLE_DATED"
     # agent-side extraction. A Stop hook asked the session's agent to
     # extract a span of its deposited transcript (ASKED; the CORPUS_ENTRY ref
     # names the transcript entry and the payload fixes the snapshot, the span,

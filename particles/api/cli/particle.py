@@ -23,9 +23,11 @@ from particles.db import DEFAULT_STORE, session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from particles.core.schema import AssertionModality, Particle
+    from particles.core.schema import AssertionModality, Particle, ValidKind
 
 particle_app = typer.Typer(help="Inspect individual extracted particles.", no_args_is_help=True)
 app.add_typer(particle_app, name="particle")
@@ -104,6 +106,14 @@ def _render_particle_header(particle: Particle) -> None:
     typer.echo(f"Uncertainty:  {particle.uncertainty_nature}")
     typer.echo(f"Asserted by:  {particle.asserted_by}")
     typer.echo(f"Asserted at:  {particle.asserted_at.isoformat()}")
+    # the world-time axis, when the claim carries it.
+    if particle.valid_from is not None or particle.valid_until is not None:
+        start = particle.valid_from.date().isoformat() if particle.valid_from else "?"
+        end = particle.valid_until.date().isoformat() if particle.valid_until else "open"
+        kind = particle.valid_kind.value if particle.valid_kind else "unkinded"
+        basis = (particle.properties or {}).get("extraction:valid_from_basis")
+        basis_note = f" [{basis}]" if basis else ""
+        typer.echo(f"Holds:        {start} → {end} ({kind}){basis_note}")
     if particle.extractor_ref:
         ext_name = particle.extractor_ref.name
         ext_version = particle.extractor_ref.version
@@ -607,6 +617,135 @@ async def _particle_reclassify(
             "reason recorded."
         )
     typer.echo("The next `particles memory consolidate` run re-pairs it under the new default.")
+
+
+@particle_app.command("date")
+def particle_date_cmd(
+    particle_id: str = typer.Argument(..., help="Particle ID (prefix OK, first 8 chars)"),
+    valid_from: str | None = typer.Option(
+        None,
+        "--from",
+        help="The date the claim begins to hold (ISO-8601; a bare date means the start "
+        "of that day, UTC). Omit with --clear to remove the record.",
+    ),
+    kind: str | None = typer.Option(
+        None,
+        "--kind",
+        help="EVENT (a moment: the claim is about that date and no other) or STATE "
+        "(a span: it holds from that date until it closes).",
+    ),
+    reason: str = typer.Option(
+        ..., "--reason", help="Why the record is being set; recorded in the event log"
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove the world-time record"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the plan without writing"),
+) -> None:
+    """Set one claim's world-time start by operator verdict.
+
+    `valid_from` and `valid_kind` say when a claim begins to hold and whether
+    it is a moment or a span; `particles query --during` reads them. The
+    extractor sets them when the source states a start, and `particles
+    validity` reads a default off the dates in a claim's prose; this verb
+    corrects one claim. The verdict is pinned: `particles validity` never
+    overwrites it. The event log records a PARTICLE_DATED event with the
+    reason and the values.
+
+    Content, confidence, provenance, status and `valid_until` do not change.
+    An EVENT cannot be set on a claim that carries a `valid_until`: a moment
+    has one end.
+    """
+    from datetime import UTC, datetime
+
+    from particles.core.schema import ValidKind
+
+    if not reason.strip():
+        typer.echo("--reason must be non-empty.", err=True)
+        raise typer.Exit(1)
+    if clear and (valid_from is not None or kind is not None):
+        typer.echo("--clear takes no --from or --kind.", err=True)
+        raise typer.Exit(1)
+    if not clear and (valid_from is None or kind is None):
+        typer.echo("--from and --kind are both required (or pass --clear).", err=True)
+        raise typer.Exit(1)
+    start: datetime | None = None
+    target: ValidKind | None = None
+    if not clear:
+        assert valid_from is not None and kind is not None
+        try:
+            start = datetime.fromisoformat(valid_from)
+        except ValueError:
+            typer.echo(
+                f"Invalid --from value {valid_from!r}: expected an ISO-8601 date or datetime.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        try:
+            target = ValidKind(kind.strip().upper())
+        except ValueError:
+            typer.echo(f"Unknown kind {kind!r}. Valid: EVENT, STATE.", err=True)
+            raise typer.Exit(1) from None
+    run(_particle_date(particle_id, start, target, reason, dry_run=dry_run))
+
+
+async def _particle_date(
+    id_prefix: str,
+    valid_from: datetime | None,
+    valid_kind: ValidKind | None,
+    reason: str,
+    *,
+    dry_run: bool,
+) -> None:
+    """Resolve, show, then write the operator verdict."""
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.validity import date_particle
+    from particles.store.particle_store import get_particle
+
+    ensure_local("particle date")
+
+    async with session_scope() as session:
+        particle_id = await _resolve_particle_id(session, id_prefix)
+        target = await get_particle(session, particle_id)
+    if target is None:  # pragma: no cover — the resolver already exits on a miss
+        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        raise typer.Exit(1)
+
+    current = target.valid_from.date().isoformat() if target.valid_from else "none"
+    current_kind = target.valid_kind.value if target.valid_kind else "unkinded"
+    typer.echo(f"  {particle_id}")
+    typer.echo(f"  status      {target.status.value}")
+    typer.echo(f"  content     {target.content}")
+    typer.echo(f"  valid_from  {current} ({current_kind})")
+    if valid_from is None:
+        typer.echo("  new         cleared")
+    else:
+        assert valid_kind is not None
+        typer.echo(f"  new         {valid_from.date().isoformat()} ({valid_kind.value})")
+    typer.echo(f"  reason      {reason}")
+
+    if dry_run:
+        typer.echo("\n--dry-run: nothing written.")
+        return
+
+    async with session_scope(write=True) as session:  # writer lock
+        try:
+            await date_particle(
+                session, particle_id, valid_from=valid_from, valid_kind=valid_kind, reason=reason
+            )
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from None
+        await session.commit()
+
+    if valid_from is None:
+        typer.echo(f"\nCleared the world-time record on {particle_id[:8]}…; reason recorded.")
+    else:
+        assert valid_kind is not None
+        typer.echo(
+            f"\nDated {particle_id[:8]}… from {valid_from.date().isoformat()} "
+            f"({valid_kind.value}) by operator verdict; reason recorded."
+        )
 
 
 @particle_app.command("search")

@@ -215,7 +215,7 @@ class TestLLMConfig:
         ):
             sel = llm.for_purpose(purpose)
             assert sel.provider == "anthropic"
-            assert sel.model == "claude-sonnet-4-6"
+            assert sel.model == "claude-sonnet-5-5"
 
     def test_for_purpose_falls_back_to_default(self) -> None:
         from particles.config import LLMConfig, ProviderSelection
@@ -233,6 +233,42 @@ class TestLLMConfig:
         )
         assert llm.for_purpose("synthesis").model == "synthesis-model"
         assert llm.for_purpose("extraction").model == "default-model"
+
+    def test_purpose_list_matches_the_port(self) -> None:
+        """``LLM_PURPOSES`` is a literal because config cannot import the port."""
+        from typing import get_args
+
+        from particles.config import LLM_PURPOSES
+        from particles.llm import LLMPurpose
+
+        assert set(LLM_PURPOSES) == set(get_args(LLMPurpose))
+        assert len(LLM_PURPOSES) == len(set(LLM_PURPOSES))
+
+    def test_selection_source_names_where_the_model_came_from(self) -> None:
+        """the compiled default can move, so say whether it is in force."""
+        from particles.config import LLMConfig, ParticlesConfig
+
+        compiled = LLMConfig()
+        assert compiled.selection_source("default") == "compiled default"
+        assert compiled.selection_source("extraction") == "compiled default"
+        assert compiled.selection_source("use_judge") == "compiled llm.use_judge"
+
+        cfg = ParticlesConfig.model_validate(
+            {"llm": {"default": {"model": "m"}, "extraction": {"model": "x"}}}
+        )
+        assert cfg.llm.selection_source("default") == "llm.default"
+        assert cfg.llm.selection_source("semantic_lint") == "llm.default"
+        assert cfg.llm.selection_source("extraction") == "llm.extraction"
+
+    def test_routed_elsewhere_lists_only_the_purposes_off_the_default(self) -> None:
+        from particles.config import LLMConfig, ProviderSelection
+
+        llm = LLMConfig(
+            default=ProviderSelection(model="m"),
+            semantic_lint=ProviderSelection(model="small"),
+            use_judge=ProviderSelection(model="m"),
+        )
+        assert llm.routed_elsewhere() == {"semantic_lint": ProviderSelection(model="small")}
 
 
 class TestLLMModelKeyMigration:
@@ -256,7 +292,7 @@ class TestLLMModelKeyMigration:
         cfg = ParticlesConfig.model_validate(raw)
         assert cfg.llm.for_purpose("synthesis").model == "legacy-synth"
         # Other purposes are unaffected by the wiki migration.
-        assert cfg.llm.for_purpose("extraction").model == "claude-sonnet-4-6"
+        assert cfg.llm.for_purpose("extraction").model == "claude-sonnet-5-5"
 
     def test_new_key_wins_over_legacy(self) -> None:
         from particles.config import ParticlesConfig, _migrate_legacy_keys
@@ -418,7 +454,11 @@ class TestSharedEstimateKeys:
         cfg = ParticlesConfig.model_validate(raw)
         # A ratio against the old flat 7,000; an entry already under the new
         # key wins.
+        # The shipped entries stay beside the carried-over ones.
+        from particles.config import _SHIPPED_OUTPUT_SCALE
+
         assert cfg.audit.estimate_output_scale_by_model == {
+            **_SHIPPED_OUTPUT_SCALE,
             "claude-haiku-4-5": 0.5,
             "m-kept": 0.9,
         }

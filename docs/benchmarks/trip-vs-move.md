@@ -1,0 +1,218 @@
+# Trip versus move: a value that changes, and one that does not
+
+A reader on the r/AIMemory forum proposed a test every agent memory should
+pass. The user says they live in Delhi. A month later they say they are in
+Mumbai for a week for work, and fly home on Thursday. The next day they say
+they moved to Mumbai. A memory that reads the week away as a move has lost the
+user's home; one that keeps "lives in Delhi" and "flies home to Delhi on
+Thursday" after the move tells every later session something false.
+
+Particles 1.187.0 changed how an update is recognised so that this case passes.
+This page publishes the case, the checks it is scored by, the
+results of record, and the commands to run all of it yourself.
+
+## The case
+
+Three short session notes, dated in their headings, ship with the package:
+
+| Note | Date | What the user says |
+|---|---|---|
+| `session-04.md` | 2026-09-04 | They live in Delhi, in Lajpat Nagar; their favourite restaurant is a ten-minute walk from their flat; they are vegetarian |
+| `session-11.md` | 2026-10-08 | They are in Mumbai for a week for work, at a hotel in Bandra, and fly back home to Delhi next Thursday |
+| `session-12-moved.md` | 2026-10-09 | They moved to Mumbai |
+
+The **move case** deposits all three notes, one at a time, with `particles
+audit`, then runs `particles memory consolidate --scope store`. The **trip
+alone** variant deposits only the first two, so a week away is never followed
+by a move.
+
+## The checks
+
+Each run's store is read back and checked. The checks read only the store's
+rows and events, never a model's opinion of them, and they were fixed before
+any run.
+
+**Move case.** A run passes when all of these hold:
+
+1. No ACTIVE claim that is not a dated restatement names Delhi together with
+   a residence or flight word (`live`, `lives`, `home`, `flat`, `fly`, `flies`,
+   `flying`, `flight`, `back to`), and every ACTIVE restatement that names a
+   flight carries an `as of` ISO date and a past-tense `was` or `were`.
+2. No restatement is kept back for contradicting the claim that retired its
+   anchor, and every restatement the re-anchor pass wrote is ACTIVE.
+3. No ACTIVE claim from the trip note that is not a restatement matches `for a
+   week` or `work trip`: the trip is retired.
+
+**Trip alone.** A run passes when an ACTIVE claim from the first note names
+Delhi with `live`, `lives` or `home`: a week away is not a move.
+
+**The bar.** Three move runs and two trip-alone runs, every one passing, with
+every LLM purpose on the one model under test.
+
+## Results of record
+
+Every purpose on one model. The first runs (2026-10-12, on the implementation
+of 1.187.0, US$1.46 in all) used the harness this suite replaced; the second
+(2026-10-13, the build released as 1.190.0, US$1.69 in all) used this suite, with the same notes and
+the same checks. The per-run stores are in
+[`trip-vs-move-end-to-end-2026-10-12.json`](trip-vs-move-end-to-end-2026-10-12.json),
+[`trip-vs-move-claude-sonnet-5-5-2026-10-13.json`](trip-vs-move-claude-sonnet-5-5-2026-10-13.json)
+and
+[`trip-vs-move-claude-sonnet-4-6-2026-10-13.json`](trip-vs-move-claude-sonnet-4-6-2026-10-13.json).
+
+| | `claude-sonnet-5-5` | `claude-sonnet-4-6` |
+|---|---|---|
+| Move case, runs passing (2026-10-12) | **3 of 3** | 2 of 3 |
+| Move case, runs passing (2026-10-13) | **3 of 3** | 2 of 3 |
+| Trip alone, runs passing (both days) | **2 of 2** | **2 of 2** |
+| Cost per move run, 2026-10-13 (list price) | US$0.15 to US$0.18 | US$0.21 to US$0.26 |
+| Cost per trip-alone run, 2026-10-13 | US$0.09 | US$0.13 to US$0.15 |
+
+On `claude-sonnet-5-5` every move run retired the residence, the home claim,
+the trip and the hotel stay as updated by the move, and kept the return flight
+and the walk to the restaurant as dated history:
+
+> As of 2026-10-08, when the user was in Mumbai for a week for work, they
+> planned to fly back to Delhi on Thursday, 2026-10-15.
+
+The failing `claude-sonnet-4-6` run did everything else right, on both days,
+and failed the same way. Its re-anchor check judged the restated walk ("was a
+ten-minute walk from the flat in Lajpat Nagar, Delhi, where the user lived, as
+of 2026-09-04") to contradict another standing claim about the restaurant, so
+it kept the original sentence, which still reads as the user's current flat.
+That is a known residual of the re-anchor check on that model, not of the
+update rule this case tests.
+
+Both 2026-10-13 reports were run on the build released as 1.190.0 and record
+the number it carried before its release, `sdk_version` 1.189.0.
+
+## Run it yourself
+
+The suite ships with the engine, so a released install is enough:
+
+```bash
+pip install linkedparticles
+export ANTHROPIC_API_KEY=sk-ant-...
+particles benchmark trip-vs-move --model claude-sonnet-5-5 --estimate
+particles benchmark trip-vs-move --model claude-sonnet-5-5 --output trip-vs-move.json
+```
+
+The first command prints what the run will cost and makes no call. The second
+asks before its first call, then runs the published protocol: three move runs
+and two trip-alone runs. The estimate is priced from the measured usage of the
+2026-10-13 runs: about US$0.75 on `claude-sonnet-5-5` and US$1.10 on
+`claude-sonnet-4-6` at today's list prices. The headline
+command names `claude-sonnet-5-5` on purpose: it is the model of the passing
+row, so the result does not depend on what your default model is. On
+`claude-sonnet-4-6`, which passed two move runs of three, the three-run bar
+holds about 30% of the time.
+
+Three properties of a run matter:
+
+- **It never touches your own store.** Each run is a separate process with its
+  own home directory, store, blob directory and configuration. Only your API
+  key, your provider endpoints, your prices and your network policy reach it.
+- **Every LLM purpose runs on the model you name.** A usage row on any other
+  model marks the run invalid rather than passed. `--pin PURPOSE=MODEL` runs
+  one purpose on another model, and the report names the mixture.
+- **Spend is bounded.** An estimate prints before any call, every live run
+  asks first (`--yes` confirms in advance), and `--max-usd` sets a ceiling per
+  run, checked against measured spend before each step. A run that reaches it
+  stops and is reported incomplete, never passed or failed. Consolidation runs
+  as it did for the published results, bounded by its own probe caps.
+
+Two other forms are worth knowing:
+
+```bash
+particles benchmark trip-vs-move --model claude-sonnet-5-5 --no-same-slot-admits
+particles benchmark trip-vs-move --arm scripted
+```
+
+`--no-same-slot-admits` runs the update rule as it was before 1.187.0, which
+reproduces the failure this case exposed: the residence and the trip stay
+current after the move. `--arm scripted` answers every model call from a table
+in the package, costs nothing and needs no key. It tests the harness, the
+isolation and the checks; it says nothing about any model.
+
+`particles benchmark trip-vs-move rescore trip-vs-move.json` re-runs the checks
+over a saved report with no call: every report saves each particle and the
+events the checks read.
+
+## The registered pair sets
+
+Passing one case could mean the fix was tuned to it. The update rule was also
+measured on labelled claim pairs, registered on 2026-10-12 before any model
+was asked a row: a development set (38 pairs), a held-out set worded apart
+from it (19), a set of past values (15) and a held-out set for the past-value
+marker (17). Each pair is an older and a newer claim about one thing, labelled
+with whether the newer one replaces the older.
+
+```bash
+particles benchmark update-gate --model claude-sonnet-5-5 --estimate
+particles benchmark update-gate --model claude-sonnet-5-5 --output update-gate.json
+```
+
+Each pair is asked three times. Each sample asks the contradiction probe and
+the update probe, and three rules are scored from the same answers: the
+**production** rule 1.187.0 ships, the update verdict **alone**, and the rule
+**before 1.187**. The registered bar applies to the production rule: every
+labelled update retired in at least two of three samples (one may miss on a
+held-out set), and no retirement in any control sample.
+
+Results of record, production rule, updates retired and control retirements:
+
+| Set | `claude-sonnet-5-5` | `claude-sonnet-4-6` |
+|---|---|---|
+| Development | **10 of 10**, 0 of 57 | **10 of 10**, 0 of 57 |
+| Held-out | **8 of 8**, 0 of 33 | **8 of 8**, 3 of 33 |
+| Past values | **5 of 5**, 0 of 24 | **5 of 5**, 1 of 24 |
+| Past-value marker, held-out | **5 of 5**, 0 of 27 | **5 of 5**, 2 of 27 |
+
+The rule before 1.187 retired 1 of 10 and 1 of 8 dated updates on
+`claude-sonnet-5-5`, and 4 of 10 and 5 of 8 on `claude-sonnet-4-6`.
+
+Every control the production rule retires on `claude-sonnet-4-6` is one the
+older rule retired on the same samples: a claim that relied on the old home,
+and two notes written in the shape of a dated restatement. The report states
+this as a second reading beside each bar, `regression`, which holds when the
+production rule adds no control retirement to the older one. It holds on
+every set on both models. One row is reported and never barred: a past value
+stated without a marker ("In 2023 the user's rent was 640 euros a month.") was
+retired by a later rent in three samples of three on both models.
+
+The samples are in
+[`update-gate-acceptance-2026-10-12.json`](update-gate-acceptance-2026-10-12.json),
+[`update-gate-past-value-2026-10-12.json`](update-gate-past-value-2026-10-12.json)
+and [`update-gate-fallback-2026-10-12.json`](update-gate-fallback-2026-10-12.json).
+At the 2026-10-12 list prices all four sets cost about US$1.75 on
+`claude-sonnet-5-5` and US$1.85 on `claude-sonnet-4-6`.
+
+The first replay through `particles benchmark update-gate`, on the build released as 1.190.0, on
+2026-10-13, reproduced every production-rule tally in the table above on both
+models, with the same three `claude-sonnet-4-6` controls retired and no control
+the production rule adds to the older rule's. It cost US$1.75 and US$1.86:
+[`update-gate-claude-sonnet-5-5-2026-10-13.json`](update-gate-claude-sonnet-5-5-2026-10-13.json)
+and
+[`update-gate-claude-sonnet-4-6-2026-10-13.json`](update-gate-claude-sonnet-4-6-2026-10-13.json).
+
+**What this page cannot show.** The sets were registered before the runs that
+score them, and the dates above say so. A published release is one commit, so
+this repository cannot prove that order; the development history that records
+it is not public.
+
+## The same rule in a simulated world
+
+The [memory-rot benchmark](rot.md) measures the update rule in both directions
+on scripted worlds where the truth is known. On 2026-10-12, with the production
+rule, each world retired exactly the updates the ground truth retires, on both
+models, and every retrieval metric matched the ground truth's
+([`update-gate-rot-adr0313-2026-10-12.json`](update-gate-rot-adr0313-2026-10-12.json)).
+
+## Reading a report
+
+Both suites write one JSON report per model. `trip-vs-move` reports carry the
+model of every purpose, the digests of the three notes, each run's checks,
+every particle and checked event of its store, and its measured usage.
+`update-gate` reports carry every sample and each set's tallies under all three
+rules. Neither report has an aggregate score. The full option list is in the
+[CLI reference](../cli-reference.md).

@@ -59,6 +59,11 @@ COPY particles ./particles
 COPY artifacts ./artifacts
 COPY alembic ./alembic
 COPY design/tokens.css ./design/tokens.css
+# The benchmark fixtures the wheel force-includes under
+# particles/_artifacts/benchmarks (`particles benchmark trip-vs-move` and
+# `update-gate`): the case's three notes and the four registered pair sets.
+COPY tests/fixtures/trip_vs_move/session-04.md tests/fixtures/trip_vs_move/session-11.md tests/fixtures/trip_vs_move/session-12-moved.md ./tests/fixtures/trip_vs_move/
+COPY tests/fixtures/update_probe/gate_pairs.json tests/fixtures/update_probe/gate_pairs_heldout.json tests/fixtures/update_probe/past_value_pairs.json tests/fixtures/update_probe/past_marker_heldout.json ./tests/fixtures/update_probe/
 
 # --frozen: install exactly the locked closure, never re-resolve. --no-dev:
 # the dev group (pytest, mypy, mkdocs) has no business in a runtime image.

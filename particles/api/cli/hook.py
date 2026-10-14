@@ -981,6 +981,9 @@ def _run_doctor(store: str) -> bool:
     for line in _check_agent_extraction(store):
         typer.echo(f"  {line}")
 
+    for line in _check_model(store):
+        typer.echo(f"  {line}")
+
     for line in _check_egress():
         typer.echo(f"  {line}")
 
@@ -1122,6 +1125,45 @@ def _check_schema(store: str) -> list[str]:
         "                A newer Particles migrated it. Upgrade the install the hooks and the "
         "MCP server run.",
     ]
+
+
+def _check_model(store: str) -> list[str]:
+    """Name the extraction model the hooks run and whether a calibration reaches it.
+
+    The compiled default can move in a release, and a calibration applies only
+    to its own pairing and extractor version, so this says which model is in
+    force, where it came from, and what the general extractor's claims will be
+    stamped with. Reported, never fatal.
+    """
+    from particles.db import session_scope
+    from particles.extraction.calibration import scaler_for_record, version_mismatch_reason
+    from particles.extraction.general import EXTRACTOR_ID, EXTRACTOR_VERSION
+    from particles.store.extractor_store import get_calibration
+
+    llm = get_config().llm
+    sel = llm.for_purpose("extraction")
+    pairing = f"{sel.provider}:{sel.model}"
+    lines = [f"model:          extraction {pairing} ({llm.selection_source('extraction')})"]
+
+    async def _probe() -> Any:
+        async with session_scope(store) as session:
+            return await get_calibration(session, EXTRACTOR_ID, pairing)
+
+    try:
+        calibration = asyncio.run(_probe())
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
+        lines.append(f"                calibration: could not check the store ({exc})")
+        return lines
+    if calibration is None:
+        status = "none for this pairing, so its claims are EXTRACTOR_DIRECT"
+    elif scaler_for_record(calibration) is None:
+        status = "NOT APPLIED (fitted before), so its claims are EXTRACTOR_DIRECT"
+    elif (reason := version_mismatch_reason(calibration, EXTRACTOR_VERSION)) is not None:
+        status = f"NOT APPLIED ({reason}), so its claims are EXTRACTOR_DIRECT"
+    else:
+        status = "applies"
+    lines.append(f"                {EXTRACTOR_ID} calibration: {status}")
+    return lines
 
 
 def _check_agent_extraction(store: str) -> list[str]:

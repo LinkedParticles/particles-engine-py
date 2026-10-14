@@ -593,6 +593,21 @@ class TestHookDoctor:
         assert "resolves and is initialized" in result.stdout
         assert str(cli_db) in result.stdout
 
+    def test_names_the_extraction_model_and_its_calibration(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path
+    ) -> None:
+        """The doctor names the extraction model and whether a fit reaches it."""
+        from particles.config import ProviderSelection
+
+        compiled = ProviderSelection()
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert result.exit_code == 0, result.output
+        assert (
+            f"model:          extraction {compiled.provider}:{compiled.model} (compiled default)"
+            in result.stdout
+        )
+        assert "general-extractor calibration: none for this pairing" in result.stdout
+
     def test_undeclared_store_exits_nonzero(
         self, runner: CliRunner, cli_db: Path, hook_home: Path
     ) -> None:

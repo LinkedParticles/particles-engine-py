@@ -51,6 +51,8 @@ from particles.core.schema import (
     RelevanceNote,
     StancePosition,
     SubjectCoverageGap,
+    WindowCoverage,
+    WindowHit,
 )
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.stance import has_stance_marker
@@ -89,6 +91,12 @@ from .respond import (
 from .source_info import load_source_rows
 from .source_trust import TrustPolicy, load_trust_policy
 from .structural import claim_filters_from_request, structural_query, structural_query_federated
+from .window import (
+    WindowGather,
+    gather_window_candidates,
+    window_listing,
+    window_listing_federated,
+)
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +183,7 @@ async def _gather_scored(
     decay_policy: DecayPolicy,
     *,
     scope_notes: list[ObserverScopeNote] | None = None,
+    window_out: WindowGather | None = None,
 ) -> tuple[
     list[Scored], dict[str, datetime | None], dict[str, AsOfNote], int, tuple[int, int] | None
 ]:
@@ -202,7 +211,17 @@ async def _gather_scored(
     """
     as_of_notes: dict[str, AsOfNote] = {}
     excluded_undatable = 0
-    if request.as_of is None:
+    if request.window is not None:
+        # the world-time window prefilters the candidate set,
+        # across statuses (a retired claim is admitted for the period it
+        # held, §4), before every filter below and before scoring. With
+        # ``as_of`` also set, believed-at-T filters what the window selected.
+        gather = window_out if window_out is not None else WindowGather()
+        admitted, excluded_undatable = await gather_window_candidates(
+            session, request, gather, require_embedding=True, as_of_notes=as_of_notes
+        )
+        candidates = [(p, emb) for p, emb, _ in admitted]
+    elif request.as_of is None:
         # Fast path — byte-for-byte today's read behaviour (ACTIVE-only plan).
         candidates = await get_active_particles_with_embeddings(
             session, request.min_confidence, subject_id=request.subject_id
@@ -502,6 +521,8 @@ async def _build_response(
     claim_coverage: ClaimCoverage | None = None,
     embeddings_used: bool = True,
     observer_scope: ObserverScopeNote | None = None,
+    window_hits_by_id: dict[str, WindowHit] | None = None,
+    window_coverage: WindowCoverage | None = None,
 ) -> QueryResponse:
     """Render the final NL answer + envelope from a ranked, collapsed result.
 
@@ -528,6 +549,12 @@ async def _build_response(
     # annotates particles[i]; None for a hit still ACTIVE today.
     as_of_notes: list[AsOfNote | None] = (
         [as_of_notes_by_id.get(p.id) for p in top_particles] if request.as_of is not None else []
+    )
+    # the same parallel-list pattern for the window readings.
+    window_hits: list[WindowHit | None] = (
+        [(window_hits_by_id or {}).get(p.id) for p in top_particles]
+        if request.window is not None
+        else []
     )
 
     # Overconfidence guard (§6.3): low mean confidence, or any uncalibrated hit.
@@ -652,6 +679,9 @@ async def _build_response(
         as_of=request.as_of,
         as_of_notes=as_of_notes,
         as_of_excluded_undatable=as_of_excluded_undatable,
+        window=request.window,
+        window_hits=window_hits,
+        window_coverage=window_coverage,
         observer_scope=observer_scope,
         claim_coverage=claim_coverage,
         relevance=relevance,
@@ -686,6 +716,8 @@ async def query(
     :func:`.structural.structural_query` instead: deterministic, no embedding,
     no LLM call.
     """
+    if request.is_window_listing:
+        return await window_listing(session, request)
     if request.is_structural_mode:
         return await structural_query(session, request)
     # refuse to operate on a store with mismatched schema_version.
@@ -702,10 +734,18 @@ async def query(
         raise ValueError("semantic query requires a question")
     query_emb = _embed(request.question)
     scope_notes: list[ObserverScopeNote] = []
+    window_gather = WindowGather() if request.window is not None else None
     scored, pub_at_by_id, as_of_notes_by_id, as_of_excluded, claim_stats = await _gather_scored(
-        session, request, query_emb, trust_policy, decay_policy, scope_notes=scope_notes
+        session,
+        request,
+        query_emb,
+        trust_policy,
+        decay_policy,
+        scope_notes=scope_notes,
+        window_out=window_gather,
     )
     claim_coverage = await _claim_coverage_for_stats(session, claim_stats)
+    window_coverage = await window_gather.coverage(session) if window_gather is not None else None
 
     # Rank by combined score, then collapse CO_EVIDENTIAL groups in the top-k
     # (§6.10) — see _collapse_co_evidential_top_k for the noisy-OR merge.
@@ -775,6 +815,8 @@ async def query(
         claim_coverage=claim_coverage,
         embeddings_used=query_emb is not None,
         observer_scope=merged_scope_note(scope_notes),
+        window_hits_by_id=window_gather.hits if window_gather is not None else None,
+        window_coverage=window_coverage,
     )
 
 
@@ -981,6 +1023,8 @@ async def query_federated(
     """
     # the purely structural modes federate through their own
     # deterministic composition (same viewer-lens rule, no embedding, no LLM).
+    if request.is_window_listing:
+        return await window_listing_federated(stores, request, viewer_store)
     if request.is_structural_mode:
         return await structural_query_federated(stores, request, viewer_store)
     if not stores:
@@ -1016,12 +1060,27 @@ async def query_federated(
     # the viewer's observer rides the shared request; each store
     # evaluates it against its own entry tags, and the disclosure is summed.
     scope_notes: list[ObserverScopeNote] = []
+    # per-store window gathers; hits merged, coverage summed.
+    window_hits_by_id: dict[str, WindowHit] = {}
+    window_coverage: WindowCoverage | None = None
     for store in stores:
         async with session_scope(store) as s:
             await assert_store_schema_current(s)
+            window_gather = WindowGather() if request.window is not None else None
             scored, pubs, notes, excluded, claim_stats = await _gather_scored(
-                s, request, query_emb, trust_policy, decay_policy, scope_notes=scope_notes
+                s,
+                request,
+                query_emb,
+                trust_policy,
+                decay_policy,
+                scope_notes=scope_notes,
+                window_out=window_gather,
             )
+            if window_gather is not None:
+                window_hits_by_id.update(window_gather.hits)
+                window_coverage = window_gather.merge(
+                    window_coverage, await window_gather.coverage(s)
+                )
             merged.extend(scored)
             pub_at_by_id.update(pubs)
             as_of_notes_by_id.update(notes)
@@ -1060,6 +1119,8 @@ async def query_federated(
         claim_coverage=claim_coverage,
         embeddings_used=query_emb is not None,
         observer_scope=merged_scope_note(scope_notes),
+        window_hits_by_id=window_hits_by_id if request.window is not None else None,
+        window_coverage=window_coverage,
     )
 
 

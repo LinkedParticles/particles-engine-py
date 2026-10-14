@@ -119,6 +119,12 @@ everything the SDK writes going forward and for reconstructible history
 (explicit supersessions, operator retractions, validity expiry); the rest is
 disclosed, never guessed.
 
+The other axis, *what held or happened during a period of the world's time*,
+is the window of `--during` and `--on`, which reads each claim's
+own start and kind rather than when the store learned it. The two compose:
+`--during` selects by world time, and `--as-of` then keeps what the store
+believed at T. See [Asking about a period](windows.md).
+
 The statuses a belief moves between on its way out are defined in
 [Concepts → status](concepts.md#status); who retired one and why is in the
 [operator event log](../operator-guide/auditing.md).

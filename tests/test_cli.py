@@ -900,6 +900,27 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "Config valid" in result.output
         assert "compiled-in defaults" in result.output
+        # the default in force, and that it is the compiled one.
+        from particles.config import ProviderSelection
+
+        compiled = ProviderSelection()
+        assert (
+            f"llm.default: {compiled.provider}:{compiled.model} (compiled default)" in result.output
+        )
+
+    def test_names_a_configured_default_and_the_purposes_routed_elsewhere(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "llm:\n  default:\n    model: model-a\n  semantic_lint:\n    model: model-b\n"
+        )
+        monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+        result = _invoke(runner, ["config", "validate"])
+        assert result.exit_code == 0, result.output
+        assert "llm.default: anthropic:model-a (llm.default)" in result.output
+        assert "llm.semantic_lint: anthropic:model-b (llm.semantic_lint)" in result.output
+        assert "llm.extraction:" not in result.output
 
     def test_valid_config_file(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

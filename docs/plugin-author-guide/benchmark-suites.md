@@ -406,5 +406,35 @@ would log-and-skip the other's files. The whole-pipeline memory benchmark
 (`particles benchmark memory`) is not an extractor benchmark at all; see
 [Agent memory benchmarks](../benchmarks.md).
 
+### The trip-versus-move case and the update-gate pair sets
+
+`particles benchmark trip-vs-move` and `particles benchmark update-gate` are
+not extractor benchmarks either: they measure how the pipeline handles a value
+that changes. Their inputs are fixtures, not suites. The case's
+three notes live in `tests/fixtures/trip_vs_move/` and the four registered pair
+sets in `tests/fixtures/update_probe/`; a built wheel carries both under
+`particles/_artifacts/benchmarks/`. Their reports are this SDK's own and not
+part of the normative schema: `TripVsMoveReport` and `UpdateGateReport` in
+`particles/benchmark/update_gate/schema.py`.
+
+Three rules bind a change to them:
+
+- **The checks are versioned.** `particles/benchmark/update_gate/checks.py`
+  holds every shipped version of the judge-free checks. A change adds a
+  version and never edits a shipped one, so a saved report re-scores under the
+  version it ran. A version that needs a field older reports did not save says
+  so, and `rescore` reports those reports as not re-scorable.
+- **A registered set is never edited.** The held-out sets were registered
+  before any model was asked a row. A new question is a new set, registered
+  before its first run.
+- **The scripted arm's table follows the fixtures.** `--arm scripted` answers
+  every model call from `particles/benchmark/update_gate/scripted_table.json`,
+  keyed on the data a request carries (the SHA-256 of the fenced source text,
+  the two claims a probe ends with), never on its instructions. Editing a note
+  changes its digest, and the unit test names the note whose entry no longer
+  matches. Editing a prompt's instructions changes nothing in the table; a
+  change to a fence, a reply grammar or the chunking breaks it, and the unit
+  test fails on the first request the table cannot answer.
+
 The suite schema is normative and declared in
 [`particles/benchmark/schema.py`](https://github.com/LinkedParticles/particles-engine-py/blob/main/particles/benchmark/schema.py).

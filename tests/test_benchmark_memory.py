@@ -1115,6 +1115,9 @@ class TestEstimate:
 
         cfg = get_config().benchmark_memory
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call", 1000)
+        # The scalar is the fallback; the default model's shipped entry (
+        # §4) would win over it, so this measures the scalar path with none.
+        monkeypatch.setattr(cfg, "estimate_output_tokens_per_extraction_call_by_model", {})
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_answer_call", 10)
         monkeypatch.setattr(cfg, "estimate_output_tokens_per_judge_call", 1)
         est = estimate_run([_question()])
