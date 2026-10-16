@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.probe_verdict import (
@@ -557,3 +558,66 @@ class TestUpdateSweep:
             (3, 0, 0),
         ]
         assert client.messages.create.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Every rung, not only model probes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rung_records_one_row_per_input_it_decided(db_session: AsyncSession) -> None:
+    from particles.core.rung_ladder import RungStamp
+    from particles.store.probe_verdict_store import ProbeVerdictRow, record_rung_verdicts
+
+    stamp = RungStamp("duplicate_key", "1")
+    key = verdict_key(ProbeKind.CONTRADICTION, "Main is at 1.2.", "Main is at 1.2.")
+    assert await record_rung_verdicts(db_session, stamp, {key: "no"}) == 1
+    # The same verdict again adds nothing; a new version is a new record set.
+    assert await record_rung_verdicts(db_session, stamp, {key: "no"}) == 0
+    assert await record_rung_verdicts(db_session, RungStamp("duplicate_key", "2"), {key: "no"}) == 1
+    row = (await db_session.execute(select(ProbeVerdictRow))).scalars().first()
+    assert row is not None
+    assert (
+        row.probe_kind,
+        row.prompt_hash,
+        row.rung,
+        row.rung_verdict,
+        row.verdict,
+        row.shadow,
+    ) == (
+        "rung:duplicate_key",
+        "1",
+        "duplicate_key@1",
+        "no",
+        False,
+        False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_rungs_precision_is_read_against_the_probes_answers(
+    db_session: AsyncSession,
+) -> None:
+    from particles.core.rung_ladder import RungStamp
+    from particles.store.probe_verdict_store import record_rung_verdicts, shadow_standings
+
+    stamp = RungStamp("polarity", "1")
+    keys = [verdict_key(ProbeKind.CONTRADICTION, f"a{i}", f"b{i}") for i in range(4)]
+    await record_rung_verdicts(
+        db_session, stamp, {k: "yes" for k in keys[:3]} | {keys[3]: "no"}, shadow=True
+    )
+    # The probe said YES on two of the rung's YES inputs, and a second reading
+    # overrules the probe's YES on the third; the fourth is unlabelled.
+    await record_verdicts(
+        db_session,
+        ProbeKind.CONTRADICTION,
+        "p",
+        {keys[0]: True, keys[1]: True, keys[2]: True},
+        model="m",
+    )
+    await record_verdicts(db_session, ProbeKind.SECOND_READING, "r", {keys[2]: False}, model="m")
+    standings = {s.verdict: s for s in await shadow_standings(db_session)}
+    yes = standings["yes"]
+    assert (yes.rung, yes.recorded, yes.labelled, yes.correct) == ("polarity@1", 3, 3, 2)
+    assert standings["no"].labelled == 0 and standings["no"].precision is None

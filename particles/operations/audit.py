@@ -36,7 +36,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,7 @@ from particles.core.schema import (
 from particles.core.status import Status
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import get_entry_by_uri, list_snapshots_for_entry
+from particles.ingest.ladder_shell import rung_tally
 from particles.llm.usage import LLMUsage, format_usd, render_usage_line, track_usage
 from particles.operations._llm import (
     llm_circuit_open,
@@ -66,7 +67,7 @@ from particles.operations.curation.collect import collect_cards
 from particles.operations.curation.leverage import contested_ids_from, score_cards
 from particles.operations.curation.session import _attach_particle_briefs
 from particles.operations.lint import ContradictionProbeControl
-from particles.operations.lint.contradictions import one_line
+from particles.operations.lint.contradictions import CensusLadder, one_line
 from particles.operations.quality import get_quality_report
 from particles.store.particle_store import get_census_records, get_particle_ids_for_entries
 
@@ -840,6 +841,10 @@ class AuditReport(BaseModel):
     # a NO for them under the current prompt. Outside ``candidate_pairs``, so
     # they never bind the cap; disclosed beside the probe counts.
     contradiction_previously_cleared: int = 0
+    # what the contradiction ladder did; None when it did not run.
+    contradiction_ladder: CensusLadder | None = None
+    # per-ladder, per-rung verdict counts for the run.
+    rung_counts: dict[str, Any] = Field(default_factory=dict)
     # the probe's flags and their second reading. ``flagged`` pairs
     # got a YES from the probe; under ``contradiction_verified`` only the
     # ``confirmed`` ones became findings, and ``unverified`` flags (past
@@ -1042,6 +1047,7 @@ def record_contradiction_census(
     if control is None:
         return
     report.contradiction_previously_cleared = control.previously_cleared
+    report.contradiction_ladder = control.ladder.model_copy()
     report.contradiction_verified = control.verify
     report.contradiction_verify_model = (
         get_config().llm.for_purpose("verification").model if control.verify else None
@@ -1141,7 +1147,7 @@ async def run_memory_audit(
     """
     # Count every completion this run pays for, per purpose and model, for the
     # report's usage line and the run record.
-    with track_usage() as usage:
+    with track_usage() as usage, rung_tally() as tally:
         started_at = _utcnow()
         # 1. Extract — PENDING snapshots scoped to this harvest's entries.
         extracted = 0
@@ -1395,6 +1401,7 @@ async def run_memory_audit(
     record_contradiction_census(report, probe_control)
     await record_disclosure_state(session, report, disclosure_cards)
     report.llm_usage = usage.snapshot()
+    report.rung_counts = tally.payload()
 
     # the run-record fold. Deferred import — the
     # consolidation module pulls the reconcile/ingest stack this census path

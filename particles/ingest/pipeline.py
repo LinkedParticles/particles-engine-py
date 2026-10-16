@@ -39,6 +39,7 @@ import particles.store.taxonomy_store  # noqa: F401  # register taxonomy sink
 import particles.store.wikidata_cache  # noqa: F401  # register wikidata label cache
 from particles.config import get_config
 from particles.core.conflict_resolution import (
+    ConflictVerdict,
     RungInputs,
     SlotVerdict,
     UpdateOrderSource,
@@ -49,9 +50,11 @@ from particles.core.conflict_resolution import (
     update_order_source,
 )
 from particles.core.generics import is_generic_claim
+from particles.core.ladders import TextPair, update_ladder
 from particles.core.observer_scope import BeliefScope, PairPrecondition
 from particles.core.probe_verdict import prompt_hash
 from particles.core.provenance import reobservation_ref
+from particles.core.rung_ladder import Availability, Ladder, RungStamp, UpdateVerdict
 from particles.core.schema import (
     AssertionModality,
     Confidence,
@@ -135,6 +138,7 @@ from particles.ingest.duplicate_suppression import (
     suppression_note,
 )
 from particles.ingest.generation import cascade_superseded_generation
+from particles.ingest.ladder_shell import drive
 from particles.ingest.narrative_merge import (
     _merge_label,
     collapse_narratives,
@@ -171,6 +175,7 @@ from particles.ingest.second_reading import (
     in_flight_context,
     read_pair,
     reading_for,
+    second_reading_prompt_hash,
     snapshot_text,
     source_name,
 )
@@ -2242,6 +2247,68 @@ def contradiction_prompt_hash() -> str:
     return prompt_hash(_contradiction_prompt("{claim_a}", "{claim_b}"))
 
 
+#: The write path's contradiction probe as a rung of the contradiction ladder
+#:: a different prompt from the census probe, so a different rung.
+RECONCILE_PROBE_RUNG = "reconcile_probe"
+#: The second reading, shared by extraction and the census.
+SECOND_READING_RUNG = "second_reading"
+
+
+def reconcile_probe_stamp() -> RungStamp:
+    """The §6.6 contradiction probe's stamp, at its current prompt version."""
+    return RungStamp(RECONCILE_PROBE_RUNG, contradiction_prompt_hash())
+
+
+def second_reading_stamp() -> RungStamp:
+    """The second reading's stamp, at its current prompt version."""
+    return RungStamp(SECOND_READING_RUNG, second_reading_prompt_hash())
+
+
+def update_decided_by() -> str:
+    """The rung a rung 2.5 retirement rests on: the update ladder's confirmation rung.
+
+    The ladder returns ``CHANGES`` only from its second reading, since a first
+    ``CHANGES`` is always replaced by the confirmation rung's verdict
+    (:func:`read_update_slot`), and every rung 2.5 door on every route
+    (extraction, the assertion door, the extra pairs, the sweep, the
+    paraphrase route) is gated on that ``CHANGES``
+    (:func:`~particles.core.conflict_resolution.update_order_source`,
+    :func:`~particles.ingest.pair_selection.select_pairs`), so every retirement
+    rests on that rung. That holds for a pair settled on the update answer
+    alone: ``same_slot_update`` is the ladder's own ``CHANGES`` on
+    a pair asked the update question first, not a deterministic key, and what
+    such a pair skipped is the contradiction probe. The dating and the ALEATORY
+    condition rung 2.5 then applies are its conditions, not a rung of the
+    update ladder, and are not named.
+    """
+    return str(RungStamp(UPDATE_SECOND_RUNG, update_prompt_hash()))
+
+
+def _outcome_decided_by(
+    verdict: ConflictVerdict | None, *, probe: bool | None, reading: str | None
+) -> str | None:
+    """The rung a §6.6 outcome rests on, ``name@version``.
+
+    A rung 2.5 retirement rests on the update ladder's confirmation rung,
+    whether the pair came through the contradiction probe or was settled on
+    the update answer alone (:func:`update_decided_by`); a rung-3 record on
+    the second reading when one confirmed the pair, else on the probe's
+    ``YES``. A forced record whose probe did not complete rests on no rung.
+    """
+    if verdict in (
+        ConflictVerdict.UPDATE_SUPERSEDES,
+        ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING,
+    ):
+        return update_decided_by()
+    if verdict is not ConflictVerdict.INCONSISTENT:
+        return None
+    if reading is not None:
+        return str(second_reading_stamp())
+    if probe is True:
+        return str(reconcile_probe_stamp())
+    return None
+
+
 def _contradiction_verdict(reply: str) -> bool | None:
     """The verdict on the reply's final line, or ``None`` when it has no clear one.
 
@@ -2501,6 +2568,27 @@ class SlotReading:
     purpose: LLMPurpose
     """``semantic_lint`` when the first reading decided, ``verification`` when
     the second did. The update-slot ledger records the deciding model."""
+    decided_by: RungStamp | None = None
+    """The update ladder's rung that decided; ``None`` when every
+    rung abstained."""
+
+
+#: The update ladder's two rungs (:func:`particles.core.ladders.update_ladder`).
+UPDATE_FIRST_RUNG = "update_slot"
+UPDATE_SECOND_RUNG = "update_slot_second"
+
+
+def update_slot_ladder() -> Ladder[TextPair, UpdateVerdict]:
+    """The update ladder at the update probe's current prompt version."""
+    return update_ladder(update_prompt_hash())
+
+
+def _as_update_verdict(verdict: SlotVerdict | None) -> UpdateVerdict:
+    return UpdateVerdict.ABSTAIN if verdict is None else UpdateVerdict(verdict.value)
+
+
+def _as_slot_verdict(verdict: UpdateVerdict) -> SlotVerdict | None:
+    return None if verdict is UpdateVerdict.ABSTAIN else SlotVerdict(verdict.value)
 
 
 async def _slot_call(prompt: str, purpose: LLMPurpose, budgets: list[int]) -> SlotVerdict | None:
@@ -2556,33 +2644,63 @@ async def _llm_slot_verdict(earlier: str, later: str) -> SlotVerdict | None:
     return await _slot_call(_update_prompt(earlier, later), "semantic_lint", budgets)
 
 
-async def read_update_slot(earlier: str, later: str) -> SlotReading:
-    """The one update probe every rung 2.5 route asks.
+async def _first_slot_reading(pair: TextPair) -> UpdateVerdict:
+    """The update ladder's first rung: one reading on ``semantic_lint``."""
+    return _as_update_verdict(await _llm_slot_verdict(*pair))
 
-    A first ``CHANGES`` is read a second time on the ``verification`` purpose,
-    at ``audit.verify_max_tokens`` with one retry at
-    ``audit.verify_retry_max_tokens`` (an adaptive-thinking model spends its
-    thinking from that budget), and the second reading's verdict replaces the
-    first, as reading replaces the contradiction probe's. Rung 2.5
-    therefore retires only on two ``CHANGES``. A first ``FIXED``,
-    ``DIFFERENT`` or failed reading stands, with no second call. Extraction,
-    the assertion door and the nightly sweep all come here.
+
+async def _second_slot_reading(pair: TextPair) -> UpdateVerdict:
+    """The update ladder's confirmation rung: one reading on ``verification``.
+
+    At ``audit.verify_max_tokens``, with one retry at
+    ``audit.verify_retry_max_tokens`` when that is larger (an
+    adaptive-thinking model spends its thinking from that budget).
     """
-    first = await _llm_slot_verdict(earlier, later)
-    if first is not SlotVerdict.CHANGES:
-        return SlotReading(first, "semantic_lint")
     cfg = get_config().audit
     budgets = [cfg.verify_max_tokens]
     if cfg.verify_retry_max_tokens > cfg.verify_max_tokens:
         budgets.append(cfg.verify_retry_max_tokens)
-    second = await _slot_call(_update_prompt(earlier, later), "verification", budgets)
+    second = await _slot_call(_update_prompt(*pair), "verification", budgets)
     if second is not SlotVerdict.CHANGES:
         log.info(
             "Update probe: the second reading answered %s where the first said CHANGES; "
             "rung 2.5 does not retire",
             "no verdict" if second is None else second.value,
         )
-    return SlotReading(second, "verification")
+    return _as_update_verdict(second)
+
+
+def _slot_availability() -> Availability:
+    """The breaker as this module sees it, read before each rung."""
+    return Availability(breaker_open=llm_circuit_open())
+
+
+async def read_update_slot(earlier: str, later: str) -> SlotReading:
+    """The one update probe every rung 2.5 route asks.
+
+    A two-rung ladder (:func:`update_slot_ladder`): the first reading on
+    ``semantic_lint``, and a confirmation rung on ``verification`` that runs
+    only on a first ``CHANGES`` and whose verdict replaces it, as the second
+    reading of a contradiction replaces the probe's. Rung 2.5 therefore retires
+    only on two ``CHANGES``. A first ``FIXED``, ``DIFFERENT`` or failed reading
+    stands, with no second call. While the breaker is open a reading is not
+    asked and abstains, which every caller reads as keep. Extraction, the
+    assertion door, the nightly sweep, the paraphrase route and the backlog
+    sweep all come here, so the port is asserted at this function.
+    """
+    settled = await drive(
+        update_slot_ladder(),
+        (earlier, later),
+        {UPDATE_FIRST_RUNG: _first_slot_reading, UPDATE_SECOND_RUNG: _second_slot_reading},
+        availability=_slot_availability,
+    )
+    decided = settled.decided_by
+    purpose: LLMPurpose = (
+        "verification"
+        if decided is not None and decided.name == UPDATE_SECOND_RUNG
+        else "semantic_lint"
+    )
+    return SlotReading(_as_slot_verdict(settled.verdict), purpose, decided)
 
 
 async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
@@ -2892,6 +3010,7 @@ async def _resolve_conflict(
         ),
         domain=domain,
         reading=reading,
+        decided_by=_outcome_decided_by(outcome.verdict, probe=probe, reading=reading),
     )
     return await _apply_conflict_plan(
         session,
@@ -3382,7 +3501,10 @@ async def _apply_update_extras(
         await update_particle_status(
             session, loser_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
         )
-        await _record_planned(session, plan_update_event(loser_id, by_id, route="extra"))
+        await _record_planned(
+            session,
+            plan_update_event(loser_id, by_id, route="extra", decided_by=update_decided_by()),
+        )
         retired.add(loser_id)
         if loser_id == winner.id:
             log.info(

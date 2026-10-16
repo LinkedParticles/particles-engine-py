@@ -28,22 +28,28 @@ import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.schema import ValidKind
+from particles.core.status import Status
 from particles.core.validity import (
     REGENERABLE_BASES,
+    VALID_FROM_BASIS_KEY,
+    VALID_FROM_CONFIDENCE_KEY,
+    VALID_FROM_CUE_KEY,
     ProseAnchor,
     ValidFromBasis,
     anchor_from_prose,
     prose_rule_digest,
 )
+from particles.corpus.store import list_entry_tag_rows, set_snapshots_published_at
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
     ValidityRecordRow,
+    get_particles_for_entry,
     get_validity_records,
     set_validity_record,
 )
@@ -51,7 +57,11 @@ from particles.store.particle_store import (
 log = logging.getLogger(__name__)
 
 #: The bases the regeneration pass leaves alone.
-PRESERVED_BASES: tuple[str, ...] = (ValidFromBasis.STATED.value, ValidFromBasis.OPERATOR.value)
+PRESERVED_BASES: tuple[str, ...] = (
+    ValidFromBasis.STATED.value,
+    ValidFromBasis.SESSION.value,
+    ValidFromBasis.OPERATOR.value,
+)
 
 
 @dataclass
@@ -297,3 +307,133 @@ async def date_particle(
         },
     )
     return DateResult(particle_id=particle_id, valid_from=valid_from, valid_kind=valid_kind)
+
+
+# ---------------------------------------------------------------------------
+# Session redating: the reference date a harvest should have carried
+# ---------------------------------------------------------------------------
+
+#: ``(entry_id, uri_r, tags) -> the session's start, or None``. The harness
+#: adapter supplies it (``_claude_code.session_started_at``): how a session URI
+#: maps to a transcript on disk is its convention, never the Engine's.
+SessionStartResolver = Callable[[str, str | None, list[str]], datetime | None]
+
+#: Event actor for the CLI repair verb.
+REDATE_ACTOR = "cli:memory-redate"
+
+
+@dataclass
+class RedateReport:
+    """What :func:`redate_sessions` examined and changed."""
+
+    dry_run: bool
+    examined: int = 0
+    resolved: int = 0
+    unresolved: list[str] = field(default_factory=list)
+    snapshots_dated: int = 0
+    claims_examined: int = 0
+    claims_redated: int = 0
+    claims_unchanged: int = 0
+    claims_failed: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "dry_run": self.dry_run,
+            "examined": self.examined,
+            "resolved": self.resolved,
+            "unresolved": len(self.unresolved),
+            "snapshots_dated": self.snapshots_dated,
+            "claims_examined": self.claims_examined,
+            "claims_redated": self.claims_redated,
+            "claims_unchanged": self.claims_unchanged,
+            "claims_failed": len(self.claims_failed),
+        }
+
+
+def session_anchor(started_at: datetime) -> datetime:
+    """The ``valid_from`` a ``session`` anchor carries: the session's day, at midnight UTC.
+
+    The extractor resolves the reference date to a calendar date before the
+    model sees it (``anchor.date().isoformat()``), so a repaired value must be
+    the same day boundary, or a repaired claim and a freshly extracted one
+    from the same session would differ by the hour.
+    """
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    return datetime.combine(started_at.astimezone(UTC).date(), time.min, tzinfo=UTC)
+
+
+async def redate_sessions(
+    session: AsyncSession,
+    *,
+    started_at_for: SessionStartResolver,
+    dry_run: bool = False,
+    actor: str = REDATE_ACTOR,
+) -> RedateReport:
+    """Give each harvested session its own start as the reference date.
+
+    Two writes per session the resolver can date, both deterministic and
+    without a model call: every snapshot of the entry that carries no
+    ``content_published_at`` gets the session's start, so a later extraction
+    resolves relative time against the right day; and every ACTIVE claim of
+    the entry whose ``valid_from`` basis is ``session`` is re-anchored to that
+    day, keeping its kind, cue and confidence. A ``session`` anchor *means*
+    "performed in this session, on its day"; a claim extracted before the
+    harvest passed that date (1.190.1) carries the extraction wall-clock
+    instead, which is what this repairs. Every other basis is untouched, and a
+    session the resolver cannot date (its transcript is gone) is listed, not
+    guessed. Records one ``SESSION_DATES_REPAIRED`` event. Does not commit;
+    the caller owns the transaction.
+    """
+    report = RedateReport(dry_run=dry_run)
+    session_basis = ValidFromBasis.SESSION.value
+    for entry_id, uri_r, tags in await list_entry_tag_rows(session):
+        if "claude-code" not in tags or not (uri_r or "").startswith("claude-code://session/"):
+            continue
+        report.examined += 1
+        started = started_at_for(entry_id, uri_r, tags)
+        if started is None:
+            report.unresolved.append(entry_id)
+            continue
+        report.resolved += 1
+        anchor = session_anchor(started)
+        if not dry_run:
+            report.snapshots_dated += await set_snapshots_published_at(session, entry_id, anchor)
+        for particle in await get_particles_for_entry(session, entry_id):
+            props = particle.properties or {}
+            if (
+                particle.status is not Status.ACTIVE
+                or props.get(VALID_FROM_BASIS_KEY) != session_basis
+            ):
+                continue
+            report.claims_examined += 1
+            if particle.valid_from is not None and particle.valid_from.date() == anchor.date():
+                report.claims_unchanged += 1
+                continue
+            report.claims_redated += 1
+            if dry_run:
+                continue
+            cue = props.get(VALID_FROM_CUE_KEY)
+            conf = props.get(VALID_FROM_CONFIDENCE_KEY)
+            try:
+                await set_validity_record(
+                    session,
+                    particle.id,
+                    valid_from=anchor,
+                    valid_kind=particle.valid_kind,
+                    basis=session_basis,
+                    cue=str(cue) if isinstance(cue, str) else None,
+                    confidence=float(conf) if isinstance(conf, (int, float)) else None,
+                )
+            except ValueError as exc:
+                log.warning("redate: %s", exc)
+                report.claims_failed.append(particle.id)
+                report.claims_redated -= 1
+    if not dry_run:
+        await record_event(
+            session,
+            actor=actor,
+            event_type=OperatorEventType.SESSION_DATES_REPAIRED,
+            payload=report.as_dict(),
+        )
+    return report

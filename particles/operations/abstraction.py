@@ -59,6 +59,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.generics import population_quantifier
+from particles.core.ladders import POPULATION_QUANTIFIER, CandidateInput, candidate_ladder
+from particles.core.probe_verdict import prompt_hash
+from particles.core.rung_ladder import CandidateVerdict, Ladder, Settled
 from particles.core.schema import (
     Confidence,
     ContributorRef,
@@ -75,6 +78,7 @@ from particles.core.status import Status, StatusReason
 from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.polarity import is_non_asserted
+from particles.ingest.ladder_shell import drive
 from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.llm.registry import LLMPurpose
 from particles.operations._llm import _llm_call
@@ -205,6 +209,9 @@ class AbstractionReport(BaseModel):
     revalidation: RevalidationCounts = Field(default_factory=RevalidationCounts)
     llm_calls: int = 0
     warnings: list[str] = Field(default_factory=list)
+    #: The candidate ladder's settled verdicts by the rung that decided them,
+    #: ``name@version`` → verdict → count.
+    decided_by: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class _Budget:
@@ -287,6 +294,42 @@ async def _synthesize_claim(premise_contents: list[str]) -> tuple[str, str] | No
     if not claim:
         return None
     return claim, str(data.get("rationale") or "").strip()
+
+
+def entailment_judge_version() -> str:
+    """The entailment judge's prompt version: its stamp's version."""
+    rubric = _ENTAILMENT_RUBRIC
+    # The rubric is the prompt's trusted text; the rendered prompt carries a
+    # fresh fence nonce per call and cannot be hashed as it is.
+    return prompt_hash(
+        rubric.instructions,
+        rubric.claim_heading,
+        rubric.claim_label,
+        rubric.premise_heading,
+        rubric.premise_label,
+    )
+
+
+async def _gate_candidate(
+    claim: str, premise_contents: list[str], *, require_entailment: bool
+) -> Settled[CandidateVerdict]:
+    """The candidate ladder on one synthesized claim.
+
+    Without ``require_entailment`` only the pure pre-check runs. With it, a
+    candidate the pre-check passes goes to the judge, whose failure is an
+    abstention the caller reads as discard.
+    """
+    ladder = candidate_ladder(entailment_judge_version())
+    if not require_entailment:
+        ladder = Ladder(ladder.kind, ladder.abstain, (POPULATION_QUANTIFIER,))
+
+    async def judge(item: CandidateInput) -> CandidateVerdict:
+        entailed = await _check_entailment(item[0], list(item[1]))
+        if entailed is None:
+            return CandidateVerdict.ABSTAIN
+        return CandidateVerdict.ENTAILED if entailed else CandidateVerdict.NOT_ENTAILED
+
+    return await drive(ladder, (claim, tuple(premise_contents)), {"entailment_judge": judge})
 
 
 async def _check_entailment(claim: str, premise_contents: list[str]) -> bool | None:
@@ -904,26 +947,29 @@ async def _promote_cluster(
     claim, rationale = synthesized
     report.candidates_synthesized += 1
 
-    # Premise-scope rule, every candidate in both modes and
-    # independent of ``require_entailment``: a claim quantifying over a kind
-    # is discarded here, before the judge call is spent on it.
-    quantifier = population_quantifier(claim)
-    if quantifier is not None:
+    # The candidate ladder: the premise-scope rule, every
+    # candidate in both modes and independent of ``require_entailment``, is its
+    # pure first rung, so a claim quantifying over a kind is discarded before
+    # the judge call is spent on it; the entailment judge is its model rung.
+    settled = await _gate_candidate(claim, contents, require_entailment=cfg.require_entailment)
+    if settled.decided_by is not None:
+        cell = report.decided_by.setdefault(str(settled.decided_by), {})
+        cell[settled.verdict.value] = cell.get(settled.verdict.value, 0) + 1
+    if settled.decided_by is not None and settled.decided_by.name == POPULATION_QUANTIFIER.name:
         report.rejected_population_scope += 1
         log.info(
             "abstraction candidate for subject %s ranges over a kind (%r); discarded",
             cluster.subject_id,
-            quantifier,
+            population_quantifier(claim),
         )
         return
 
     if cfg.require_entailment:
         report.llm_calls += 1
-        entailed = await _check_entailment(claim, contents)
-        if entailed is None:
+        if settled.verdict is CandidateVerdict.ABSTAIN:
             report.warnings.append("entailment judge unavailable; candidate discarded")
             return
-        if not entailed:
+        if settled.verdict is CandidateVerdict.NOT_ENTAILED:
             report.rejected_entailment += 1
             return
 

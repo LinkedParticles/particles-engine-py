@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,8 @@ import pytest
 
 from particles.benchmark.update_gate import _child, case, checks, estimate, pairs, scoring
 from particles.benchmark.update_gate.fixtures import (
-    MOVE_NOTES,
+    CASES,
     PAIR_SETS,
-    TRIP_ALONE_NOTES,
     case_note,
     pair_set,
 )
@@ -70,7 +70,7 @@ _FIXED = [
 
 class TestChecks:
     def test_the_fixed_store_passes(self) -> None:
-        assert checks.evaluate(_FIXED, [], trip_alone=False)["pass"]
+        assert checks.evaluate(_FIXED, [], trip_alone=False, case="mid-trip", version=1)["pass"]
 
     @pytest.mark.parametrize(
         ("extra", "failed"),
@@ -92,7 +92,7 @@ class TestChecks:
         ],
     )
     def test_each_check_catches_its_failure(self, extra: Any, failed: str) -> None:
-        got = checks.evaluate([*_FIXED, extra], [], trip_alone=False)
+        got = checks.evaluate([*_FIXED, extra], [], trip_alone=False, case="mid-trip", version=1)
         assert not got["pass"] and got[failed] == [extra["content"]]
 
     def test_a_restatement_held_by_its_anchors_winner_fails(self) -> None:
@@ -110,32 +110,213 @@ class TestChecks:
                 },
             ),
         ]
-        got = checks.evaluate(_FIXED, events, trip_alone=False)
+        got = checks.evaluate(_FIXED, events, trip_alone=False, case="mid-trip", version=1)
         assert got["ii_held_by_winner"] == ["As of 2026-10-08, when …"] and not got["pass"]
         # Held against another claim is not this check's failure.
         events[1][1]["other_id"] = "sandeep"
-        assert checks.evaluate(_FIXED, events, trip_alone=False)["ii_held_by_winner"] == []
+        assert (
+            checks.evaluate(_FIXED, events, trip_alone=False, case="mid-trip", version=1)[
+                "ii_held_by_winner"
+            ]
+            == []
+        )
 
     def test_trip_alone_needs_the_residence_active(self) -> None:
         residence = _row("The user lives in Lajpat Nagar, Delhi.", src=S4)
-        assert checks.evaluate([residence], [], trip_alone=True)["pass"]
+        assert checks.evaluate([residence], [], trip_alone=True, case="mid-trip", version=1)["pass"]
         retired = {**residence, "status": "PROVENANCE_STALE"}
-        assert not checks.evaluate([retired], [], trip_alone=True)["pass"]
-        # A Delhi claim from the trip note does not count as the residence.
-        assert not checks.evaluate([_row("The user's home is in Delhi.")], [], trip_alone=True)[
+        assert not checks.evaluate([retired], [], trip_alone=True, case="mid-trip", version=1)[
             "pass"
         ]
+        # A Delhi claim from the trip note does not count as the residence.
+        assert not checks.evaluate(
+            [_row("The user's home is in Delhi.")], [], trip_alone=True, case="mid-trip", version=1
+        )["pass"]
 
     def test_a_run_missing_a_field_the_version_reads_is_not_rescorable(self) -> None:
         bare = [{"content": "x", "status": "ACTIVE", "restatement": False}]
         with pytest.raises(checks.NotRescorable, match="sources"):
-            checks.evaluate(bare, [], trip_alone=False)
+            checks.evaluate(bare, [], trip_alone=False, case="mid-trip", version=1)
         with pytest.raises(KeyError):
-            checks.evaluate(_FIXED, [], trip_alone=False, version=99)
+            checks.evaluate(_FIXED, [], trip_alone=False, case="mid-trip", version=99)
 
     def test_a_uri_is_read_as_its_note_name(self) -> None:
         assert checks.note_name("file:///tmp/x/notes/session-11.md") == S11
         assert checks.note_name("session-04.md") == S4
+
+
+# ---------------------------------------------------------------------------
+# Checks version 2: both cases, both halves of the reader's test
+# ---------------------------------------------------------------------------
+
+R1, R2 = "reader-01.md", "reader-02-moved.md"
+
+
+def _rrow(
+    content: str,
+    status: str = "ACTIVE",
+    *,
+    src: str = R1,
+    restated: bool = False,
+    valid_until: str | None = None,
+) -> Any:
+    return {
+        "content": content,
+        "status": status,
+        "sources": [src],
+        "restatement": restated,
+        "valid_until": valid_until,
+    }
+
+
+#: A store that reads the reader's case right after the move.
+_READER_MOVED = [
+    _rrow("The user lives in Delhi.", "PROVENANCE_STALE"),
+    _rrow("The user is in Mumbai for a week, as of 2026-09-01.", "PROVENANCE_STALE"),
+    _rrow("The user moved to Mumbai, as of 2026-10-01.", src=R2),
+]
+#: The same note before any move: home in Delhi, the week in Mumbai current.
+_READER_TRIP = [
+    _rrow("The user lives in Delhi."),
+    _rrow("The user is in Mumbai for a week, as of 2026-09-01."),
+]
+
+
+def _v2(rows: list[Any], *, trip_alone: bool, case: str = "reader") -> dict[str, Any]:
+    return checks.evaluate(rows, [], trip_alone=trip_alone, case=case, version=2)
+
+
+class TestChecksV2:
+    def test_the_reader_case_passes_when_read_right(self) -> None:
+        assert _v2(_READER_TRIP, trip_alone=True)["pass"]
+        assert _v2(_READER_MOVED, trip_alone=False)["pass"]
+
+    def test_a_store_that_drops_the_trip_fails_the_first_half(self) -> None:
+        """Version 1's gap: only the residence was required."""
+        got = _v2(_READER_TRIP[:1], trip_alone=True)
+        assert not got["pass"] and got["missing"] == ["b_trip_current"]
+        got = _v2(_READER_TRIP[1:], trip_alone=True)
+        assert not got["pass"] and got["missing"] == ["a_home_in_delhi"]
+
+    def test_one_claim_may_carry_both_halves(self) -> None:
+        both = [_rrow("The user lives in Delhi but is in Mumbai for a week.")]
+        assert _v2(both, trip_alone=True)["pass"]
+        # After the move the same claim, still ACTIVE, fails (i) and (iii).
+        got = _v2([*both, _rrow("The user moved to Mumbai.", src=R2)], trip_alone=False)
+        assert got["i_delhi_residence_or_flight"] == got["iii_trip_current"] == [both[0]["content"]]
+
+    def test_a_restatement_does_not_make_the_trip_current(self) -> None:
+        restated = _rrow("The user is in Mumbai for a week.", restated=True)
+        assert not _v2([_READER_TRIP[0], restated], trip_alone=True)["pass"]
+
+    def test_a_store_that_drops_everything_fails_the_move(self) -> None:
+        got = _v2(_READER_MOVED[:2], trip_alone=False)
+        assert not got["pass"] and got["missing"] == ["iv_move_kept"]
+
+    @pytest.mark.parametrize(
+        ("extra", "failed"),
+        [
+            (_rrow("The user lives in Delhi."), "i_delhi_residence_or_flight"),
+            (_rrow("The user's home is in Delhi."), "i_delhi_residence_or_flight"),
+            (_rrow("The user is living in Delhi.", restated=True), "i_restatement_shape"),
+            (_rrow("The user is in Mumbai for a week."), "iii_trip_current"),
+            (_rrow("The user is visiting Mumbai temporarily."), "iii_trip_current"),
+            (_rrow("The user was in Mumbai on a trip.", restated=True), "iii_trip_current"),
+        ],
+    )
+    def test_each_move_check_catches_its_failure(self, extra: Any, failed: str) -> None:
+        got = _v2([*_READER_MOVED, extra], trip_alone=False)
+        assert not got["pass"] and got[failed] == [extra["content"]]
+
+    def test_a_dated_restatement_is_history_not_a_current_claim(self) -> None:
+        dated = _rrow(
+            "As of 2026-09-01, the user was in Mumbai for a week and lived in Delhi.",
+            restated=True,
+        )
+        assert _v2([*_READER_MOVED, dated], trip_alone=False)["pass"]
+
+    def test_a_week_lapsed_by_the_move_counts_only_in_the_readers_case(self) -> None:
+        lapsed = _rrow("The user is in Mumbai for a week.", valid_until="2026-09-08 00:00:00")
+        assert _v2([*_READER_MOVED, lapsed], trip_alone=False)["pass"]
+        running = {**lapsed, "valid_until": "2026-10-02 00:00:00"}
+        assert not _v2([*_READER_MOVED, running], trip_alone=False)["pass"]
+        # In the mid-trip case the move arrives inside the week: no lapse is read.
+        mid = {**lapsed, "sources": [S11]}
+        moved = _row("The user moved to Mumbai.", src=S12)
+        assert _v2([mid, moved], trip_alone=False, case="mid-trip")["iii_trip_current"]
+
+    def test_a_city_name_alone_after_the_move_is_no_offence(self) -> None:
+        assert _v2([*_READER_MOVED, _rrow("The user is in Mumbai.")], trip_alone=False)["pass"]
+
+    def test_the_mid_trip_fixed_store_passes_and_its_trip_alone_needs_both_halves(self) -> None:
+        assert _v2(_FIXED, trip_alone=False, case="mid-trip")["pass"]
+        home = _row("The user lives in Lajpat Nagar, Delhi.", src=S4)
+        trip = _row("The user is in Mumbai for a week for work.")
+        assert _v2([home, trip], trip_alone=True, case="mid-trip")["pass"]
+        assert not _v2([home], trip_alone=True, case="mid-trip")["pass"]
+
+    def test_version_1_does_not_define_the_readers_case(self) -> None:
+        with pytest.raises(checks.NotRescorable, match="reader"):
+            checks.evaluate(_READER_TRIP, [], trip_alone=True, case="reader", version=1)
+
+    def test_the_readers_case_needs_the_saved_validity(self) -> None:
+        bare = [{k: v for k, v in r.items() if k != "valid_until"} for r in _READER_MOVED]
+        with pytest.raises(checks.NotRescorable, match="valid_until"):
+            _v2(bare, trip_alone=False)
+        # The mid-trip case reads no validity field, so older reports re-score.
+        assert _v2([{**r, "sources": [S12]} for r in bare], trip_alone=False, case="mid-trip")
+
+
+@pytest.mark.parametrize(
+    ("model", "move", "alone"),
+    [("claude-sonnet-5-5", 3, 2), ("claude-sonnet-4-6", 2, 2)],
+)
+def test_the_mid_trip_records_rescore_under_version_2(model: str, move: int, alone: int) -> None:
+    """The 2026-10-13 reports carry no case field and re-score, at no cost."""
+    saved = TripVsMoveReport.model_validate_json(
+        (_BENCH / f"trip-vs-move-{model}-2026-10-13.json").read_text()
+    )
+    assert saved.case == "mid-trip" and saved.checks_version == 1
+    again = case.rescore(saved, version=2)
+    assert (again.verdict.move_passed, again.verdict.trip_alone_passed) == (move, alone)
+    published = _BENCH / f"trip-vs-move-{model}-2026-10-13-checks-v2.json"
+    assert TripVsMoveReport.model_validate_json(published.read_text()).verdict == again.verdict
+
+
+def test_the_readers_notes_are_the_registered_bytes() -> None:
+    """records these digests before any run; an edit is a new case."""
+    assert hashlib.sha256(case_note(R1).read_bytes()).hexdigest() == (
+        "08b0416b6f6deb820cc13901b003eb6534f5fbe15c836ff7bb7c53a866b823b9"
+    )
+    assert hashlib.sha256(case_note(R2).read_bytes()).hexdigest() == (
+        "5447086994dddcface41d06768bd7aa777dc809600d395b1e2def54b618ea1b2"
+    )
+
+
+def test_every_case_note_is_packaged() -> None:
+    """Each case note is packaged in the wheel, the sdist and the image."""
+    # Read structurally, so the check holds in a published engine tree too, whose
+    # pyproject.toml is the overlay and whose sdist includes all of `tests`.
+    engine = _ROOT / "publish" / "overlays" / "particles-engine-py" / "pyproject.toml"
+    configs = [_ROOT / "pyproject.toml"] + ([engine] if engine.exists() else [])
+    for spec in CASES.values():
+        for note in spec.notes:
+            path = f"tests/fixtures/trip_vs_move/{note}"
+            for config in configs:
+                targets = tomllib.loads(config.read_text())["tool"]["hatch"]["build"]["targets"]
+                assert path in targets["wheel"]["force-include"], (config, note)
+                sdist = targets["sdist"]["only-include"]
+                assert any(path == inc or path.startswith(f"{inc}/") for inc in sdist), (
+                    config,
+                    note,
+                )
+            # The image builds the wheel from a context that lists each file.
+            dockerfile = _ROOT / "deploy" / "Dockerfile"
+            if dockerfile.exists():
+                assert path in dockerfile.read_text(), note
+            dockerignore = _ROOT / ".dockerignore"
+            if dockerignore.exists():
+                assert f"!{path}" in dockerignore.read_text(), note
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +453,7 @@ def test_every_extraction_entry_names_its_note_by_digest() -> None:
     """A fixture edit fails here, naming the note, instead of as a table miss."""
     data = json.loads(TABLE_PATH.read_text())
     entries = {e["note"]: e["sha256"] for e in data["extraction"]}
-    assert set(entries) == set(MOVE_NOTES) | set(TRIP_ALONE_NOTES)
+    assert set(entries) == {note for spec in CASES.values() for note in spec.notes}
     for note, digest in entries.items():
         assert source_key(case_note(note).read_text()) == digest, note
         assert hashlib.sha256(case_note(note).read_bytes()).hexdigest() == digest, note
@@ -295,23 +476,31 @@ class TestEstimate:
     def test_the_shipped_profile_covers_both_record_models(self) -> None:
         profile = estimate.load_profile()
         assert profile is not None
-        assert set(profile["models"]) >= set(estimate.RECORD_RUN_USD)
+        assert set(profile["cases"]["mid-trip"]["models"]) >= set(estimate.RECORD_RUN_USD)
+        # The reader reports of record (2026-10-14) supply the reader case's own entries.
+        assert set(profile["cases"]["reader"]["models"]) >= set(estimate.RECORD_RUN_USD)
         for model in estimate.RECORD_RUN_USD:
             pins = _pins(model.split(":", 1)[1])
-            est = estimate.estimate_case(pins, {"move": 3, "trip-alone": 2}, mixed=False)
+            est = estimate.estimate_case(
+                pins, {"move": 3, "trip-alone": 2}, mixed=False, case="mid-trip"
+            )
             assert est.source == "profile" and "approximation" not in est.note
             assert est.total_usd and est.total_calls
 
     @pytest.mark.usefixtures("no_profile")
     def test_the_record_prices_the_two_measured_models(self) -> None:
-        est = estimate.estimate_case(_pins(), {"move": 3, "trip-alone": 2}, mixed=False)
+        est = estimate.estimate_case(
+            _pins(), {"move": 3, "trip-alone": 2}, mixed=False, case="mid-trip"
+        )
         assert est.source == "record"
         assert est.total_usd == pytest.approx(3 * 0.1384 + 2 * 0.0757)
         assert estimate.default_ceiling(est, "move", 4.0) == pytest.approx(4 * 0.1384)
 
     @pytest.mark.usefixtures("no_profile")
     def test_another_priced_model_gets_the_bound(self) -> None:
-        est = estimate.estimate_case(_pins("claude-opus-5-5"), {"move": 1}, mixed=False)
+        est = estimate.estimate_case(
+            _pins("claude-opus-5-5"), {"move": 1}, mixed=False, case="mid-trip"
+        )
         assert est.source == "bound" and est.total_usd and est.total_calls
         assert estimate.default_ceiling(est, "move", 4.0) == est.run_usd("move")
 
@@ -319,12 +508,16 @@ class TestEstimate:
     def test_a_mixture_never_reads_the_record(self) -> None:
         pins = _pins()
         pins["extraction"] = ProviderSelection(provider="anthropic", model="claude-sonnet-4-6")
-        assert estimate.estimate_case(pins, {"move": 1}, mixed=True).source == "bound"
+        assert (
+            estimate.estimate_case(pins, {"move": 1}, mixed=True, case="mid-trip").source == "bound"
+        )
 
     @pytest.mark.usefixtures("no_profile")
     def test_an_unpriced_model_has_no_dollar_figure_and_no_ceiling(self) -> None:
         get_config().llm.price_per_mtok.clear()
-        est = estimate.estimate_case(_pins("unpriced-model"), {"move": 1}, mixed=False)
+        est = estimate.estimate_case(
+            _pins("unpriced-model"), {"move": 1}, mixed=False, case="mid-trip"
+        )
         assert est.total_usd is None and est.total_calls
         assert estimate.default_ceiling(est, "move", 4.0) is None
         assert "No dollar total" in estimate.render_case_estimate(est, "anthropic:unpriced-model")
@@ -336,37 +529,47 @@ class TestEstimate:
         profile.write_text(
             json.dumps(
                 {
-                    "models": {
-                        "anthropic:claude-sonnet-5-5": {
-                            "source": "test",
-                            "variants": {
-                                "move": [
-                                    {
-                                        "purpose": "extraction",
-                                        "calls": 3,
-                                        "input_tokens": 1_000_000,
+                    "cases": {
+                        "mid-trip": {
+                            "models": {
+                                "anthropic:claude-sonnet-5-5": {
+                                    "source": "test",
+                                    "variants": {
+                                        "move": [
+                                            {
+                                                "purpose": "extraction",
+                                                "calls": 3,
+                                                "input_tokens": 1_000_000,
+                                            },
+                                            {
+                                                "purpose": "semantic_lint",
+                                                "calls": 9,
+                                                "output_tokens": 1_000_000,
+                                            },
+                                        ]
                                     },
-                                    {
-                                        "purpose": "semantic_lint",
-                                        "calls": 9,
-                                        "output_tokens": 1_000_000,
-                                    },
-                                ]
-                            },
+                                }
+                            }
                         }
                     }
                 }
             )
         )
         monkeypatch.setattr(estimate, "PROFILE_PATH", profile)
-        est = estimate.estimate_case(_pins(), {"move": 1}, mixed=False)
+        est = estimate.estimate_case(_pins(), {"move": 1}, mixed=False, case="mid-trip")
         price = get_config().llm.price_for(_pins()["default"])
         assert price is not None
         assert est.source == "profile" and est.per_run_calls["move"] == 12
         assert est.run_usd("move") == pytest.approx(price.input + price.output)
         assert "approximation" not in est.note
-        other = estimate.estimate_case(_pins("claude-sonnet-4-6"), {"move": 1}, mixed=False)
+        other = estimate.estimate_case(
+            _pins("claude-sonnet-4-6"), {"move": 1}, mixed=False, case="mid-trip"
+        )
         assert other.source == "profile" and "approximation" in other.note
+        # A case no report has measured is priced from the same model's mid-trip entry.
+        reader = estimate.estimate_case(_pins(), {"move": 1}, mixed=False, case="reader")
+        assert reader.source == "profile" and reader.run_usd("move") == est.run_usd("move")
+        assert "approximation for the reader case" in reader.note
 
     def test_the_profile_takes_the_costliest_live_run_per_variant(self) -> None:
         from datetime import UTC, datetime
@@ -405,9 +608,11 @@ class TestEstimate:
         profile = estimate.profile_from_reports(
             [report, report.model_copy(update={"arm": "scripted"})]
         )
-        move = profile["models"]["anthropic:claude-sonnet-5-5"]["variants"]["move"]
+        models = profile["cases"]["mid-trip"]["models"]
+        move = models["anthropic:claude-sonnet-5-5"]["variants"]["move"]
         assert move[0]["input_tokens"] == 300
-        assert set(profile["models"]) == {"anthropic:claude-sonnet-5-5"}
+        assert set(profile["cases"]) == {"mid-trip"}
+        assert set(models) == {"anthropic:claude-sonnet-5-5"}
 
 
 # ---------------------------------------------------------------------------
@@ -550,22 +755,24 @@ def scripted(tmp_path_factory: pytest.TempPathFactory) -> Generator[dict[str, An
         reset_config()
         _base, pins = case.resolve_pins(provider=None, model=None, pins={})
         report = case.run_case(
+            case="mid-trip",
             base=_base,
             pins=pins,
             runs={"move": 3, "trip-alone": 2},
             arm="scripted",
             same_slot_admits=True,
-            estimate=estimate.estimate_case(pins, {"move": 3}, mixed=False),
+            estimate=estimate.estimate_case(pins, {"move": 3}, mixed=False, case="mid-trip"),
             max_usd=None,
             store_dir=base / "runs",
         )
         old_gate = case.run_case(
+            case="mid-trip",
             base=_base,
             pins=pins,
             runs={"move": 1, "trip-alone": 0},
             arm="scripted",
             same_slot_admits=False,
-            estimate=estimate.estimate_case(pins, {"move": 1}, mixed=False),
+            estimate=estimate.estimate_case(pins, {"move": 1}, mixed=False, case="mid-trip"),
             max_usd=None,
             store_dir=None,
         )
@@ -594,7 +801,7 @@ class TestScriptedArm:
     ) -> None:
         run: CaseRun = scripted["old_gate"].runs[0]
         assert run.passed is False and run.refused_calls == {}
-        assert run.checks["iii_trip_active"] and run.checks["i_delhi_residence_or_flight"]
+        assert run.checks["iii_trip_current"] and run.checks["i_delhi_residence_or_flight"]
 
     def test_the_parents_store_and_home_are_untouched(self, scripted: dict[str, Any]) -> None:
         assert scripted["sentinel"].read_bytes() == b"the parent's store; no run may touch it"
@@ -628,6 +835,7 @@ def test_a_run_at_its_ceiling_stops_before_its_next_step(tmp_path: Path) -> None
     _base, pins = case.resolve_pins(provider=None, model=None, pins={})
     run = case.run_one(
         tmp_path / "move-1",
+        case="mid-trip",
         variant="move",
         index=1,
         arm="scripted",
@@ -684,3 +892,47 @@ def test_the_child_entry_is_the_surface_module() -> None:
 
     assert _child.ENTRY_MODULE == "particles.api.cli._trip_vs_move_child"
     assert importlib.util.find_spec(_child.ENTRY_MODULE) is not None
+
+
+def test_the_scripted_reader_case_meets_its_bar_and_the_old_gate_fails_it() -> None:
+    """The reader entries were written from the first claude-sonnet-5-5 report.
+
+    The arm proves the harness and the checks on the reader's notes; it says
+    nothing about any model's reading.
+    """
+    _base, pins = case.resolve_pins(provider=None, model=None, pins={})
+
+    def scripted(runs: dict[str, int], *, admits: bool) -> TripVsMoveReport:
+        return case.run_case(
+            case="reader",
+            base=_base,
+            pins=pins,
+            runs=runs,
+            arm="scripted",
+            same_slot_admits=admits,
+            estimate=estimate.estimate_case(pins, runs, mixed=False, case="reader"),
+            max_usd=None,
+            store_dir=None,
+        )
+
+    report = scripted({"move": 1, "trip-alone": 1}, admits=True)
+    assert [r.passed for r in report.runs] == [True, True]
+    assert all(r.refused_calls == {} for r in report.runs)
+    assert [f.name for f in report.fixture] == [R1, R2] and report.case == "reader"
+    old = scripted({"move": 1, "trip-alone": 0}, admits=False).runs[0]
+    assert old.passed is False and old.refused_calls == {}
+    assert old.checks["i_delhi_residence_or_flight"] and old.checks["iii_trip_current"]
+
+
+@pytest.mark.parametrize("name", ["reader", "mid-trip"])
+def test_the_verb_names_its_case_before_any_call(name: str) -> None:
+    from typer.testing import CliRunner
+
+    from particles.api.cli import app
+
+    argv = ["benchmark", "trip-vs-move", "--model", "claude-sonnet-5-5", "--estimate"]
+    if name != "reader":
+        argv += ["--case", name]
+    out = CliRunner().invoke(app, argv)
+    assert out.exit_code == 0, out.output
+    assert f"Case: {name}." in out.output and "nothing was run" in out.output

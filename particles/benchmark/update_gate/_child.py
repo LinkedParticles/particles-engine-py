@@ -7,7 +7,8 @@
 One child process runs one store. The parent starts it with a private
 environment: its own ``HOME``, ``DATABASE_URL``, ``PARTICLES_BLOB_DIR`` and
 ``PARTICLES_CONFIG``, everything else of the Particles kind removed. The child
-drives the operator's own verbs, ``particles audit`` once per note and then
+drives the operator's own verbs, ``particles audit`` once per note of its
+case and variant and then
 ``particles memory consolidate --scope store``, as ``scripts/trip_vs_move_e2e.py``
 did. It writes ``result.json`` in its run directory and nothing outside it.
 
@@ -96,6 +97,7 @@ async def _dispose() -> None:
 def run(
     run_dir: Path,
     *,
+    case: str,
     variant: str,
     arm: str,
     parent_store: str,
@@ -105,11 +107,7 @@ def run(
     """Deposit the notes, consolidate, and return what happened. Spends on the live arm."""
     # Deferred imports: the environment the parent set must be in place before
     # the SDK reads config.
-    from particles.benchmark.update_gate.fixtures import (
-        MOVE_NOTES,
-        TRIP_ALONE_NOTES,
-        case_note,
-    )
+    from particles.benchmark.update_gate.fixtures import CASES, case_note
     from particles.llm import override_providers, track_usage
 
     pins: dict[str, str] = json.loads((run_dir / PINS_FILE).read_text())
@@ -136,7 +134,7 @@ def run(
 
     notes_dir = run_dir / "notes"
     notes_dir.mkdir()
-    notes = TRIP_ALONE_NOTES if variant == "trip-alone" else MOVE_NOTES
+    notes = CASES[case].variants[variant]
     result: dict[str, Any] = {"exits": {}, "incomplete": None}
     # The ceiling is checked against measured spend between steps, never handed
     # to consolidation.budget_usd: that budget skips a pass whose cap-based
@@ -166,6 +164,15 @@ def run(
     if log is not None:
         result["requests"] = log.entries
         result["refused_calls"] = log.refused_by_purpose()
+        misses = log.misses()
+        if misses and result["incomplete"] is not None:
+            # A scripted run stops at the first request its table cannot
+            # answer; name it, so the stop reads as a missing
+            # entry rather than as a verb's failure.
+            first = misses[0]
+            result["incomplete"] += (
+                f"; the scripted table has no {first['kind']} entry for {first['key']}"
+            )
     return result
 
 
@@ -173,6 +180,7 @@ def main(invoke: Invoke, argv: list[str] | None = None) -> int:
     """Parse the parent's arguments, run, and write ``result.json``."""
     parser = argparse.ArgumentParser(description="One trip-versus-move run.")
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--case", choices=("reader", "mid-trip"), required=True)
     parser.add_argument("--variant", choices=("move", "trip-alone"), required=True)
     parser.add_argument("--arm", choices=("live", "scripted"), required=True)
     parser.add_argument("--parent-store", required=True)
@@ -180,6 +188,7 @@ def main(invoke: Invoke, argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = run(
         args.run_dir,
+        case=args.case,
         variant=args.variant,
         arm=args.arm,
         parent_store=args.parent_store,

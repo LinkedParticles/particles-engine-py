@@ -50,6 +50,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.duplicate_key import content_hash as norm_content_hash
 from particles.core.equivalence import co_evidential_components
+from particles.core.probe_verdict import prompt_hash
+from particles.core.rung_ladder import DuplicateVerdict, QuestionKind, RungStamp
 from particles.core.schema import (
     CandidateCluster,
     CoEvidentialCandidate,
@@ -70,6 +72,7 @@ from particles.core.schema import (
 from particles.core.stance import stance_holder
 from particles.core.status import Status, StatusReason
 from particles.extraction.polarity import is_non_asserted
+from particles.ingest.ladder_shell import report
 from particles.llm.breaker import PROBE_MAX_TOKENS
 from particles.operations._scope import pair_scope_tier
 from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
@@ -506,7 +509,20 @@ async def _judge_pairs(pairs: Sequence[tuple[str, str]]) -> list[JudgeVerdictKin
     from particles.operations._llm import _llm_call
 
     lines = [f"[{_judge_key(i)}]\nA: {a}\nB: {b}" for i, (a, b) in enumerate(pairs)]
-    prompt = (
+    prompt = _judge_prompt("\n\n".join(lines))
+    response = await _llm_call(prompt, max_tokens=_judge_max_tokens(len(pairs)))
+    verdicts: list[JudgeVerdictKind | None] = [None] * len(pairs)
+    for key, verdict in _parse_verdicts(response).items():
+        index = _key_index(key)
+        if index is not None and index < len(pairs) and verdicts[index] is None:
+            verdicts[index] = verdict
+    _tally_judge(verdicts)
+    return verdicts
+
+
+def _judge_prompt(pair_lines: str) -> str:
+    """The judge's prompt over its rendered pair lines."""
+    return (
         "You are curating an epistemic knowledge base. Below are candidate "
         "pairs of claims that may assert the SAME underlying fact (a "
         "paraphrase) or DIFFERENT facts. For each pair, choose exactly one "
@@ -515,15 +531,33 @@ async def _judge_pairs(pairs: Sequence[tuple[str, str]]) -> list[JudgeVerdictKin
         "- DISTINCT: the two claims assert different facts\n"
         "- UNSURE: you cannot tell\n\n"
         "Return ONLY a JSON object mapping each bracketed pair key to its "
-        'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.\n\n' + "\n\n".join(lines)
+        'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.\n\n' + pair_lines
     )
-    response = await _llm_call(prompt, max_tokens=_judge_max_tokens(len(pairs)))
-    verdicts: list[JudgeVerdictKind | None] = [None] * len(pairs)
-    for key, verdict in _parse_verdicts(response).items():
-        index = _key_index(key)
-        if index is not None and index < len(pairs) and verdicts[index] is None:
-            verdicts[index] = verdict
-    return verdicts
+
+
+def duplicate_judge_stamp() -> RungStamp:
+    """The judge as the duplicate ladder's model rung, at its prompt's version."""
+    return RungStamp("duplicate_judge", prompt_hash(_judge_prompt("[p0]\nA: {a}\nB: {b}")))
+
+
+_DUPLICATE_VERDICT = {
+    JudgeVerdictKind.PARAPHRASE: DuplicateVerdict.SAME,
+    JudgeVerdictKind.DISTINCT: DuplicateVerdict.DIFFERENT,
+}
+
+
+def _tally_judge(verdicts: Sequence[JudgeVerdictKind | None]) -> None:
+    """Count the judge's verdicts as the duplicate ladder's.
+
+    ``UNSURE`` and an omitted pair are the rung's abstention; with one rung,
+    an abstention leaves no rung deciding.
+    """
+    stamp = duplicate_judge_stamp()
+    for verdict in verdicts:
+        mapped = _DUPLICATE_VERDICT.get(verdict) if verdict is not None else None
+        value = (mapped or DuplicateVerdict.ABSTAIN).value
+        report(QuestionKind.DUPLICATE, "rungs", stamp, value)
+        report(QuestionKind.DUPLICATE, "settled", stamp if mapped else None, value)
 
 
 async def judge_claim_pairs(

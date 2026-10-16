@@ -7,8 +7,8 @@
 The split-package build gives the Client (``linkedparticles-core``) and Engine
 (``linkedparticles``) distributions a test suite each, and both need the same
 process-hygiene fixtures: the env defaults, the logger-level restore, the
-env-leak assertion, the config/LLM-client reset between tests, the live-LLM
-guard, and the encoder-absent seam. Every fixture here touches **only**
+env-leak assertion, the git hook-variable scrub, the config/LLM-client reset
+between tests, the live-LLM guard, and the encoder-absent seam. Every fixture here touches **only**
 Client-layer modules (``particles.config``, ``particles.embeddings``,
 ``particles.llm``) plus the standard library and ``httpx`` (a Client
 dependency), so the file rides both repos unchanged.
@@ -87,6 +87,45 @@ def pytest_configure(config: pytest.Config) -> None:
     # No strategy in the suite filters or is costly, so the check is noise here.
     settings.register_profile("particles", suppress_health_check=[HealthCheck.too_slow])
     settings.load_profile("particles")
+    # Process-wide as well as per test (``no_git_redirect`` below), so
+    # collection and session-scoped fixtures run git without them too.
+    for name in _GIT_REDIRECT_VARS:
+        os.environ.pop(name, None)
+
+
+#: Environment variables that point git at a repository other than the one
+#: ``-C`` / the working directory names. Git exports several of them to its
+#: hooks, so a suite run by pre-commit inherits the outer repository's. Mirrors
+#: ``scripts/publish_export.py``'s ``_GIT_REDIRECT_VARS`` (scripts do not ship in
+#: either exported tree, so it cannot be imported from here).
+_GIT_REDIRECT_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_git_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test's git commands on the repository the test names.
+
+    Under pre-commit the suite runs inside a git hook, and git hands its hooks
+    ``GIT_DIR`` / ``GIT_INDEX_FILE`` for the outer repository. Those override
+    ``git -C <tmp>``: a test's ``git init`` in ``tmp_path`` re-initialises the
+    real repository instead and writes ``core.bare = true`` into the shared
+    ``.git/config``, which breaks git in the main checkout and every worktree
+    at once (it happened twice, most recently 2026-10-14). Individual tests
+    used to strip the variables themselves; this makes it the default, so a new
+    test cannot repeat it. Integration tests are not exempt. A test that needs
+    one of these variables sets it with ``monkeypatch.setenv``.
+    """
+    for name in _GIT_REDIRECT_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

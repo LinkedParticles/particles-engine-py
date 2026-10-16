@@ -40,7 +40,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
-from particles.ingest.pipeline import SlotReading
+from particles.ingest.pipeline import SlotReading, update_decided_by
 from particles.store.event_store import OperatorEventType
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
@@ -262,6 +262,7 @@ class TestTheSurvivor:
             "retired_id": c["home"].id,
             "winner_id": c["move"].id,
             "route": "paraphrase",
+            "decided_by": update_decided_by(),
         }
 
     @pytest.mark.parametrize("verdict", [SlotVerdict.DIFFERENT, SlotVerdict.FIXED])

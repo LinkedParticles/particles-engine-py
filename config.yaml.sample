@@ -828,6 +828,14 @@ extraction_validity:  # [client]
   # `benchmark/validity` harness measures — raise it to be stricter. Never gates
   # the stored confidence.value.
   min_boundary_confidence: 0.75
+  # Source types a harness deposits as a session transcript. For these
+  # the extractor may date a past-tense claim that reports an act performed IN
+  # the session ("the tests passed", "the cherry-pick landed") at the session's
+  # date as an EVENT under the `session` basis, so `particles query --during`
+  # finds what a session did. A past event the session merely mentions keeps the
+  # rule (dated only when the text states a date). Empty disables it.
+  session_source_types:
+    - CONVERSATION
 
 structured_claim:  # [client]
   # The derived S-P-O rendering stored beside the immutable prose
@@ -2020,6 +2028,13 @@ audit:  # [engine]
   # exhaustive). Within each tier, pairs from two different notes are probed
   # before pairs from one note.
   max_contradiction_probes: 50
+  # Share of that cap reserved for cross-scope pairs, two projects' claims the
+  # observer precondition declines. Pairs some
+  # single reader sees are probed first; a cross-scope contradiction is still
+  # discovered and recorded as OBSERVER_DIVERGENCE. A share one side cannot
+  # fill goes to the other. Ordering only: no pair is dropped, a store that was
+  # never rescoped is not reordered, and uncapped `particles lint` ignores it.
+  cross_scope_probe_share: 0.2
   # Read each pair the probe flagged a second time, on llm.verification, with
   # each claim's source passage, note name and note date, and count only the
   # confirmed pairs. The report discloses "N flagged, M confirmed".

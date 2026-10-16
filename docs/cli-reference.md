@@ -901,7 +901,8 @@ $ particles benchmark trip-vs-move [OPTIONS] COMMAND [ARGS]...
 
 **Options**:
 
-* `--model <str>`: The model every purpose runs on (default: llm.default's model). The page's headline run names claude-sonnet-5-5, the model of the record's passing row.
+* `--case <reader|mid-trip>`: reader (default): the reader's own case, a week in Mumbai and a move a month later. mid-trip: a harder, different case, where the move is announced the day after the trip note.  [default: reader]
+* `--model <str>`: The model every purpose runs on (default: llm.default's model). The page's headline run names claude-sonnet-5-5.
 * `--provider <str>`: The provider of --model: anthropic or an llm.providers entry (default: llm.default's provider).
 * `--pin <str>`: PURPOSE=MODEL: run one purpose on another model of the same provider. Repeatable. The report names the mixture.
 * `--move-runs <int range>`: Move-case runs (default: 3, the record's protocol).  [x>=0]
@@ -2741,6 +2742,7 @@ $ particles memory [OPTIONS] COMMAND [ARGS]...
 * `useful`: Mark a belief useful: the explicit utility...
 * `rescope`: Bring a store's project keys up to date,...
 * `widen`: Put a belief in view for every project...
+* `redate`: Give each harvested session its own start...
 * `sweep-rank-lift`: Sweep the usefulness rank-lift and report...
 * `consolidate`: Run the scheduled consolidation cycle (ADR...
 * `serve`: Serve the reference memory-server...
@@ -2871,6 +2873,36 @@ $ particles memory widen [OPTIONS] {ID}
 
 * `--entry`: ID is a corpus entry: widen every belief sourced from it.
 * `--revoke`: Take a widening back.
+* `--store <str>`: Store handle.  [default: default]
+* `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
+* `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
+* `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
+* `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
+* `--help`: Show this message and exit.
+
+### `particles memory redate`
+
+Give each harvested session its own start as the reference date.
+
+A claim about an act a session performed is dated to the session's day
+(the `session` basis of `valid_from`). Sessions harvested before 1.190.1
+carried no date of their own, so their claims were anchored at the day
+they were extracted instead. This verb reads each session's start from
+its transcript, records it on the session's snapshots, and moves every
+`session`-dated claim of that session to that day. It makes no model
+call, never touches a claim dated any other way, and lists the sessions
+whose transcript is gone rather than guessing. Running it twice changes
+nothing. Local store only.
+
+**Usage**:
+
+```console
+$ particles memory redate [OPTIONS]
+```
+
+**Options**:
+
+* `--dry-run`: Report what would change; write nothing.
 * `--store <str>`: Store handle.  [default: default]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).

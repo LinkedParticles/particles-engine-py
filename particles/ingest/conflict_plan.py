@@ -88,18 +88,25 @@ class ConflictWritePlan:
     log_args: tuple[object, ...] = field(default_factory=tuple)
 
 
-def plan_update_event(retired_id: str, winner_id: str, *, route: str) -> PlannedEvent:
+def plan_update_event(
+    retired_id: str, winner_id: str, *, route: str, decided_by: str | None = None
+) -> PlannedEvent:
     """The ``UPDATE_SUPERSESSION`` event of one rung 2.5 retirement.
 
     ``route`` names where the retirement was decided: ``ladder`` (extraction
     or the assertion door), ``extra`` (a further same-subject pair)
-    or ``sweep``.
+    or ``sweep``. ``decided_by`` is the update ladder's rung
+    whose ``CHANGES`` the retirement rests on, ``name@version``,
+    recorded in the payload when given.
     """
+    payload: dict[str, object] = {"retired_id": retired_id, "winner_id": winner_id, "route": route}
+    if decided_by is not None:
+        payload["decided_by"] = decided_by
     return PlannedEvent(
         event_type=OperatorEventType.UPDATE_SUPERSESSION,
         reason=f"Rung 2.5 ({route}): {retired_id[:8]} superseded by {winner_id[:8]}",
         refs=((EventRefKind.PARTICLE, retired_id), (EventRefKind.PARTICLE, winner_id)),
-        payload={"retired_id": retired_id, "winner_id": winner_id, "route": route},
+        payload=payload,
     )
 
 
@@ -116,6 +123,7 @@ def plan_quarantine(
     trigger_ref_type: ProvenanceRefType,
     retired_twin: bool = False,
     reading: str | None = None,
+    decided_by: str | None = None,
 ) -> tuple[Particle, Particle]:
     """The quarantined candidate and the INCONSISTENCY record that names it.
 
@@ -127,6 +135,8 @@ def plan_quarantine(
     retired by judgment rather than a live one. ``reading`` is the
     instruction a second reading confirmed the pair under, stamped on the
     record as ``conflict:reading``; ``None`` leaves it unstamped.
+    ``decided_by`` is the contradiction ladder's deciding rung,
+    stamped as ``conflict:decided_by``.
     """
     quarantined = new.model_copy(
         update={
@@ -142,6 +152,7 @@ def plan_quarantine(
         asserted_by=PIPELINE_ACTOR,
         trigger_ref_type=trigger_ref_type,
         retired_twin=retired_twin,
+        decided_by=decided_by,
     )
     if reading is not None:
         wrapper = wrapper.model_copy(
@@ -206,6 +217,7 @@ def plan_conflict_writes(
     scores: tuple[float | None, float | None],
     domain: str | None,
     reading: str | None = None,
+    decided_by: str | None = None,
 ) -> ConflictWritePlan:
     """Map one ladder outcome to its writes.
 
@@ -213,6 +225,10 @@ def plan_conflict_writes(
     dropped-candidate event and the trust-resolution log lines. ``domain`` is
     the INCONSISTENCY record's ``domain_hint``. ``reading`` is the instruction a
     second reading confirmed the pair under, stamped on a rung-3 record.
+    ``decided_by`` is the rung whose verdict the outcome rests
+    on: the update ladder's on a rung 2.5 retirement, recorded
+    in its event, and the contradiction ladder's on a rung-3 record, stamped
+    on it.
     """
     score_new, score_existing = scores
     new_short, existing_short = new.id[:8], existing.id[:8]
@@ -323,7 +339,9 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=minted,
                 demote=(existing.id, StatusReason.SUPERSEDED_BY_UPDATE),
-                update_event=plan_update_event(existing.id, minted.id, route="ladder"),
+                update_event=plan_update_event(
+                    existing.id, minted.id, route="ladder", decided_by=decided_by
+                ),
                 cache_drop_existing=True,
                 cache_add_new=True,
                 result=minted,
@@ -336,7 +354,9 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=new,
                 demote=(new.id, StatusReason.SUPERSEDED_BY_UPDATE),
-                update_event=plan_update_event(new.id, existing.id, route="ladder"),
+                update_event=plan_update_event(
+                    new.id, existing.id, route="ladder", decided_by=decided_by
+                ),
                 result=_demoted(new, StatusReason.SUPERSEDED_BY_UPDATE),
                 log_message=(
                     "Update supersession (rung 2.5): existing %s is newer than new %s"
@@ -353,6 +373,7 @@ def plan_conflict_writes(
                 snapshot_id=snapshot_id,
                 trigger_ref_type=trigger_ref_type,
                 reading=reading,
+                decided_by=decided_by,
             )
             return ConflictWritePlan(
                 insert=quarantined,

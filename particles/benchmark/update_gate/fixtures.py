@@ -15,12 +15,75 @@ copy; fall back to the source tree, as the schema artifacts do.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
-#: The trip-versus-move notes, in deposit order (the move case reads all three).
+#: The mid-trip case's notes, in deposit order (its move variant reads all three).
 MOVE_NOTES = ("session-04.md", "session-11.md", "session-12-moved.md")
-#: The trip-alone variant: a week away, and no move.
+#: The mid-trip case's trip-alone variant: a week away, and no move.
 TRIP_ALONE_NOTES = ("session-04.md", "session-11.md")
+
+
+@dataclass(frozen=True)
+class Case:
+    """One trip-versus-move case: its notes per variant, and the roles they play.
+
+    The checks select claims by the note they came from: the **home** note
+    states the residence, the **trip** note the week away, the **move** note
+    the move. In the reader's case one note is both home and trip.
+    """
+
+    name: str
+    label: str
+    #: Variant (``move``, ``trip-alone``) → notes in deposit order.
+    variants: dict[str, tuple[str, ...]]
+    home: str
+    trip: str
+    move: str
+    #: The move note's own date (its heading's).
+    move_date: date
+    #: Whether a trip claim lapsed on its own validity by the move counts as
+    #: no longer current (the reader's case only: there the week ends three
+    #: weeks before the move, and in the mid-trip case it cannot).
+    lapse_counts: bool
+
+    @property
+    def notes(self) -> tuple[str, ...]:
+        """Every note the case reads, in deposit order."""
+        return self.variants["move"]
+
+
+#: The cases ``particles benchmark trip-vs-move --case`` runs.
+CASES: dict[str, Case] = {
+    "reader": Case(
+        name="reader",
+        label="A week away, then a move a month later",
+        variants={
+            "move": ("reader-01.md", "reader-02-moved.md"),
+            "trip-alone": ("reader-01.md",),
+        },
+        home="reader-01.md",
+        trip="reader-01.md",
+        move="reader-02-moved.md",
+        move_date=date(2026, 10, 1),
+        lapse_counts=True,
+    ),
+    "mid-trip": Case(
+        name="mid-trip",
+        label="Change of plans mid-trip",
+        variants={"move": MOVE_NOTES, "trip-alone": TRIP_ALONE_NOTES},
+        home="session-04.md",
+        trip="session-11.md",
+        move="session-12-moved.md",
+        move_date=date(2026, 10, 9),
+        lapse_counts=False,
+    ),
+}
+#: The verb's default case: the reader's own.
+DEFAULT_CASE = "reader"
+#: The case a report without a ``case`` field measured (every report before).
+LEGACY_CASE = "mid-trip"
 
 #: The four registered pair sets the update-gate verb replays, by set name.
 PAIR_SETS = {

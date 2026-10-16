@@ -132,3 +132,51 @@ checked: 24 confirmed, four coarse `in <year>` anchors that should read as
 events rather than states (the cue's kind was changed on that ruling), one
 `since` that dated a report's coverage window, and one sentence holding two
 claims; going forward the extractor dates what it extracts.
+
+## The owner's store, live (2026-10-14 and 2026-10-15)
+
+The acceptance runs above used fixture stores. The question that started
+the work, "what did I work on last week", was then asked of the owner's own
+Claude Code memory store (53,804 ACTIVE claims by the end), over the week
+2026-10-06 to 2026-10-13, at the free listing tier (no question, no model
+call). Three stages, each measured with the same listing:
+
+| Stage | began | admitted | dated claims |
+|---|---|---|---|
+| Baseline, after the prose backfill (2026-10-14) | 0 | 110 | 754 |
+| After extracting the week's 103 sessions under extractor 0.18.0 | 52 | 155 | 1,672 |
+| After `particles memory redate` (1.191.4) | 429 | 523 | 1,801 |
+
+The baseline admitted nothing that began in the week: the store's claims
+about its own sessions are past-tense acts with no date in the text, which
+the start rule of the window route withholds a date from,
+and the week's transcripts had not been extracted at all (a backlog of 443
+pending conversation snapshots, the extract pass capped at 20 entries a
+night). The `session` basis (1.190.1) dates an act a session
+performed to the session's day. Extracting the 103 October sessions
+(unbatched, $17.39 metered) produced 812 such claims, but 798 of them landed
+on 2026-10-14 or 2026-10-15, the extraction wall-clock, because sessions
+harvested before 1.190.1 carried no `content_published_at`; `particles
+memory redate` (1.191.4) read each session's start from its transcript and
+moved 902 claims to their day with no model call. Of the 429 claims that
+began in the week after the repair, 381 are session-dated acts, 20 carry a
+stated date, 15 a prose date, and the rest are spans. By day: 59 on 10-08,
+112 on 10-10, 64 on 10-11, 115 on 10-12, 70 on 10-13; 10-09 holds eight,
+because that day's session is one of 26 whose transcript no longer exists
+on the machine. The ruled-out side is also visible: a July session's acts
+are dated to July, not to the week they were extracted in.
+
+The question form, "What did I work on in the week of 2026-10-06?" with the
+same window, was asked twice (claude-sonnet-5-5, one call each). At the
+default `top_k` of 40 the answer covered 2026-10-09 to 2026-10-12 and said
+it found nothing for 10-06 to 10-08, though 59 claims began on 10-08: the
+window admitted 523 candidates, ranking put standing context from June
+(held-at states at effective confidence 0.6 to 0.7) above the week's acts
+(0.2 to 0.3, uncalibrated), and the response warned that 383 more
+candidates scored within 0.15 of the cutoff. At `top_k` 120 the answer
+covered every day from 10-08 and read as the week (the decision to continue
+the project, the three approvals, the trip-case runs, the pypi outage), with
+64 of its 120 hits under the *began* reading, and still warned of 402
+candidates within 0.15 of the cutoff. The listing is the complete answer;
+the question form summarises what ranking lets through, and on a window this
+wide ranking is the limit, not the window.

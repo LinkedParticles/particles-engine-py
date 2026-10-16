@@ -713,6 +713,9 @@ async def _harvest_transcript(
     tags = ["claude-code", f"session:{session_id}"]
     if project:
         tags.append(f"project:{project}")
+    # the session's own start is the reference date its claims
+    # resolve against. Left unset, the extractor anchors on its wall-clock,
+    # which the deferred extract pass makes later than the session.
     return await get_backend().deposit_text_at_uri(
         text=text,
         uri_r=f"claude-code://session/{session_id}",
@@ -720,7 +723,7 @@ async def _harvest_transcript(
         mutability="APPEND_ONLY",
         tags=tags,
         deposited_by="claude-code-hook",
-        content_published_at=None,
+        content_published_at=transcript_started_at(jsonl_text),
         store=store,
     )
 

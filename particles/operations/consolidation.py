@@ -51,7 +51,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -69,6 +69,7 @@ from particles.core.schema import SuggestMode
 from particles.core.spend_budget import decide_spend
 from particles.core.status import Status
 from particles.db import write_lock, write_transaction
+from particles.ingest.ladder_shell import rung_tally
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.llm.batch_budget import (
     BatchWaitBudget,
@@ -109,7 +110,11 @@ from particles.operations.curation.snapshot import QueueSource, collect_and_pers
 from particles.operations.held_release import ReleaseReport, run_release
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.lint.contestedness import contested_findings_for
-from particles.operations.lint.contradictions import contradiction_partner, count_disagreements
+from particles.operations.lint.contradictions import (
+    CensusLadder,
+    contradiction_partner,
+    count_disagreements,
+)
 from particles.operations.lint.open_inconsistency import open_inconsistency_findings
 from particles.operations.modality import reclassified_particle_ids_since
 from particles.operations.paraphrases import ParaphraseReport, run_paraphrases
@@ -152,6 +157,7 @@ from particles.store.particle_store import (
     get_particles_by_ids,
     get_particles_by_status,
 )
+from particles.store.probe_verdict_store import ShadowStanding, shadow_standings
 
 if sys.platform != "win32":
     import fcntl
@@ -977,6 +983,9 @@ class ConsolidationReport(BaseModel):
     contradiction_grouped_pairs: int = 0
     duplicate_candidate_pairs_total: int = 0
     duplicate_in_scope: int = 0
+    # what the census's contradiction ladder did, None when the
+    # census did not probe.
+    contradiction_ladder: CensusLadder | None = None
     # Pass 3's reported and confirmed pairs, handed to pass 3b.
     # Working state, not run-record fields.
     contradiction_finding_pairs: list[tuple[str, str, bool]] = Field(
@@ -1052,6 +1061,13 @@ class ConsolidationReport(BaseModel):
     #: Measured LLM usage for the run (the providers' own ``usage`` fields,
     #: priced at list price); also written to the run record.
     llm_usage: LLMUsage | None = None
+
+    #: Per-ladder, per-rung verdict counts for the run, the run
+    #: record's ``rungs`` block. Written on every run, structural-only included.
+    rung_counts: dict[str, Any] = Field(default_factory=dict)
+    #: Each shadow rung's running precision, read from the probe
+    #: ledger for the report. Not recorded: the ledger is the record.
+    shadow_standings: list[ShadowStanding] = Field(default_factory=list, exclude=True)
 
     #: Event id of the written run record.
     event_id: str | None = None
@@ -1248,6 +1264,7 @@ def build_run_payload(
     batch_wait: BatchWaitSummary | None = None,
     budget: BudgetSummary | None = None,
     closure: ClosureMeasure | None = None,
+    rungs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The versioned ``CONSOLIDATION_RUN`` payload (``format: 1``).
 
@@ -1266,6 +1283,10 @@ def build_run_payload(
     for a run that did not measure. ``speaker_openers`` is additive too:
     a digest of the speaker references the about-subject key
     read, so a change in the sweep's pairs can be traced to an opener edit.
+    ``rungs`` is additive too: per ladder, the verdicts each
+    rung returned, the ladder's settled verdicts by the rung that decided
+    them, and any shadow rung's verdicts. The key is written on every run, an
+    empty block on a night no ladder ran, so its absence is never ambiguous.
     """
     payload: dict[str, Any] = {
         "format": RUN_PAYLOAD_FORMAT,
@@ -1290,6 +1311,7 @@ def build_run_payload(
             for p in passes
         ],
         "census": census,
+        "rungs": dict(rungs or {}),
     }
     if llm_usage is not None:
         payload["llm_usage"] = llm_usage.model_dump(mode="json")
@@ -1438,6 +1460,7 @@ async def run_consolidation(
     report.budget = BudgetSummary(budget_usd=cfg.budget_usd)
     with (
         track_usage() as usage,
+        rung_tally() as tally,
         batch_wait_budget(budget),
         spend_budget(_run_spend_budget(cfg.budget_usd, usage)) as spend,
     ):
@@ -1781,6 +1804,8 @@ async def run_consolidation(
             # ---------------------------------------- pass 7: record + report
             report.completed_at = _utcnow()
             report.llm_usage = usage.snapshot()
+            report.rung_counts = tally.payload()
+            report.shadow_standings = await shadow_standings(session)
             report.batch_wait = BatchWaitSummary.from_budget(budget)
             report.budget.spent_usd = report.llm_usage.priced_cost_usd
             if spend is not None:
@@ -1812,6 +1837,7 @@ async def run_consolidation(
                 batch_wait=report.batch_wait,
                 budget=report.budget,
                 closure=report.closure,
+                rungs=report.rung_counts,
             )
             async with write_transaction(session):
                 event = await record_event(
@@ -2966,6 +2992,7 @@ async def _pass_census(
         report.contradiction_intra_scope_pairs = probe_control.intra_scope_pairs
         report.contradiction_probes_run = probe_control.probes_run
         report.contradiction_previously_cleared = probe_control.previously_cleared
+        report.contradiction_ladder = probe_control.ladder.model_copy()
         report.contradiction_verified = probe_control.verify
         report.contradiction_flagged = probe_control.flagged
         report.contradiction_confirmed = probe_control.confirmed
@@ -3422,6 +3449,11 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "contradiction_unverified": report.contradiction_unverified,
         "contradiction_disagreements": report.contradiction_disagreements,
         "contradiction_grouped_pairs": report.contradiction_grouped_pairs,
+        **(
+            {"contradiction_ladder": report.contradiction_ladder.payload()}
+            if report.contradiction_ladder is not None
+            else {}
+        ),
         "disclosure_open_records": report.disclosure_open_records,
         "contested_census_claims": report.contested_census_claims,
         **({"disclosure": report.disclosure.payload()} if report.disclosure is not None else {}),
@@ -3552,6 +3584,7 @@ async def record_audit_run(
         contradiction_unverified=audit_report.contradiction_unverified,
         contradiction_disagreements=audit_report.contradiction_disagreements,
         contradiction_grouped_pairs=audit_report.contradiction_grouped_pairs,
+        contradiction_ladder=audit_report.contradiction_ladder,
         duplicate_candidate_pairs_total=audit_report.duplicate_candidate_pairs_total,
         pending_extracted=audit_report.extracted_snapshots,
     )
@@ -3568,6 +3601,7 @@ async def record_audit_run(
         passes=[extract_pass, census_pass],
         census=_census_payload(report),
         llm_usage=audit_report.llm_usage,
+        rungs=audit_report.rung_counts,
     )
     await record_event(
         session,
@@ -3757,6 +3791,58 @@ def _budget_lines(report: ConsolidationReport) -> list[str]:
     return lines
 
 
+#: The admission bar a shadow rung's report line measures against.
+SHADOW_BAR_PRECISION = 0.95
+SHADOW_BAR_INPUTS = 30
+
+
+def render_rung_lines(report: ConsolidationReport) -> list[str]:
+    """Which reasoners decided how much this run, and each shadow rung's standing.
+
+    One line per ladder that ran, its settled verdicts by deciding rung; the
+    census's duplicate-key line (what the cap bought, and how many probed
+    pairs were one sentence twice); then one line per shadow rung verdict,
+    with its running precision and how far it is from the bar.
+    """
+    lines: list[str] = []
+    for kind, sections in sorted(report.rung_counts.items()):
+        settled = sections.get("settled", {})
+        if not settled:
+            continue
+        parts = []
+        for rung, verdicts in settled.items():
+            counts = ", ".join(f"{verdict} {n:,}" for verdict, n in verdicts.items())
+            parts.append(f"{rung} ({counts})")
+        lines.append("")
+        lines.append(f"  reasoners, {kind}: " + "; ".join(parts))
+    ladder = report.contradiction_ladder
+    if ladder is not None and ladder.probed_distinct:
+        identical = ladder.probed_identical
+        share = identical / ladder.probed_distinct
+        line = (
+            f"  census cap bought {ladder.probed_distinct:,} distinct pairs; "
+            f"{identical:,} probed pair(s) were one sentence twice ({share:.1%}), "
+            f"{ladder.repeated_pairs:,} repeated pair(s) dropped"
+        )
+        if ladder.observer_ordered:
+            line += (
+                f"; {ladder.in_scope_probed:,} in scope, {ladder.cross_scope_probed:,} "
+                f"cross-scope ({ladder.cross_scope_reserved:,} reserved)"
+            )
+        lines.append(line)
+    for standing in report.shadow_standings:
+        precision = standing.precision
+        shown = "no labelled input yet" if precision is None else f"precision {precision:.2f}"
+        short = max(0, SHADOW_BAR_INPUTS - standing.labelled)
+        lines.append(
+            f"  shadow {standing.rung} '{standing.verdict}': {shown} over "
+            f"{standing.labelled:,} labelled of {standing.recorded:,} input(s); bar "
+            f"{SHADOW_BAR_PRECISION:.2f} over {SHADOW_BAR_INPUTS}"
+            + (f", {short} labelled input(s) short" if short else "")
+        )
+    return lines
+
+
 def render_consolidation_report(report: ConsolidationReport) -> str:
     """Render the §7 report shape — headline deltas, disclosures, the queue."""
     lines: list[str] = []
@@ -3906,6 +3992,7 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             f"skipped as previously cleared (both claims unchanged since a probe answered "
             f"no; not counted against audit.max_contradiction_probes)"
         )
+    lines.extend(render_rung_lines(report))
     if not report.semantic_degraded and report.update_previously_cleared:
         lines.append("")
         lines.append(

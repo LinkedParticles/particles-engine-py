@@ -72,6 +72,8 @@ from particles.ingest.pipeline import (
     _trigger_ref_for,
     contradiction_prompt_hash,
     read_update_slot,
+    reconcile_probe_stamp,
+    update_decided_by,
     update_prompt_hash,
 )
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
@@ -193,6 +195,8 @@ async def _open_fixed_slot_review(session: AsyncSession, older: Particle, newer:
         snapshot_id=snapshot_id,
         asserted_by=UPDATE_SWEEP_ACTOR,
         trigger_ref_type=ref_type,
+        # The sweep opens it on the §6.6 probe's YES about a fixed slot.
+        decided_by=str(reconcile_probe_stamp()),
     )
     record = record.model_copy(
         update={"properties": {**(record.properties or {}), ORIGIN_KEY: FIXED_SLOT_ORIGIN}}
@@ -811,7 +815,9 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
                     StatusReason.SUPERSEDED_BY_UPDATE,
                 )
                 await _set_supersedes_if_unset(session, newer.id, older.id)
-                event = plan_update_event(older.id, newer.id, route="sweep")
+                event = plan_update_event(
+                    older.id, newer.id, route="sweep", decided_by=update_decided_by()
+                )
                 await record_event(
                     session,
                     actor=event.actor,
@@ -884,6 +890,7 @@ async def _sweep_contradiction(
             contradiction_prompt_hash(),
             {_contradiction_key(newer, older): probe},
             purpose="semantic_lint",
+            rung=reconcile_probe_stamp(),
         )
     return probe
 
@@ -901,6 +908,7 @@ async def _sweep_slot(
             update_prompt_hash(),
             {_slot_key(older, newer): admits_update(slot)},
             purpose=reading.purpose,
+            rung=reading.decided_by,
         )
     return slot
 

@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
+from sqlalchemy import select
 
 from particles.core.schema import (
     AssertionModality,
@@ -2003,3 +2004,354 @@ class TestSourceKindReading:
         assert outcome.verdicts == {stale_1.key: None}
         assert outcome.withdrawn_reasons == {stale_1.key: "a change"}
         assert (outcome.read, outcome.withdrawn, outcome.deferred) == (1, 1, 1)
+
+
+# ---------------------------------------------------------------------------
+# The contradiction ladder in the census
+# ---------------------------------------------------------------------------
+
+
+async def _seed(session: object, rows: list[tuple[str, str]]) -> list[Particle]:
+    """Insert one particle per ``(content, entry)``, all above the similarity gate."""
+    out = []
+    for content, entry in rows:
+        particle = _make_particle(content).model_copy(update={"provenance": _prov(entry)})
+        await insert_particle(session, particle, embedding=_EMB_HI_A)  # type: ignore[arg-type]
+        out.append(particle)
+    await session.commit()  # type: ignore[attr-defined]
+    return out
+
+
+@pytest.mark.asyncio
+async def test_the_duplicate_key_rung_answers_before_the_probe(db_session: object) -> None:
+    """One sentence held twice is never probed; the cap buys distinct pairs."""
+    from unittest.mock import AsyncMock, patch
+
+    from particles.ingest.ladder_shell import rung_tally
+    from particles.operations.lint import ContradictionProbeControl, _check_contradictions
+    from particles.operations.lint.contradictions import probe_prompt_hash
+    from particles.store.probe_verdict_store import ProbeVerdictRow
+
+    session = db_session  # type: ignore[assignment]
+    await _seed(
+        session,
+        [
+            ("Main is at version 1.2.", "n1"),
+            ("Main is at version 1.2.", "n2"),
+            ("Main is at version 1.3.", "n3"),
+        ],
+    )
+    probe = AsyncMock(return_value="the two versions differ")
+    control = ContradictionProbeControl(max_probes=10)
+    with (
+        rung_tally() as tally,
+        patch("particles.operations.lint.contradictions._llm_check_contradiction", probe),
+    ):
+        findings = await _check_contradictions(session, fix=False, control=control)  # type: ignore[arg-type]
+
+    # Three pairs: the identical one answered by the rung, the two 1.2-vs-1.3
+    # pairs one question, asked once.
+    assert probe.await_count == 1
+    ladder = control.ladder
+    assert ladder.pairs_evaluated == 3
+    assert ladder.decided == {"duplicate_key@1": 1}
+    assert ladder.repeated_pairs == 1
+    assert (ladder.probed_distinct, ladder.probed_identical) == (1, 0)
+    assert [f.decided_by for f in findings] == [f"contradiction_probe@{probe_prompt_hash()}"]
+    counts = tally.payload()["contradiction"]
+    assert counts["settled"]["duplicate_key@1"] == {"no": 1}
+    assert counts["settled"][f"contradiction_probe@{probe_prompt_hash()}"] == {"yes": 1}
+    # The probe's row is stamped with its rung; the admitted deterministic rung
+    # writes no row of its own (its load is the tally above).
+    rows = (await session.execute(select(ProbeVerdictRow))).scalars().all()  # type: ignore[union-attr]
+    assert [r.probe_kind for r in rows] == ["contradiction"]
+    assert rows[0].rung == f"contradiction_probe@{probe_prompt_hash()}"
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_rung_writes_no_ledger_row_and_a_shadow_rung_does(
+    db_session: object,
+) -> None:
+    """and § 6: the ledger keeps a shadow rung's verdicts, not an admitted rung's."""
+    from particles.core.ladders import DUPLICATE_KEY, ClaimPair
+    from particles.core.rung_ladder import (
+        ContradictionVerdict,
+        CostClass,
+        Ladder,
+        QuestionKind,
+        Rung,
+        RungStamp,
+    )
+    from particles.operations.lint.contradictions import _PairRungs
+    from particles.operations.probe_ledger import remember_rungs
+    from particles.store.probe_verdict_store import ProbeVerdictRow
+
+    session = db_session  # type: ignore[assignment]
+
+    def always_no(pair: ClaimPair) -> ContradictionVerdict:
+        return ContradictionVerdict.NO
+
+    shadowed = Rung(
+        name="shadowed", version="1", cost=CostClass.PURE, decide=always_no, shadow=True
+    )
+    ladder = Ladder(
+        kind=QuestionKind.CONTRADICTION,
+        abstain=ContradictionVerdict.ABSTAIN,
+        rungs=(shadowed, DUPLICATE_KEY),
+    )
+    rungs = _PairRungs(ladder)
+    same = _make_particle("Main is at version 1.2."), _make_particle("Main is at version 1.2.")
+    other = _make_particle("Main is at version 1.3.")
+    # The duplicate key decides the identical pair; the shadow rung decides both.
+    assert rungs(*same) is True
+    assert rungs(same[0], other) is False
+    assert rungs.counts[DUPLICATE_KEY.stamp] == {"no": 1}
+    assert rungs.counts[shadowed.stamp] == {"no": 2}
+    assert set(rungs.rows) == {shadowed.stamp}
+    assert len(rungs.rows[shadowed.stamp]) == 2
+
+    assert await remember_rungs(session, rungs.rows, shadow=rungs.shadow) == 2
+    rows = (await session.execute(select(ProbeVerdictRow))).scalars().all()  # type: ignore[union-attr]
+    assert {(r.probe_kind, r.rung, r.shadow) for r in rows} == {
+        ("rung:shadowed", str(RungStamp("shadowed", "1")), True)
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_non_truth_apt_pair_is_answered_by_the_adjudicability_rung(
+    db_session: object,
+) -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from particles.operations.lint import ContradictionProbeControl, _check_contradictions
+
+    session = db_session  # type: ignore[assignment]
+    apt = _make_particle("The office opens at nine.")
+    opinion = _make_particle("The office is a lovely place.").model_copy(
+        update={"assertion_modality": AssertionModality.EVALUATIVE}
+    )
+    for p in (apt, opinion):
+        await insert_particle(session, p, embedding=_EMB_HI_A)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+    probe = AsyncMock(return_value=None)
+    control = ContradictionProbeControl()
+    with patch("particles.operations.lint.contradictions._llm_check_contradiction", probe):
+        await _check_contradictions(session, fix=False, control=control)  # type: ignore[arg-type]
+    probe.assert_not_awaited()
+    assert control.ladder.decided == {"adjudicability@1": 1}
+
+
+def _pair(a: str, b: str) -> object:
+    from particles.operations.candidate_pairs import CandidatePair
+
+    return CandidatePair(0, 0.9, _make_particle(a), _make_particle(b))
+
+
+@pytest.mark.asyncio
+async def test_the_cap_probes_in_scope_pairs_first_and_reserves_a_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ruling: order, do not drop."""
+    from particles.core.observer_scope import BeliefScope
+    from particles.operations.lint import contradictions as c_mod
+
+    pairs = [_pair(f"x{i}", f"y{i}") for i in range(10)]
+    # Pairs 0-5 join two projects' claims; 6-9 are seen by one reader.
+    cross = {p.a.id for p in pairs[:6]} | {p.b.id for p in pairs[:6]}  # type: ignore[attr-defined]
+
+    async def engaged(session: object) -> bool:
+        return True
+
+    async def no_widening(session: object) -> bool:
+        return False
+
+    async def scopes(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
+        out = {}
+        for p in particles:
+            key = p.content  # each claim its own project when cross-scope
+            out[p.id] = BeliefScope(keys=frozenset({key if p.id in cross else "shared"}))
+        return out
+
+    monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
+    monkeypatch.setattr(c_mod, "any_widening", no_widening)
+    monkeypatch.setattr(c_mod, "load_scopes", scopes)
+    ladder = c_mod.CensusLadder()
+    planned, flags = await c_mod._observer_ordered(None, pairs, 5, 0.2, ladder)  # type: ignore[arg-type]
+    # Four in-scope pairs first, in their own order, then the one reserved
+    # cross-scope pair: nothing is dropped from the list, the cap picks.
+    assert planned == pairs[6:10] + pairs[0:1]
+    assert flags == [False] * 4 + [True]
+    assert (ladder.observer_ordered, ladder.cross_scope_reserved) == (True, 1)
+
+    # A side that cannot fill its share gives the rest to the other.
+    planned, flags = await c_mod._observer_ordered(None, pairs, 8, 0.2, ladder)  # type: ignore[arg-type]
+    assert planned == pairs[6:10] + pairs[0:4]
+    assert flags.count(True) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_store_never_rescoped_is_not_reordered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from particles.operations.lint import contradictions as c_mod
+
+    async def open_gate(session: object) -> bool:
+        return False
+
+    monkeypatch.setattr(c_mod, "lens_may_engage", open_gate)
+    pairs = [_pair(f"x{i}", f"y{i}") for i in range(4)]
+    ladder = c_mod.CensusLadder()
+    planned, flags = await c_mod._observer_ordered(None, pairs, 2, 0.2, ladder)  # type: ignore[arg-type]
+    assert planned == pairs[:2] and flags == [False, False]
+    assert not ladder.observer_ordered
+
+
+@pytest.mark.asyncio
+async def test_the_observer_scan_is_bounded_when_one_share_cannot_fill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rare kind stops the scan at ``_ORDER_SCAN_FACTOR`` pairs per probe, not the list's end."""
+    from particles.core.observer_scope import BeliefScope
+    from particles.operations.lint import contradictions as c_mod
+
+    pairs = [_pair(f"x{i}", f"y{i}") for i in range(1000)]  # every pair in scope
+    calls: list[int] = []
+
+    async def engaged(session: object) -> bool:
+        return True
+
+    async def no_widening(session: object) -> bool:
+        return False
+
+    async def scopes(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
+        calls.append(len(particles))
+        return {p.id: BeliefScope(keys=frozenset({"shared"})) for p in particles}
+
+    monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
+    monkeypatch.setattr(c_mod, "any_widening", no_widening)
+    monkeypatch.setattr(c_mod, "load_scopes", scopes)
+    monkeypatch.setattr(c_mod, "_ORDER_CHUNK", 100)
+    ladder = c_mod.CensusLadder()
+    planned, flags = await c_mod._observer_ordered(None, pairs, 4, 0.25, ladder)  # type: ignore[arg-type]
+    # The cross-scope share can never fill. The scan reads 4 × 50 = 200 pairs
+    # (two chunks of 100), not all 1,000, and the unfilled share goes in scope.
+    assert len(calls) == 2
+    assert sum(calls) == 400
+    assert planned == pairs[:4]
+    assert flags == [False] * 4
+
+
+@pytest.mark.asyncio
+async def test_a_particle_the_scope_join_omits_reads_as_unattributed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stamping gap fails closed: never GLOBAL, the direction that widens a belief."""
+    from particles.core.observer_scope import UNATTRIBUTED_SCOPE, BeliefScope, pair_precondition
+    from particles.operations.lint import contradictions as c_mod
+
+    pairs = [_pair("x", "y")]
+    seen: list[tuple[BeliefScope, BeliefScope]] = []
+
+    async def engaged(session: object) -> bool:
+        return True
+
+    async def no_widening(session: object) -> bool:
+        return False
+
+    async def nothing_loaded(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
+        return {}
+
+    def recording(candidate: BeliefScope, existing: BeliefScope) -> object:
+        seen.append((candidate, existing))
+        return pair_precondition(candidate, existing)
+
+    monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
+    monkeypatch.setattr(c_mod, "any_widening", no_widening)
+    monkeypatch.setattr(c_mod, "load_scopes", nothing_loaded)
+    monkeypatch.setattr(c_mod, "pair_precondition", recording)
+    await c_mod._observer_ordered(None, pairs, 1, 0.2, c_mod.CensusLadder())  # type: ignore[arg-type]
+    assert seen == [(UNATTRIBUTED_SCOPE, UNATTRIBUTED_SCOPE)]
+    assert not seen[0][0].is_global
+
+
+@pytest.mark.asyncio
+async def test_a_rung_yes_survives_a_stale_ledger_no_and_a_repeated_pair(
+    db_session: object,
+) -> None:
+    """The cheaper rung's verdict stands; no ledger NO or repeat pre-empts it."""
+    from unittest.mock import AsyncMock, patch
+
+    from particles.core.ladders import ClaimPair
+    from particles.core.probe_verdict import ProbeKind, verdict_key
+    from particles.core.rung_ladder import ContradictionVerdict, CostClass, Ladder, Rung
+    from particles.operations.lint import ContradictionProbeControl, _check_contradictions
+    from particles.operations.lint import contradictions as c_mod
+    from particles.operations.probe_ledger import remember
+
+    session = db_session  # type: ignore[assignment]
+    nine, ten = "The office opens at nine.", "The office opens at ten."
+    await _seed(session, [(nine, "n1"), (nine, "n2"), (ten, "n3")])
+    # The ledger holds an older probe NO on the two texts under the current prompt.
+    await remember(
+        session,
+        ProbeKind.CONTRADICTION,
+        c_mod.probe_prompt_hash(),
+        {verdict_key(ProbeKind.CONTRADICTION, nine, ten): False},
+        purpose="semantic_lint",
+    )
+
+    def stub(pair: ClaimPair) -> ContradictionVerdict:
+        if {pair[0].content, pair[1].content} == {nine, ten}:
+            return ContradictionVerdict.YES
+        return ContradictionVerdict.ABSTAIN
+
+    real = c_mod.census_ladder
+
+    def with_stub(forms: object = None) -> Ladder[ClaimPair, ContradictionVerdict]:
+        base = real(forms)  # type: ignore[arg-type]
+        yes = Rung(name="stub", version="1", cost=CostClass.PURE, decide=stub)
+        return Ladder(kind=base.kind, abstain=base.abstain, rungs=(*base.rungs, yes))
+
+    probe = AsyncMock(return_value=None)
+    control = ContradictionProbeControl(max_probes=10)
+    with (
+        patch.object(c_mod, "census_ladder", with_stub),
+        patch("particles.operations.lint.contradictions._llm_check_contradiction", probe),
+    ):
+        findings = await _check_contradictions(session, fix=False, control=control)  # type: ignore[arg-type]
+
+    # Both nine-versus-ten pairs are the rung's: the second shares the first's
+    # texts and the ledger cleared them, and neither fact reaches a rung's YES.
+    probe.assert_not_awaited()
+    assert len(findings) == 2
+    assert {f.decided_by for f in findings} == {"stub@1"}
+    assert all("decided by stub@1" in f.detail for f in findings)
+    assert control.ladder.decided == {"duplicate_key@1": 1, "stub@1": 2}
+    assert (control.previously_cleared, control.ladder.repeated_pairs) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_census_normalises_each_text_once(
+    db_session: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The duplicate-key rung reads each claim's normalised form once per run, not per pair."""
+    from unittest.mock import AsyncMock, patch
+
+    from particles.core import ladders as ladders_mod
+    from particles.core.duplicate_key import normalize_content
+    from particles.operations.lint import ContradictionProbeControl, _check_contradictions
+
+    session = db_session  # type: ignore[assignment]
+    await _seed(session, [(f"Main is at version 1.{i}.", f"n{i}") for i in range(4)])
+    calls: list[str] = []
+
+    def counting(text: str) -> str:
+        calls.append(text)
+        return normalize_content(text)
+
+    monkeypatch.setattr(ladders_mod, "normalize_content", counting)
+    probe = AsyncMock(return_value=None)
+    control = ContradictionProbeControl(max_probes=10)
+    with patch("particles.operations.lint.contradictions._llm_check_contradiction", probe):
+        await _check_contradictions(session, fix=False, control=control)  # type: ignore[arg-type]
+    # Six pairs reached the rung and the tally read the six probed pairs again.
+    assert control.ladder.pairs_evaluated == 6
+    assert len(calls) == 4

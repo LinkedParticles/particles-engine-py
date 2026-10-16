@@ -410,8 +410,8 @@ would log-and-skip the other's files. The whole-pipeline memory benchmark
 
 `particles benchmark trip-vs-move` and `particles benchmark update-gate` are
 not extractor benchmarks either: they measure how the pipeline handles a value
-that changes. Their inputs are fixtures, not suites. The case's
-three notes live in `tests/fixtures/trip_vs_move/` and the four registered pair
+that changes. Their inputs are fixtures, not suites. The notes of
+both cases (`reader` and `mid-trip`) live in `tests/fixtures/trip_vs_move/` and the four registered pair
 sets in `tests/fixtures/update_probe/`; a built wheel carries both under
 `particles/_artifacts/benchmarks/`. Their reports are this SDK's own and not
 part of the normative schema: `TripVsMoveReport` and `UpdateGateReport` in

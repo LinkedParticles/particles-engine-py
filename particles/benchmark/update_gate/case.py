@@ -35,7 +35,7 @@ import yaml
 from particles.benchmark.update_gate import _child
 from particles.benchmark.update_gate.checks import CHECKS_VERSION, evaluate, read_store
 from particles.benchmark.update_gate.estimate import CaseEstimate, default_ceiling
-from particles.benchmark.update_gate.fixtures import MOVE_NOTES, case_note, sha256
+from particles.benchmark.update_gate.fixtures import CASES, case_note, sha256
 from particles.benchmark.update_gate.schema import (
     CaseRun,
     FixtureFile,
@@ -207,6 +207,7 @@ def budget_limited(db: Path) -> bool:
 def run_one(
     run_dir: Path,
     *,
+    case: str,
     variant: str,
     index: int,
     arm: str,
@@ -228,6 +229,8 @@ def run_one(
         _child.ENTRY_MODULE,
         "--run-dir",
         str(run_dir),
+        "--case",
+        case,
         "--variant",
         variant,
         "--arm",
@@ -261,7 +264,7 @@ def run_one(
     usage = LLMUsage.model_validate(result["usage"]) if result.get("usage") else None
     db = run_dir / "particles.db"
     rows, events = read_store(db)
-    checks = evaluate(rows, events, trip_alone=variant == "trip-alone")
+    checks = evaluate(rows, events, trip_alone=variant == "trip-alone", case=case)
     incomplete = result.get("incomplete")
     if incomplete is None and budget_limited(db):
         incomplete = "budget"
@@ -326,6 +329,7 @@ def _spend(
 
 def run_case(
     *,
+    case: str,
     base: ProviderSelection,
     pins: Mapping[str, ProviderSelection],
     runs: Mapping[str, int],
@@ -355,6 +359,7 @@ def run_case(
             for i in range(1, n + 1):
                 run = run_one(
                     root / f"{variant}-{i}",
+                    case=case,
                     variant=variant,
                     index=i,
                     arm=arm,
@@ -376,12 +381,13 @@ def run_case(
         checks_version=CHECKS_VERSION,
         sdk_version=__version__,
         run_at=datetime.now(UTC),
+        case=case,  # type: ignore[arg-type]
         model=selection_key(base),
         purposes={p: selection_key(s) for p, s in pins.items()},
         mixed=mixed,
         same_slot_admits=same_slot_admits,
         arm=arm,  # type: ignore[arg-type]
-        fixture=[FixtureFile(name=n, sha256=sha256(case_note(n))) for n in MOVE_NOTES],
+        fixture=[FixtureFile(name=n, sha256=sha256(case_note(n))) for n in CASES[case].notes],
         runs=done,
         verdict=_verdict(done),
         spend=_spend(done, estimate, ceilings) if arm == "live" else Spend(estimate_source="none"),
@@ -405,14 +411,24 @@ def _run_line(run: CaseRun) -> str:
 def rescore(report: TripVsMoveReport, *, version: int = CHECKS_VERSION) -> TripVsMoveReport:
     """Re-run the checks over a saved report's rows and events; no store, no call.
 
+    Only the fields a report saved are passed on, so a version that reads a
+    field an older report lacks refuses it rather than reading a default.
+
     Raises:
-        NotRescorable: If a run lacks a field ``version`` reads.
+        NotRescorable: If a run lacks a field ``version`` reads, or ``version``
+            does not define the report's case.
     """
     runs = []
     for run in report.runs:
-        rows = [r.model_dump() for r in run.rows]
+        rows = [r.model_dump(exclude_unset=True) for r in run.rows]
         events = [(e.event_type, e.payload) for e in run.events]
-        checks = evaluate(rows, events, trip_alone=run.variant == "trip-alone", version=version)
+        checks = evaluate(
+            rows,
+            events,
+            trip_alone=run.variant == "trip-alone",
+            case=report.case,
+            version=version,
+        )
         passed = None if (run.incomplete or run.invalid) else bool(checks["pass"])
         runs.append(run.model_copy(update={"checks": checks, "passed": passed}))
     return report.model_copy(

@@ -63,7 +63,12 @@ from particles.db import write_transaction
 from particles.embeddings import cosine_similarity
 from particles.ingest.conflict_plan import plan_update_event
 from particles.ingest.observer_gate import ObserverGate
-from particles.ingest.pipeline import SlotReading, read_update_slot, update_prompt_hash
+from particles.ingest.pipeline import (
+    SlotReading,
+    read_update_slot,
+    update_decided_by,
+    update_prompt_hash,
+)
 from particles.ingest.subject_resolver import load_speaker_key
 from particles.ingest.update_supersession import SpeakerKey, SubjectIndex, particle_subject_ids
 from particles.llm.breaker import llm_circuit_open
@@ -290,7 +295,9 @@ async def _retire(session: AsyncSession, paraphrase: Particle, winner: Particle)
         await update_particle_status(
             session, paraphrase.id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
         )
-        event = plan_update_event(paraphrase.id, winner.id, route=ROUTE)
+        event = plan_update_event(
+            paraphrase.id, winner.id, route=ROUTE, decided_by=update_decided_by()
+        )
         await record_event(
             session,
             actor=event.actor,
@@ -334,6 +341,7 @@ async def _ask(
             update_prompt_hash(),
             {_slot_key(paraphrase, winner): admits_update(reading.verdict)},
             purpose=reading.purpose,
+            rung=reading.decided_by,
         )
         if reading.verdict is not SlotVerdict.CHANGES:
             report.kept.append(

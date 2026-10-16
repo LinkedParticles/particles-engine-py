@@ -11,6 +11,7 @@ import copy
 import ipaddress
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1558,6 +1559,37 @@ class TestGistGitFallback:
 
         with pytest.raises(ValueError, match="git binary not found"):
             await _clone_gist_files("abc123", resolve=_stub_resolver(_PUBLIC_ADDR))
+
+    @pytest.mark.asyncio
+    async def test_clone_drops_a_hooks_repository_vars(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Inherited from a git hook, GIT_INDEX_FILE makes `git clone` write the
+        # clone's index over the outer repository's, and GIT_DIR points the
+        # `git log` at the outer repository.
+        from particles.ingest.importers.github import _clone_gist_files
+
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "outer.git"))
+        monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "outer.git" / "index"))
+        envs: list[dict[str, str]] = []
+
+        async def fake_exec(*argv: str, **kwargs: object) -> MagicMock:
+            env = kwargs["env"]
+            assert isinstance(env, dict)
+            envs.append(env)
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            return proc
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        await _clone_gist_files("abc123", resolve=_stub_resolver(_PUBLIC_ADDR))
+
+        assert len(envs) == 2  # the clone, then the local `git log`
+        for env in envs:
+            assert "GIT_DIR" not in env
+            assert "GIT_INDEX_FILE" not in env
+            assert env["GIT_ALLOW_PROTOCOL"] == "https"
 
 
 class TestGistCloneConnectPin:

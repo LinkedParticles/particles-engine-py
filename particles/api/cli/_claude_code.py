@@ -1048,6 +1048,25 @@ def particles_mcp_registered(cwd: Path, home: Path | None = None) -> bool:
     return any(_is_particles_server(s) for c in configs for s in _servers_in(c))
 
 
+def session_started_at(uri_r: str | None, projects_root: Path) -> datetime | None:
+    """The start of the session a ``claude-code://session/<id>`` URI names, or ``None``.
+
+    Read from the transcript's first ``timestamp`` while the file still exists
+    under ``projects_root``; ``particles memory redate`` injects it
+    into the Engine op, which never learns where transcripts live.
+    """
+    uri = uri_r or ""
+    if not uri.startswith(_SESSION_URI_PREFIX):
+        return None
+    session_id = uri[len(_SESSION_URI_PREFIX) :]
+    for transcript in sorted(projects_root.glob(f"*/{session_id}.jsonl")):
+        try:
+            return transcript_started_at(transcript.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return None
+
+
 def transcript_started_at(jsonl_text: str) -> datetime | None:
     """The first ``timestamp`` a Claude Code transcript records, or ``None``.
 

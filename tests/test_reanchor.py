@@ -61,6 +61,7 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.extraction.general import CandidateParticle, ExtractionResult
+from particles.ingest.pipeline import update_decided_by
 
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -982,6 +983,7 @@ class TestTripVersusMove:
             "retired_id": home.id,
             "winner_id": decided.id,
             "route": "paraphrase",
+            "decided_by": update_decided_by(),
         }
         assert [r["retired"] for r in report.retired] == [home.id]
 

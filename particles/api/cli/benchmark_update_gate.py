@@ -53,6 +53,11 @@ class _Arm(StrEnum):
     scripted = "scripted"
 
 
+class _Case(StrEnum):
+    reader = "reader"
+    mid_trip = "mid-trip"
+
+
 class _Format(StrEnum):
     table = "table"
     json = "json"
@@ -124,11 +129,18 @@ def _parse_pins(pins: list[str] | None) -> dict[str, str]:
 @trip_app.callback(invoke_without_command=True)
 def trip_vs_move_cmd(  # noqa: PLR0913 — the CLI option list is the API
     ctx: typer.Context,
+    case_name: _Case = typer.Option(
+        _Case.reader,
+        "--case",
+        help="reader (default): the reader's own case, a week in Mumbai and a move a month "
+        "later. mid-trip: a harder, different case, where the move is announced the day "
+        "after the trip note.",
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
         help="The model every purpose runs on (default: llm.default's model). The page's "
-        "headline run names claude-sonnet-5-5, the model of the record's passing row.",
+        "headline run names claude-sonnet-5-5.",
     ),
     provider: str | None = typer.Option(
         None,
@@ -190,10 +202,11 @@ def trip_vs_move_cmd(  # noqa: PLR0913 — the CLI option list is the API
 ) -> None:
     """Run the trip-versus-move case end to end and check each store.
 
-    A user who lives in Delhi spends a week in Mumbai for work, then moves to
-    Mumbai. Each run deposits the case's notes into a fresh scratch store in a
-    child process with a private environment, consolidates it, and checks the
-    store with judge-free checks. Nothing reaches your own store.
+    A user who lives in Delhi says they are in Mumbai for a week, and a month
+    later that they moved to Mumbai. Each run deposits the case's notes into a
+    fresh scratch store in a child process with a private environment,
+    consolidates it, and checks the store with judge-free checks. Nothing
+    reaches your own store.
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -213,9 +226,11 @@ def trip_vs_move_cmd(  # noqa: PLR0913 — the CLI option list is the API
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(EXIT_NOT_STARTED) from exc
     mixed = any(selection_key(s) != selection_key(base) for s in pins.values())
-    est = estimate_case(pins, runs, mixed=mixed)
+    est = estimate_case(pins, runs, mixed=mixed, case=case_name.value)
     if arm is _Arm.live:
-        typer.echo(render_case_estimate(est, selection_key(base)), err=True)
+        typer.echo(
+            f"Case: {case_name.value}. " + render_case_estimate(est, selection_key(base)), err=True
+        )
     else:
         typer.echo("Scripted arm: no LLM call leaves this process, and nothing is spent.", err=True)
     if estimate:
@@ -229,6 +244,7 @@ def trip_vs_move_cmd(  # noqa: PLR0913 — the CLI option list is the API
 
     try:
         report = run_case(
+            case=case_name.value,
             base=base,
             pins=pins,
             runs=runs,

@@ -66,7 +66,15 @@ The extractor emits a start when the source states one ("since March",
 ("I'm staying at a hotel in Bandra") is anchored at the day it was said,
 marked `as-of`: known to hold then, start unknown, read as held from then
 on and never as having begun then. A past-tense claim with no date gets
-nothing, since when it was said is not when it happened. For the claims
+nothing, since when it was said is not when it happened, with one
+exception: in a session transcript the harness deposits (the Claude Code
+hooks), an act the session performed ("the tests passed", "the pull request
+was opened") is dated to the session's day as an event, marked `session`,
+because that is when it happened. A past event the session merely mentions
+is not. A session harvested before this rule existed carries no date of its
+own, so its claims were anchored at the day they were extracted;
+`particles memory redate` reads each such session's start from its
+transcript and moves those claims to that day, at no model cost. For the claims
 already in a store, `particles validity` reads the absolute dates the
 extractor writes into claim prose and sets a default from a short list of
 cues (`on`, `since`, `from`, `as of`, `in <year>`), at no model cost; a claim
