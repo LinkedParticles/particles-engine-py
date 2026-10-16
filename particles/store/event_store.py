@@ -245,6 +245,10 @@ class OperatorEventType(StrEnum):
     # values in the payload). Basis ``operator``, which the ``particles
     # validity`` prose default never overwrites.
     PARTICLE_DATED = "PARTICLE_DATED"
+    # ``particles memory redate`` gave harvested sessions their own
+    # start as the reference date and re-anchored their ``session``-basis
+    # claims to it. One event per run, the counts in the payload.
+    SESSION_DATES_REPAIRED = "SESSION_DATES_REPAIRED"
     # agent-side extraction. A Stop hook asked the session's agent to
     # extract a span of its deposited transcript (ASKED; the CORPUS_ENTRY ref
     # names the transcript entry and the payload fixes the snapshot, the span,

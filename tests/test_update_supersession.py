@@ -58,6 +58,7 @@ from particles.core.status import Status, StatusReason
 from particles.extraction.general import CandidateParticle, ExtractionResult
 from particles.ingest.duplicate_suppression import JUDGMENT_RETIREMENTS
 from particles.ingest.pipeline import _has_update_signal as _real_update_signal
+from particles.ingest.pipeline import update_decided_by
 from particles.ingest.update_supersession import (
     SubjectIndex,
     candidate_subject_names,
@@ -664,7 +665,12 @@ class TestPipeline:
         [new] = await _say(db_session, ex, DENVER, day=9)
         [old] = await _by_content(db_session, BOSTON)
         [event] = await _update_events(db_session)
-        assert event.payload == {"retired_id": old.id, "winner_id": new.id, "route": "ladder"}
+        assert event.payload == {
+            "retired_id": old.id,
+            "winner_id": new.id,
+            "route": "ladder",
+            "decided_by": update_decided_by(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1450,7 +1456,12 @@ class TestSweep:
         [new] = await _by_content(db_session, DENVER)
         assert new.status is Status.ACTIVE and new.supersedes == old.id
         [event] = await _update_events(db_session)
-        assert event.payload == {"retired_id": old.id, "winner_id": new.id, "route": "sweep"}
+        assert event.payload == {
+            "retired_id": old.id,
+            "winner_id": new.id,
+            "route": "sweep",
+            "decided_by": update_decided_by(),
+        }
 
         second = await reconcile_updates(db_session)
         assert second["demoted"] == 0
@@ -1680,7 +1691,12 @@ class TestSweepReadsTheNewerClaim:
         assert denver.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
         assert lisbon.status is Status.ACTIVE
         [event] = await _update_events(db_session)
-        assert event.payload == {"retired_id": denver.id, "winner_id": lisbon.id, "route": "sweep"}
+        assert event.payload == {
+            "retired_id": denver.id,
+            "winner_id": lisbon.id,
+            "route": "sweep",
+            "decided_by": update_decided_by(),
+        }
 
 
 @pytest.mark.asyncio

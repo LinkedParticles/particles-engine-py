@@ -72,7 +72,13 @@ from .source_trust import TrustPolicy, load_trust_policy
 #: held on that day and so bounds the predecessor's end from above. A
 #: ``coarse`` anchor (a month, a year) is too wide to close anything.
 CLOSING_BASES: frozenset[str] = frozenset(
-    {ValidFromBasis.STATED, ValidFromBasis.PROSE, ValidFromBasis.OPERATOR, ValidFromBasis.AS_OF}
+    {
+        ValidFromBasis.STATED,
+        ValidFromBasis.PROSE,
+        ValidFromBasis.OPERATOR,
+        ValidFromBasis.AS_OF,
+        ValidFromBasis.SESSION,
+    }
 )
 
 

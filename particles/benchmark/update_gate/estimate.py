@@ -8,16 +8,18 @@ The end-to-end case takes its estimate from the first of three sources that
 applies, and says which:
 
 1. ``profile``: a measured usage profile shipped beside this module, one entry
-   per model a report of record measured (calls and tokens per purpose for the
-   largest run of each variant), priced at each pinned model's
-   ``llm.price_per_mtok`` entry. The entry for the chosen model is used when
-   there is one. For any other model the first entry is, and it is an
-   approximation: the input tokens come mostly from the fixture, the output
-   tokens and the number of probes from the model that ran.
+   per case and model a report of record measured (calls and tokens per
+   purpose for the largest run of each variant), priced at each pinned model's
+   ``llm.price_per_mtok`` entry. The entry for the chosen case and model is
+   used when there is one. A case no report has measured yet takes the same
+   model's mid-trip entry, and any other model the first entry;
+   either is an approximation and the line says so: the input tokens come
+   mostly from the fixture, the output tokens and the number of probes from
+   the model and notes that ran.
 2. ``record``: the largest measured per-run cost of each variant in the
    2026-10-12 record, for the two models it measured, one model on every
-   purpose. It cannot be re-priced for another model: the record kept costs,
-   not token rows.
+   purpose, and the mid-trip case only. It cannot be re-priced for another
+   model: the record kept costs, not token rows.
 3. ``bound``: an upper bound from the configuration (the audit's extraction
    estimate over the notes, each audit's probe cap, and the consolidation
    probe caps), for a priced model with neither. It reads high.
@@ -34,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from particles.benchmark.update_gate.fixtures import MOVE_NOTES, TRIP_ALONE_NOTES, case_note
+from particles.benchmark.update_gate.fixtures import CASES, LEGACY_CASE, case_note
 from particles.benchmark.update_gate.schema import TripVsMoveReport
 from particles.config import ProviderSelection, TokenPrice, get_config
 from particles.llm.usage import format_usd
@@ -62,8 +64,6 @@ RECORD_PAIRS_USD: dict[str, dict[str, float]] = {
         "past-marker": 0.3594,
     },
 }
-
-VARIANT_NOTES = {"move": MOVE_NOTES, "trip-alone": TRIP_ALONE_NOTES}
 
 
 @dataclass(frozen=True)
@@ -135,13 +135,21 @@ def load_profile(path: Path | None = None) -> dict[str, Any] | None:
     return profile
 
 
+def _profile_entries(profile: Mapping[str, Any], case: str) -> tuple[Mapping[str, Any], str]:
+    """The profile's model entries for ``case``, or the mid-trip ones, and which case."""
+    cases: Mapping[str, Any] = profile.get("cases", {})
+    if cases.get(case, {}).get("models"):
+        return cases[case]["models"], case
+    return cases.get(LEGACY_CASE, {}).get("models", {}), LEGACY_CASE
+
+
 def _from_profile(
-    profile: Mapping[str, Any], pins: Mapping[str, ProviderSelection]
+    profile: Mapping[str, Any], pins: Mapping[str, ProviderSelection], case: str
 ) -> tuple[dict[str, float | None], dict[str, int | None], str]:
     llm = get_config().llm
     usd: dict[str, float | None] = {}
     calls: dict[str, int | None] = {}
-    entries: Mapping[str, Any] = profile["models"]
+    entries, measured_case = _profile_entries(profile, case)
     measured = _key(pins["default"])
     if measured not in entries:
         measured = next(iter(entries))
@@ -159,21 +167,27 @@ def _from_profile(
     note = f"measured usage from {entries[measured].get('source', 'the report of record')}"
     if models != {measured}:
         note += f", measured on {measured}: an approximation for {', '.join(sorted(models))}"
+    if measured_case != case:
+        note += (
+            f", measured on the {measured_case} case: an approximation for the {case} case, "
+            "which no report has measured yet"
+        )
     return usd, calls, note
 
 
 def profile_from_reports(reports: Sequence[TripVsMoveReport]) -> dict[str, Any]:
-    """The usage profile the reports of record supply: one entry per model.
+    """The usage profile the reports of record supply: one entry per case and model.
 
-    For each model and variant, the run that cost the most at list price (the
-    most tokens when unpriced), as calls and tokens per purpose. Live runs on
-    one model on every purpose only: a mixture or a scripted run measures
+    For each case, model and variant, the run that cost the most at list price
+    (the most tokens when unpriced), as calls and tokens per purpose. Live runs
+    on one model on every purpose only: a mixture or a scripted run measures
     something else.
     """
-    models: dict[str, Any] = {}
+    cases: dict[str, Any] = {}
     for report in reports:
         if report.arm != "live" or report.mixed:
             continue
+        models = cases.setdefault(report.case, {"models": {}})["models"]
         entry = models.setdefault(report.model, {"variants": {}})
         entry["source"] = (
             f"the trip-vs-move report run at {report.run_at.strftime('%Y-%m-%d %H:%M')} UTC"
@@ -204,11 +218,11 @@ def profile_from_reports(reports: Sequence[TripVsMoveReport]) -> dict[str, Any]:
                 for row in largest.rows
                 if not row.replayed
             ]
-    return {"models": models}
+    return {"cases": cases}
 
 
 def _bound(
-    pins: Mapping[str, ProviderSelection],
+    pins: Mapping[str, ProviderSelection], case: str
 ) -> tuple[dict[str, float | None], dict[str, int | None]]:
     # Deferred import: the audit estimate pulls in the extraction stack.
     from particles.operations.audit import estimate_extraction
@@ -221,7 +235,7 @@ def _bound(
     def at(purpose: str) -> TokenPrice | None:
         return llm.price_for(pins.get(purpose) or pins["default"])
 
-    for variant, notes in VARIANT_NOTES.items():
+    for variant, notes in CASES[case].variants.items():
         sizes = [len(case_note(n).read_text()) for n in notes]
         est = estimate_extraction(sizes)
         audits = len(notes)
@@ -273,15 +287,19 @@ def _bound(
 
 
 def estimate_case(
-    pins: Mapping[str, ProviderSelection], runs: Mapping[str, int], *, mixed: bool
+    pins: Mapping[str, ProviderSelection],
+    runs: Mapping[str, int],
+    *,
+    mixed: bool,
+    case: str,
 ) -> CaseEstimate:
-    """The end-to-end case's estimate for ``runs`` per variant under ``pins``."""
+    """The ``case``'s estimate for ``runs`` per variant under ``pins``."""
     profile = load_profile()
-    if profile is not None:
-        usd, calls, note = _from_profile(profile, pins)
+    if profile is not None and _profile_entries(profile, case)[0]:
+        usd, calls, note = _from_profile(profile, pins, case)
         return CaseEstimate("profile", usd, calls, runs, note)
     model = _key(pins["default"])
-    if not mixed and model in RECORD_RUN_USD:
+    if not mixed and case == LEGACY_CASE and model in RECORD_RUN_USD:
         per_run: dict[str, float | None] = dict(RECORD_RUN_USD[model])
         return CaseEstimate(
             "record",
@@ -290,7 +308,7 @@ def estimate_case(
             runs,
             "the largest measured run of each variant on 2026-10-12, at that day's list prices",
         )
-    usd, calls = _bound(pins)
+    usd, calls = _bound(pins, case)
     return CaseEstimate(
         "bound",
         usd,

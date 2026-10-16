@@ -40,7 +40,7 @@ groups the survivors by Subject first. The similarity pass needs numpy, which
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any
@@ -99,6 +99,7 @@ def enumerate_candidate_pairs(
     exclude: AbstractSet[frozenset[str]] = frozenset(),
     scope: frozenset[str] | None = None,
     cross_source_first: bool = False,
+    decline: Callable[[Particle, Particle], bool] | None = None,
 ) -> list[CandidatePair]:
     """Every candidate pair among ``candidates``, in probe order.
 
@@ -115,6 +116,11 @@ def enumerate_candidate_pairs(
             side in it, and the tier records how many.
         cross_source_first: Within each scope tier, order the pairs from two
             different corpus entries before the pairs from one.
+        decline: Asked last of a pair past every other rule, in place of the
+            generic-versus-instance rule; ``True`` drops the pair. The
+            contradiction census passes its ladder's deterministic rungs here,
+            which include that rule; ``None`` applies the rule
+            alone.
 
     Returns:
         The pairs ordered by tier, then (when ``cross_source_first``) cross-source
@@ -161,8 +167,11 @@ def enumerate_candidate_pairs(
                 continue
             # A generic and an instance claim are not an adjudicable pair.
             # Read last, so only pairs past every cheaper rule
-            # pay the detector.
-            if is_generic_instance_pair(p_a, p_b):
+            # pay the detector. A caller's ``decline`` takes its place.
+            if decline is not None:
+                if decline(p_a, p_b):
+                    continue
+            elif is_generic_instance_pair(p_a, p_b):
                 continue
 
             same_source = not sources[i].isdisjoint(sources[i + 1 + offset])

@@ -504,6 +504,22 @@ async def _fetch_gist_comments(client: Any, gist_id: str) -> list[dict[str, Any]
 
 _GIST_CLONE_HOST = "gist.github.com"
 
+#: Variables that point git at a repository other than the one its arguments
+#: name. A git hook exports several of them, so a deposit run from inside one
+#: would otherwise reach the hook's repository.
+_GIT_REDIRECT_VARS = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    }
+)
+
 
 async def _clone_gist_files(
     gist_id: str,
@@ -529,7 +545,10 @@ async def _clone_gist_files(
     # server-side redirect can downgrade to a non-https protocol (file://,
     # ext::, etc.). A no-op for the pinned gist.github.com host, but explicit
     # hardening before this code is public and forkable.
-    git_env = os.environ.copy()
+    # The repository variables a git hook exports are dropped as well: inherited
+    # from a hook, GIT_INDEX_FILE makes the clone overwrite the outer
+    # repository's index, and GIT_DIR points the ``log`` below at it.
+    git_env = {k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_VARS}
     git_env["GIT_ALLOW_PROTOCOL"] = "https"
 
     # Pin the clone's connection to addresses vetted in *this* process, so the

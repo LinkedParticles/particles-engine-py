@@ -446,6 +446,68 @@ async def _widen(target_id: str, *, entry: bool, revoke: bool, store: str) -> No
         )
 
 
+@memory_app.command("redate")
+def redate_cmd(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change; write nothing."
+    ),
+    store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
+) -> None:
+    """Give each harvested session its own start as the reference date.
+
+    A claim about an act a session performed is dated to the session's day
+    (the `session` basis of `valid_from`). Sessions harvested before 1.190.1
+    carried no date of their own, so their claims were anchored at the day
+    they were extracted instead. This verb reads each session's start from
+    its transcript, records it on the session's snapshots, and moves every
+    `session`-dated claim of that session to that day. It makes no model
+    call, never touches a claim dated any other way, and lists the sessions
+    whose transcript is gone rather than guessing. Running it twice changes
+    nothing. Local store only.
+    """
+    configure_output(verbose, debug, quiet, progress)
+    run(_redate(dry_run=dry_run, store=store))
+
+
+async def _redate(*, dry_run: bool, store: str) -> None:
+    from particles.api.cli._claude_code import session_started_at
+    from particles.operations.validity import REDATE_ACTOR, redate_sessions
+
+    root = _claude_projects_root()
+    async with session_scope(store, write=not dry_run) as session:
+        report = await redate_sessions(
+            session,
+            started_at_for=lambda _entry_id, uri_r, _tags: session_started_at(uri_r, root),
+            dry_run=dry_run,
+            actor=REDATE_ACTOR,
+        )
+        if not dry_run:
+            await session.commit()
+    verb = "would" if dry_run else "did"
+    typer.echo(
+        f"Redate of '{store}': examined {report.examined} harvested session(s), dated "
+        f"{report.resolved} from their transcripts; {verb} set the date on "
+        f"{report.snapshots_dated} snapshot(s) and move {report.claims_redated} of "
+        f"{report.claims_examined} session-dated claim(s) ({report.claims_unchanged} already "
+        "on their day)."
+    )
+    if report.claims_failed:
+        typer.echo(f"  {len(report.claims_failed)} claim(s) could not be moved (see the log).")
+    if report.unresolved:
+        typer.echo(
+            f"\n{len(report.unresolved)} session(s) have no transcript on this machine and keep "
+            "their dates:"
+        )
+        for entry_id in report.unresolved[:10]:
+            typer.echo(f"  {entry_id}")
+    if dry_run:
+        typer.echo("\nDry run: nothing was written.")
+
+
 @memory_app.command("sweep-rank-lift")
 def sweep_rank_lift_cmd(
     store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle to sweep."),

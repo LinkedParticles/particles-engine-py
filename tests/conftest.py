@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests._client_fixtures import (  # noqa: F401
     no_embedding_model,
     no_env_leak,
+    no_git_redirect,
     no_live_llm,
     pytest_configure,
     reset_client_state,

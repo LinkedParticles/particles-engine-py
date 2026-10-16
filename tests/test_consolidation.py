@@ -778,6 +778,16 @@ class TestDegradation:
         assert (event.payload or {})["semantic_degraded"] is True
 
     @pytest.mark.asyncio
+    async def test_every_run_record_carries_the_rung_counts(
+        self, db_session: AsyncSession, cycle_env: Path
+    ) -> None:
+        """§ Acceptance item 4: present on every run, structural-only included."""
+        report = await run_consolidation(db_session, structural_only=True)
+        event = await latest_run_event(db_session)
+        assert event is not None
+        assert (event.payload or {})["rungs"] == report.rung_counts == {}
+
+    @pytest.mark.asyncio
     async def test_structural_only_flag(self, db_session: AsyncSession, cycle_env: Path) -> None:
         report = await run_consolidation(db_session, structural_only=True)
         assert report.semantic_degraded is True
@@ -3507,3 +3517,38 @@ class TestPartialReadCounts:
         assert "FAILED snapshot holding a partial whole read" in caplog.text
         assert "restore the blob" in caplog.text
         assert "1 snapshot(s) wait on an earlier snapshot" in render_consolidation_report(report)
+
+
+class TestRungLines:
+    """the report says which reasoners decided how much."""
+
+    def test_the_report_names_the_deciding_rungs_and_a_shadow_rungs_standing(self) -> None:
+        from particles.operations.consolidation import ConsolidationReport, render_rung_lines
+        from particles.operations.lint.contradictions import CensusLadder
+        from particles.store.probe_verdict_store import ShadowStanding
+
+        report = ConsolidationReport(
+            store="default",
+            rung_counts={
+                "contradiction": {
+                    "settled": {
+                        "duplicate_key@1": {"no": 170},
+                        "contradiction_probe@ab": {"no": 30},
+                    }
+                }
+            },
+            contradiction_ladder=CensusLadder(
+                probed_distinct=200, probed_identical=0, repeated_pairs=12
+            ),
+            shadow_standings=[
+                ShadowStanding(rung="polarity@1", verdict="yes", recorded=9, labelled=8, correct=8)
+            ],
+        )
+        lines = "\n".join(render_rung_lines(report))
+        assert "reasoners, contradiction: duplicate_key@1 (no 170)" in lines
+        assert (
+            "census cap bought 200 distinct pairs; 0 probed pair(s) were one sentence twice (0.0%)"
+            in lines
+        )
+        assert "shadow polarity@1 'yes': precision 1.00 over 8 labelled of 9 input(s)" in lines
+        assert "22 labelled input(s) short" in lines

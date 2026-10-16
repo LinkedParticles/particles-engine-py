@@ -28,31 +28,67 @@ attached to a Subject. ``verdict`` is True when a candidate was chosen. Its
 key includes the model (:func:`lookup_answer`), because a pick among
 candidates is a judgement a different model may make differently.
 
+**Rungs, not only model probes**. A row may also carry the
+stamp of the rung that produced it (``rung``, ``name@version``; a model
+probe's version is its prompt hash), the verdict in the ladder's own
+vocabulary (``rung_verdict``), and a ``shadow`` flag for a rung that has not
+met its bar, whose verdict was recorded and never returned. A shadow rung's
+rows sit under a kind of their own (:func:`~particles.core.probe_verdict.rung_kind`),
+keyed on the same content hashes as the probe whose question it answers, so
+its verdicts and the probe's answers on the same inputs join
+(:func:`shadow_standings`); those rows are what its admission bar accumulates.
+An admitted deterministic rung writes no row: nothing reads
+one, its load is counted on the run record, and on a large store it decides
+more pairs per census than the ledger holds probe answers. A rung row records
+a decision, never an abstention: an abstaining rung is counted on the run
+record and leaves no row.
+
 The functions flush and never commit: the caller owns the transaction.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, select, tuple_
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    false,
+    func,
+    select,
+    tuple_,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from particles.core.probe_verdict import ProbeKind, VerdictKey
+from particles.core.probe_verdict import RUNG_KIND_PREFIX, ProbeKind, VerdictKey, rung_kind
+from particles.core.rung_ladder import RungStamp
 from particles.db import Base
 
 __all__ = [
+    "POSITIVE_VERDICTS",
     "ProbeVerdictRow",
+    "ShadowStanding",
     "count_verdicts",
     "lookup_answer",
     "lookup_verdicts",
     "record_answer",
     "record_verdict",
+    "record_rung_verdicts",
     "record_verdicts",
+    "shadow_standings",
     "verdicts_for_pair",
 ]
+
+#: The ladder verdicts a row's ``verdict`` boolean reads as True: the answer
+#: that would act (a contradiction, a same slot, one claim, an entailment).
+POSITIVE_VERDICTS = frozenset({"yes", "changes", "fixed", "same", "entailed"})
 
 #: Pairs per ``IN`` clause: two bound parameters each, well under SQLite's limit.
 _CHUNK = 400
@@ -74,6 +110,15 @@ class ProbeVerdictRow(Base):
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: The stamp of the rung that produced the row, ``name@version`` (
+    #: § 6); ``None`` on a row recorded before the ladder.
+    rung: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    #: The verdict in the ladder's own vocabulary, when ``verdict`` cannot carry it.
+    rung_verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: The rung ran in shadow: its verdict was recorded and never returned.
+    shadow: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     __table_args__ = (
         Index("ix_probe_verdicts_key", "probe_kind", "prompt_hash", "hash_a", "hash_b"),
@@ -121,9 +166,11 @@ async def record_verdicts(
     *,
     model: str,
     now: datetime | None = None,
+    rung: RungStamp | None = None,
 ) -> int:
     """Append each verdict whose key has no record, or whose newest record differs.
 
+    ``rung`` stamps the rows with the ladder rung that asked.
     Returns the number of rows written. Flushes; the caller commits.
     """
     if not verdicts:
@@ -139,6 +186,7 @@ async def record_verdicts(
             verdict=verdict,
             model=model,
             recorded_at=at,
+            rung=None if rung is None else str(rung),
         )
         for key, verdict in verdicts.items()
         if known.get(key) is not verdict
@@ -254,3 +302,169 @@ async def count_verdicts(session: AsyncSession, kind: ProbeKind | None = None) -
     if kind is not None:
         stmt = stmt.where(ProbeVerdictRow.probe_kind == kind.value)
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def _newest_rung_verdicts(
+    session: AsyncSession, kind: str, version: str, shadow: bool, keys: Sequence[VerdictKey]
+) -> dict[VerdictKey, str]:
+    found: dict[VerdictKey, tuple[int, str]] = {}
+    for start in range(0, len(keys), _CHUNK):
+        chunk = keys[start : start + _CHUNK]
+        rows = await session.execute(
+            select(
+                ProbeVerdictRow.id,
+                ProbeVerdictRow.hash_a,
+                ProbeVerdictRow.hash_b,
+                ProbeVerdictRow.rung_verdict,
+            ).where(
+                ProbeVerdictRow.probe_kind == kind,
+                ProbeVerdictRow.prompt_hash == version,
+                ProbeVerdictRow.shadow == shadow,
+                tuple_(ProbeVerdictRow.hash_a, ProbeVerdictRow.hash_b).in_(chunk),
+            )
+        )
+        for row_id, hash_a, hash_b, value in rows:
+            key = (hash_a, hash_b)
+            if value is not None and (key not in found or row_id > found[key][0]):
+                found[key] = (row_id, value)
+    return {key: value for key, (_, value) in found.items()}
+
+
+async def record_rung_verdicts(
+    session: AsyncSession,
+    stamp: RungStamp,
+    verdicts: Mapping[VerdictKey, str],
+    *,
+    shadow: bool = False,
+    now: datetime | None = None,
+) -> int:
+    """Append a deterministic rung's verdicts, one row per input it decided.
+
+    ``verdicts`` maps each input's key to the rung's verdict value; pass only
+    decisions, never an abstention. The rows sit under :func:`rung_kind` with the
+    rung's version as the prompt hash, so a new version is a new record set. A
+    verdict equal to the newest one already recorded for its key adds nothing.
+    Returns the rows written. Flushes; the caller commits.
+
+    The census calls this for its shadow rungs only (``shadow=True``), the
+    rows :func:`shadow_standings` reads; an admitted rung's decisions are
+    counted on the run record and never written here.
+    """
+    if not verdicts:
+        return 0
+    kind = rung_kind(stamp.name)
+    wanted = list(dict.fromkeys(verdicts))
+    known = await _newest_rung_verdicts(session, kind, stamp.version, shadow, wanted)
+    at = now or datetime.now(UTC)
+    rows = [
+        ProbeVerdictRow(
+            probe_kind=kind,
+            prompt_hash=stamp.version,
+            hash_a=key[0],
+            hash_b=key[1],
+            verdict=value in POSITIVE_VERDICTS,
+            model=str(stamp),
+            recorded_at=at,
+            rung=str(stamp),
+            rung_verdict=value,
+            shadow=shadow,
+        )
+        for key, value in verdicts.items()
+        if known.get(key) != value
+    ]
+    session.add_all(rows)
+    await session.flush()
+    return len(rows)
+
+
+@dataclass(frozen=True)
+class ShadowStanding:
+    """A shadow rung's running precision for one verdict it returns."""
+
+    rung: str
+    """The rung's stamp, ``name@version``."""
+    verdict: str
+    """The verdict value this line measures (``yes``, ``no``, …)."""
+    recorded: int
+    """Inputs the rung gave this verdict on."""
+    labelled: int
+    """…of those, inputs the labels cover: the bar's input count."""
+    correct: int
+    """…of those, inputs where the label agrees."""
+
+    @property
+    def precision(self) -> float | None:
+        """``correct / labelled``, or ``None`` with no labelled input yet."""
+        return self.correct / self.labelled if self.labelled else None
+
+
+async def shadow_standings(
+    session: AsyncSession,
+    label_kinds: Sequence[ProbeKind] = (ProbeKind.SECOND_READING, ProbeKind.CONTRADICTION),
+) -> list[ShadowStanding]:
+    """Each shadow rung's running precision against the probes' answers.
+
+    A shadow rung's verdicts accrue night after night beside the probe's
+    answers on the same inputs. The label of an input is the newest answer of
+    the first kind in ``label_kinds`` that answered it, under any prompt
+    version: for the contradiction ladder, the second reading where one ran,
+    else the census probe. A shadow ``no`` is correct when the label is NO,
+    any other verdict when it is YES. The owner's labels in the kept fixture
+    are keyed on particle ids, not contents, and are joined by the milestone's
+    benchmark, not here.
+    """
+    rows = (
+        await session.execute(
+            select(
+                ProbeVerdictRow.id,
+                ProbeVerdictRow.rung,
+                ProbeVerdictRow.rung_verdict,
+                ProbeVerdictRow.hash_a,
+                ProbeVerdictRow.hash_b,
+            ).where(
+                ProbeVerdictRow.shadow.is_(True),
+                ProbeVerdictRow.probe_kind.startswith(RUNG_KIND_PREFIX),
+            )
+        )
+    ).all()
+    newest: dict[tuple[str, VerdictKey], tuple[int, str]] = {}
+    for row_id, rung, value, hash_a, hash_b in rows:
+        if rung is None or value is None:
+            continue
+        slot = (rung, (hash_a, hash_b))
+        if slot not in newest or row_id > newest[slot][0]:
+            newest[slot] = (row_id, value)
+    keys = list({key for _, key in newest})
+    labels: dict[VerdictKey, bool] = {}
+    for kind in label_kinds:
+        missing = [k for k in keys if k not in labels]
+        if not missing:
+            break
+        for start in range(0, len(missing), _CHUNK):
+            chunk = missing[start : start + _CHUNK]
+            found = await session.execute(
+                select(
+                    ProbeVerdictRow.id,
+                    ProbeVerdictRow.hash_a,
+                    ProbeVerdictRow.hash_b,
+                    ProbeVerdictRow.verdict,
+                )
+                .where(
+                    ProbeVerdictRow.probe_kind == kind.value,
+                    tuple_(ProbeVerdictRow.hash_a, ProbeVerdictRow.hash_b).in_(chunk),
+                )
+                .order_by(ProbeVerdictRow.id)
+            )
+            for _, hash_a, hash_b, verdict in found:
+                labels[(hash_a, hash_b)] = verdict
+    tally: dict[tuple[str, str], list[int]] = {}
+    for (rung, key), (_, value) in newest.items():
+        cell = tally.setdefault((rung, value), [0, 0, 0])
+        cell[0] += 1
+        if key in labels:
+            cell[1] += 1
+            cell[2] += int(labels[key] == (value in POSITIVE_VERDICTS))
+    return [
+        ShadowStanding(rung=rung, verdict=value, recorded=r, labelled=lab, correct=ok)
+        for (rung, value), (r, lab, ok) in sorted(tally.items())
+    ]

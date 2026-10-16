@@ -157,6 +157,56 @@
      }
     }
    ]
+  },
+  {
+   "note": "reader-01.md",
+   "sha256": "08b0416b6f6deb820cc13901b003eb6534f5fbe15c836ff7bb7c53a866b823b9",
+   "candidates": [
+    {
+     "content": "The user lives in Delhi.",
+     "subjects": [
+      "the user",
+      "Delhi"
+     ],
+     "confidence_value": 0.92,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "lives in",
+      "object": "Delhi"
+     }
+    },
+    {
+     "content": "The user is in Mumbai for a week, as of 2026-09-01.",
+     "subjects": [
+      "the user",
+      "Mumbai"
+     ],
+     "confidence_value": 0.88,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": null
+    }
+   ]
+  },
+  {
+   "note": "reader-02-moved.md",
+   "sha256": "5447086994dddcface41d06768bd7aa777dc809600d395b1e2def54b618ea1b2",
+   "candidates": [
+    {
+     "content": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+     "subjects": [
+      "the user",
+      "Mumbai"
+     ],
+     "confidence_value": 0.9,
+     "uncertainty_nature": "EPISTEMIC",
+     "structured_claim": {
+      "subject": "the user",
+      "predicate": "moved to",
+      "object": "Mumbai"
+     }
+    }
+   ]
   }
  ],
  "contradiction": [
@@ -279,6 +329,36 @@
    "a": "The user plans to fly back home to Delhi on Thursday, 2026-10-15.",
    "b": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
    "verdict": "NO"
+  },
+  {
+   "a": "The user lives in Delhi.",
+   "b": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "b": "The user lives in Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user lives in Delhi.",
+   "b": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "b": "The user lives in Delhi.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "b": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "verdict": "NO"
+  },
+  {
+   "a": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "b": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "verdict": "NO"
   }
  ],
  "update": [
@@ -335,6 +415,26 @@
   {
    "a": "Sandeep's Curry House is in Lajpat Nagar, Delhi.",
    "b": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user lives in Delhi.",
+   "b": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "b": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "verdict": "CHANGES"
+  },
+  {
+   "a": "The user lives in Delhi.",
+   "b": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "verdict": "DIFFERENT"
+  },
+  {
+   "a": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "b": "The user lives in Delhi.",
    "verdict": "DIFFERENT"
   }
  ],
@@ -431,6 +531,35 @@
     "user",
     "diet",
     "vegetarian"
+   ]
+  },
+  {
+   "text": "The user lives in Delhi.",
+   "features": [
+    "user",
+    "residence",
+    "residence",
+    "delhi"
+   ]
+  },
+  {
+   "text": "The user is in Mumbai for a week, as of 2026-09-01.",
+   "features": [
+    "user",
+    "mumbai",
+    "stay",
+    "trip",
+    "week"
+   ]
+  },
+  {
+   "text": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+   "features": [
+    "user",
+    "residence",
+    "mumbai",
+    "mumbai",
+    "move"
    ]
   }
  ],

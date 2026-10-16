@@ -1,0 +1,672 @@
+{
+ "suite": "trip-vs-move",
+ "report_version": 2,
+ "checks_version": 2,
+ "sdk_version": "1.191.0",
+ "run_at": "2026-10-14T22:25:30.662845Z",
+ "case": "reader",
+ "model": "anthropic:claude-sonnet-5-5",
+ "purposes": {
+  "default": "anthropic:claude-sonnet-5-5",
+  "extraction": "anthropic:claude-sonnet-5-5",
+  "semantic_lint": "anthropic:claude-sonnet-5-5",
+  "query_response": "anthropic:claude-sonnet-5-5",
+  "synthesis": "anthropic:claude-sonnet-5-5",
+  "benchmark": "anthropic:claude-sonnet-5-5",
+  "benchmark_answer": "anthropic:claude-sonnet-5-5",
+  "abstraction": "anthropic:claude-sonnet-5-5",
+  "verification": "anthropic:claude-sonnet-5-5",
+  "subject_resolution": "anthropic:claude-sonnet-5-5",
+  "use_judge": "anthropic:claude-sonnet-5-5"
+ },
+ "mixed": false,
+ "same_slot_admits": true,
+ "arm": "live",
+ "fixture": [
+  {
+   "name": "reader-01.md",
+   "sha256": "08b0416b6f6deb820cc13901b003eb6534f5fbe15c836ff7bb7c53a866b823b9"
+  },
+  {
+   "name": "reader-02-moved.md",
+   "sha256": "5447086994dddcface41d06768bd7aa777dc809600d395b1e2def54b618ea1b2"
+  }
+ ],
+ "runs": [
+  {
+   "variant": "move",
+   "index": 1,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as reported in a session dated 2026-10-01."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 3,
+      "input_tokens": 6553,
+      "output_tokens": 2547,
+      "cache_creation_tokens": 2868,
+      "cache_read_tokens": 5736,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.046893199999999996
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 3,
+      "input_tokens": 3200,
+      "output_tokens": 216,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00856
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 1754,
+      "output_tokens": 28,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.003788
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 2635,
+      "output_tokens": 156,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00683
+     }
+    ],
+    "cost_usd": 0.0660712,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "4aa7eb29-7a38-4d4d-b465-8b65b798d84e",
+     "content": "The user is in Mumbai for a week, as of 2026-09-01.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "afa603e8-1e21-4086-9f64-1a335ad8ab5e",
+     "content": "The user lives in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "f28b26fd-e0e9-4b47-ae0a-419c76becfe4",
+     "content": "The user moved to Mumbai, as reported in a session dated 2026-10-01.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-02-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "4aa7eb29-7a38-4d4d-b465-8b65b798d84e",
+      "winner_id": "f28b26fd-e0e9-4b47-ae0a-419c76becfe4",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "afa603e8-1e21-4086-9f64-1a335ad8ab5e",
+      "winner_id": "f28b26fd-e0e9-4b47-ae0a-419c76becfe4",
+      "route": "extra"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "move",
+   "index": 2,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as stated in the session dated 2026-10-01."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 4373,
+      "output_tokens": 1633,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 5736,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.026223200000000002
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 2635,
+      "output_tokens": 148,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00675
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 1762,
+      "output_tokens": 28,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.003804
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 2635,
+      "output_tokens": 150,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00677
+     }
+    ],
+    "cost_usd": 0.0435472,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "7523f2cc-8772-4018-a9a6-1ba84a80aab1",
+     "content": "As of 2026-09-01, the user is in Mumbai for a week.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "f718fc75-fc13-468c-b17c-2976293c7ee1",
+     "content": "The user lives in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "27b8c20c-d5de-497d-a06a-efed52b966de",
+     "content": "The user moved to Mumbai, as stated in the session dated 2026-10-01.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-02-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "7523f2cc-8772-4018-a9a6-1ba84a80aab1",
+      "winner_id": "27b8c20c-d5de-497d-a06a-efed52b966de",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "f718fc75-fc13-468c-b17c-2976293c7ee1",
+      "winner_id": "27b8c20c-d5de-497d-a06a-efed52b966de",
+      "route": "extra"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "move",
+   "index": 3,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as reported by the user in a session dated 2026-10-01."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 3,
+      "input_tokens": 6597,
+      "output_tokens": 2630,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 8604,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.0412148
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 3,
+      "input_tokens": 3254,
+      "output_tokens": 205,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.008558
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 1761,
+      "output_tokens": 28,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.003802
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 2656,
+      "output_tokens": 148,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.006792
+     }
+    ],
+    "cost_usd": 0.060366800000000005,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "4b4099ef-0531-4792-973e-5d3a48793b53",
+     "content": "The user is in Mumbai for a week, as of 2026-09-01.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "f1d3d667-6dda-4147-966a-92e5369a8e06",
+     "content": "The user lives in Delhi (stated in a session dated 2026-09-01).",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "31c7c697-ae4f-4348-b8b4-ff971dca8ee1",
+     "content": "The user moved to Mumbai, as reported by the user in a session dated 2026-10-01.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-02-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "4b4099ef-0531-4792-973e-5d3a48793b53",
+      "winner_id": "31c7c697-ae4f-4348-b8b4-ff971dca8ee1",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "f1d3d667-6dda-4147-966a-92e5369a8e06",
+      "winner_id": "31c7c697-ae4f-4348-b8b4-ff971dca8ee1",
+      "route": "extra"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "trip-alone",
+   "index": 1,
+   "passed": true,
+   "checks": {
+    "a_home_in_delhi": [
+     "The user lives in Delhi (stated on 2026-09-01)."
+    ],
+    "b_trip_current": [
+     "The user is in Mumbai for a week, as of 2026-09-01."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 1,
+      "input_tokens": 2204,
+      "output_tokens": 1020,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 2868,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.0151816
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 1,
+      "input_tokens": 576,
+      "output_tokens": 58,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.001732
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 1757,
+      "output_tokens": 28,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.003794
+     }
+    ],
+    "cost_usd": 0.0207076,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "7e406e9e-0014-438a-a0a0-0e6fee4e97db",
+     "content": "The user is in Mumbai for a week, as of 2026-09-01.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "10a3e126-d4ac-4466-95d5-82216c1126a9",
+     "content": "The user lives in Delhi (stated on 2026-09-01).",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    }
+   ],
+   "events": [],
+   "refused_calls": {}
+  },
+  {
+   "variant": "trip-alone",
+   "index": 2,
+   "passed": true,
+   "checks": {
+    "a_home_in_delhi": [
+     "The user lives in Delhi."
+    ],
+    "b_trip_current": [
+     "The user is in Mumbai for a week, as of 2026-09-01."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 1,
+      "input_tokens": 2196,
+      "output_tokens": 1152,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 2868,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.0164856
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 1,
+      "input_tokens": 559,
+      "output_tokens": 66,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.001778
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 1818,
+      "output_tokens": 28,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.003916
+     }
+    ],
+    "cost_usd": 0.022179599999999997,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "aef9ec63-66ac-4dfb-a7eb-c126a7ae6aa0",
+     "content": "The user is in Mumbai for a week, as of 2026-09-01.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    },
+    {
+     "id": "4c9ea487-976a-4c32-8e69-b67b7b7d5e7c",
+     "content": "The user lives in Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "reader-01.md"
+     ],
+     "restatement": false,
+     "valid_from": "2026-09-01T00:00:00",
+     "valid_until": null,
+     "valid_kind": "STATE"
+    }
+   ],
+   "events": [],
+   "refused_calls": {}
+  }
+ ],
+ "verdict": {
+  "move_passed": 3,
+  "move_runs": 3,
+  "trip_alone_passed": 2,
+  "trip_alone_runs": 2,
+  "bar_met": true
+ },
+ "spend": {
+  "estimate_source": "profile",
+  "estimate_usd": 0.744226,
+  "estimate_calls": 128,
+  "cost_usd": 0.2128724,
+  "priced_cost_usd": 0.212872,
+  "unpriced": [],
+  "ceiling_usd": 0.7392368
+ },
+ "notes": []
+}

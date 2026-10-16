@@ -1,148 +1,300 @@
 {
- "models": {
-  "anthropic:claude-sonnet-5-5": {
-   "variants": {
-    "move": [
-     {
-      "purpose": "extraction",
-      "batched": false,
-      "calls": 5,
-      "input_tokens": 11780,
-      "output_tokens": 5622,
-      "cache_creation_tokens": 2868,
-      "cache_read_tokens": 5736
+ "cases": {
+  "mid-trip": {
+   "models": {
+    "anthropic:claude-sonnet-5-5": {
+     "variants": {
+      "move": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 5,
+        "input_tokens": 11780,
+        "output_tokens": 5622,
+        "cache_creation_tokens": 2868,
+        "cache_read_tokens": 5736
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 17,
+        "input_tokens": 17003,
+        "output_tokens": 2773,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 4,
+        "input_tokens": 3495,
+        "output_tokens": 57,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "verification",
+        "batched": false,
+        "calls": 6,
+        "input_tokens": 10613,
+        "output_tokens": 619,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ],
+      "trip-alone": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 4525,
+        "output_tokens": 4647,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 5736
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 10,
+        "input_tokens": 11756,
+        "output_tokens": 710,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 4,
+        "input_tokens": 3525,
+        "output_tokens": 57,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ]
      },
-     {
-      "purpose": "semantic_lint",
-      "batched": false,
-      "calls": 17,
-      "input_tokens": 17003,
-      "output_tokens": 2773,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
+     "source": "the trip-vs-move report run at 2026-10-14 00:56 UTC"
+    },
+    "anthropic:claude-sonnet-4-6": {
+     "variants": {
+      "move": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 9,
+        "input_tokens": 16517,
+        "output_tokens": 4895,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 6315
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 31,
+        "input_tokens": 21709,
+        "output_tokens": 1194,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 1313,
+        "output_tokens": 24,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "verification",
+        "batched": false,
+        "calls": 9,
+        "input_tokens": 11282,
+        "output_tokens": 681,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ],
+      "trip-alone": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 3478,
+        "output_tokens": 3824,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 4210
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 28,
+        "input_tokens": 20470,
+        "output_tokens": 1093,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 3,
+        "input_tokens": 2025,
+        "output_tokens": 34,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ]
      },
-     {
-      "purpose": "subject_resolution",
-      "batched": false,
-      "calls": 4,
-      "input_tokens": 3495,
-      "output_tokens": 57,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     },
-     {
-      "purpose": "verification",
-      "batched": false,
-      "calls": 6,
-      "input_tokens": 10613,
-      "output_tokens": 619,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     }
-    ],
-    "trip-alone": [
-     {
-      "purpose": "extraction",
-      "batched": false,
-      "calls": 2,
-      "input_tokens": 4525,
-      "output_tokens": 4647,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 5736
-     },
-     {
-      "purpose": "semantic_lint",
-      "batched": false,
-      "calls": 10,
-      "input_tokens": 11756,
-      "output_tokens": 710,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     },
-     {
-      "purpose": "subject_resolution",
-      "batched": false,
-      "calls": 4,
-      "input_tokens": 3525,
-      "output_tokens": 57,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     }
-    ]
-   },
-   "source": "the trip-vs-move report run at 2026-10-14 00:56 UTC"
+     "source": "the trip-vs-move report run at 2026-10-14 01:07 UTC"
+    }
+   }
   },
-  "anthropic:claude-sonnet-4-6": {
-   "variants": {
-    "move": [
-     {
-      "purpose": "extraction",
-      "batched": false,
-      "calls": 9,
-      "input_tokens": 16517,
-      "output_tokens": 4895,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 6315
+  "reader": {
+   "models": {
+    "anthropic:claude-sonnet-5-5": {
+     "variants": {
+      "move": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 3,
+        "input_tokens": 6553,
+        "output_tokens": 2547,
+        "cache_creation_tokens": 2868,
+        "cache_read_tokens": 5736
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 3,
+        "input_tokens": 3200,
+        "output_tokens": 216,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 1754,
+        "output_tokens": 28,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "verification",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 2635,
+        "output_tokens": 156,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ],
+      "trip-alone": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 2196,
+        "output_tokens": 1152,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 2868
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 559,
+        "output_tokens": 66,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 1818,
+        "output_tokens": 28,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ]
      },
-     {
-      "purpose": "semantic_lint",
-      "batched": false,
-      "calls": 31,
-      "input_tokens": 21709,
-      "output_tokens": 1194,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
+     "source": "the trip-vs-move report run at 2026-10-14 22:25 UTC"
+    },
+    "anthropic:claude-sonnet-4-6": {
+     "variants": {
+      "move": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 4,
+        "input_tokens": 7018,
+        "output_tokens": 1153,
+        "cache_creation_tokens": 2105,
+        "cache_read_tokens": 2105
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 4,
+        "input_tokens": 4034,
+        "output_tokens": 176,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 663,
+        "output_tokens": 12,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "verification",
+        "batched": false,
+        "calls": 2,
+        "input_tokens": 2006,
+        "output_tokens": 87,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ],
+      "trip-alone": [
+       {
+        "purpose": "extraction",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 1687,
+        "output_tokens": 763,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 2105
+       },
+       {
+        "purpose": "semantic_lint",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 421,
+        "output_tokens": 38,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       },
+       {
+        "purpose": "subject_resolution",
+        "batched": false,
+        "calls": 1,
+        "input_tokens": 667,
+        "output_tokens": 12,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0
+       }
+      ]
      },
-     {
-      "purpose": "subject_resolution",
-      "batched": false,
-      "calls": 2,
-      "input_tokens": 1313,
-      "output_tokens": 24,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     },
-     {
-      "purpose": "verification",
-      "batched": false,
-      "calls": 9,
-      "input_tokens": 11282,
-      "output_tokens": 681,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     }
-    ],
-    "trip-alone": [
-     {
-      "purpose": "extraction",
-      "batched": false,
-      "calls": 2,
-      "input_tokens": 3478,
-      "output_tokens": 3824,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 4210
-     },
-     {
-      "purpose": "semantic_lint",
-      "batched": false,
-      "calls": 28,
-      "input_tokens": 20470,
-      "output_tokens": 1093,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     },
-     {
-      "purpose": "subject_resolution",
-      "batched": false,
-      "calls": 3,
-      "input_tokens": 2025,
-      "output_tokens": 34,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0
-     }
-    ]
-   },
-   "source": "the trip-vs-move report run at 2026-10-14 01:07 UTC"
+     "source": "the trip-vs-move report run at 2026-10-14 22:35 UTC"
+    }
+   }
   }
  }
 }

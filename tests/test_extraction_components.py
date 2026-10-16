@@ -45,6 +45,7 @@ _FLAGS = (
     "structure_enabled",
     "tool_turns_present",
     "context_present",
+    "session_source",
 )
 
 
@@ -154,6 +155,7 @@ class TestGeneralPromptTable:
         for name in (
             general.PROMPT_TOOL_TURNS,
             general.PROMPT_APPEND_CONTEXT,
+            general.PROMPT_SESSION_VALIDITY,
             general.PATH_SINGLE_PASS,
             general.PATH_CHUNKED,
             general.PATH_APPEND_DELTA,
@@ -291,6 +293,31 @@ class TestWhatAnExtractionRecords:
         expected = {c.name: c.digest for c in general._configured_prompt_components()}
         expected[general.CODE_PARSE] = general.parse_component_digest()
         assert tally.exercised == expected
+
+    def test_session_source_adds_its_rule_under_validity_only(self) -> None:
+        # the session rule rides only a transcript, and only when the
+        # validity rule it extends is on.
+        names = {c.name for c in general._configured_prompt_components(session_source=False)}
+        assert general.PROMPT_SESSION_VALIDITY not in names
+        names = {c.name for c in general._configured_prompt_components(session_source=True)}
+        assert general.PROMPT_SESSION_VALIDITY in names
+        off = {
+            c.name
+            for c in general.extract_prompt_components(
+                scope_enabled=False,
+                modality_enabled=False,
+                validity_enabled=False,
+                session_source=True,
+            )
+        }
+        assert general.PROMPT_SESSION_VALIDITY not in off
+        token = general._SESSION_SOURCE.set(True)
+        try:
+            with tally_components() as tally:
+                general._build_llm_request("Some source text.")
+        finally:
+            general._SESSION_SOURCE.reset(token)
+        assert general.PROMPT_SESSION_VALIDITY in tally.exercised
 
     def test_tool_turns_and_images_add_their_components(self) -> None:
         from particles.llm import VisionImage

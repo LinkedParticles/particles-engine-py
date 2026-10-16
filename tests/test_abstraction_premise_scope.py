@@ -228,6 +228,8 @@ class TestPromotionGate:
 
         assert report.rejected_population_scope == 1
         assert report.rejected_entailment == 0
+        # the run record names the rung that decided.
+        assert report.decided_by == {"population_quantifier@1": {"not_entailed": 1}}
         assert len(llm.systems) == 1  # synthesis only: the judge call was never spent
         assert report.llm_calls == 1
         assert report.proposed_event_ids == []
@@ -259,6 +261,9 @@ class TestPromotionGate:
             await ab._promote_cluster(db_session, cluster, report)
 
         assert report.rejected_population_scope == 0
+        assert report.decided_by == {
+            f"entailment_judge@{ab.entailment_judge_version()}": {"entailed": 1}
+        }
         assert len(llm.systems) == 2
         events = await list_events(db_session, event_type=OperatorEventType.ABSTRACTION_CANDIDATE)
         assert len(events) == 1

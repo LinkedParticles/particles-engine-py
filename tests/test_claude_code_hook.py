@@ -62,9 +62,15 @@ def _hook_log_lines(home: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def _write_transcript(path: Path, *turns: tuple[str, str]) -> None:
+def _write_transcript(path: Path, *turns: tuple[str, str], timestamp: str | None = None) -> None:
     lines = [
-        json.dumps({"type": speaker, "message": {"role": speaker, "content": text}})
+        json.dumps(
+            {
+                "type": speaker,
+                "message": {"role": speaker, "content": text},
+                **({"timestamp": timestamp} if timestamp else {}),
+            }
+        )
         for speaker, text in turns
     ]
     path.write_text("\n".join(lines) + "\n")
@@ -353,6 +359,37 @@ class TestSessionEnd:
         records = _hook_log_lines(hook_home)
         assert records[-1]["outcome"] == "ok"
         assert records[-1]["deposited"] == 1
+
+    def test_transcript_deposit_carries_the_session_start(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        # the session's first timestamp is the reference date its
+        # claims resolve against, so an act the session performed is dated to
+        # the day it happened rather than to the deferred extract pass.
+        project_dir = tmp_path / ".claude" / "projects" / "-dated"
+        project_dir.mkdir(parents=True)
+        transcript = project_dir / "sess-d.jsonl"
+        _write_transcript(transcript, ("user", "run the tests"), timestamp="2026-10-14T05:12:00Z")
+        result = runner.invoke(
+            app,
+            ["hook", "session-end", "--store", "default"],
+            input=_session_end_payload(transcript, "sess-d"),
+        )
+        assert result.exit_code == 0
+
+        async def _published_at() -> Any:
+            from particles.corpus.store import list_snapshots_for_entry
+            from particles.db import session_scope
+
+            entries = await _corpus_entries()
+            conv = [e for e in entries if e.uri_r == "claude-code://session/sess-d"]
+            async with session_scope() as session:
+                snap = (await list_snapshots_for_entry(session, conv[0].entry_id))[0]
+            return snap.content_published_at
+
+        published = asyncio.run(_published_at())
+        assert published is not None
+        assert published.date().isoformat() == "2026-10-14"
 
     def test_unchanged_reharvest_noop_vs_tail_append(
         self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path

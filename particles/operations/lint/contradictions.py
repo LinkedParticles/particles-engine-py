@@ -41,11 +41,14 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Final, Literal
 
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
@@ -55,12 +58,28 @@ from particles.core.contradiction_disclosure import (
     ConfirmedPair,
 )
 from particles.core.equivalence import co_evidential_components
+from particles.core.ladders import ClaimPair, NormalizedForms, contradiction_ladder
+from particles.core.observer_scope import (
+    GLOBAL_SCOPE,
+    UNATTRIBUTED_SCOPE,
+    BeliefScope,
+    PairPrecondition,
+    pair_precondition,
+)
 from particles.core.probe_verdict import (
     ProbeKind,
     VerdictKey,
     prompt_hash,
     remembered_clear,
     verdict_key,
+)
+from particles.core.rung_ladder import (
+    ContradictionVerdict,
+    CostClass,
+    Ladder,
+    QuestionKind,
+    Rung,
+    RungStamp,
 )
 from particles.core.schema import (
     LintFinding,
@@ -69,7 +88,9 @@ from particles.core.schema import (
     RelationType,
 )
 from particles.core.status import Status
+from particles.extraction.polarity import is_non_asserted
 from particles.extraction.scope import is_excluded_document_meta
+from particles.ingest.ladder_shell import report
 
 # The second reading moved to ``ingest`` so extraction can call it;
 # its names are re-exported here for the census and for callers that import
@@ -105,9 +126,10 @@ from particles.operations._llm import (
 from particles.operations.candidate_pairs import (
     CandidatePair,
     enumerate_candidate_pairs,
-    is_pair_eligible,
 )
-from particles.operations.probe_ledger import recall, remember
+from particles.operations.probe_ledger import recall, remember, remember_rungs
+from particles.store.observer_scope_join import lens_may_engage, load_scopes
+from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
     get_active_particles_with_embeddings,
     get_particles_by_ids,
@@ -123,6 +145,7 @@ __all__ = [
     "_VERIFY_INSTRUCTION",
     "_VERIFY_OBSERVED_INSTRUCTION",
     "_VERIFY_PASSAGE_CHARS",
+    "CensusLadder",
     "ClaimContext",
     "ContradictionProbeControl",
     "Disagreements",
@@ -140,6 +163,7 @@ __all__ = [
     "_verify_request",
     "claim_context",
     "contradiction_partner",
+    "census_ladder",
     "count_disagreements",
     "one_line",
     "probe_prompt_hash",
@@ -149,6 +173,123 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+_KIND = QuestionKind.CONTRADICTION
+
+
+class CensusLadder(BaseModel):
+    """What the contradiction ladder did in one census (§ 7.4).
+
+    Rides the run record beside the probe counts, so the claim that the
+    deterministic rungs carry the load is read from the record, not asserted.
+    """
+
+    #: Candidate pairs the deterministic rungs were asked about.
+    pairs_evaluated: int = 0
+    #: Pairs each deterministic rung answered (``name@version`` → count); none
+    #: of them reached the probe.
+    decided: dict[str, int] = Field(default_factory=dict)
+    #: Pairs dropped because an earlier pair in probe order asks about the same
+    #: two texts: the cap buys distinct pairs.
+    repeated_pairs: int = 0
+    #: Pairs probed, all distinct by their two texts.
+    probed_distinct: int = 0
+    #: Probed pairs whose two texts are one normalised sentence. The duplicate
+    #: key in front of the probe holds this at zero (bar: below 5 %).
+    probed_identical: int = 0
+    #: The cap was split by the observer precondition (the ruling).
+    observer_ordered: bool = False
+    #: Probes the cap reserved for cross-scope pairs.
+    cross_scope_reserved: int = 0
+    #: Probes sent to pairs some single reader sees, and to cross-scope pairs.
+    in_scope_probed: int = 0
+    cross_scope_probed: int = 0
+
+    def payload(self) -> dict[str, object]:
+        """The run record's block."""
+        return self.model_dump(mode="json")
+
+
+def census_ladder(forms: NormalizedForms | None = None) -> Ladder[ClaimPair, ContradictionVerdict]:
+    """The census's contradiction ladder at the current prompt versions.
+
+    ``forms`` is the run's memo of normalised texts: the duplicate-key rung is
+    asked of every candidate pair, so one census normalises each text once
+    through it rather than twice per pair.
+    """
+    return contradiction_ladder(probe_prompt_hash(), second_reading_prompt_hash(), forms=forms)
+
+
+class _PairRungs:
+    """The ladder's deterministic rungs, asked of every candidate pair before the probe.
+
+    Called by the pair enumeration in place of its last rule. A pair a rung
+    answers ``NO`` is dropped there and never costs a probe; a shadow rung's
+    verdict is kept and the pair goes on. No deterministic rung of the census
+    answers ``YES`` yet; one that did would hand its pair on as flagged.
+
+    Only a shadow rung's decisions become ledger rows: those
+    are the rows its admission bar accumulates against the probe's answers.
+    An admitted rung's load is on the run tally and nothing reads a row of
+    its own; on the owner's store the generic guard decides some 128,000
+    pairs a census, which is that many rows per rung version for no reader.
+    """
+
+    def __init__(self, ladder: Ladder[ClaimPair, ContradictionVerdict]) -> None:
+        self.rungs: list[Rung[ClaimPair, ContradictionVerdict]] = [
+            r for r in ladder.rungs if r.cost < CostClass.MODEL and not r.confirming
+        ]
+        self.evaluated = 0
+        self.ran: Counter[RungStamp] = Counter()
+        self.counts: dict[RungStamp, Counter[str]] = {r.stamp: Counter() for r in self.rungs}
+        self.rows: dict[RungStamp, dict[VerdictKey, str]] = {}
+        self.flagged: list[tuple[CandidatePair, str]] = []
+        self.flagged_by: dict[tuple[str, str], RungStamp] = {}
+
+    def __call__(self, a: Particle, b: Particle) -> bool:
+        self.evaluated += 1
+        pair = (a, b)
+        for rung in self.rungs:
+            if not rung.applies(pair):
+                continue
+            assert rung.decide is not None  # a census pair rung is declared with its decide
+            self.ran[rung.stamp] += 1
+            verdict = rung.decide(pair)
+            if verdict is ContradictionVerdict.ABSTAIN:
+                continue
+            self.counts[rung.stamp][verdict.value] += 1
+            if rung.shadow:
+                key = verdict_key(ProbeKind.CONTRADICTION, a.content, b.content)
+                self.rows.setdefault(rung.stamp, {})[key] = verdict.value
+                continue
+            if verdict is ContradictionVerdict.YES:
+                self.flagged_by[(a.id, b.id)] = rung.stamp
+            return verdict is ContradictionVerdict.NO
+        return False
+
+    @property
+    def shadow(self) -> frozenset[RungStamp]:
+        return frozenset(r.stamp for r in self.rungs if r.shadow)
+
+    def tally(self, out: CensusLadder) -> None:
+        """Report every rung's verdicts and abstentions to the run tally."""
+        out.pairs_evaluated = self.evaluated
+        for rung in self.rungs:
+            counts = self.counts[rung.stamp]
+            section = "shadow" if rung.shadow else "rungs"
+            for verdict, n in counts.items():
+                report(_KIND, section, rung.stamp, verdict, n)
+                if not rung.shadow:
+                    report(_KIND, "settled", rung.stamp, verdict, n)
+            report(
+                _KIND,
+                section,
+                rung.stamp,
+                ContradictionVerdict.ABSTAIN.value,
+                self.ran[rung.stamp] - sum(counts.values()),
+            )
+            if not rung.shadow and counts:
+                out.decided[str(rung.stamp)] = sum(counts.values())
 
 
 @dataclass
@@ -240,6 +381,8 @@ class ContradictionProbeControl:
     #: reason, in probe order. What the nightly disclosure pass reads
     #:.
     confirmed_pairs: list[ConfirmedPair] = field(default_factory=list)
+    #: Out: what the contradiction ladder did.
+    ladder: CensusLadder = field(default_factory=CensusLadder)
 
     @property
     def capped(self) -> bool:
@@ -370,8 +513,12 @@ def _pair_key(c: CandidatePair) -> VerdictKey:
 
 
 async def _drop_cleared(
-    session: AsyncSession, pairs: list[CandidatePair], *, verify: bool
-) -> tuple[list[CandidatePair], int]:
+    session: AsyncSession,
+    pairs: list[CandidatePair],
+    keys: list[VerdictKey],
+    *,
+    verify: bool,
+) -> tuple[list[CandidatePair], list[VerdictKey], int]:
     """Split off the pairs the ledger already cleared; order is kept.
 
     A pair is cleared by a recorded NO from the probe under its current prompt.
@@ -380,18 +527,121 @@ async def _drop_cleared(
     settles the pair whatever the first probe says now.
     """
     if not pairs:
-        return pairs, 0
-    keys = [_pair_key(c) for c in pairs]
+        return pairs, keys, 0
     probed = await recall(session, ProbeKind.CONTRADICTION, probe_prompt_hash(), keys)
     read: dict[VerdictKey, bool] = {}
     if verify:
         read = await recall(session, ProbeKind.SECOND_READING, second_reading_prompt_hash(), keys)
     kept = [
-        c
+        (c, key)
         for c, key in zip(pairs, keys, strict=True)
         if not remembered_clear(probed.get(key), read.get(key))
     ]
+    return [c for c, _ in kept], [k for _, k in kept], len(pairs) - len(kept)
+
+
+def _distinct(
+    pairs: list[CandidatePair], keys: list[VerdictKey]
+) -> tuple[list[CandidatePair], int]:
+    """The first pair in probe order for each two texts, and how many repeats were dropped.
+
+    Two pairs that ask about the same two sentences (one sentence held by two
+    particles) are one question, and the ledger keys its answer on the texts
+    already; probing both would spend the cap twice on it.
+    """
+    seen: set[VerdictKey] = set()
+    kept: list[CandidatePair] = []
+    for c, key in zip(pairs, keys, strict=True):
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(c)
     return kept, len(pairs) - len(kept)
+
+
+def _asserted_at(p: Particle) -> datetime:
+    at = p.asserted_at
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
+
+
+#: Pairs classified per scope read when ordering the cap by observer.
+_ORDER_CHUNK = 2000
+
+#: The observer ordering classifies at most this many pairs per probe of the
+#: cap before it stops looking for the rarer kind. On a rescoped store where
+#: one kind is rare (every claim in one project, say) the scan would otherwise
+#: classify every candidate pair, some 2.47 million on the owner's store in
+#: chunks of two store reads each, to fill a 200-probe cap. Past the bound the
+#: unfilled share goes to the other side, as it does when the list runs out.
+_ORDER_SCAN_FACTOR = 50
+
+
+async def _observer_ordered(
+    session: AsyncSession,
+    pairs: list[CandidatePair],
+    cap: int,
+    share: float,
+    out: CensusLadder,
+) -> tuple[list[CandidatePair], list[bool]]:
+    """The capped probe list, pairs some single reader sees first.
+
+    The ruling, order, do not drop: the observer precondition
+    is read with the newer claim as the candidate, as the write
+    path reads it. A pair it reconciles or sends to review is in scope; a pair
+    it declines joins two projects' claims and is cross-scope. ``share`` of the
+    cap is reserved for cross-scope pairs, so a contradiction between two
+    projects is still discovered and, on the write path, recorded as
+    ``OBSERVER_DIVERGENCE``. A share one side cannot fill goes to the other.
+    Probe order is in-scope first, then cross-scope, each in the census's own
+    order. Scope is read only, never written, and only as far down the list
+    as filling the cap needs, bounded at ``_ORDER_SCAN_FACTOR`` pairs per probe
+    of the cap: when one kind is too rare to fill its share within the bound,
+    the scan stops there and the other kind takes the rest. On a store that
+    was never rescoped the gate is open and the list is returned capped in its
+    own order.
+
+    A particle the scope join returns no row for is read as unattributed, the
+    fail-closed direction (``core/observer_scope.UNATTRIBUTED_SCOPE``: a
+    stamping gap never widens a belief to every reader). The join returns
+    every particle it is given today, so the default is a guard, not a path.
+
+    Returns the planned pairs and, for each, whether it is cross-scope.
+    """
+    if not await lens_may_engage(session):
+        return pairs[:cap], [False] * min(cap, len(pairs))
+    reserved = round(cap * share)
+    out.observer_ordered = True
+    out.cross_scope_reserved = reserved
+    widening = await any_widening(session)
+    scopes: dict[str, BeliefScope] = {}
+    inside: list[CandidatePair] = []
+    cross: list[CandidatePair] = []
+    scan_limit = min(len(pairs), cap * _ORDER_SCAN_FACTOR)
+    for start in range(0, scan_limit, _ORDER_CHUNK):
+        if len(inside) >= cap - reserved and len(cross) >= reserved:
+            break
+        chunk = pairs[start : min(start + _ORDER_CHUNK, scan_limit)]
+        missing = list({p.id: p for c in chunk for p in (c.a, c.b) if p.id not in scopes}.values())
+        if missing:
+            loaded = await load_scopes(session, missing)
+            widened = (
+                await widened_ids(session, ScopeTarget.PARTICLE, [p.id for p in missing])
+                if widening
+                else set()
+            )
+            for p in missing:
+                scopes[p.id] = (
+                    GLOBAL_SCOPE if p.id in widened else loaded.get(p.id, UNATTRIBUTED_SCOPE)
+                )
+        for c in chunk:
+            newer, older = (c.a, c.b) if _asserted_at(c.a) >= _asserted_at(c.b) else (c.b, c.a)
+            verdict = pair_precondition(scopes[newer.id], scopes[older.id])
+            (cross if verdict is PairPrecondition.DECLINE else inside).append(c)
+    cross_take = min(len(cross), reserved)
+    inside_take = min(len(inside), cap - cross_take)
+    cross_take = min(len(cross), cap - inside_take)
+    planned = inside[:inside_take] + cross[:cross_take]
+    return planned, [False] * inside_take + [True] * cross_take
 
 
 async def _record_answers(
@@ -404,8 +654,27 @@ async def _record_answers(
         if answer is not UNANSWERED
     }
     await remember(
-        session, ProbeKind.CONTRADICTION, probe_prompt_hash(), fresh, purpose="semantic_lint"
+        session,
+        ProbeKind.CONTRADICTION,
+        probe_prompt_hash(),
+        fresh,
+        purpose="semantic_lint",
+        rung=_probe_stamp(),
     )
+
+
+def _probe_stamp() -> RungStamp:
+    return RungStamp("contradiction_probe", probe_prompt_hash())
+
+
+def _reading_stamp() -> RungStamp:
+    return RungStamp("second_reading", second_reading_prompt_hash())
+
+
+def _answer_verdict(answer: ProbeAnswer) -> ContradictionVerdict:
+    if answer is UNANSWERED:
+        return ContradictionVerdict.ABSTAIN
+    return ContradictionVerdict.YES if isinstance(answer, str) else ContradictionVerdict.NO
 
 
 async def _check_contradictions(
@@ -445,10 +714,12 @@ async def _check_contradictions(
     # non-asserted, and non-truth-apt particles. A rejected /
     # deferred / counterfactual claim must not manufacture an INCONSISTENCY
     # against the chosen decision.
+    # Truth-aptness is not read here: it is the ladder's adjudicability rung,
+    # asked of each pair below, so its load is counted.
     candidates = [
         (p, emb)
         for p, emb in await get_active_particles_with_embeddings(session)
-        if not is_excluded_document_meta(p.properties) and is_pair_eligible(p)
+        if not is_excluded_document_meta(p.properties) and not is_non_asserted(p.properties)
     ]
     if len(candidates) < 2:
         return []
@@ -461,6 +732,11 @@ async def _check_contradictions(
     # without a probe; probing it again would pay twice and
     # report it twice.
     recorded = await _recorded_pairs(session)
+    # The contradiction ladder: its deterministic rungs run on every
+    # candidate pair inside the enumeration, before any probe. Each text is
+    # normalised once for the whole run, not once per pair it appears in.
+    forms = NormalizedForms()
+    pair_rungs = _PairRungs(census_ladder(forms))
 
     # Decide — enumerate the candidate-pair set (no LLM). Knowing the full set
     # before the first probe is what makes the cap, the "probed X of Y"
@@ -479,21 +755,49 @@ async def _check_contradictions(
         # from one note are mostly siblings of one sentence or entries of one
         # series, so under a cap they wait behind cross-note pairs.
         cross_source_first=True,
+        decline=pair_rungs,
     )
+    pair_rungs.tally(control.ladder)
+    await remember_rungs(session, pair_rungs.rows, shadow=pair_rungs.shadow)
+    # A pair a deterministic rung answered YES is flagged without a probe. The
+    # cheaper rung's verdict stands, so these pairs leave the
+    # probe's list here, before the ledger and the distinct-pair rule read it:
+    # an older probe NO on the same two texts, or an earlier pair that shares
+    # them, is the probe's business and never pre-empts a rung's YES. They
+    # cost no probe, so the cap never sees them either.
+    rung_flagged = [c for c in pairs if (c.a.id, c.b.id) in pair_rungs.flagged_by]
+    pairs = [c for c in pairs if (c.a.id, c.b.id) not in pair_rungs.flagged_by]
     # A pair the ledger already cleared under the current prompt is not asked
     # again. It is dropped before the cap is applied, so a cleared
     # pair never takes a probe from one that has not been asked: a capped
     # census reaches further down the similarity order on every run.
-    pairs, control.previously_cleared = await _drop_cleared(session, pairs, verify=control.verify)
+    keys = [_pair_key(c) for c in pairs]
+    pairs, keys, control.previously_cleared = await _drop_cleared(
+        session, pairs, keys, verify=control.verify
+    )
     if control.previously_cleared:
         log.info(
             "contradiction probe: %d pair(s) skipped as previously cleared",
             control.previously_cleared,
         )
+    # The cap buys distinct pairs.
+    pairs, control.ladder.repeated_pairs = _distinct(pairs, keys)
     control.candidate_pairs = len(pairs)
     if control.scope_particle_ids is not None:
         control.intra_scope_pairs = sum(1 for c in pairs if c.tier == 0)
-    planned = len(pairs) if control.max_probes is None else min(len(pairs), control.max_probes)
+    cross_flags: list[bool]
+    if control.max_probes is not None and len(pairs) > control.max_probes:
+        # Under a cap the observer precondition orders the plan.
+        planned_pairs, cross_flags = await _observer_ordered(
+            session,
+            pairs,
+            control.max_probes,
+            get_config().audit.cross_scope_probe_share,
+            control.ladder,
+        )
+    else:
+        planned_pairs, cross_flags = pairs, [False] * len(pairs)
+    planned = len(planned_pairs)
 
     # Phase 2 — probe the planned prefix. Two shapes, one verdict list: N
     # sequential calls when someone is waiting, or one asynchronous half-price
@@ -501,7 +805,7 @@ async def _check_contradictions(
     # The probes are independent by construction — each asks about one pair and
     # nothing carries between them — which is exactly what makes the set
     # batchable without changing a single verdict.
-    probe_pairs = pairs[:planned]
+    probe_pairs = planned_pairs
     verdicts: list[ProbeAnswer] = []
     if control.latency_tolerant:
         verdicts = await _batch_check_contradictions(
@@ -542,14 +846,20 @@ async def _check_contradictions(
             session, probe_pairs[recorded_through : len(verdicts)], verdicts[recorded_through:]
         )
 
+    _tally_probes(probe_pairs, verdicts, cross_flags, control, forms)
     flagged = [
         (c, why)
         for c, why in zip(probe_pairs[: len(verdicts)], verdicts, strict=True)
         if isinstance(why, str)
     ]
+    flagged += [(c, f"decided by {pair_rungs.flagged_by[(c.a.id, c.b.id)]}") for c in rung_flagged]
     control.flagged = len(flagged)
     if control.verify:
         flagged = await _verify_flagged(session, flagged, control)
+    else:
+        for c, _ in flagged:
+            report(_KIND, "settled", _decider(c, pair_rungs), ContradictionVerdict.YES.value)
+    decided_by = str(_reading_stamp())
 
     findings: list[LintFinding] = []
     for c, contradiction in flagged:
@@ -566,9 +876,44 @@ async def _check_contradictions(
                 recommended_action=(
                     f"Create INCONSISTENCY particle or run Review for {p_a.id} ↔ {p_b.id}"
                 ),
+                decided_by=decided_by if control.verify else str(_decider(c, pair_rungs)),
             )
         )
     return findings
+
+
+def _decider(c: CandidatePair, pair_rungs: _PairRungs) -> RungStamp:
+    """The rung a flag rests on before any second reading."""
+    return pair_rungs.flagged_by.get((c.a.id, c.b.id)) or _probe_stamp()
+
+
+def _tally_probes(
+    probe_pairs: Sequence[CandidatePair],
+    verdicts: Sequence[ProbeAnswer],
+    cross_flags: Sequence[bool],
+    control: ContradictionProbeControl,
+    forms: NormalizedForms,
+) -> None:
+    """Count the probe's verdicts and what the cap bought (§ 8.2).
+
+    ``forms`` is the run's memo of normalised texts, already filled by the
+    duplicate-key rung for every pair that reached the probe.
+    """
+    sent = probe_pairs[: len(verdicts)]
+    for answer in verdicts:
+        verdict = _answer_verdict(answer)
+        report(_KIND, "rungs", _probe_stamp(), verdict.value)
+        if verdict is not ContradictionVerdict.YES:
+            # A NO stands on the probe; an abstention leaves no rung deciding.
+            decider = _probe_stamp() if verdict is ContradictionVerdict.NO else None
+            report(_KIND, "settled", decider, verdict.value)
+    ladder = control.ladder
+    ladder.probed_distinct = len({_pair_key(c) for c in sent})
+    ladder.probed_identical = sum(1 for c in sent if forms.of(c.a) == forms.of(c.b))
+    if ladder.observer_ordered:
+        crossed = sum(1 for flag in cross_flags[: len(sent)] if flag)
+        ladder.cross_scope_probed = crossed
+        ladder.in_scope_probed = len(sent) - crossed
 
 
 async def _verify_flagged(
@@ -605,6 +950,15 @@ async def _verify_flagged(
             control.on_verify_progress(read, len(planned))
         if verdict is not None:
             readings[_pair_key(c)] = verdict.contradicts
+        settled = (
+            ContradictionVerdict.ABSTAIN
+            if verdict is None
+            else ContradictionVerdict.YES
+            if verdict.contradicts
+            else ContradictionVerdict.NO
+        )
+        report(_KIND, "rungs", _reading_stamp(), settled.value)
+        report(_KIND, "settled", _reading_stamp(), settled.value)
         if verdict is None:
             control.unverified += 1
         elif verdict.contradicts:
@@ -619,8 +973,12 @@ async def _verify_flagged(
                     reading=reading_for(ctx_a, ctx_b),
                 )
             )
-    # Flags past the cap, or left when the breaker opened, were never read.
+    # Flags past the cap, or left when the breaker opened, were never read:
+    # the confirmation rung could not run, and its abstention stands.
     control.unverified += len(flagged) - read
+    report(
+        _KIND, "settled", _reading_stamp(), ContradictionVerdict.ABSTAIN.value, len(flagged) - read
+    )
     # The census's own readings are recorded; a NO clears the pair
     # for every later verifying run while both claims are unchanged.
     await remember(
@@ -629,6 +987,7 @@ async def _verify_flagged(
         second_reading_prompt_hash(),
         readings,
         purpose="verification",
+        rung=_reading_stamp(),
     )
     return confirmed
 

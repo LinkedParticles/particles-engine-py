@@ -17,6 +17,7 @@ these run under ``pytest -m "not integration"``.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 
@@ -66,11 +67,16 @@ _BODY_V2 = (
 
 
 def _git(repo: Path, *args: str) -> str:
+    # Scrubbed here too, not only by the fixtures: ``_init_repo`` runs
+    # ``git init``, which under an inherited GIT_DIR re-initialises the outer
+    # repository as bare.
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_CONTEXT_VARS}
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     ).stdout
 
 

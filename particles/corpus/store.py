@@ -245,6 +245,25 @@ async def list_snapshots_for_entry(session: AsyncSession, entry_id: str) -> list
     return [r.to_model() for r in result.scalars()]
 
 
+async def set_snapshots_published_at(
+    session: AsyncSession, entry_id: str, published_at: datetime
+) -> int:
+    """Give every snapshot of ``entry_id`` that has no ``content_published_at`` the value.
+
+    The repair for a harvest deposited before the session's start rode along:
+    a snapshot that already carries a date is left alone. Returns
+    the number of rows written. Flushes; the caller commits.
+    """
+    result = await session.execute(
+        update(SnapshotRow)
+        .where(SnapshotRow.entry_id == entry_id, SnapshotRow.content_published_at.is_(None))
+        .values(content_published_at=published_at)
+    )
+    await session.flush()
+    rowcount = getattr(result, "rowcount", 0)
+    return int(rowcount) if isinstance(rowcount, int) and rowcount > 0 else 0
+
+
 async def update_extraction_status(
     session: AsyncSession,
     snapshot_id: str,

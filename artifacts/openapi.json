@@ -2683,6 +2683,17 @@
             ],
             "title": "Corpus Entry Id"
           },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
           "detail": {
             "title": "Detail",
             "type": "string"
@@ -3149,6 +3160,7 @@
           "MODALITY_RECLASSIFIED",
           "MODALITY_GRANT_QUEUED",
           "PARTICLE_DATED",
+          "SESSION_DATES_REPAIRED",
           "AGENT_EXTRACTION_ASKED",
           "AGENT_EXTRACTION_CONTINUED",
           "AGENT_EXTRACTION_SUBMITTED"

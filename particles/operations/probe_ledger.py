@@ -21,10 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.probe_verdict import ProbeKind, VerdictKey
+from particles.core.rung_ladder import RungStamp
 from particles.db import write_transaction
-from particles.store.probe_verdict_store import lookup_verdicts, record_verdicts
+from particles.store.probe_verdict_store import (
+    lookup_verdicts,
+    record_rung_verdicts,
+    record_verdicts,
+)
 
-__all__ = ["model_label", "recall", "remember"]
+__all__ = ["model_label", "recall", "remember", "remember_rungs"]
 
 
 def model_label(purpose: str) -> str:
@@ -47,8 +52,11 @@ async def remember(
     verdicts: Mapping[VerdictKey, bool],
     *,
     purpose: str,
+    rung: RungStamp | None = None,
 ) -> int:
     """Record fresh verdicts and commit them under the writer lock.
+
+    ``rung`` stamps the rows with the ladder rung that asked.
 
     Committed at once, so a pass that stops part-way (the breaker opened, the
     process died) keeps what it paid for. Anything the session holds
@@ -58,5 +66,28 @@ async def remember(
         return 0
     async with write_transaction(session):
         return await record_verdicts(
-            session, kind, prompt_hash, verdicts, model=model_label(purpose)
+            session, kind, prompt_hash, verdicts, model=model_label(purpose), rung=rung
         )
+
+
+async def remember_rungs(
+    session: AsyncSession,
+    verdicts: Mapping[RungStamp, Mapping[VerdictKey, str]],
+    *,
+    shadow: frozenset[RungStamp] = frozenset(),
+) -> int:
+    """Record deterministic rungs' decisions, committed under the writer lock.
+
+    ``verdicts`` maps each rung to the inputs it decided and its verdict on
+    each; a rung in ``shadow`` is recorded with the shadow flag. The census
+    passes only its shadow rungs' decisions: an admitted rung's
+    load is on the run tally and no reader wants a row per pair it decided.
+    Returns the rows written.
+    """
+    if not any(verdicts.values()):
+        return 0
+    written = 0
+    async with write_transaction(session):
+        for stamp, decided in verdicts.items():
+            written += await record_rung_verdicts(session, stamp, decided, shadow=stamp in shadow)
+    return written

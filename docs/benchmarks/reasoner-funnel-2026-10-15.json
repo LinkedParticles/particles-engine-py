@@ -1,0 +1,329 @@
+{
+ "funnel": {
+  "measured_at": "2026-10-15T20:12:52+00:00",
+  "checks": [
+   {
+    "key": "document_meta",
+    "label": "DOCUMENT_META scope"
+   },
+   {
+    "key": "adjudicability",
+    "label": "adjudicability gate, is_truth_apt"
+   },
+   {
+    "key": "non_asserted",
+    "label": "non-asserted polarity, DECLINED or HYPOTHETICAL"
+   },
+   {
+    "key": "co_evidential",
+    "label": "CO_EVIDENTIAL component, a paraphrase pair"
+   },
+   {
+    "key": "recorded",
+    "label": "CONTRADICTS already recorded"
+   },
+   {
+    "key": "stance_holder",
+    "label": "stance holder differs"
+   },
+   {
+    "key": "generic_instance",
+    "label": "generic-versus-instance guard"
+   }
+  ],
+  "threshold": 0.6,
+  "particles_active_embedded": 55533,
+  "above_threshold_pairs": 2816564,
+  "sequential": {
+   "document_meta": 116817,
+   "adjudicability": 63226,
+   "non_asserted": 34641,
+   "co_evidential": 1,
+   "recorded": 87,
+   "stance_holder": 0,
+   "generic_instance": 127560
+  },
+  "alone": {
+   "document_meta": 116817,
+   "adjudicability": 70272,
+   "non_asserted": 36836,
+   "co_evidential": 1,
+   "recorded": 87,
+   "stance_holder": 0,
+   "generic_instance": 147781
+  },
+  "survivors": 2474232,
+  "previously_cleared": 236,
+  "candidate_pairs": 2473996,
+  "cap": 200,
+  "planned": 200,
+  "write_path": {
+   "same_normalised_content": {
+    "candidate_pairs": 440,
+    "planned": 170
+   },
+   "both_carry_triple": {
+    "candidate_pairs": 492559,
+    "planned": 25
+   },
+   "duplicate_key_identity": {
+    "candidate_pairs": 138,
+    "planned": 44
+   },
+   "same_stored_slot_loose": {
+    "candidate_pairs": 1766,
+    "planned": 5
+   },
+   "same_stored_slot": {
+    "candidate_pairs": 1631,
+    "planned": 3
+   },
+   "past_value_marker": {
+    "candidate_pairs": 23689
+   },
+   "same_source": {
+    "candidate_pairs": 118644
+   },
+   "precondition_decline": {
+    "candidate_pairs": 1732911,
+    "planned": 131
+   },
+   "precondition_reconcile": {
+    "candidate_pairs": 740742,
+    "planned": 69
+   },
+   "disclosure_observer_disjoint": {
+    "candidate_pairs": 12926,
+    "planned": 11
+   },
+   "precondition_review": {
+    "candidate_pairs": 343
+   }
+  },
+  "observer_engaged": true,
+  "timings_s": {
+   "load_s": 6.709630415774882,
+   "enumerate_s": 7.941853791475296,
+   "ledger_s": 14.50146404094994,
+   "observer_s": 3.713685999624431
+  },
+  "cross_check": {
+   "census_candidate_pairs": 2473993,
+   "census_previously_cleared": 236,
+   "census_probes_run": 0,
+   "census_findings": 0,
+   "census_wall_s": 52.92079866677523,
+   "agrees": false
+  }
+ },
+ "census": {
+  "measured_at": "2026-10-15T20:13:48+00:00",
+  "particles": {
+   "active": 55578,
+   "active_with_triple": 20638,
+   "eligible_with_triple": 19789,
+   "eligible_subject_resolved": 16593,
+   "eligible_literal_object": 19573,
+   "eligible_dated": 420,
+   "eligible_with_valid_until": 0,
+   "eligible_classed_subject": 5152,
+   "eligible_negated_predicate": 402,
+   "subjects": 15334,
+   "subjects_with_class": 3770
+  },
+  "comparable_objects_by_kind": {
+   "number": 1068,
+   "date": 160,
+   "number_with_unit": 1307,
+   "boolean": 154
+  },
+  "polarity_of_falsifiable_triples": {
+   "ASSERTED": 19789,
+   "DECLINED": 75,
+   "HYPOTHETICAL": 155
+  },
+  "structurizers": {
+   "content-structurizer 1.0.0": 270,
+   "general-extractor 0.13.0": 3065,
+   "general-extractor 0.14.0": 2809,
+   "general-extractor 0.15.0": 3661,
+   "general-extractor 0.16.0": 10173,
+   "general-extractor 0.17.0": 93,
+   "general-extractor 0.18.0": 567
+  },
+  "strict_slot": {
+   "slot_pairs": 2462,
+   "classed_subject": 667,
+   "comparator_number_with_unit": 182,
+   "comparator_applicable": 57,
+   "comparator_equal": 37,
+   "same_object": 609,
+   "both_dated": 43,
+   "comparator_unequal": 20,
+   "both_dated_different_start": 18,
+   "comparator_kinds": {
+    "date": 6,
+    "number": 45,
+    "boolean": 6
+   }
+  },
+  "loose_slot": {
+   "slot_pairs": 2658,
+   "classed_subject": 667,
+   "comparator_number_with_unit": 191,
+   "comparator_applicable": 62,
+   "comparator_equal": 40,
+   "same_object": 675,
+   "both_dated": 46,
+   "comparator_unequal": 22,
+   "both_dated_different_start": 18,
+   "comparator_kinds": {
+    "date": 6,
+    "number": 50,
+    "boolean": 6
+   }
+  },
+  "polarity_negated_predicate_pairs": 0,
+  "polarity_axis_pairs_including_declined": 1,
+  "examples": {
+   "comparator_unequal": [
+    [
+     "`audit.max_contradiction_probes` is set to 50.",
+     "audit.max_contradiction_probes is now set to 200 in config.yaml."
+    ],
+    [
+     "`audit.max_contradiction_probes` is set to 50.",
+     "The nightly contradiction-probe cap audit.max_contradiction_probes is set to 1000."
+    ],
+    [
+     "audit.max_contradiction_probes is now set to 200 in config.yaml.",
+     "The nightly contradiction-probe cap audit.max_contradiction_probes is set to 1000."
+    ],
+    [
+     "The full suite on the rebased tree showed 4464 tests passed.",
+     "The test suite had 4466 tests passed in the full gate run."
+    ],
+    [
+     "The CI suite includes mypy --strict, 3 import-linter contracts, 4661 unit tests, ruff, mkdocs --strict, and browser verification of all three routes against a seeded demo store.",
+     "The full test suite contains 4711 unit tests."
+    ],
+    [
+     "The full test suite ran with 4774 tests passing.",
+     "5772 tests were passing in the particles-engine-py codebase."
+    ],
+    [
+     "A calibration run on the prose-calibration suite produced a temperature value of T=1.1237.",
+     "A subsequent calibration run produced a temperature value of T=1.1726."
+    ],
+    [
+     "The full test suite passed with 4728 tests passing, mypy strict checks clean, and import-linter reporting 3/3.",
+     "All 146 tests in the relevant test suite (tests/test_llm_local.py, tests/test_llm.py, tests/test_config.py, tests/test_secrets.py) passed."
+    ],
+    [
+     "The count of findings produced by the publish_export.py rewrite rose to 1593 because an earlier `(3` mangling had been hiding findings that then surfaced.",
+     "After the PREP and Dockerfile fixture fixes, the publish_export.py rewrite's residual finding count dropped to 1384."
+    ],
+    [
+     "The count of findings produced by the publish_export.py rewrite rose to 1593 because an earlier `(3` mangling had been hiding findings that then surfaced.",
+     "After moving the `_HSP` definition earlier and constraining the TRAILER rule, the engine's residual finding count dropped from 1052 to 969."
+    ],
+    [
+     "The count of findings produced by the publish_export.py rewrite rose to 1593 because an earlier `(3` mangling had been hiding findings that then surfaced.",
+     "After adding an em/en-dash rule for paren-head separators to scripts/publish_export.py, the residual finding count dropped to 1274."
+    ],
+    [
+     "After the PREP and Dockerfile fixture fixes, the publish_export.py rewrite's residual finding count dropped to 1384.",
+     "After moving the `_HSP` definition earlier and constraining the TRAILER rule, the engine's residual finding count dropped from 1052 to 969."
+    ]
+   ],
+   "negated_predicate": [],
+   "polarity_axis": [
+    [
+     "Priority Tier does not cover Claude Opus 5.",
+     "Priority Tier does not cover Claude Opus 5."
+    ]
+   ]
+  },
+  "funnel_candidate_pair_ids": {
+   "pairs": 2473996,
+   "both_carry_triple": 492559,
+   "slot_slot_pairs": 1631,
+   "slot_same_object": 554,
+   "slot_classed_subject": 463,
+   "slot_comparator_applicable": 45,
+   "slot_comparator_equal": 31,
+   "slot_comparator_number_with_unit": 112,
+   "slot_both_dated": 36,
+   "slot_both_dated_different_start": 18,
+   "slot_comparator_unequal": 14,
+   "slot_comparator_kinds": {
+    "number": 37,
+    "date": 4,
+    "boolean": 4
+   }
+  },
+  "funnel_planned_pair_ids": {
+   "pairs": 200,
+   "both_carry_triple": 25,
+   "slot_slot_pairs": 3,
+   "slot_same_object": 2,
+   "slot_comparator_kinds": {}
+  }
+ },
+ "probe": {
+  "measured_at": "2026-10-16T00:29:29+00:00",
+  "cap": 1000,
+  "candidate_pairs": 2473993,
+  "previously_cleared": 236,
+  "probes_run": 1000,
+  "unanswered": 0,
+  "flagged": 107,
+  "verifications_run": 25,
+  "confirmed": 0,
+  "unverified": 82,
+  "findings": 0,
+  "same_source_findings": 0,
+  "wall_s": 1278.2,
+  "probe_seconds_mean": 1.19,
+  "reading_seconds_mean": 1.41,
+  "usage": {
+   "rows": [
+    {
+     "purpose": "semantic_lint",
+     "provider": "anthropic",
+     "model": "claude-haiku-5-5",
+     "batched": false,
+     "replayed": false,
+     "calls": 1000,
+     "input_tokens": 604938,
+     "output_tokens": 108244,
+     "cache_creation_tokens": 0,
+     "cache_read_tokens": 0,
+     "max_tokens_stops": 0,
+     "cost_usd": 0.1146158
+    },
+    {
+     "purpose": "verification",
+     "provider": "anthropic",
+     "model": "claude-sonnet-5-5",
+     "batched": false,
+     "replayed": false,
+     "calls": 25,
+     "input_tokens": 39300,
+     "output_tokens": 1592,
+     "cache_creation_tokens": 0,
+     "cache_read_tokens": 0,
+     "max_tokens_stops": 0,
+     "cost_usd": 0.09452
+    }
+   ],
+   "cost_usd": 0.2091358,
+   "unpriced": [],
+   "replayed_cost_usd": 0.0
+  },
+  "usage_line": "LLM usage: 1000 semantic lint calls (claude-haiku-5-5), 605k input, 108k output tokens; 25 verification calls (claude-sonnet-5-5), 39k input, 2k output tokens; ≈ $0.21 at list price.",
+  "probe_model": "claude-haiku-5-5",
+  "verify_model": "claude-sonnet-5-5",
+  "flagged_pairs": 107
+ }
+}

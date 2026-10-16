@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from particles.benchmark.update_gate.checks import case_rows
+from particles.benchmark.update_gate.checks import SUPPORTING, case_rows
+from particles.benchmark.update_gate.fixtures import CASES
 from particles.benchmark.update_gate.schema import CaseRun, TripVsMoveReport, UpdateGateReport
 from particles.benchmark.update_gate.scoring import GATES
 from particles.llm.usage import format_usd
@@ -36,7 +37,7 @@ def _spend_line(report: TripVsMoveReport) -> str:
 def render_case(report: TripVsMoveReport, *, rows: bool = True) -> str:
     """The trip-versus-move report as text: one block per run, then the verdict."""
     out = [
-        f"Trip versus move: {report.model}"
+        f"Trip versus move, {report.case} case ({CASES[report.case].label}): {report.model}"
         + (
             " (mixed: "
             + ", ".join(f"{p}={m}" for p, m in sorted(report.purposes.items()) if m != report.model)
@@ -57,13 +58,15 @@ def render_case(report: TripVsMoveReport, *, rows: bool = True) -> str:
         out.append(f"{run.variant} run {run.index}: {_state(run)}{cost}")
         for check, offending in run.checks.items():
             if (
-                check != "pass"
+                check not in ("pass", "missing")
                 and isinstance(offending, list)
                 and offending
-                and check != "residence_claims"
+                and check not in SUPPORTING
             ):
                 out.append(f"  {check}:")
                 out.extend(f"    {text}" for text in offending)
+        if run.checks.get("missing"):
+            out.append(f"  found no claim for: {', '.join(run.checks['missing'])}")
         if run.refused_calls:
             out.append(f"  refused calls: {run.refused_calls}")
         if rows:

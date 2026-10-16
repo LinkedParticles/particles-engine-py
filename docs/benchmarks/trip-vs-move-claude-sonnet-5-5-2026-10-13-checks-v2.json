@@ -1,0 +1,1335 @@
+{
+ "suite": "trip-vs-move",
+ "report_version": 1,
+ "checks_version": 2,
+ "sdk_version": "1.189.0",
+ "run_at": "2026-10-14T00:56:40.561117Z",
+ "case": "mid-trip",
+ "model": "anthropic:claude-sonnet-5-5",
+ "purposes": {
+  "default": "anthropic:claude-sonnet-5-5",
+  "extraction": "anthropic:claude-sonnet-5-5",
+  "semantic_lint": "anthropic:claude-sonnet-5-5",
+  "query_response": "anthropic:claude-sonnet-5-5",
+  "synthesis": "anthropic:claude-sonnet-5-5",
+  "benchmark": "anthropic:claude-sonnet-5-5",
+  "benchmark_answer": "anthropic:claude-sonnet-5-5",
+  "abstraction": "anthropic:claude-sonnet-5-5",
+  "verification": "anthropic:claude-sonnet-5-5",
+  "subject_resolution": "anthropic:claude-sonnet-5-5",
+  "use_judge": "anthropic:claude-sonnet-5-5"
+ },
+ "mixed": false,
+ "same_slot_admits": true,
+ "arm": "live",
+ "fixture": [
+  {
+   "name": "session-04.md",
+   "sha256": "057b9ae0f1c09f0207175a7b64c089b3a8647865842510e4fe8d6a60c089dffc"
+  },
+  {
+   "name": "session-11.md",
+   "sha256": "5680e17d392a8d4d2b42ee7717e267d3e2d93acc42a4d5700c91250b04c230f4"
+  },
+  {
+   "name": "session-12-moved.md",
+   "sha256": "fed4870fd8da4f6ff361bdec9e85f96608998151c551d06b00fcd984cc5ebd3f"
+  }
+ ],
+ "runs": [
+  {
+   "variant": "move",
+   "index": 1,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as stated in a session dated 2026-10-09."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 5,
+      "input_tokens": 11780,
+      "output_tokens": 5622,
+      "cache_creation_tokens": 2868,
+      "cache_read_tokens": 5736,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.0880972
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 17,
+      "input_tokens": 17003,
+      "output_tokens": 2773,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.061736
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 4,
+      "input_tokens": 3495,
+      "output_tokens": 57,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00756
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 6,
+      "input_tokens": 10613,
+      "output_tokens": 619,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.027416
+     }
+    ],
+    "cost_usd": 0.1848092,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "4e70142c-df7c-4cd4-ae64-99962beb7f24",
+     "content": "As of 2026-09-04, Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c194695d-f71d-42a9-a67c-fd4c57bc98ff",
+     "content": "As of 2026-10-08, during the week-long work trip to Mumbai, the user was staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "ed798ccd-a6c1-4e01-9682-b51ba09e6109",
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week on a work trip, they were due to fly back to Delhi on Thursday 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "202bfb42-1289-44f7-a7da-1daab110b9d8",
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "09cfdf8d-8443-4b22-9b10-3443287760f1",
+     "content": "Sandeep's Curry House is located near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "41834cbb-502e-45ff-85b8-e1f83ccf3d61",
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "e0a15d18-cb5b-48cd-b8e0-ff2735f46bbc",
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "2e6839d1-0afb-4361-881b-459c408e977b",
+     "content": "The user is in Mumbai for a week on a work trip, as of 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "759a6041-1798-4352-9430-f8a2904d9895",
+     "content": "The user is staying at a hotel in Bandra, Mumbai, as of 2026-10-08.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "221f4166-3863-47fa-993f-5b457c9d099c",
+     "content": "The user is vegetarian.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "db4af86c-bfd5-426a-8eee-00335d93fe11",
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "ac32ff78-a056-41d3-85e0-932ecce44260",
+     "content": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-12-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c5814ca2-83f2-4f20-8c73-0fba7b397d74",
+     "content": "The user will fly back to Delhi on Thursday 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "83ddb2cc-a12c-49b1-9ab6-f57c73c6f725",
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "2e6839d1-0afb-4361-881b-459c408e977b",
+      "winner_id": "ac32ff78-a056-41d3-85e0-932ecce44260",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "db4af86c-bfd5-426a-8eee-00335d93fe11",
+      "winner_id": "ac32ff78-a056-41d3-85e0-932ecce44260",
+      "route": "extra"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "83ddb2cc-a12c-49b1-9ab6-f57c73c6f725",
+      "winner_id": "ac32ff78-a056-41d3-85e0-932ecce44260",
+      "route": "sweep"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "move",
+   "index": 2,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as reported in a session dated 2026-10-09."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 5,
+      "input_tokens": 11606,
+      "output_tokens": 5032,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 8604,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.07525280000000001
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 13,
+      "input_tokens": 13899,
+      "output_tokens": 958,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.037378
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 4,
+      "input_tokens": 3445,
+      "output_tokens": 57,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00746
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 6,
+      "input_tokens": 9764,
+      "output_tokens": 1061,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.030138
+     }
+    ],
+    "cost_usd": 0.1502288,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "40ba8acb-830b-4a61-bcd4-2b7dab5d539c",
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week for work, they were due to fly back to Delhi on Thursday 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "f43eb048-ecbd-4af9-b044-b6e02a7216a5",
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "50e61e46-03d0-4d75-b1f6-4b1ad7e1b901",
+     "content": "Sandeep's Curry House is located in or near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "dfe82de9-8a50-4760-8f8d-fae118ec1c15",
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "72b9015d-3f34-4aac-954b-cddf788e33c4",
+     "content": "Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived, as of 2026-09-04.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "6b3018ab-3c58-4616-95c2-fa7bb75113a8",
+     "content": "The paneer tikka at Sandeep's Curry House is the best the user has had.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "4531f6a5-39c5-41d2-bad3-47b5c206b85f",
+     "content": "The user is in Mumbai for a week for work, in the week starting 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "ef37a535-b86b-497a-94f7-35a180dfaf44",
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "00b16a66-ff4d-47af-9c7f-9a59feb9e331",
+     "content": "The user is vegetarian.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "9eeee25e-566c-4885-a93f-a2fd30acad06",
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "59ab29a6-9003-4721-b525-8c0f8933d08a",
+     "content": "The user moved to Mumbai, as reported in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-12-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "0e1cb277-1f7e-4cf0-9ebd-eb49eb04443f",
+     "content": "The user will fly back to Delhi on the Thursday of the week after 2026-10-08 (2026-10-15).",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "4126b3fa-1f92-4b47-be12-79c221c028ac",
+     "content": "The user's home is in Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "4531f6a5-39c5-41d2-bad3-47b5c206b85f",
+      "winner_id": "59ab29a6-9003-4721-b525-8c0f8933d08a",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "ef37a535-b86b-497a-94f7-35a180dfaf44",
+      "winner_id": "59ab29a6-9003-4721-b525-8c0f8933d08a",
+      "route": "extra"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "9eeee25e-566c-4885-a93f-a2fd30acad06",
+      "winner_id": "59ab29a6-9003-4721-b525-8c0f8933d08a",
+      "route": "extra"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "4126b3fa-1f92-4b47-be12-79c221c028ac",
+      "winner_id": "59ab29a6-9003-4721-b525-8c0f8933d08a",
+      "route": "sweep"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "move",
+   "index": 3,
+   "passed": true,
+   "checks": {
+    "i_delhi_residence_or_flight": [],
+    "i_restatement_shape": [],
+    "ii_held_by_winner": [],
+    "ii_restatements_not_active": [],
+    "iii_trip_current": [],
+    "iv_move_kept": [
+     "The user moved to Mumbai, as stated in a session dated 2026-10-09."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 5,
+      "input_tokens": 11634,
+      "output_tokens": 5353,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 8604,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.0785188
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 18,
+      "input_tokens": 18345,
+      "output_tokens": 1877,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.05546
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 4,
+      "input_tokens": 3428,
+      "output_tokens": 57,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.007426
+     },
+     {
+      "purpose": "verification",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 6,
+      "input_tokens": 9726,
+      "output_tokens": 900,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.028452
+     }
+    ],
+    "cost_usd": 0.1698568,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "0322157c-2e52-4aad-ae29-d606d0add189",
+     "content": "As of 2026-09-04, Sandeep's Curry House was a ten-minute walk from the user's flat in Lajpat Nagar, Delhi, where the user lived.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "a090f46e-dd47-4f4e-98d5-d7c514f4cb96",
+     "content": "As of 2026-10-08, when the user was in Mumbai for a week on a work trip, the user was due to fly from Mumbai back to Delhi on Thursday 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": true,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "a2549635-7580-4013-b5d4-1cedcc8fd0bb",
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "36c9ae53-1c58-4fe8-b0db-7c9bee023aa5",
+     "content": "Sandeep's Curry House is in Delhi, near Lajpat Nagar.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "81331db9-3089-4da2-a7c7-4fcbf5fae591",
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "d1d87a8d-f5b4-425e-828c-2030d546e5c8",
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "b4efed8e-cccc-4562-85b6-5f1d0548d68a",
+     "content": "The user is in Mumbai for a week on a work trip in the week of 2026-10-08.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "539c7796-46cb-4c6c-86d6-83ca5d73c867",
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "719ab511-c988-4531-8265-99256ea1b27e",
+     "content": "The user is vegetarian.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "058c9679-b568-40e2-9ec4-a268a28c51a2",
+     "content": "The user lives in Delhi (their home is Delhi).",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "d40b3849-20b5-47c5-a002-b9983c5778e3",
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "PROVENANCE_STALE",
+     "reason": "SUPERSEDED_BY_UPDATE",
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "46e1ca41-78c9-4435-a2f8-82befd836852",
+     "content": "The user moved to Mumbai, as stated in a session dated 2026-10-09.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-12-moved.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "85fbc974-51cf-4606-8d29-8f561972eeb5",
+     "content": "The user will fly from Mumbai back to Delhi on Thursday 2026-10-15.",
+     "status": "SUPERSEDED",
+     "reason": "SUPERSEDED_BY_REANCHOR",
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "b4efed8e-cccc-4562-85b6-5f1d0548d68a",
+      "winner_id": "46e1ca41-78c9-4435-a2f8-82befd836852",
+      "route": "ladder"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "539c7796-46cb-4c6c-86d6-83ca5d73c867",
+      "winner_id": "46e1ca41-78c9-4435-a2f8-82befd836852",
+      "route": "extra"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "d40b3849-20b5-47c5-a002-b9983c5778e3",
+      "winner_id": "46e1ca41-78c9-4435-a2f8-82befd836852",
+      "route": "sweep"
+     }
+    },
+    {
+     "event_type": "UPDATE_SUPERSESSION",
+     "payload": {
+      "retired_id": "058c9679-b568-40e2-9ec4-a268a28c51a2",
+      "winner_id": "46e1ca41-78c9-4435-a2f8-82befd836852",
+      "route": "sweep"
+     }
+    }
+   ],
+   "refused_calls": {}
+  },
+  {
+   "variant": "trip-alone",
+   "index": 1,
+   "passed": true,
+   "checks": {
+    "a_home_in_delhi": [
+     "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "The user lives in Lajpat Nagar, Delhi."
+    ],
+    "b_trip_current": [
+     "The user flies back from Mumbai to Delhi on Thursday, 2026-10-15 (the Thursday following the 2026-10-08 session).",
+     "The user is in Mumbai for a week on a work trip, as of 2026-10-08.",
+     "The user is staying at a hotel in Bandra, Mumbai."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 4525,
+      "output_tokens": 4647,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 5736,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.056667199999999994
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 10,
+      "input_tokens": 11756,
+      "output_tokens": 710,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.030612
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 4,
+      "input_tokens": 3525,
+      "output_tokens": 57,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.00762
+     }
+    ],
+    "cost_usd": 0.0948992,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "3bb5108b-88a1-491f-8f76-7a246c06236e",
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c7f3cd97-96a0-4611-ba1d-14d75377b39f",
+     "content": "Sandeep's Curry House is located within about a ten-minute walk of Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "24caf95e-4e9a-477b-9c65-f56949b67926",
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "b5105950-5cd3-4362-b555-e39a9e0bc9e8",
+     "content": "The paneer tikka at Sandeep's Curry House is the best paneer tikka the user has had.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "ebcf761a-7bf5-4c40-96bc-4b5e7a4f6e59",
+     "content": "The user flies back from Mumbai to Delhi on Thursday, 2026-10-15 (the Thursday following the 2026-10-08 session).",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "b8b5fcf5-0c90-4d25-832d-909d2938484c",
+     "content": "The user is in Mumbai for a week on a work trip, as of 2026-10-08.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c20b3be1-9709-44be-b4c7-b57a1fe5c02b",
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "9a54a6a8-4ebd-4610-bcfb-13682a928bbf",
+     "content": "The user is vegetarian.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c2e7bd95-d1d0-4da4-a498-c19f8ecc2cf2",
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "17de4cf4-11a0-40b4-ae10-db4bbdeb94c5",
+     "content": "The user's home is in Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [],
+   "refused_calls": {}
+  },
+  {
+   "variant": "trip-alone",
+   "index": 2,
+   "passed": true,
+   "checks": {
+    "a_home_in_delhi": [
+     "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "The user lives in Lajpat Nagar, Delhi."
+    ],
+    "b_trip_current": [
+     "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+     "The user is staying at a hotel in Bandra, Mumbai.",
+     "The user plans to fly from Mumbai back to Delhi on Thursday, 2026-10-15."
+    ],
+    "missing": [],
+    "pass": true
+   },
+   "incomplete": null,
+   "invalid": null,
+   "usage": {
+    "rows": [
+     {
+      "purpose": "extraction",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 2,
+      "input_tokens": 4529,
+      "output_tokens": 4570,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 5736,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.055905199999999995
+     },
+     {
+      "purpose": "semantic_lint",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 8,
+      "input_tokens": 9070,
+      "output_tokens": 578,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.02392
+     },
+     {
+      "purpose": "subject_resolution",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "batched": false,
+      "replayed": false,
+      "calls": 4,
+      "input_tokens": 3467,
+      "output_tokens": 57,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "max_tokens_stops": 0,
+      "cost_usd": 0.007504
+     }
+    ],
+    "cost_usd": 0.0873292,
+    "unpriced": [],
+    "replayed_cost_usd": 0.0
+   },
+   "rows": [
+    {
+     "id": "55cfe595-25ee-4535-9d92-8fc7a9a0e5a0",
+     "content": "Sandeep's Curry House is a ten-minute walk from the user's flat in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "c63a7a04-3e70-467e-bf42-c283d4ce45b2",
+     "content": "Sandeep's Curry House is located near Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "47b6531b-59ce-461c-9590-8fcb87036421",
+     "content": "Sandeep's Curry House is the user's favourite place to eat.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "700598de-ffb0-4e77-9e8a-6bd818b671fc",
+     "content": "The paneer tikka at Sandeep's Curry House is the best the user has had.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "eeadb63c-134e-40d8-9275-a03ab1ef5f27",
+     "content": "The user is in Mumbai for about a week for work, as of 2026-10-08.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "1480ef41-27a0-44ac-b877-18fc2ea22e8b",
+     "content": "The user is staying at a hotel in Bandra, Mumbai.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "17c1edfb-a5d3-414e-9dc9-1cd04fee0e98",
+     "content": "The user is vegetarian.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "fd0a8ac3-c40b-4daa-9a21-42a4ff61f674",
+     "content": "The user lives in Lajpat Nagar, Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-04.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "db0820e6-8a18-4a74-8eda-3b1e57d221b9",
+     "content": "The user plans to fly from Mumbai back to Delhi on Thursday, 2026-10-15.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    },
+    {
+     "id": "530c6daf-d7d6-4291-9a19-47f393676325",
+     "content": "The user's home is in Delhi.",
+     "status": "ACTIVE",
+     "reason": null,
+     "sources": [
+      "session-11.md"
+     ],
+     "restatement": false,
+     "valid_from": null,
+     "valid_until": null,
+     "valid_kind": null
+    }
+   ],
+   "events": [],
+   "refused_calls": {}
+  }
+ ],
+ "verdict": {
+  "move_passed": 3,
+  "move_runs": 3,
+  "trip_alone_passed": 2,
+  "trip_alone_runs": 2,
+  "bar_met": true
+ },
+ "spend": {
+  "estimate_source": "record",
+  "estimate_usd": 0.5666,
+  "estimate_calls": null,
+  "cost_usd": 0.6871231999999999,
+  "priced_cost_usd": 0.687123,
+  "unpriced": [],
+  "ceiling_usd": 0.5536
+ },
+ "notes": [
+  "Re-scored under checks version 2 from the saved rows and events."
+ ]
+}

@@ -1,0 +1,40 @@
+# Build-context allowlist for deploy/Dockerfile.
+#
+# Deny everything, then re-admit exactly what the build copies. An allowlist,
+# not a denylist, for the same reason the hatch sdist target uses one: a new
+# directory dropped at the repo root (a corpus dump, a scratch DB, the private
+# ADR tree) must not silently join the build context.
+*
+
+!pyproject.toml
+!uv.lock
+!constraints.txt
+!README.md
+!LICENSE
+!NOTICE
+!CHANGELOG.md
+!alembic.ini
+!alembic/**
+!particles/**
+!artifacts/**
+!clients/web-ui/dist/**
+!design/tokens.css
+# The benchmark fixtures the wheel force-includes (particles benchmark
+# trip-vs-move / update-gate), listed per file like the force-include.
+!tests/fixtures/trip_vs_move/session-04.md
+!tests/fixtures/trip_vs_move/session-11.md
+!tests/fixtures/trip_vs_move/session-12-moved.md
+!tests/fixtures/trip_vs_move/reader-01.md
+!tests/fixtures/trip_vs_move/reader-02-moved.md
+!tests/fixtures/update_probe/gate_pairs.json
+!tests/fixtures/update_probe/gate_pairs_heldout.json
+!tests/fixtures/update_probe/past_value_pairs.json
+!tests/fixtures/update_probe/past_marker_heldout.json
+!deploy/config.container.yaml
+
+# Re-exclude noise that lives inside the admitted trees.
+**/__pycache__/**
+**/*.pyc
+**/.pytest_cache/**
+**/.mypy_cache/**
+**/.ruff_cache/**

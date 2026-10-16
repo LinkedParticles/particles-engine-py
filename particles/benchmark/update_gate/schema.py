@@ -7,7 +7,9 @@
 Neither is an extractor benchmark, so neither falls under techspec §13.3: both
 are this SDK's own, non-normative, as ``RotBenchmarkReport`` is. Each carries
 a ``report_version``; ``TripVsMoveReport`` also carries the ``checks_version``
-it was scored under (:mod:`.checks`).
+it was scored under (:mod:`.checks`). Report version 2 adds
+the case a report measured and each row's world-time fields; a report
+without ``case`` measured the mid-trip case.
 """
 
 from __future__ import annotations
@@ -20,9 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from particles.llm.usage import LLMUsage
 
 REPORT_VERSION = 1
+#: ``TripVsMoveReport``'s version: 2 adds ``case`` and the rows' world time.
+CASE_REPORT_VERSION = 2
 
 Variant = Literal["move", "trip-alone"]
 Arm = Literal["live", "scripted"]
+CaseName = Literal["reader", "mid-trip"]
 
 
 class FixtureFile(BaseModel):
@@ -43,6 +48,11 @@ class SavedRow(BaseModel):
     sources: list[str] = Field(default_factory=list)
     #: Whether the re-anchor pass wrote the claim.
     restatement: bool = False
+    #: World time (report version 2). Absent from an older report, which is
+    #: why :func:`~.case.rescore` dumps only the fields a report set.
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    valid_kind: str | None = None
 
 
 class SavedEvent(BaseModel):
@@ -101,10 +111,12 @@ class TripVsMoveReport(BaseModel):
     """The trip-versus-move case end to end, one model configuration."""
 
     suite: Literal["trip-vs-move"] = "trip-vs-move"
-    report_version: int = REPORT_VERSION
+    report_version: int = CASE_REPORT_VERSION
     checks_version: int
     sdk_version: str
     run_at: datetime
+    #: The case measured; every report before it is the mid-trip case.
+    case: CaseName = "mid-trip"
     #: ``provider:model`` of the one model, before any ``--pin``.
     model: str
     #: Every purpose's resolved ``provider:model``.
