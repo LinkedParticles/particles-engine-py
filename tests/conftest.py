@@ -75,6 +75,24 @@ def clear_subject_cache(reset_client_state: None) -> None:  # noqa: F811
 
 
 @pytest.fixture(autouse=True)
+def no_real_shadow_candidates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep shadow-mode candidates out of the real ``~/.particles`` state dir.
+
+    A shadow submission appends its claims to a file that defaults under the
+    operator's own state directory. Point the default at the test's
+    tmp_path without reading config, so a test that sets its own environment
+    still loads config fresh.
+    """
+    from particles.ingest import agent_extraction
+
+    monkeypatch.setattr(
+        agent_extraction,
+        "_default_shadow_candidates_path",
+        lambda: tmp_path / "agent-extraction-shadow.jsonl",
+    )
+
+
+@pytest.fixture(autouse=True)
 def second_reading_confirms(monkeypatch: pytest.MonkeyPatch) -> None:
     """Extraction's second reading of a contradiction confirms by default.
 

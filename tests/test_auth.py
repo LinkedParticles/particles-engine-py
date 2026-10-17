@@ -13,14 +13,20 @@ imported the module.
 The fail-closed bearer-auth behaviour is also covered here: the
 constant-time compare, the per-request non-loopback gate under dev-key, the
 ``_is_loopback_host`` classifier, and the ``enforce_fail_closed_on_startup``
-boot check.
+boot check. The operator gate is covered too: the operator-scope
+writes and review resolution refuse the dev-key skip even from loopback, while
+the read routes and the agent's own-belief writes keep it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
+
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from particles.api.auth import (
@@ -353,3 +359,157 @@ class TestVerifyReadKey:
         monkeypatch.setenv("PARTICLES_API_REQUIRE_AUTH_FOR_READS", "true")
         reset_config()
         _verify_read_key(_request(), None)  # loopback peer → no exception
+
+
+# ---------------------------------------------------------------------------
+# Operator-scope writes never ride the dev-key loopback skip
+# ---------------------------------------------------------------------------
+
+#: Every operator-scope route, with a body that passes request validation. The
+#: two dry-run-capable routes are listed with ``dry_run`` false, the writing form.
+_OPERATOR_ROUTES: list[tuple[str, dict[str, object]]] = [
+    (
+        "/particles/p-missing/supersede",
+        {"content": "c", "subject_names": ["S"], "confidence": 0.5, "reason": "r"},
+    ),
+    ("/particles/p-missing/retract", {"reason": "r"}),
+    ("/particles/p-missing/subjects", {"subject_name": "S"}),
+    ("/curation/affirm", {"particle_id": "p-missing"}),
+    ("/curation/snooze", {"card_key": "contested:p-missing"}),
+    ("/review/p-missing", {"action": "DEFER", "reviewer_id": "operator"}),
+    ("/corpus/e-missing/retract", {"reason": "r", "dry_run": False}),
+    ("/subjects/relink-gated", {"dry_run": False}),
+]
+
+
+@pytest.fixture
+def api_client(cli_db: object) -> Iterator[TestClient]:
+    """A loopback ``TestClient`` over a file-backed store with every table created."""
+    from particles.api.app import app
+
+    yield TestClient(app, client=("127.0.0.1", 50000))
+
+
+class TestOperatorRoutesRefuseDevKey:
+    """A loopback caller with no key cannot reach an operator-scope write.
+
+    The dev-key skip serves loopback because a local process is taken to be
+    the operator. A producing agent with a shell is also a local process, so
+    the routes that act with the operator's authority need a real key.
+    """
+
+    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    def test_loopback_dev_key_refused_503(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post(path, json=body)
+        assert resp.status_code == 503
+        assert "PARTICLES_API_KEY" in resp.json()["detail"]
+
+    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    def test_loopback_dev_key_refused_even_with_a_bearer(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        # Under dev-key there is no key to check a bearer against, so presenting
+        # one changes nothing.
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer dev-key"})
+        assert resp.status_code == 503
+
+    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    def test_real_key_wrong_bearer_401(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer nope"})
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    def test_real_key_right_bearer_passes_the_gate(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        # Past the gate the route answers on its own terms (403 writes disabled,
+        # 404 no such record, 200 for an empty relink): anything but an auth refusal.
+        monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer prod-secret"})
+        assert resp.status_code not in (401, 503), resp.text
+
+    def test_every_operator_route_is_listed(self) -> None:
+        # A route that takes ``OperatorAuthDep`` and is missing from the table
+        # above would go untested; one listed here that lost it would fail above.
+        from fastapi.routing import APIRoute
+
+        from particles.api.app import app
+        from particles.api.auth import _verify_operator_key
+
+        def _uses(dependant: Any) -> bool:
+            return any(d.call is _verify_operator_key or _uses(d) for d in dependant.dependencies)
+
+        gated = {
+            route.path
+            for route in app.routes
+            if isinstance(route, APIRoute) and _uses(route.dependant)
+        }
+        assert gated == {
+            "/particles/{particle_id}/supersede",
+            "/particles/{particle_id}/retract",
+            "/particles/{particle_id}/subjects",
+            "/curation/affirm",
+            "/curation/snooze",
+            "/review/{particle_id}",
+        }
+
+
+class TestDevKeyLoopbackSkipStillServes:
+    """Everything outside the operator scope keeps the loopback skip."""
+
+    def test_dry_run_corpus_retract_served(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dry run writes nothing, so it keeps the skip: 404 for an absent entry.
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post("/corpus/e-missing/retract", json={"dry_run": True})
+        assert resp.status_code == 404
+
+    def test_dry_run_relink_served(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post("/subjects/relink-gated", json={"dry_run": True})
+        assert resp.status_code == 200
+
+    @pytest.mark.parametrize("path", ["/review", "/events", "/particles", "/subjects"])
+    def test_read_routes_served(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.get(path)
+        assert resp.status_code == 200, resp.text
+
+    def test_agent_own_belief_write_keeps_the_skip(
+        self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The agent's own-beliefs path is not operator scope: past the bearer
+        # gate it reaches the store gate, which refuses by default (403).
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post(
+            "/particles/retract", json={"particle_id": "p-missing", "reason": "r"}
+        )
+        assert resp.status_code == 403

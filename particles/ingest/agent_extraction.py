@@ -15,9 +15,12 @@ retired-value quarantine.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -308,6 +311,8 @@ async def apply_submission(
     if cfg.mode != "on" or now_through >= end:
         if now_through >= end:
             out.notes.append("span already extracted by another pass; nothing written")
+        if cfg.mode == "shadow" and cfg.keep_shadow_candidates:
+            keep_shadow_candidates(payload, out, accepted, content)
         await _record_submitted(session, entry_ref, out)
         return out
 
@@ -362,6 +367,77 @@ async def apply_submission(
         out.notes.append("submission below the coverage floor; span left to the background pass")
     await _record_submitted(session, entry_ref, out)
     return out
+
+
+def shadow_candidates_path() -> Path:
+    """Where shadow mode keeps submitted candidates (``shadow_candidates_path``)."""
+    configured = get_config().claude_code.agent_extraction.shadow_candidates_path
+    if configured:
+        return Path(configured).expanduser()
+    return _default_shadow_candidates_path()
+
+
+def _default_shadow_candidates_path() -> Path:
+    return Path(get_config().claude_code.state_dir).expanduser() / "agent-extraction-shadow.jsonl"
+
+
+def keep_shadow_candidates(
+    ask: dict[str, Any], out: SubmitOutcome, accepted: list[Any], content: bytes
+) -> None:
+    """Append one shadow submission's accepted candidates to the local JSONL file.
+
+    A shadow answer writes no particle, so without this its claims are lost,
+    and they are the session claims a transcript calibration set needs.
+    Each line is one submission: the ask's identity, the counts,
+    and per candidate the claim, its stated confidence before any calibration,
+    and the evidence it quoted. Claim text stays out of the operator event log,
+    which keeps counts only. Best effort: a write failure is logged and the
+    submission's outcome is unchanged. The file is created owner-only, since it
+    holds session text.
+    """
+    record = {
+        "ts": datetime.now(UTC).isoformat(),
+        "ask_id": out.ask_id,
+        "session_id": ask.get("session_id"),
+        "snapshot_id": ask.get("snapshot_id"),
+        "span": ask.get("span"),
+        "provider_model": ask.get("provider_model"),
+        "extractor_version": ask.get("extractor_version"),
+        "covered": out.covered,
+        "counts": {
+            "submitted": out.submitted,
+            "accepted": out.accepted,
+            "malformed": out.malformed,
+            "dropped_no_evidence": out.dropped_no_evidence,
+            "dropped_tool_line": out.dropped_tool_line,
+            "dropped_already_extracted": out.dropped_already_extracted,
+        },
+        "candidates": [_candidate_record(c, content) for c in accepted],
+    }
+    path = shadow_candidates_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        log.warning("Could not keep shadow candidates in %s: %s", path, exc)
+
+
+def _candidate_record(candidate: Any, content: bytes) -> dict[str, Any]:
+    location = candidate.provenance_location
+    evidence: str | None = None
+    if isinstance(location, str) and location.startswith("bytes="):
+        begin, end = (int(x) for x in location.split("=", 1)[1].split("-"))
+        evidence = content[begin:end].decode("utf-8", errors="replace")
+    return {
+        "content": candidate.content,
+        "subjects": list(candidate.subjects),
+        "confidence": candidate.confidence_value,
+        "uncertainty_nature": candidate.uncertainty_nature.value,
+        "location": location,
+        "evidence": evidence,
+    }
 
 
 async def _record_submitted(session: AsyncSession, entry_id: str, out: SubmitOutcome) -> None:

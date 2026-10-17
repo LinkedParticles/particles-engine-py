@@ -378,8 +378,7 @@ class ContradictionProbeControl:
     #: in report order, for :meth:`disagreements`.
     finding_pairs: list[tuple[str, str, bool]] = field(default_factory=list)
     #: Out, under ``verify``: every confirmed pair with the second reading's
-    #: reason, in probe order. What the nightly disclosure pass reads
-    #:.
+    #: reason, in probe order. What the nightly disclosure pass reads.
     confirmed_pairs: list[ConfirmedPair] = field(default_factory=list)
     #: Out: what the contradiction ladder did.
     ladder: CensusLadder = field(default_factory=CensusLadder)

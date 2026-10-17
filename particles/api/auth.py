@@ -23,6 +23,11 @@ untrusted hop) to identify the real client. With ``trusted_proxies`` empty (the
 default) the header is ignored and the raw peer is used, exactly as before. The
 gate remains a backstop for the authoritative ``bind_host`` startup check, not a
 substitute for it (§(a)).
+
+The operator-scope writes are stricter: ``OperatorAuthDep`` and
+``require_operator_credential`` refuse them under the dev-key skip even from
+loopback, because a producing agent with a shell on the engine host is a
+loopback caller too, and those routes act with the operator's authority.
 """
 
 from __future__ import annotations
@@ -161,6 +166,59 @@ def _verify_key(
 
 
 AuthDep = Annotated[None, Depends(_verify_key)]
+
+
+#: The refusal an operator-scope route gives while the dev-key skip is active.
+OPERATOR_DEV_KEY_REFUSAL = (
+    "Refusing an operator write without a credential. This route acts with the "
+    "operator's authority (a review resolution, an operator supersede or "
+    "retract, a curation gesture), so it is never served under the dev-key "
+    "skip, not even from loopback. Restart the engine "
+    "with PARTICLES_API_KEY set to a secret value and send that value as the "
+    "bearer token (PARTICLES_ENGINE_TOKEN for the CLI's remote backend, the "
+    "token field in the web app or the Obsidian plugin). The local CLI calls "
+    "these operations in-process and needs no key."
+)
+
+
+def require_operator_credential() -> None:
+    """Refuse an operator-scope write while bearer auth is the ``dev-key`` skip.
+
+    The dev-key skip lets any loopback process call the write verbs
+    with no credential, which is a fair trade for an agent's own writes but not
+    for writes that act with the operator's authority: an operator supersede or
+    retract can retire any belief, and a review resolution decides between two
+    claims and may write trust policy. A producing agent with a shell on the
+    same host reaches loopback, so on those routes loopback is no evidence of
+    the operator. They require a real ``PARTICLES_API_KEY`` they
+    never ride the loopback skip.
+
+    503, not 401/403, for the reason ``_verify_key`` gives for its own dev-key
+    refusal: no credential the caller could present would succeed, since the
+    engine has no key to check it against. It also keeps the clients from
+    misreading it, since they treat 401 as a bad token and 403 as a read-only
+    store. Callable inline for a route that writes only when ``dry_run`` is
+    false; :data:`OperatorAuthDep` is the dependency form.
+    """
+    if get_particles_api_key() == _DEV_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=OPERATOR_DEV_KEY_REFUSAL,
+        )
+
+
+def _verify_operator_key(
+    request: Request,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    """Bearer gate for operator-scope writes: :func:`_verify_key` without the dev-key skip."""
+    require_operator_credential()
+    _verify_key(request, creds)
+
+
+#: Bearer gate for operator-scope belief writes and review resolution.
+#: Like :data:`AuthDep`, except that the dev-key loopback skip does not apply.
+OperatorAuthDep = Annotated[None, Depends(_verify_operator_key)]
 
 
 def _verify_read_key(

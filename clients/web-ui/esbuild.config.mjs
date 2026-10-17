@@ -32,8 +32,8 @@ const OUTDIR = "dist";
 // A per-build version string: the package version plus a hash of the build
 // INPUTS (src/, public/, the vendored Cytoscape, package.json). Injected into
 // the bundle (__BUILD_VERSION__) for the diagnostics footer AND into the
-// service worker's cache name, so a changed build busts the app-shell cache
-//. Deliberately deterministic — no timestamp — so rebuilding
+// service worker's cache name, so a changed build busts the app-shell cache.
+// Deliberately deterministic — no timestamp — so rebuilding
 // identical sources yields a byte-identical dist/ and the committed bundle
 // only ever changes when the code does.
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));

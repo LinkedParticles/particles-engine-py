@@ -7344,7 +7344,7 @@
     },
     "/corpus/{entry_id}/retract": {
       "post": {
-        "description": "Retract every live particle from a source, preserving the corpus +\nsnapshots (HTTP mirror of `corpus retract`). Live particles\n(ACTIVE / INCONSISTENCY) become RETRACTED with reason SOURCE_RETRACTED;\nidempotent. 404 if the entry is absent. Run `POST /lint` afterwards to\ncascade PROVENANCE_STALE to downstream particles.",
+        "description": "Retract every live particle from a source, preserving the corpus +\nsnapshots (HTTP mirror of `corpus retract`). Live particles\n(ACTIVE / INCONSISTENCY) become RETRACTED with reason SOURCE_RETRACTED;\nidempotent. 404 if the entry is absent. Run `POST /lint` afterwards to\ncascade PROVENANCE_STALE to downstream particles. A real retraction needs\na real bearer: it is refused (503) under the dev-key skip, even from\nloopback, while a `dry_run` plan is served as before.",
         "operationId": "corpus_retract_endpoint_corpus__entry_id__retract_post",
         "parameters": [
           {
@@ -7503,7 +7503,7 @@
     },
     "/curation/affirm": {
       "post": {
-        "description": "Affirm a belief still holds (``BELIEF_AFFIRMED`` operator event).\n\nSuppresses the belief's curation card without mutating the belief. 403 when\ncuration writes are disabled (``mcp.write.enabled_stores`` default-deny).",
+        "description": "Affirm a belief still holds (``BELIEF_AFFIRMED`` operator event).\n\nSuppresses the belief's curation card without mutating the belief. 403 when\ncuration writes are disabled (``mcp.write.enabled_stores`` default-deny).\nRefused (503) under the dev-key skip, even from loopback: it needs a real bearer.",
         "operationId": "curation_affirm_endpoint_curation_affirm_post",
         "requestBody": {
           "content": {
@@ -7609,7 +7609,7 @@
     },
     "/curation/snooze": {
       "post": {
-        "description": "Snooze / dismiss a curation card (``CURATION_CARD_SNOOZED`` event).\n\n``snooze_days=None`` permanently dismisses; a positive value hides the card\nfor that window. 403 when curation writes are disabled.",
+        "description": "Snooze / dismiss a curation card (``CURATION_CARD_SNOOZED`` event).\n\n``snooze_days=None`` permanently dismisses; a positive value hides the card\nfor that window. 403 when curation writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "curation_snooze_endpoint_curation_snooze_post",
         "requestBody": {
           "content": {
@@ -9169,7 +9169,7 @@
     },
     "/particles/{particle_id}/retract": {
       "post": {
-        "description": "Operator-retract any belief, incl. an extracted one.\n\nRetract one extraction-/operator-sourced belief by id: the per-particle\nretract a curation card needs (vs the blunt per-source\n``POST /corpus/{id}/retract``). Skips only the ownership check; the\nHUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard\nviolation or empty reason; 403 when curation writes are disabled.",
+        "description": "Operator-retract any belief, incl. an extracted one.\n\nRetract one extraction-/operator-sourced belief by id: the per-particle\nretract a curation card needs (vs the blunt per-source\n``POST /corpus/{id}/retract``). Skips only the ownership check; the\nHUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard\nviolation or empty reason; 403 when curation writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real bearer.",
         "operationId": "operator_retract_endpoint_particles__particle_id__retract_post",
         "parameters": [
           {
@@ -9289,7 +9289,7 @@
     },
     "/particles/{particle_id}/subjects": {
       "post": {
-        "description": "Attach a subject to a belief that has none (in place since).\n\nWrites the subject link on the same belief, which keeps its id, confidence,\nprovenance and utility evidence; the response names that same id. 400 on a\nbad resolution, a guard violation, or a belief that already has a subject;\n403 when writes are disabled.",
+        "description": "Attach a subject to a belief that has none (in place since).\n\nWrites the subject link on the same belief, which keeps its id, confidence,\nprovenance and utility evidence; the response names that same id. 400 on a\nbad resolution, a guard violation, or a belief that already has a subject;\n403 when writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "assign_subject_endpoint_particles__particle_id__subjects_post",
         "parameters": [
           {
@@ -9354,7 +9354,7 @@
     },
     "/particles/{particle_id}/supersede": {
       "post": {
-        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. ``reason`` is required and recorded on the\naudit event. 400 on a guard / granularity violation or an empty reason; 403\nwhen curation writes are disabled.",
+        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. ``reason`` is required and recorded on the\naudit event. 400 on a guard / granularity violation or an empty reason; 403\nwhen curation writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "operator_supersede_endpoint_particles__particle_id__supersede_post",
         "parameters": [
           {
@@ -9711,7 +9711,7 @@
     },
     "/review/{particle_id}": {
       "post": {
-        "description": "Resolve an INCONSISTENCY particle (\u00a79.6).\n\nEvery action except DEFER closes the record. PREFER_A and PREFER_B demote\nthe other claim and may write a SourceTrustStatement. BOTH_VALID keeps\nboth claims as ALEATORY. DISCARD retracts both claims and writes no trust\nstatement.",
+        "description": "Resolve an INCONSISTENCY particle (\u00a79.6).\n\nEvery action except DEFER closes the record. PREFER_A and PREFER_B demote\nthe other claim and may write a SourceTrustStatement. BOTH_VALID keeps\nboth claims as ALEATORY. DISCARD retracts both claims and writes no trust\nstatement.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "review_particle_review__particle_id__post",
         "parameters": [
           {
@@ -9944,7 +9944,7 @@
     },
     "/subjects/relink-gated": {
       "post": {
-        "description": "Link subjectless beliefs to the project-scoped subjects they name.\n\nRecovers each belief's names from its own gated-subjects record, its\nstructured claim's subject term, or its backtick spans, and links them in\nplace, one event per run. The `relink` gesture of the `gated_subjects`\ncuration card. 403 when writes are disabled and `dry_run` is false.",
+        "description": "Link subjectless beliefs to the project-scoped subjects they name.\n\nRecovers each belief's names from its own gated-subjects record, its\nstructured claim's subject term, or its backtick spans, and links them in\nplace, one event per run. The `relink` gesture of the `gated_subjects`\ncuration card. 403 when writes are disabled and `dry_run` is false. A\nreal relink is refused (503) under the dev-key skip, even from loopback;\na `dry_run` plan is served as before.",
         "operationId": "relink_gated_endpoint_subjects_relink_gated_post",
         "requestBody": {
           "content": {

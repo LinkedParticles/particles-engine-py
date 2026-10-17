@@ -2,16 +2,16 @@
  * Typed HTTP client of the Particles FastAPI engine (§6).
  *
  * Every request/response shape is imported from `./openapi`, the file
- * `openapi-typescript` generates from the committed `artifacts/openapi.json`
- *. The PWA never hand-writes CurationCard / ReviewRequest / … shapes,
+ * `openapi-typescript` generates from the committed `artifacts/openapi.json`.
+ * The PWA never hand-writes CurationCard / ReviewRequest / … shapes,
  * so a breaking contract change surfaces as a TypeScript compile error rather
  * than a runtime parse failure. Run `npm run gen-api` (done automatically by
  * `npm run build` / `npm run typecheck`) to refresh `src/openapi.d.ts`.
  *
  * The client is store-free: it holds no schema logic and no reconciliation. It
  * presents the client bearer on every call and parses responses back
- * through the generated types. Because the engine serves this PWA same-origin
- *, the calls carry no `Origin` mismatch and trigger no CORS
+ * through the generated types. Because the engine serves this PWA same-origin,
+ * the calls carry no `Origin` mismatch and trigger no CORS
  * preflight — the engine's lack of CORS middleware is a non-issue.
  */
 import type { components } from "./openapi";
@@ -71,8 +71,8 @@ export type GraphParticleInfo = Schemas["GraphParticleInfo"];
 /**
  * Categorised failure surfaced from an engine call (mirrors client).
  *
- * - `unauthorized` (401): the engine rejected the bearer token
- *. Surfaced as a clear "engine rejected the token" error.
+ * - `unauthorized` (401): the engine rejected the bearer token.
+ * Surfaced as a clear "engine rejected the token" error.
  * - `forbidden` (403): belief writes are disabled on this store
  *   (`mcp.write.enabled_stores` default-deny). The feed degrades to
  *   a read-only review mode (write gestures hidden).
@@ -576,8 +576,8 @@ export class ParticlesApiClient {
   }
 
   /**
-   * operator per-particle retract → POST /particles/{id}/retract
-   *. Retracts one extracted/operator-sourced belief by id (vs the
+   * operator per-particle retract → POST /particles/{id}/retract.
+   * Retracts one extracted/operator-sourced belief by id (vs the
    * blunt whole-source `retractCorpusEntry`).
    */
   async operatorRetract(

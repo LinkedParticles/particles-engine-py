@@ -336,8 +336,8 @@ class GraphLayoutInputs:
     utility: Mapping[str, float]
     source_uris: Mapping[str, str]
     as_of_notes: Mapping[str, AsOfNote]
-    #: The full subject set; node labels are disambiguated against all of it
-    #:, not just the rendered nodes.
+    #: The full subject set; node labels are disambiguated against all of it,
+    #: not just the rendered nodes.
     subjects_by_id: Mapping[str, Subject]
     viewer_subject_ids: frozenset[str]
     # Disclosure inputs: counts the gather step already settled.

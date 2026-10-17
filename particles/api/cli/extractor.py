@@ -2429,8 +2429,8 @@ async def _extractor_calibration_forget(extractor_id: str, provider_model: str, 
 
 
 #: Metric rows of the benchmark tables, in print order. The three §13.3
-#: metrics, the semantic-match calibration error beside the full-match one
-#:, then the subject-resolution fractions a suite with gold subjects
+#: metrics, the semantic-match calibration error beside the full-match one,
+#: then the subject-resolution fractions a suite with gold subjects
 #: adds; a name absent from a report is skipped, so a report saved
 #: before a row existed still renders.
 _BENCHMARK_TABLE_METRICS = (

@@ -21,6 +21,21 @@ and that the reference's own suite pins:
   everything requested was actually deleted, and a ``Deleted N of M …`` count
   otherwise. The counting arithmetic is the reference's, quirks included.
 
+One behaviour has no reference counterpart, because the reference cannot hold a
+write back: **a write the store holds for review is not reported as written.**
+A delete here is a retraction, a judgment retirement, so a client that later
+re-adds the identical observation (or re-creates the identical relation) is
+re-asserting a claim the store has retired. The §6.6 retired-value rung holds
+that claim behind an INCONSISTENCY record instead of reviving it,
+and a claim that contradicts a held belief is held the same way. A held item
+never appears in ``read_graph``, ``search_nodes`` or ``open_nodes``, so the
+three writing operations that return what they wrote (``create_entities``,
+``create_relations``, ``add_observations``) list only what landed ACTIVE, and
+return a note per held item, naming the INCONSISTENCY record an operator
+settles with ``particles review``. The server appends each note as an extra
+text block after the reference JSON, exactly as it discloses a read cap, so
+the response shape a client parses is unchanged.
+
 Writes go through the agent-write path — deposit for provenance, then
 assert through the §6.6 ladder — under the façade's own asserting principal, so
 a façade claim is attributable and trust-weighted below an operator's. Nothing
@@ -33,9 +48,11 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from particles.config import get_config
+from particles.core.status import Status
 from particles.mcp.memory_compat.graph import (
     OBSERVATION_TAG,
     TOMBSTONE_TAG,
@@ -127,10 +144,11 @@ async def _assert(
     subject_ids: list[str],
     corpus_entry_id: str,
     tags: list[str],
-) -> None:
+) -> Any:
+    """Assert one façade claim; return the ``AgentWriteResult`` verdict."""
     from particles.operations.agent_write import assert_belief
 
-    await assert_belief(
+    return await assert_belief(
         session,
         store=store,
         content=content,
@@ -141,6 +159,34 @@ async def _assert(
         tags=tags,
         identity=_cfg().asserter_identity,
         granularity=_granularity(),
+    )
+
+
+def _landed(result: Any) -> bool:
+    """Whether an assertion landed ACTIVE, the only state the façade reads back."""
+    return bool(result.status == Status.ACTIVE.value)
+
+
+def held_note(tool: str, noun: str, held: list[tuple[str, Any]]) -> str:
+    """Disclose writes the store held for review rather than wrote.
+
+    ``held`` pairs a client-facing label for each item with its
+    ``AgentWriteResult``. The note names the INCONSISTENCY record where there
+    is one, so an operator can find it in ``particles review``.
+    """
+    items = []
+    for label, result in held:
+        if result.inconsistency_id:
+            items.append(f"{label} (INCONSISTENCY {result.inconsistency_id})")
+        elif result.asserted_particle_id:
+            items.append(f"{label} (held as {result.asserted_particle_id})")
+        else:
+            items.append(f"{label} (not stored: {result.verdict})")
+    return (
+        f"{tool}: {len(held)} {noun}(s) held for review, not added, so they are left out "
+        "of the result above and will not appear in reads. The store already retired "
+        "an identical claim (an earlier delete) or holds one it conflicts with; an "
+        f"operator settles it with `particles review`. Held: {'; '.join(items)}."
     )
 
 
@@ -180,8 +226,14 @@ async def _create_subject(session: Any, name: str, entity_type: str) -> Any:
 
 async def create_entities(
     session: Any, *, store: str, entities: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Create entities, returning only the newly created ones (reference semantics)."""
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Create entities, returning only the newly created ones (reference semantics).
+
+    Returns ``(created, notes)``. An observation the store held for review
+    (re-creating a deleted entity with its old observations does exactly this)
+    is left out of its entity's ``observations`` and disclosed in ``notes``;
+    see the module docstring.
+    """
     sub = await load_subgraph(session)
     pending: list[dict[str, Any]] = []
     claimed: set[str] = set()
@@ -197,10 +249,11 @@ async def create_entities(
         claimed.add(key)
         pending.append(entity)
     if not pending:
-        return []
+        return [], []
 
     entry_id = await _deposit(session, "create_entities", entities)
     created: list[dict[str, Any]] = []
+    held: list[tuple[str, Any]] = []
 
     for entity in pending:
         name = str(entity.get("name", ""))
@@ -220,8 +273,9 @@ async def create_entities(
 
                 await set_subject_class(session, subject.id, entity_type)
 
+        landed: list[str] = []
         for text in observations:
-            await _assert(
+            result = await _assert(
                 session,
                 store=store,
                 content=text,
@@ -229,16 +283,25 @@ async def create_entities(
                 corpus_entry_id=entry_id,
                 tags=[OBSERVATION_TAG],
             )
+            if _landed(result):
+                landed.append(text)
+            else:
+                held.append((f"{name}: {json.dumps(text)}", result))
 
-        created.append({"name": name, "entityType": entity_type, "observations": observations})
+        created.append({"name": name, "entityType": entity_type, "observations": landed})
 
-    return created
+    notes = [held_note("create_entities", "observation", held)] if held else []
+    return created, notes
 
 
 async def create_relations(
     session: Any, *, store: str, relations: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Create relations, deduped on the exact triple, returning only the new ones.
+
+    Returns ``(created, notes)``. A relation the store held for review
+    (re-creating a deleted relation does exactly this) is left out of
+    ``created`` and disclosed in ``notes``; see the module docstring.
 
     Raises:
         ValueError: If either endpoint of any relation is not an existing
@@ -268,12 +331,14 @@ async def create_relations(
         pending.append({"from": src, "to": dst, "relationType": kind})
 
     if not pending:
-        return []
+        return [], []
 
     entry_id = await _deposit(session, "create_relations", relations)
+    created: list[dict[str, Any]] = []
+    held: list[tuple[str, Any]] = []
     for relation in pending:
         src, dst, kind = relation["from"], relation["to"], relation["relationType"]
-        await _assert(
+        result = await _assert(
             session,
             store=store,
             content=relation_content(src, dst, kind),
@@ -281,13 +346,24 @@ async def create_relations(
             corpus_entry_id=entry_id,
             tags=relation_tags(src, dst, kind),
         )
-    return pending
+        if _landed(result):
+            created.append(relation)
+        else:
+            held.append((f"{src} {kind} {dst}", result))
+    notes = [held_note("create_relations", "relation", held)] if held else []
+    return created, notes
 
 
 async def add_observations(
     session: Any, *, store: str, observations: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Add observations to existing entities.
+
+    Returns ``(results, notes)``. ``addedObservations`` lists only the
+    observations that landed ACTIVE, the ones a read will return. An
+    observation the store held for review is left out of it and disclosed in
+    ``notes``: re-adding an observation deleted earlier is the common case,
+    since the delete retired that exact claim (see the module docstring).
 
     Raises:
         ValueError: If a named entity does not exist — the reference throws
@@ -314,10 +390,13 @@ async def add_observations(
         entry_id = await _deposit(session, "add_observations", observations)
 
     results: list[dict[str, Any]] = []
+    held: list[tuple[str, Any]] = []
     for (subject, fresh), item in zip(targets, observations, strict=True):
+        name = str(item.get("entityName", ""))
+        added: list[str] = []
         for text in fresh:
             assert entry_id is not None
-            await _assert(
+            result = await _assert(
                 session,
                 store=store,
                 content=text,
@@ -325,8 +404,13 @@ async def add_observations(
                 corpus_entry_id=entry_id,
                 tags=[OBSERVATION_TAG],
             )
-        results.append({"entityName": str(item.get("entityName", "")), "addedObservations": fresh})
-    return results
+            if _landed(result):
+                added.append(text)
+            else:
+                held.append((f"{name}: {json.dumps(text)}", result))
+        results.append({"entityName": name, "addedObservations": added})
+    notes = [held_note("add_observations", "observation", held)] if held else []
+    return results, notes
 
 
 async def delete_entities(
@@ -368,16 +452,25 @@ async def delete_entities(
             await _retract(session, store=store, particle_id=particle.id)
 
     # Tombstone the Subject itself, so an entity with no observations still
-    # disappears from reads while the record survives.
+    # disappears from reads while the record survives. Each
+    # deletion's tombstone is a distinct claim: re-creating the entity retracts
+    # the old one, and an identical second tombstone would re-assert that
+    # retired claim and be held for review, leaving the entity live
+    # after a delete that reported success.
     for subject_id in doomed_ids:
-        await _assert(
+        result = await _assert(
             session,
             store=store,
-            content=f"Entity deleted through the memory-compat façade: {subject_id}",
+            content=(
+                f"Entity deleted through the memory-compat façade: {subject_id} "
+                f"(deletion {uuid.uuid4().hex})"
+            ),
             subject_ids=[subject_id],
             corpus_entry_id=entry_id,
             tags=[TOMBSTONE_TAG],
         )
+        if not _landed(result):
+            log.warning("memory-compat tombstone for %s did not land: %s", subject_id, result)
     return deleted, not_found
 
 

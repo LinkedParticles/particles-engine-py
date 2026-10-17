@@ -317,8 +317,7 @@ class SnapshotOutcome:
         return "partial" if self.truncated_replies else "full"
 
 
-#: The provider prefix agent-side extraction stamps a session's model with
-#:.
+#: The provider prefix agent-side extraction stamps a session's model with.
 _CLAUDE_CODE_PREFIX = "claude-code:"
 
 
@@ -2247,8 +2246,8 @@ def contradiction_prompt_hash() -> str:
     return prompt_hash(_contradiction_prompt("{claim_a}", "{claim_b}"))
 
 
-#: The write path's contradiction probe as a rung of the contradiction ladder
-#:: a different prompt from the census probe, so a different rung.
+#: The write path's contradiction probe as a rung of the contradiction ladder:
+#: a different prompt from the census probe, so a different rung.
 RECONCILE_PROBE_RUNG = "reconcile_probe"
 #: The second reading, shared by extraction and the census.
 SECOND_READING_RUNG = "second_reading"

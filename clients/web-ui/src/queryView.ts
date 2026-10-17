@@ -3,8 +3,8 @@
  *
  * Non-streaming v1 over the existing POST /query: the client shows staged
  * progress locally while one authenticated call runs (retrieval + the paid
- * NL completion happen engine-side); a streaming rung is deferred
- *. The answer renders with its cited particles from the existing
+ * NL completion happen engine-side); a streaming rung is deferred.
+ * The answer renders with its cited particles from the existing
  * response contract — stored vs effective confidence, status, and the
  * the contested badge, all server-computed (no client-side confidence
  * math).

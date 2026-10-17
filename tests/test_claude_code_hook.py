@@ -181,6 +181,25 @@ class TestDistillation:
         assert distill_transcript("not json\n\n[1, 2]\n") == ""
         assert distill_transcript("") == ""
 
+    def test_harness_injected_user_records_are_left_out(self) -> None:
+        # A loaded skill's body arrives as a user record marked isMeta; it is
+        # not the person speaking, so it never becomes a ## User turn.
+        skill = json.dumps(
+            {
+                "type": "user",
+                "isMeta": True,
+                "sourceToolUseID": "toolu_1",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Base directory for this skill: /x"}],
+                },
+            }
+        )
+        typed = json.dumps({"type": "user", "message": {"role": "user", "content": "run it"}})
+        out = distill_transcript(skill + "\n" + typed)
+        assert "Base directory for this skill" not in out
+        assert out.count("## User") == 1 and "run it" in out
+
     def test_tool_result_only_turn_produces_no_heading(self) -> None:
         line = json.dumps(
             {

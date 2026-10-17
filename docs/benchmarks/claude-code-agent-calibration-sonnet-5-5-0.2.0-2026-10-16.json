@@ -1,0 +1,33 @@
+{
+  "calibration": {
+    "benchmark_suite_id": "prose-calibration-001",
+    "breakpoints": [
+      [
+        0.5650000000000001,
+        0.65
+      ],
+      [
+        0.8351111111111112,
+        0.8666666666666667
+      ],
+      [
+        0.9153571428571429,
+        0.9047619047619048
+      ]
+    ],
+    "calibration_error_after": 0.014201615168837993,
+    "calibration_error_before": 0.03765100671140933,
+    "extractor_version": "0.2.0",
+    "fitted_at": "2026-10-16T23:37:43.592053Z",
+    "heldout_error_after": 0.03907396482702168,
+    "heldout_error_before": 0.06171548117154811,
+    "heldout_sample_size": 239,
+    "heldout_suite_id": "prose-article-seed-001",
+    "provider_model": "anthropic:claude-sonnet-5-5",
+    "sample_size": 149,
+    "temperature": 1.0,
+    "transform": "isotonic"
+  },
+  "extractor_id": "claude-code-agent",
+  "provider_model": "anthropic:claude-sonnet-5-5"
+}

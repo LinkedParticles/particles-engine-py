@@ -889,8 +889,7 @@ class ConsolidationReport(BaseModel):
     #: tried.
     pending_retry: int = 0
     #: Of those, the snapshots that kept part of their read: an APPEND_ONLY
-    #: read's answered chunks were written, and the retry reads only the rest
-    #:.
+    #: read's answered chunks were written, and the retry reads only the rest.
     pending_partial: int = 0
     #: Snapshots not tried because an earlier snapshot of the entry holds a
     #: partial whole read: they wait until it completes.

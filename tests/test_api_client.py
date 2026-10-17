@@ -103,6 +103,18 @@ def http_backend(
     yield HttpBackend()
 
 
+@pytest.fixture
+def operator_engine_key(http_backend: HttpBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real engine key, presented by the backend as its token.
+
+    Operator writes refuse the dev-key skip even from loopback, so a
+    test that drives one through the backend needs a key on both sides. It
+    depends on ``http_backend`` so it runs after that fixture clears the token.
+    """
+    monkeypatch.setenv("PARTICLES_API_KEY", "test-operator-key")
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "test-operator-key")
+
+
 class TestHttpBackendRoundTrip:
     """HttpBackend → FastAPI app → operations → JSON → shared model."""
 
@@ -433,6 +445,7 @@ class TestHttpBackendOperatorVerbs:
         resolved = asyncio.run(http_backend.trust_statement_set(stmt))
         assert isinstance(resolved, int)
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_corpus_show_and_retract(self, http_backend: HttpBackend) -> None:
         eid, pid = asyncio.run(_seed_entry_with_particle())
         entry = asyncio.run(http_backend.corpus_show(eid))
@@ -443,6 +456,7 @@ class TestHttpBackendOperatorVerbs:
         result = asyncio.run(http_backend.corpus_retract(eid, reason="pulled", dry_run=False))
         assert result.dry_run is False and pid in result.retracted_ids
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_events_list_and_show(self, http_backend: HttpBackend) -> None:
         eid, _pid = asyncio.run(_seed_entry_with_particle())
         # The retraction logs a SOURCE_RETRACTED operator event.

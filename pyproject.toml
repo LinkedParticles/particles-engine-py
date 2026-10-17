@@ -21,7 +21,7 @@
 # compatibility question.
 [project]
 name = "linkedparticles"
-version = "1.192.2"
+version = "1.192.10"
 description = "Auditable, provenance-tracked memory for AI agents — the Particles engine and its API, CLI, and MCP surfaces"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -66,35 +66,53 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
+# These ranges are the published compatibility claim, bounded by the same
+# three rules as the Client distribution's (its pyproject.toml has them in
+# full): every range admits the version the upstream's suite runs against, a
+# next-breaking upper bound is the upstream's bound with the floor on the line
+# just below it, and no floor reaches back into an older major than the
+# upstream's floor. Where a published advisory affects a path this layer
+# exercises, the floor is the first release that fixes it, and the advisory is
+# named beside it.
 dependencies = [
     # The store-free Client layer. Pinned exactly, and rewritten to the release
     # version at export time — never relax this to a compatible-release range.
-    "linkedparticles-core==1.192.2",
+    "linkedparticles-core==1.192.10",
     # `[asyncio]` because 2.1 stopped installing greenlet by default and every
     # `sqlalchemy.ext.asyncio` import needs it. Bounded below the next minor:
-    # 2.1 changed ORM and typing behaviour this code depends on, so a 2.2 must
-    # be vetted before adoption rather than pulled in by a fresh resolve.
-    "sqlalchemy[asyncio]>=2.0,<2.2",
+    # 2.1 changed ORM and typing behaviour this code depends on, so it is the
+    # floor, and a 2.2 must be vetted before adoption rather than pulled in by a
+    # fresh resolve.
+    "sqlalchemy[asyncio]>=2.1,<2.2",
     "alembic>=1.13",
     "aiosqlite>=0.20",
     "greenlet>=3.5.0",
     "fastapi>=0.111",
-    "python-multipart>=0.0.9",
+    # Parses multipart uploads from the HTTP API, so it is attacker-facing:
+    # GHSA-v9pg-7xvm-68hf, the latest of several, was fixed in 0.0.31.
+    "python-multipart>=0.0.31",
     "uvicorn[standard]>=0.30",
-    "typer>=0.12",
-    "jinja2>=3.1",
+    # The lowest release the CLI suite passes on: before 0.23 Typer rejects the
+    # `X | None` option annotations the verbs use, or its test runner does not
+    # capture stderr apart. The three rules above cannot see this (0.12 and the
+    # tested 0.27 share a major), so it was found by running the suite at every
+    # declared floor.
+    "typer>=0.23",
+    # GHSA-cpwx-vrp4-4pq7 (sandbox breakout, fixed in 3.1.6).
+    "jinja2>=3.1.6",
     "warcio>=1.7",
     # Capped below the 2.x major: `mcp` 2.0 moved `mcp.server.fastmcp`, which
     # the native MCP server and the memory-compat façade both import, so an
     # unbounded floor resolves a downstream `pip install` straight into an
     # ImportError. The development upstream is insulated by its lockfile; a
-    # published distribution is not. Raise the cap when 2.x is tested.
-    "mcp>=1.27.1,<2",
+    # published distribution is not. Raise the cap when 2.x is tested. Floored
+    # at 1.30.0 for GHSA-84m7-p3x7-pcfv (unbounded StreamableHTTP sessions).
+    "mcp>=1.30.0,<2",
     "apscheduler>=3.10",
     # Cross-process advisory write lock: a small, cross-platform file-lock
     # library used to serialize SQLite writers across processes (the always-on
     # engine vs. a direct-I/O CLI verb on the host).
-    "filelock>=3.13",
+    "filelock>=4.0",
     # Observability API only (no-op unless the `otel` extra is installed). Also
     # a dependency of the core distribution, since Client modules emit spans
     # through it unconditionally.
@@ -120,7 +138,9 @@ otel = [
 # The adapter imports it lazily and raises an actionable ImportError when the
 # extra is missing, so the package imports cleanly without it.
 langchain = [
-    "langchain-core>=0.3",
+    # GHSA-pjwx-r37v-7724 (unsafe deserialization through `load()`, fixed in
+    # 1.3.3), which also puts the floor on the 1.x line the adapter is tested on.
+    "langchain-core>=1.3.3",
 ]
 
 [project.scripts]

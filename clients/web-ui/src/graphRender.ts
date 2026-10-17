@@ -549,8 +549,8 @@ export function renderGraph(
     if (info.contested) {
       // The chip's hover tooltip is invisible on touch and easy to miss —
       // spell the drill-down out as panel text. The INCONSISTENCY id links
-      // to the contradiction's evidence render (scope=inconsistency
-      //): the anchor record, both disputants with their true
+      // to the contradiction's evidence render (scope=inconsistency):
+      // the anchor record, both disputants with their true
       // statuses, their subjects and sources.
       const kv = el("div", "kv contested-kv");
       kv.appendChild(

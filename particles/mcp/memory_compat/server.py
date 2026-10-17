@@ -21,12 +21,15 @@ cannot implement the capability the reference has shipped since 2026-06-17;
 and returning a ``CallToolResult`` directly is the only way to control the
 envelope byte-for-byte (§2).
 
-Five behaviours a tool call can observe differ from the reference and are
+Six behaviours a tool call can observe differ from the reference and are
 disclosed in the tool descriptions the client actually reads, not only in the
 ADR: deletes retract rather than destroy, reads are capped, the write tools
 refuse with an actionable message on a store that is not write-enabled, entity
-names match case-insensitively, and ``read_graph`` returns entities in name
-order rather than creation order. Two more are invisible to a tool call and are
+names match case-insensitively, ``read_graph`` returns entities in name
+order rather than creation order, and a write the store holds for review (an
+observation or relation identical to one deleted earlier, or one that conflicts
+with a held belief) is left out of the result and named in an appended note
+rather than reported as written. Two more are invisible to a tool call and are
 recorded in the ADR alone: ``serverInfo.version`` is this package's version,
 and concurrent mutations are isolated per transaction rather than queued.
 """
@@ -113,6 +116,11 @@ _NAME_NOTE = (
     "differing from an existing entity only by case is treated as that entity and skipped."
 )
 _ORDER_NOTE = " Entities are returned in name order, not creation order."
+_HELD_NOTE = (
+    " Backed by a Particles store: an item identical to one deleted earlier, or one "
+    "that conflicts with a stored belief, is held for review rather than added. It is "
+    "left out of the result, and an extra text block names it."
+)
 
 _WRITE_TOOLS = frozenset(
     {
@@ -132,7 +140,9 @@ def _tools() -> list[types.Tool]:
         types.Tool(
             name="create_entities",
             title="Create Entities",
-            description="Create multiple new entities in the knowledge graph" + _NAME_NOTE,
+            description=(
+                "Create multiple new entities in the knowledge graph" + _NAME_NOTE + _HELD_NOTE
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {"entities": {"type": "array", "items": _ENTITY_SCHEMA}},
@@ -155,7 +165,7 @@ def _tools() -> list[types.Tool]:
             title="Create Relations",
             description=(
                 "Create multiple new relations between entities in the knowledge graph. "
-                "Relations should be in active voice"
+                "Relations should be in active voice" + _HELD_NOTE
             ),
             inputSchema={
                 "type": "object",
@@ -177,7 +187,9 @@ def _tools() -> list[types.Tool]:
         types.Tool(
             name="add_observations",
             title="Add Observations",
-            description="Add new observations to existing entities in the knowledge graph",
+            description=(
+                "Add new observations to existing entities in the knowledge graph" + _HELD_NOTE
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -410,8 +422,9 @@ def tool_surface() -> list[dict[str, Any]]:
 def _json_result(payload: dict[str, Any], notes: list[str] | None = None) -> types.CallToolResult:
     """The reference envelope: pretty JSON text plus matching structured content.
 
-    Truncation notes are **appended** as a second text block, never prepended —
-    a client doing ``JSON.parse(content[0].text)`` must keep working (§7).
+    Notes (a read's truncation, a write's held items) are **appended** as
+    further text blocks, never prepended, so a client doing
+    ``JSON.parse(content[0].text)`` keeps working (§7).
     """
     content: list[types.ContentBlock] = [
         types.TextContent(type="text", text=json.dumps(payload, indent=2))
@@ -535,20 +548,20 @@ async def _dispatch_write(
 ) -> types.CallToolResult:
     match name:
         case "create_entities":
-            created = await ops.create_entities(
+            created, notes = await ops.create_entities(
                 session, store=store, entities=arguments.get("entities", [])
             )
-            return _json_result({"entities": created})
+            return _json_result({"entities": created}, notes)
         case "create_relations":
-            created_rel = await ops.create_relations(
+            created_rel, notes = await ops.create_relations(
                 session, store=store, relations=arguments.get("relations", [])
             )
-            return _json_result({"relations": created_rel})
+            return _json_result({"relations": created_rel}, notes)
         case "add_observations":
-            results = await ops.add_observations(
+            results, notes = await ops.add_observations(
                 session, store=store, observations=arguments.get("observations", [])
             )
-            return _json_result({"results": results})
+            return _json_result({"results": results}, notes)
         case "delete_entities":
             deleted, not_found = await ops.delete_entities(
                 session, store=store, entity_names=arguments.get("entityNames", [])
