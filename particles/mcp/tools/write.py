@@ -378,8 +378,8 @@ async def extraction_submit(
     Args:
         ask_id: The id the ask gave.
         candidates: The claims, each ``{content, subjects, confidence_value,
-            uncertainty_nature, evidence}`` plus any optional fields the ask's
-            rules describe.
+            evidence}`` plus any optional field the ask's rules describe whose
+            value is not null or the default.
         store: Target store handle; required only when several are write-enabled.
 
     Returns:

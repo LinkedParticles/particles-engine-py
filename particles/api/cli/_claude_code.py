@@ -765,6 +765,12 @@ def distill_transcript(
     conversation-aware extractor (§ Composition point) — change it
     only with a distiller version story.
 
+    A ``user`` record Claude Code marks ``isMeta`` is left out too: the
+    harness injected it (a loaded skill's body, a local-command caveat, an
+    auto-continue prompt, a message from another session, an expanded slash
+    command), so it is not the person speaking and must not be distilled as
+    a ``## User`` turn whose claims would be attributed to them.
+
     ``exclude_uuids`` names transcript records left out entirely: an
     agent-extraction ask and the agent's answer to it (see
     :func:`ask_exclusions`). They always follow the snapshot the ask was made
@@ -787,6 +793,8 @@ def distill_transcript(
             continue
         entry_type = entry.get("type")
         if entry_type not in ("user", "assistant"):
+            continue
+        if entry_type == "user" and entry.get("isMeta"):
             continue
         message = entry.get("message")
         if not isinstance(message, dict):

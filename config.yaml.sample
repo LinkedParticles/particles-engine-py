@@ -360,11 +360,18 @@ claude_code:  # [engine]
     # An ask unanswered after this many seconds expires.
     ask_ttl_seconds: 900
     # A submission covers its span with at least this many accepted claims per
-    # 1000 characters (10th percentile of the general extractor's deltas).
-    min_claims_per_kchar: 2.7
+    # 1000 characters (10th percentile of the general extractor's transcript
+    # deltas, 262 reads measured 2026-10-16).
+    min_claims_per_kchar: 1.27
     # ...and at most this share of candidates dropped for missing evidence.
     # Placeholder until the shadow week measures it.
     max_evidence_drop_ratio: 0.5
+    # In shadow mode, keep each submission's accepted candidates (claim text,
+    # stated confidence, evidence) in a local JSONL file for later labelling
+    # and calibration. The event log keeps counts only.
+    keep_shadow_candidates: true
+    # null ⇒ <state_dir>/agent-extraction-shadow.jsonl.
+    shadow_candidates_path: null
 
 # Agent-memory product surface — the MEMORY.md projection.
 # Namespace shared with the claude_code hook integration above:
@@ -662,6 +669,10 @@ extraction:  # [client]
   # The largest delta chunk sent in one call (minimum 1000). Each chunk after
   # the first takes the end of the chunk before it as its context.
   append_chunk_chars: 7500
+  # claims per 1000 characters the agent extractor's prompt names as
+  # a thoroughness guide, never a quota (median of the general extractor's
+  # transcript deltas, 262 reads measured 2026-10-16).
+  agent_expected_claims_per_kchar: 1.9
   # Extract-time exact-duplicate suppression. When a candidate's
   # claim is already held verbatim by an ACTIVE particle with the same
   # subjects and the same stance:holder, don't mint a second particle —

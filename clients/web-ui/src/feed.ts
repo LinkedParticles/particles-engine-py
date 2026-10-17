@@ -997,8 +997,8 @@ function truncate(text: string, max: number): string {
 }
 
 /**
- * The LLM judge's advisory same-claim verdict on a duplicate-pair card
- *. Rendered under the brief, e.g. "LLM: same claim — safe to merge"
+ * The LLM judge's advisory same-claim verdict on a duplicate-pair card.
+ * Rendered under the brief, e.g. "LLM: same claim — safe to merge"
  * or "LLM: not a duplicate — <rationale>". Advisory only: the operator still
  * taps Merge / Dismiss; a DISTINCT verdict has already demoted the card.
  */

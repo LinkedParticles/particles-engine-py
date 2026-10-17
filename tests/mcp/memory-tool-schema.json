@@ -6,7 +6,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Create multiple new entities in the knowledge graph Backed by a Particles store: entity names match case-insensitively, so a name differing from an existing entity only by case is treated as that entity and skipped.",
+    "description": "Create multiple new entities in the knowledge graph Backed by a Particles store: entity names match case-insensitively, so a name differing from an existing entity only by case is treated as that entity and skipped. Backed by a Particles store: an item identical to one deleted earlier, or one that conflicts with a stored belief, is held for review rather than added. It is left out of the result, and an extra text block names it.",
     "inputSchema": {
       "properties": {
         "entities": {
@@ -89,7 +89,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice",
+    "description": "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice Backed by a Particles store: an item identical to one deleted earlier, or one that conflicts with a stored belief, is held for review rather than added. It is left out of the result, and an extra text block names it.",
     "inputSchema": {
       "properties": {
         "relations": {
@@ -166,7 +166,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Add new observations to existing entities in the knowledge graph",
+    "description": "Add new observations to existing entities in the knowledge graph Backed by a Particles store: an item identical to one deleted earlier, or one that conflicts with a stored belief, is held for review rather than added. It is left out of the result, and an extra text block names it.",
     "inputSchema": {
       "properties": {
         "observations": {

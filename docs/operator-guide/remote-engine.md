@@ -75,8 +75,47 @@ scope.
 
 The SSH forward has one further property: an engine bound to loopback with no
 `PARTICLES_API_KEY` runs with the development-key skip, and every tunnelled
-request arrives from loopback, so the client needs no token at all. Use it only
-when you are the sole user of the engine host.
+request arrives from loopback, so the client needs no token for reads, deposits,
+extraction, query, lint, and an agent's own belief writes. Use it only when you
+are the sole user of the engine host. The operator writes below need a real key
+even then.
+
+## Operator writes need a key, even on loopback
+
+Some routes act with the operator's authority rather than an agent's, and the
+development-key skip never applies to them, not even from loopback:
+
+| Route | Gesture |
+|---|---|
+| `POST /review/{id}` | resolve an INCONSISTENCY (`particles review` against an engine) |
+| `POST /particles/{id}/supersede` | operator edit of any belief, extracted ones included |
+| `POST /particles/{id}/retract` | operator retract of any single belief |
+| `POST /particles/{id}/subjects` | assign a subject to an orphan belief |
+| `POST /curation/affirm`, `POST /curation/snooze` | the curation queue's "still true", snooze, and dismiss |
+| `POST /corpus/{id}/retract` | whole-source retract (a `dry_run` plan is still served) |
+| `POST /subjects/relink-gated` | batch relink (a `dry_run` plan is still served) |
+
+The skip treats a loopback caller as the operator, and an agent with a shell on
+the engine host is a loopback caller too. With `PARTICLES_API_KEY` unset or
+`dev-key`, these routes answer `503` with a message naming the fix; no token the
+client sends can change that, because the engine has no key to check it
+against. To use them over HTTP, start the engine with a key and give each client
+the same value:
+
+```bash
+export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+particles engine serve localhost:8000
+```
+
+| Client | Where the token goes |
+|---|---|
+| `particles` CLI with `engine.base_url` set | `PARTICLES_ENGINE_TOKEN` |
+| Web app at `/app` | the bearer token field in its settings |
+| Obsidian plugin | the bearer token field in the plugin settings |
+
+The CLI without `engine.base_url`, and the MCP server, run these operations
+in-process against the local store and need no key. The MCP server's write
+tools are the agent's own-belief writes, which the skip still covers.
 
 ## What is not remoted yet
 

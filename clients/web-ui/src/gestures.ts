@@ -28,8 +28,8 @@ export type GestureAvailability =
 
 /**
  * Resolve the availability of a gesture name on a card of a given CardKind. The
- * gesture names come straight from the engine's `card.suggested_gestures`
- * — the PWA invents none. `dismiss` is the one gesture whose
+ * gesture names come straight from the engine's `card.suggested_gestures`—
+ * the PWA invents none. `dismiss` is the one gesture whose
  * availability depends on the card kind (v1 only for uncited_url via the URL
  * dismiss endpoint; belief-snooze on other kinds is the deferred path).
  */
@@ -46,8 +46,8 @@ export function gestureAvailability(
     case "reindex":
       return { kind: "v1" };
     case "retract":
-      // v1: operator per-particle retract (POST /particles/{id}/retract
-      //) for an extracted belief, with whole-source retract as the
+      // v1: operator per-particle retract (POST /particles/{id}/retract)
+      // for an extracted belief, with whole-source retract as the
       // fallback when no belief id is on the card.
       return { kind: "v1" };
     case "assign-subject":

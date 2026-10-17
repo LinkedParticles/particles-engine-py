@@ -65,6 +65,13 @@ This also works against an engine running with a real `PARTICLES_API_KEY`
 (including the container): the shell loads unauthenticated and the
 app prompts for the bearer, which it then sends on every call.
 
+Without a key the engine still serves the queue and every read, but the
+curation gestures (affirm, snooze, dismiss, resolve, edit, retract, assign
+subject, relink, whole-source retract) are refused with a 503: they are
+operator writes, which never ride the dev-key loopback skip. To
+curate, start the engine with `PARTICLES_API_KEY` set and paste the same value
+into settings.
+
 The engine mounts `/app` only when `clients/web-ui/dist/` is present (it is,
 in a source checkout; an installed wheel does not ship it and simply skips
 the mount). The app footer shows `web-ui <build stamp> · engine <version>` —
@@ -77,7 +84,7 @@ worker reloads the page once when a new build takes over).
 From this directory:
 
 ```bash
-npm install            # once per checkout
+npm ci                 # once per checkout: the toolchain pinned in package-lock.json
 npm run build          # gen-api → src/openapi.d.ts, then esbuild → dist/
 ```
 
@@ -91,7 +98,13 @@ exporter embeds; same-origin asset, no CDN).
 OpenAPI contract) must commit the rebuilt `dist/` in the same change.** The
 build stamp is deterministic — package version + a hash of the build inputs,
 no timestamp — so rebuilding identical sources is a no-op diff, and the
-committed bundle changes exactly when the code does. Other scripts:
+committed bundle changes exactly when the code does. That holds only for the
+toolchain pinned exactly in `package.json` and `package-lock.json`: a
+different esbuild minifies differently, so build from `npm ci`, never from a
+stale `node_modules`. To move a pin, edit its exact version in `package.json`,
+run `npm install --ignore-scripts --min-release-age=7` (npm refuses any version
+published in the last seven days), and commit both files with the rebuilt
+`dist/`. Other scripts:
 
 | Script | What it does |
 |---|---|

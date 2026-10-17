@@ -447,6 +447,12 @@ only what the agent did not cover. Three settings need care:
   what the agent would record before turning it on. Each stretch is asked
   about once: after an answer, the next ask starts where the answered one
   ended, while the background extractor still reads the whole transcript.
+  Shadow mode also keeps each answer's accepted claims, with the confidence
+  the agent stated and the passage it quoted, in a local file
+  (`agent-extraction-shadow.jsonl` in the state directory, readable by your
+  account only), so a later pass can measure how well that confidence
+  matches the hit rate. Set `keep_shadow_candidates: false` to keep only the
+  counts.
 - Without an API key, the contradiction check on a near-duplicate claim
   cannot run, so such a pair is held for review in `particles review` rather
   than merged or kept silently.

@@ -170,6 +170,17 @@ either spelling. Reads always return the spelling it was created with.
 created in. A store has no single creation order to preserve once other
 Particles surfaces write to it too.
 
+**A deleted memory cannot be silently re-added.** Because a delete is a
+retraction, adding the identical observation again (or re-creating the
+identical relation) re-asserts a claim the store has already retired. The store
+holds that write for review rather than reviving it, and holds a write that
+conflicts with a stored belief the same way. A held item does not appear in
+reads, so it is not reported as written either: `add_observations` leaves it
+out of `addedObservations` (and `create_entities` and `create_relations` leave
+it out of what they return), and a plain-text notice appended after the JSON
+names each held item and the INCONSISTENCY record behind it, which an operator
+settles with `particles review`.
+
 Two smaller differences are invisible to a tool call. The server reports the
 Particles package version as its `serverInfo.version`, not the reference's.
 Where the reference queues mutations behind one lock, here each tool call is

@@ -1201,8 +1201,7 @@ class TestTripVersusMove:
 
 #: The second acceptance run of the settled-report rule, on claude-sonnet-4-6,
 #: 2026-10-10: the flight came back without "home" and labelled
-#: EPISTEMIC, and the probe judged it HOLDS against the retired trip
-#:.
+#: EPISTEMIC, and the probe judged it HOLDS against the retired trip.
 FLIGHT_RUN_2 = "The user flies back to Delhi on Thursday, 2026-10-15."
 FLIGHT_RUN_2_RESTATED = (
     "As of 2026-10-08, when the user was in Mumbai for a week for work, the user was "

@@ -104,11 +104,21 @@ def facade(distinct_embeddings: Any) -> Any:
 
 
 async def _create(session: Any, entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return await ops.create_entities(session, store=DEFAULT_STORE, entities=entities)
+    created, notes = await ops.create_entities(session, store=DEFAULT_STORE, entities=entities)
+    assert notes == [], notes
+    return created
 
 
 async def _relate(session: Any, relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return await ops.create_relations(session, store=DEFAULT_STORE, relations=relations)
+    created, notes = await ops.create_relations(session, store=DEFAULT_STORE, relations=relations)
+    assert notes == [], notes
+    return created
+
+
+async def _add(session: Any, entity: str, contents: list[str]) -> tuple[list[Any], list[str]]:
+    return await ops.add_observations(
+        session, store=DEFAULT_STORE, observations=[{"entityName": entity, "contents": contents}]
+    )
 
 
 async def _graph(session: Any) -> dict[str, Any]:
@@ -253,7 +263,7 @@ class TestAddObservations:
         self, db_session: Any, facade: Any
     ) -> None:
         await _create(db_session, [ALICE])
-        results = await ops.add_observations(
+        results, _notes = await ops.add_observations(
             db_session,
             store=DEFAULT_STORE,
             observations=[{"entityName": "Alice", "contents": ["likes coffee"]}],
@@ -266,7 +276,7 @@ class TestAddObservations:
 
     async def test_does_not_add_duplicate_observations(self, db_session: Any, facade: Any) -> None:
         await _create(db_session, [ALICE])
-        results = await ops.add_observations(
+        results, _notes = await ops.add_observations(
             db_session,
             store=DEFAULT_STORE,
             observations=[{"entityName": "Alice", "contents": ["works at Acme Corp"]}],
@@ -288,7 +298,7 @@ class TestAddObservations:
         long_text = "Alice " + "really " * 80 + "likes coffee."
         assert len(long_text) > get_config().mcp.write.max_assertion_chars
         await _create(db_session, [_bare("Alice")])
-        results = await ops.add_observations(
+        results, _notes = await ops.add_observations(
             db_session,
             store=DEFAULT_STORE,
             observations=[{"entityName": "Alice", "contents": [long_text]}],
@@ -474,6 +484,177 @@ class TestDeleteRelations:
         )
         assert report == (1, 2)
         assert (await _graph(db_session))["relations"] == []
+
+
+# -- held writes (no reference counterpart) -----------------------------
+
+
+async def _stored(session: Any, content: str) -> list[tuple[str, str | None]]:
+    """Every stored ``(status, status_reason)`` for one exact content string."""
+    from sqlalchemy import select
+
+    from particles.store.particle_store import ParticleRow
+
+    rows = (
+        await session.execute(
+            select(ParticleRow.status, ParticleRow.status_reason).where(
+                ParticleRow.content == content
+            )
+        )
+    ).all()
+    return sorted((str(status), reason and str(reason)) for status, reason in rows)
+
+
+async def _open_inconsistencies(session: Any) -> list[str]:
+    from sqlalchemy import select
+
+    from particles.store.particle_store import ParticleRow
+
+    rows = (
+        await session.execute(
+            select(ParticleRow.id).where(ParticleRow.status == Status.INCONSISTENCY.value)
+        )
+    ).all()
+    return [row[0] for row in rows]
+
+
+class TestHeldWrites:
+    """A write the store holds for review is never reported as written.
+
+    A façade delete is a retraction, a judgment retirement, so re-adding the
+    identical claim is held by the retired-value rung behind an INCONSISTENCY
+    record. Reads will not return it, so the write's result must not
+    list it either: it is left out and named in a note instead.
+    """
+
+    async def _delete_alice_observation(self, session: Any) -> None:
+        await _create(session, [ALICE])
+        await ops.delete_observations(
+            session,
+            store=DEFAULT_STORE,
+            deletions=[{"entityName": "Alice", "observations": ["works at Acme Corp"]}],
+        )
+
+    async def test_re_added_deleted_observation_is_held_not_reported_added(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await self._delete_alice_observation(db_session)
+        results, notes = await _add(db_session, "Alice", ["works at Acme Corp"])
+
+        # What the backend actually holds: the retracted original, the
+        # quarantined re-assertion, and an open INCONSISTENCY naming them.
+        assert await _stored(db_session, "works at Acme Corp") == [
+            ("PROVENANCE_STALE", "CONFLICT_PENDING"),
+            ("RETRACTED", "EXPLICIT_RETRACTION"),
+        ]
+        (inconsistency_id,) = await _open_inconsistencies(db_session)
+
+        # What the façade reports: not added, and why.
+        assert results == [{"entityName": "Alice", "addedObservations": []}]
+        assert len(notes) == 1
+        assert "add_observations: 1 observation(s) held for review, not added" in notes[0]
+        assert 'Alice: "works at Acme Corp"' in notes[0]
+        assert f"INCONSISTENCY {inconsistency_id}" in notes[0]
+        assert "particles review" in notes[0]
+
+        # And the reads agree with the report.
+        assert _entity(await _graph(db_session), "Alice")["observations"] == []
+        found, _ = await ops.search_nodes(db_session, query="Acme")
+        assert found["entities"] == []
+
+    async def test_repeating_the_held_observation_is_still_not_added(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """The second re-add lands on the open hold; still not added."""
+        await self._delete_alice_observation(db_session)
+        await _add(db_session, "Alice", ["works at Acme Corp"])
+        results, notes = await _add(db_session, "Alice", ["works at Acme Corp"])
+        assert results == [{"entityName": "Alice", "addedObservations": []}]
+        assert len(notes) == 1 and "held for review" in notes[0]
+        assert len(await _open_inconsistencies(db_session)) == 1
+
+    async def test_only_the_held_observation_is_left_out_of_a_mixed_batch(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await self._delete_alice_observation(db_session)
+        results, notes = await _add(db_session, "Alice", ["works at Acme Corp", "likes coffee"])
+        assert results == [{"entityName": "Alice", "addedObservations": ["likes coffee"]}]
+        assert len(notes) == 1 and "1 observation(s) held" in notes[0]
+        assert _entity(await _graph(db_session), "Alice")["observations"] == ["likes coffee"]
+
+    async def test_an_ordinary_add_carries_no_note(self, db_session: Any, facade: Any) -> None:
+        await _create(db_session, [ALICE])
+        results, notes = await _add(db_session, "Alice", ["likes coffee"])
+        assert results == [{"entityName": "Alice", "addedObservations": ["likes coffee"]}]
+        assert notes == []
+
+    async def test_held_note_is_appended_after_the_reference_json(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """The response shape a client parses is the reference's, unchanged."""
+        await self._delete_alice_observation(db_session)
+        result = await server._dispatch_write(
+            db_session,
+            DEFAULT_STORE,
+            "add_observations",
+            {"observations": [{"entityName": "Alice", "contents": ["works at Acme Corp"]}]},
+        )
+        expected = {"results": [{"entityName": "Alice", "addedObservations": []}]}
+        assert result.isError is not True
+        assert result.structuredContent == expected
+        assert json.loads(result.content[0].text) == expected  # type: ignore[union-attr]
+        assert len(result.content) == 2
+        assert "held for review" in result.content[1].text  # type: ignore[union-attr]
+
+    async def test_re_created_deleted_relation_is_held_not_reported_created(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [ALICE, BOB])
+        await _relate(db_session, [ALICE_KNOWS_BOB])
+        await ops.delete_relations(db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB])
+
+        created, notes = await ops.create_relations(
+            db_session, store=DEFAULT_STORE, relations=[ALICE_KNOWS_BOB]
+        )
+        assert created == []
+        assert len(notes) == 1
+        assert "create_relations: 1 relation(s) held for review" in notes[0]
+        assert "Alice knows Bob (INCONSISTENCY " in notes[0]
+        assert (await _graph(db_session))["relations"] == []
+
+    async def test_reviving_an_entity_reports_only_the_observations_that_landed(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """The entity revives; its old observation, retired by the delete, is held."""
+        await _create(db_session, [ALICE])
+        await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Alice"])
+
+        created, notes = await ops.create_entities(
+            db_session, store=DEFAULT_STORE, entities=[ALICE]
+        )
+        assert created == [{"name": "Alice", "entityType": "person", "observations": []}]
+        assert len(notes) == 1
+        assert "create_entities: 1 observation(s) held for review" in notes[0]
+        assert _entity(await _graph(db_session), "Alice")["observations"] == []
+
+    async def test_a_revived_entity_can_be_deleted_again(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        """Each deletion's tombstone is a distinct claim, so the second one lands.
+
+        An identical tombstone would re-assert the one the revive retracted and
+        be held, leaving the entity live after a delete that reported success.
+        """
+        await _create(db_session, [CHARLIE])
+        for _ in range(2):
+            deleted, not_found = await ops.delete_entities(
+                db_session, store=DEFAULT_STORE, entity_names=["Charlie"]
+            )
+            assert (deleted, not_found) == (["Charlie"], [])
+            assert _names(await _graph(db_session)) == []
+            assert await _create(db_session, [CHARLIE]) == [CHARLIE]
+            assert _names(await _graph(db_session)) == ["Charlie"]
+        assert await _open_inconsistencies(db_session) == []
 
 
 # -- readGraph ----------------------------------------------------------
@@ -771,6 +952,8 @@ class TestToolSurface:
             assert "retracts" in by_name[name]
         for name in ("read_graph", "search_nodes", "open_nodes"):
             assert "capped" in by_name[name]
+        for name in ("create_entities", "create_relations", "add_observations"):
+            assert "held for review" in by_name[name]
         assert "case-insensitively" in by_name["create_entities"]
         assert "name order" in by_name["read_graph"]
 

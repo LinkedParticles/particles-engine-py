@@ -3,8 +3,8 @@
  *
  * Mobile-first, single-column. One shell — the top nav's Queue / Query /
  * Graph tabs plus the global deposit & settings actions — over per-route
- * views: the swipeable curation card stack, the query surface
- *, and the scoped epistemic graph.
+ * views: the swipeable curation card stack, the query surface,
+ * and the scoped epistemic graph.
  *
  * Colour, type, space and radius come from the design-system tokens
  * (design/tokens.css, copied into dist/ by the build and loaded before this

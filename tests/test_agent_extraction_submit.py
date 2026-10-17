@@ -166,6 +166,58 @@ class TestModes:
         )
         assert events[0].payload is not None and events[0].payload["accepted"] == 2
 
+    async def test_shadow_keeps_the_accepted_candidates_locally(
+        self, db_session: AsyncSession, llm: FakeLLM
+    ) -> None:
+        import json
+
+        get_config().claude_code.agent_extraction.mode = "shadow"
+        entry_id, snapshot_id = await _deposit(db_session, FIRST)
+        ask_id = await _ask(db_session, entry_id, snapshot_id, 0, len(FIRST.encode()))
+        bad = _candidate("Staging runs Postgres 18.", "not in the text")
+        await apply_submission(db_session, ask_id=ask_id, store="default", candidates=[*GOOD, bad])
+        path = agent_extraction.shadow_candidates_path()
+        (line,) = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(line)
+        assert record["ask_id"] == ask_id
+        assert record["provider_model"] == "claude-code:claude-opus-5-5"
+        assert record["counts"]["submitted"] == 3 and record["counts"]["dropped_no_evidence"] == 1
+        claims = {c["content"]: c for c in record["candidates"]}
+        assert set(claims) == {g["content"] for g in GOOD}
+        kept = claims["The staging database runs Postgres 17."]
+        assert kept["confidence"] == 0.9
+        assert kept["evidence"] == "staging database runs Postgres 17"
+        assert path.stat().st_mode & 0o777 == 0o600
+        # The event log still carries counts only.
+        events = await list_events(
+            db_session, event_type=OperatorEventType.AGENT_EXTRACTION_SUBMITTED
+        )
+        assert "candidates" not in (events[0].payload or {})
+
+    async def test_shadow_keeps_nothing_when_switched_off(
+        self, db_session: AsyncSession, llm: FakeLLM
+    ) -> None:
+        cfg = get_config().claude_code.agent_extraction
+        cfg.mode = "shadow"
+        cfg.keep_shadow_candidates = False
+        entry_id, snapshot_id = await _deposit(db_session, FIRST)
+        ask_id = await _ask(db_session, entry_id, snapshot_id, 0, len(FIRST.encode()))
+        await apply_submission(db_session, ask_id=ask_id, store="default", candidates=GOOD)
+        assert not agent_extraction.shadow_candidates_path().exists()
+
+    async def test_a_failed_keep_never_fails_the_submission(
+        self, db_session: AsyncSession, llm: FakeLLM, tmp_path: Any
+    ) -> None:
+        cfg = get_config().claude_code.agent_extraction
+        cfg.mode = "shadow"
+        blocker = tmp_path / "a-file"
+        blocker.write_text("x")
+        cfg.shadow_candidates_path = str(blocker / "under-a-file.jsonl")
+        entry_id, snapshot_id = await _deposit(db_session, FIRST)
+        ask_id = await _ask(db_session, entry_id, snapshot_id, 0, len(FIRST.encode()))
+        out = await apply_submission(db_session, ask_id=ask_id, store="default", candidates=GOOD)
+        assert out.accepted == 2
+
     async def test_on_writes_agent_particles_and_closes_the_span(
         self, db_session: AsyncSession, llm: FakeLLM, mode_on: None
     ) -> None:
@@ -184,6 +236,8 @@ class TestModes:
         assert row.extraction_status == ExtractionStatus.COMPLETE.value
         assert row.extracted_through == end
         assert llm.calls == []
+        # On mode writes particles, so it keeps no shadow file.
+        assert not agent_extraction.shadow_candidates_path().exists()
 
 
 class TestRefusals:

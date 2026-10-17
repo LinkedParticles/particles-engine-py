@@ -128,8 +128,8 @@ def _wikidata_link_confidence(description: str, particle_content: str | None) ->
 # ---------------------------------------------------------------------------
 
 
-#: The Wikidata languages whose aliases can vouch for a word-continuation label
-#:. ``mul`` is Wikidata's language-neutral code, where many product
+#: The Wikidata languages whose aliases can vouch for a word-continuation label.
+#: ``mul`` is Wikidata's language-neutral code, where many product
 #: and brand names now live: PostgreSQL's "Postgres" alias is held only there,
 #: not under ``en``.
 _ALIAS_LANGUAGES = ("en", "mul")

@@ -25,8 +25,10 @@ from particles.api._middleware import BodySizeLimitMiddleware
 from particles.api._rate_limit import RateLimitDep, enforce_rate_limit
 from particles.api.auth import (
     AuthDep,
+    OperatorAuthDep,
     ReadAuthDep,
     enforce_fail_closed_on_startup,
+    require_operator_credential,
     warn_if_dev_auth_in_use,
 )
 from particles.api.daemon import DaemonStatus, daemon_status, start_daemon, stop_daemon
@@ -591,7 +593,8 @@ async def rebuild_curation_endpoint(
 # filter (`_suppressed_keys`) consumes them. Gated exactly like the belief-write
 # endpoints (`mcp.write.enabled_stores` → 403; the bearer) — they are
 # operator-judgment writes against the canonical store, so the same write gate
-# applies and they never ride the dev-key loopback skip.
+# applies and they never ride the dev-key loopback skip: `OperatorAuthDep`
+# refuses them (503) while PARTICLES_API_KEY is the dev-key sentinel.
 # ---------------------------------------------------------------------------
 
 
@@ -627,12 +630,13 @@ class CurationEventResponse(BaseModel):
 
 @app.post("/curation/affirm", response_model=CurationEventResponse, responses=_ERR400)
 async def curation_affirm_endpoint(
-    req: CurationAffirmRequest, session: SessionDep, _auth: AuthDep
+    req: CurationAffirmRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> CurationEventResponse:
     """Affirm a belief still holds (``BELIEF_AFFIRMED`` operator event).
 
     Suppresses the belief's curation card without mutating the belief. 403 when
-    curation writes are disabled (``mcp.write.enabled_stores`` default-deny)."""
+    curation writes are disabled (``mcp.write.enabled_stores`` default-deny).
+    Refused (503) under the dev-key skip, even from loopback: it needs a real bearer."""
     from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 
     _require_belief_writes_enabled()
@@ -722,12 +726,14 @@ async def memory_useful_endpoint(
 
 @app.post("/curation/snooze", response_model=CurationEventResponse, responses=_ERR400)
 async def curation_snooze_endpoint(
-    req: CurationSnoozeRequest, session: SessionDep, _auth: AuthDep
+    req: CurationSnoozeRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> CurationEventResponse:
     """Snooze / dismiss a curation card (``CURATION_CARD_SNOOZED`` event).
 
     ``snooze_days=None`` permanently dismisses; a positive value hides the card
-    for that window. 403 when curation writes are disabled."""
+    for that window. 403 when curation writes are disabled.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real
+    bearer."""
     from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 
     _require_belief_writes_enabled()
@@ -1044,10 +1050,14 @@ async def corpus_retract_endpoint(
     snapshots (HTTP mirror of `corpus retract`). Live particles
     (ACTIVE / INCONSISTENCY) become RETRACTED with reason SOURCE_RETRACTED;
     idempotent. 404 if the entry is absent. Run `POST /lint` afterwards to
-    cascade PROVENANCE_STALE to downstream particles."""
+    cascade PROVENANCE_STALE to downstream particles. A real retraction needs
+    a real bearer: it is refused (503) under the dev-key skip, even from
+    loopback, while a `dry_run` plan is served as before."""
     from particles.corpus.store import get_entry as _get_entry
     from particles.operations.retract import plan_retraction, retract_entry
 
+    if not req.dry_run:
+        require_operator_credential()
     if await _get_entry(session, entry_id) is None:
         raise HTTPException(status_code=404, detail="Entry not found")
 
@@ -1565,14 +1575,16 @@ class ReviewRequest(BaseModel):
     responses=_ERR404,
 )
 async def review_particle(
-    particle_id: str, req: ReviewRequest, session: SessionDep, _auth: AuthDep
+    particle_id: str, req: ReviewRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> ReviewParticle:
     """Resolve an INCONSISTENCY particle (§9.6).
 
     Every action except DEFER closes the record. PREFER_A and PREFER_B demote
     the other claim and may write a SourceTrustStatement. BOTH_VALID keeps
     both claims as ALEATORY. DISCARD retracts both claims and writes no trust
-    statement."""
+    statement.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real
+    bearer."""
     try:
         return await resolve(
             session,
@@ -2599,7 +2611,10 @@ async def particle_retract_endpoint(
 # SECURITY: the operator path can mutate ANY belief, so it MUST stay gated by
 # `mcp.write.enabled_stores` + the bearer exactly like the agent
 # belief-writes — `_require_belief_writes_enabled()` enforces the store gate and
-# the route's `AuthDep` the bearer. It NEVER widens the dev-key loopback skip.
+# the route's `OperatorAuthDep` the bearer. It NEVER rides the dev-key loopback
+# skip: `OperatorAuthDep` refuses (503) while PARTICLES_API_KEY is the dev-key
+# sentinel, so a loopback process with no key cannot reach it. The agent
+# own-beliefs routes above keep `AuthDep` and the skip.
 # The agent_write operator path skips only the ownership check; the HUMAN_REVIEW
 # guard and ACTIVE-status check still apply.
 # ---------------------------------------------------------------------------
@@ -2631,7 +2646,7 @@ class OperatorRetractRequest(BaseModel):
 
 @app.post("/particles/{particle_id}/supersede", response_model=AgentWriteResult, responses=_ERR400)
 async def operator_supersede_endpoint(
-    particle_id: str, req: OperatorSupersedeRequest, session: SessionDep, _auth: AuthDep
+    particle_id: str, req: OperatorSupersedeRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> AgentWriteResult:
     """Operator-supersede any belief, incl. an extracted one.
 
@@ -2639,7 +2654,9 @@ async def operator_supersede_endpoint(
     curation queue. Skips only the ownership check; the HUMAN_REVIEW guard and
     ACTIVE-status check still apply. ``reason`` is required and recorded on the
     audit event. 400 on a guard / granularity violation or an empty reason; 403
-    when curation writes are disabled."""
+    when curation writes are disabled.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real
+    bearer."""
     store = _require_belief_writes_enabled()
     try:
         result = await supersede_belief(
@@ -2669,7 +2686,7 @@ async def operator_supersede_endpoint(
     responses=_ERR400,
 )
 async def operator_retract_endpoint(
-    particle_id: str, req: OperatorRetractRequest, session: SessionDep, _auth: AuthDep
+    particle_id: str, req: OperatorRetractRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> ParticleRetractEndpointResponse:
     """Operator-retract any belief, incl. an extracted one.
 
@@ -2677,7 +2694,8 @@ async def operator_retract_endpoint(
     retract a curation card needs (vs the blunt per-source
     ``POST /corpus/{id}/retract``). Skips only the ownership check; the
     HUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard
-    violation or empty reason; 403 when curation writes are disabled."""
+    violation or empty reason; 403 when curation writes are disabled.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real bearer."""
     store = _require_belief_writes_enabled()
     try:
         await retract_belief(
@@ -2715,14 +2733,16 @@ class ParticleSubjectAssignRequest(BaseModel):
 
 @app.post("/particles/{particle_id}/subjects", response_model=AgentWriteResult, responses=_ERR400)
 async def assign_subject_endpoint(
-    particle_id: str, req: ParticleSubjectAssignRequest, session: SessionDep, _auth: AuthDep
+    particle_id: str, req: ParticleSubjectAssignRequest, session: SessionDep, _auth: OperatorAuthDep
 ) -> AgentWriteResult:
     """Attach a subject to a belief that has none (in place since).
 
     Writes the subject link on the same belief, which keeps its id, confidence,
     provenance and utility evidence; the response names that same id. 400 on a
     bad resolution, a guard violation, or a belief that already has a subject;
-    403 when writes are disabled."""
+    403 when writes are disabled.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real
+    bearer."""
     store = _require_belief_writes_enabled()
     try:
         result = await assign_subject_belief(
@@ -2761,8 +2781,11 @@ async def relink_gated_endpoint(
     Recovers each belief's names from its own gated-subjects record, its
     structured claim's subject term, or its backtick spans, and links them in
     place, one event per run. The `relink` gesture of the `gated_subjects`
-    curation card. 403 when writes are disabled and `dry_run` is false."""
+    curation card. 403 when writes are disabled and `dry_run` is false. A
+    real relink is refused (503) under the dev-key skip, even from loopback;
+    a `dry_run` plan is served as before."""
     if not req.dry_run:
+        require_operator_credential()
         _require_belief_writes_enabled()
     plan = await plan_gated_relink(session, tiers=req.tiers)
     if req.dry_run:

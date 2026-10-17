@@ -103,6 +103,20 @@ def client(api_db: Path) -> TestClient:
     return TestClient(app, client=("127.0.0.1", 50000))
 
 
+_OPERATOR_KEY = "test-operator-key"
+
+
+@pytest.fixture
+def operator_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set a real ``PARTICLES_API_KEY`` and send it as ``client``'s bearer.
+
+    The operator-scope writes and review resolution refuse the dev-key skip even
+    from loopback, so tests that drive them need a key.
+    """
+    monkeypatch.setenv("PARTICLES_API_KEY", _OPERATOR_KEY)
+    client.headers["Authorization"] = f"Bearer {_OPERATOR_KEY}"
+
+
 def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
@@ -791,6 +805,7 @@ class TestCorpus:
 
 
 # (sibling): POST /corpus/{id}/retract.
+@pytest.mark.usefixtures("operator_key")
 class TestCorpusRetract:
     def test_retract_marks_live_particle_retracted(self, client: TestClient) -> None:
         entry_id, snap = _run_async(_add_corpus_entry())
@@ -985,6 +1000,7 @@ class TestDevKeyLoopbackGate:
 class TestErrorMessagesAreGeneric:
     """Handlers no longer echo str(exc) to clients (F-7); messages are owned."""
 
+    @pytest.mark.usefixtures("operator_key")
     def test_review_unknown_particle_message(self, client: TestClient) -> None:
         resp = client.post(
             f"/review/{uuid.uuid4()}",
@@ -1004,6 +1020,7 @@ class TestErrorMessagesAreGeneric:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("operator_key")
 class TestReview:
     def test_review_queue_empty(self, client: TestClient) -> None:
         resp = client.get("/review")
@@ -1680,6 +1697,7 @@ def _extracted_particle(
     )
 
 
+@pytest.mark.usefixtures("operator_key")
 class TestOperatorCurationWrites:
     """Operator-scoped curation writes + subject-assign."""
 
