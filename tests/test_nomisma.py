@@ -340,6 +340,27 @@ class TestNomismaImporter:
             with pytest.raises(ValueError, match="not found"):
                 await d.deposit(AsyncMock(), "http://nomisma.org/id/nonexistent", "test", [])
 
+    @pytest.mark.asyncio
+    async def test_refetch_reads_the_https_jsonld_document(self) -> None:
+        """A refresh of the ``http://`` concept IRI must fetch the HTTPS JSON-LD
+        document, never the cleartext IRI itself (security finding F14)."""
+        content = json.dumps(_ALUMINIUM_DOC).encode()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = content
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        set_capped_responses(mock_client, return_value=mock_resp)
+
+        with patch("particles.http.particles_client", return_value=mock_client):
+            body = await NomismaImporter().refetch("http://nomisma.org/id/al")
+
+        assert body == content
+        assert mock_client.stream.call_args.args[1] == "https://nomisma.org/id/al.jsonld"
+
 
 # ---------------------------------------------------------------------------
 # add_external_ref integration

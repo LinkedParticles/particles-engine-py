@@ -753,17 +753,23 @@ class HttpBackend:
         )
 
     async def links_add(
-        self, particle_a: str, particle_b: str, *, relation_type: str, confidence: float
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        confidence: float,
+        project_key: str | None = None,
     ) -> ParticleRelation:
-        body = await self._post(
-            "/links",
-            {
-                "particle_a": particle_a,
-                "particle_b": particle_b,
-                "relation_type": relation_type,
-                "confidence": confidence,
-            },
-        )
+        payload: dict[str, Any] = {
+            "particle_a": particle_a,
+            "particle_b": particle_b,
+            "relation_type": relation_type,
+            "confidence": confidence,
+        }
+        if project_key is not None:
+            payload["project_key"] = project_key
+        body = await self._post("/links", payload)
         return ParticleRelation.model_validate(body)
 
     async def links_remove(self, particle_a: str, particle_b: str, *, relation_type: str) -> bool:

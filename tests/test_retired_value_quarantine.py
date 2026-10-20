@@ -20,6 +20,8 @@ calls the sequence "memory laundering"; its test list is the spec here:
   hold, not a second record;
 * **the lift is a review** — PREFER_B mints the ACTIVE particle, PREFER_A
   keeps the retirement, and neither writes a trust statement or cascades;
+* **a DISCARD does not arm it** — a restated discarded value re-enters ACTIVE,
+  where the same restatement after an explicit retraction is held;
 * **the flag is a true off-switch**.
 """
 
@@ -416,6 +418,95 @@ async def test_trust_cascade_leaves_retired_value_records_to_a_person(db_session
 
 
 # ---------------------------------------------------------------------------
+# A DISCARD is not a verdict on the value
+# ---------------------------------------------------------------------------
+#
+# These pin current behaviour on a question that is still open: whether a
+# DISCARD variant that arms the hold should exist (the Atlas report's "Avoid"
+# bullet). Today ``decide_retirement`` retracts both sides with
+# CONFLICT_RESOLVED, a pairing outside JUDGMENT_RETIREMENTS, so a restatement
+# re-enters ACTIVE. If that changes, change these tests with it.
+
+
+async def _conflict(
+    session: Any, claim_a: str, claim_b: str
+) -> tuple[Particle, Particle, Particle]:
+    """Seed an ordinary §6.6 conflict: ACTIVE A, quarantined B, and the open wrapper."""
+    a = _particle(claim_a)
+    b = _particle(
+        claim_b,
+        status=Status.PROVENANCE_STALE,
+        reason=StatusReason.CONFLICT_PENDING,
+        entry_id="entry-2",
+        snapshot_id="snap-2",
+    )
+    wrapper = build_inconsistency_particle(a, b, corpus_entry_id="entry-2", snapshot_id="snap-2")
+    await insert_particle(session, a, EMB)
+    await insert_particle(session, b, [0.9, 0.1, 0.0, 0.0])
+    await insert_particle(session, wrapper, domain_hint="general")
+    await session.commit()
+    return a, b, wrapper
+
+
+async def _discard(session: Any, wrapper: Particle) -> None:
+    from particles.operations.review import resolve
+
+    await resolve(session, wrapper.id, ResolutionAction.DISCARD, "reviewer-1")
+    await session.commit()
+
+
+@pytest.mark.parametrize("side", ["a", "b"])
+@pytest.mark.asyncio
+async def test_a_discarded_value_is_reminted_on_restatement(db_session: Any, side: str) -> None:
+    """Pins: after a DISCARD, restating either side's exact claim mints it
+    ACTIVE, with no retired-value hold and no new INCONSISTENCY record.
+
+    Open question: whether a hold-arming DISCARD variant should exist. Until
+    one does, "neither side is worth keeping" is a ruling on the conflict,
+    not on the value (``decide_retirement``).
+    """
+    a, b, wrapper = await _conflict(db_session, "The daemon port is 7000.", "The port is 7001.")
+    await _discard(db_session, wrapper)
+    discarded = a if side == "a" else b
+    reloaded = await get_particle(db_session, discarded.id)
+    assert reloaded is not None
+    assert (reloaded.status, reloaded.status_reason) == (
+        Status.RETRACTED,
+        StatusReason.CONFLICT_RESOLVED,
+    )
+
+    restated = _particle(discarded.content, entry_id="entry-3", snapshot_id="snap-3")
+    returned = await _reconcile(db_session, restated)
+    await db_session.commit()
+
+    assert returned is not None and returned.id == restated.id
+    assert returned.status is Status.ACTIVE
+    assert not returned.properties or RETIRED_VALUE_KEY not in returned.properties
+    assert [p.id for p in await _active_with(db_session, discarded.content)] == [restated.id]
+    assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_restatement_after_an_explicit_retraction_is_held(db_session: Any) -> None:
+    """The contrast to the DISCARD case above: retracting side A outright is a
+    verdict on its value, so the identical restatement is held for review."""
+    a, _b, _wrapper = await _conflict(db_session, "The daemon port is 7000.", "The port is 7001.")
+    await update_particle_status(
+        db_session, a.id, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
+    )
+    await db_session.commit()
+    before = len(await get_particles_by_status(db_session, Status.INCONSISTENCY))
+
+    returned = await _reconcile(db_session, _particle(a.content, entry_id="entry-3"))
+    await db_session.commit()
+
+    assert returned is not None and returned.status is Status.INCONSISTENCY
+    assert returned.properties == {RETIRED_VALUE_KEY: "EXPLICIT_RETRACTION"}
+    assert await _active_with(db_session, a.content) == []
+    assert len(await get_particles_by_status(db_session, Status.INCONSISTENCY)) == before + 1
+
+
+# ---------------------------------------------------------------------------
 # End-to-end through the extraction pipeline
 # ---------------------------------------------------------------------------
 
@@ -492,6 +583,56 @@ async def test_reextraction_of_a_retracted_claim_is_held_and_disclosed(
         assert len(held) == 1 and held[0].status_reason is StatusReason.CONFLICT_PENDING
         assert held[0].provenance[0].corpus_entry_id == e2
         assert "RETIRED_VALUE_QUARANTINED: 1 candidate(s)" in caplog.text
+    finally:
+        set_client(None)
+        ep.set_embedding_model(original)
+
+
+@pytest.mark.asyncio
+async def test_reextraction_of_a_discarded_claim_is_reminted(
+    db_session: Any, tmp_path: Path
+) -> None:
+    """Pins, through extraction: a source restating a value a reviewer
+    DISCARDed is re-extracted ACTIVE and not held.
+
+    Open question: whether a hold-arming DISCARD variant should exist (see
+    ``test_a_discarded_value_is_reminted_on_restatement``).
+    """
+    from particles import embeddings as ep
+    from particles.ingest.pipeline import extract_snapshot
+    from particles.llm import set_client
+
+    claim = "The live store is named `particles.db`."
+    model = MagicMock()
+    model.encode = MagicMock(return_value=np.array([EMB], dtype=np.float32))
+    original = ep._embedding_model
+    ep.set_embedding_model(model)
+    set_client(_mock_llm([claim]))
+    try:
+        e1, s1 = await _deposit(db_session, tmp_path, "a.md", "first source")
+        (first,) = await extract_snapshot(db_session, e1, s1)
+        await db_session.commit()
+        other = _particle(
+            "The live store is named `memory.db`.",
+            status=Status.PROVENANCE_STALE,
+            reason=StatusReason.CONFLICT_PENDING,
+            entry_id="entry-2",
+        )
+        wrapper = build_inconsistency_particle(
+            first, other, corpus_entry_id="entry-2", snapshot_id="snap-1"
+        )
+        await insert_particle(db_session, other, [0.9, 0.1, 0.0, 0.0])
+        await insert_particle(db_session, wrapper, domain_hint="general")
+        await db_session.commit()
+        await _discard(db_session, wrapper)
+
+        e2, s2 = await _deposit(db_session, tmp_path, "b.md", "second source, same claim")
+        second = await extract_snapshot(db_session, e2, s2)
+        await db_session.commit()
+
+        assert len(second) == 1 and second[0].status is Status.ACTIVE
+        assert [p.id for p in await _active_with(db_session, claim)] == [second[0].id]
+        assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
     finally:
         set_client(None)
         ep.set_embedding_model(original)

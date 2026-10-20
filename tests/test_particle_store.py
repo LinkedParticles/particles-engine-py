@@ -17,6 +17,7 @@ not substring-match the JSON column.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 import pytest
@@ -429,3 +430,55 @@ class TestGetActiveNarratives:
 
         found = await get_active_narratives(db_session)
         assert [p.id for p in found] == [wanted.id]
+
+
+class TestActiveEmbeddingLoader:
+    """The semantic query's loader: its order and its subject-filtered plan."""
+
+    @staticmethod
+    def _p(confidence: float, subjects: list[str]) -> Particle:
+        return _particle().model_copy(
+            update={
+                "id": str(uuid.uuid4()),
+                "confidence": Confidence(
+                    value=confidence, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                ),
+                "subject_ids": subjects,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_rows_come_back_by_confidence_then_insertion(self, db_session: Any) -> None:
+        from particles.store.particle_store import get_active_particles_with_embeddings
+
+        wanted = [self._p(c, ["s"]) for c in (0.9, 0.4, 0.9, 0.7, 0.4, 0.9)]
+        for p in wanted:
+            await insert_particle(db_session, p, [1.0, 0.0])
+        await db_session.commit()
+        expected = [
+            p.id for _, p in sorted(enumerate(wanted), key=lambda t: (t[1].confidence.value, t[0]))
+        ]
+        for subject in (None, "s"):
+            rows = await get_active_particles_with_embeddings(db_session, subject_id=subject)
+            assert [p.id for p, _ in rows] == expected
+
+    @pytest.mark.asyncio
+    async def test_a_subject_filter_starts_from_the_subjects_links(self, db_session: Any) -> None:
+        from particles.store.particle_store import get_active_particles_with_embeddings
+        from tests._query_plan import plans_of
+
+        for i in range(20):
+            await insert_particle(
+                db_session, self._p(0.8, ["hub" if i % 2 else "rare"]), [1.0, 0.0]
+            )
+        await db_session.commit()
+        ((_, plan),) = await plans_of(
+            db_session,
+            lambda: get_active_particles_with_embeddings(db_session, subject_id="rare"),
+        )
+        # The outer loop walks the subject's index entries; particles is only
+        # looked up by id, never ranged over by status.
+        assert plan[0].startswith("SEARCH particle_subjects USING")
+        assert "(subject_id=?)" in plan[0]
+        assert plan[1] == "SEARCH particles USING INDEX sqlite_autoindex_particles_1 (id=?)"
+        assert not any("ix_particles_status_confidence" in d for d in plan)

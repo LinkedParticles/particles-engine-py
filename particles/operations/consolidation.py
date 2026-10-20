@@ -107,6 +107,7 @@ from particles.operations.curation.cards import CardKind, CurationCard
 from particles.operations.curation.collect import cards_from_findings, collect_cards
 from particles.operations.curation.session import _suppressed_keys, build_curation_queue
 from particles.operations.curation.snapshot import QueueSource, collect_and_persist
+from particles.operations.extraction_reads import ReadSummary, plan_reads
 from particles.operations.held_release import ReleaseReport, run_release
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.lint.contestedness import contested_findings_for
@@ -131,7 +132,7 @@ from particles.operations.spend_estimate import (
     PassEstimate,
     context_call_estimate,
     estimate_batch_chunk,
-    extraction_estimate,
+    planned_extraction_estimate,
     probe_estimate,
 )
 from particles.operations.utility_exposure import ExposureReader
@@ -2337,8 +2338,8 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
     chosen = _extract_selection(pending, batching=batching)
     if current_spend_budget() is not None:
         # price the chosen snapshots before the first call.
-        sizes = await _snapshot_sizes(session, [snapshot_id for _, snapshot_id in chosen])
-        reason = _budget_skip_reason("extract", extraction_estimate(sizes))
+        estimate, _ = await extraction_plan_estimate(session, chosen, batching=batching)
+        reason = _budget_skip_reason("extract", estimate)
         if reason is not None:
             report.pending_remaining = report.pending_total
             report.pending_oldest_at = await _oldest_pending_at(session)
@@ -2391,24 +2392,24 @@ def _prioritised(pending: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
     return first + rest
 
 
-async def _snapshot_sizes(session: AsyncSession, snapshot_ids: Sequence[str]) -> list[int]:
-    """Source size in bytes of each snapshot's blob, for an extraction estimate.
+async def extraction_plan_estimate(
+    session: AsyncSession, chosen: Sequence[tuple[str, str]], *, batching: bool
+) -> tuple[PassEstimate, ReadSummary]:
+    """Pass 1's estimate over the snapshots it chose, and what the read plan found.
 
-    Bytes stand in for characters: an HTML or PDF source reads larger than the
-    text extraction sees, so the estimate errs high. A missing blob counts 0.
+    Each snapshot is planned as the extractor will read it
+    (:func:`~particles.operations.extraction_reads.plan_reads`: the
+    append-only tail, chunks carried forward left out, the per-source call
+    cap), and the calls are priced at the batch discount when the pooled pass
+    would submit them as a batch. The run's budget check and ``--dry-run``
+    both call this, so they price the pass alike.
     """
-    from particles.corpus.deposit import blob_path
-    from particles.corpus.store import get_snapshot_content_hashes
-
-    hashes = await get_snapshot_content_hashes(session, snapshot_ids)
-    sizes: list[int] = []
-    for snapshot_id in snapshot_ids:
-        content_hash = hashes.get(snapshot_id)
-        try:
-            sizes.append(blob_path(content_hash).stat().st_size if content_hash else 0)
-        except (OSError, ValueError):
-            sizes.append(0)
-    return sizes
+    reads = await plan_reads(session, chosen)
+    summary = ReadSummary.of(reads)
+    estimate = planned_extraction_estimate(
+        summary.calls, entries=sum(1 for read in reads if read.calls), batched=batching
+    )
+    return estimate, summary
 
 
 def _one_per_entry(pending: Sequence[PendingSnapshot], cap: int) -> list[tuple[str, str]]:
@@ -3228,7 +3229,7 @@ async def _pass_utility(
     # budget, every group reads as unanswered, exactly as after a failed batch,
     # and nothing is credited.
     skip = (
-        _budget_skip_reason("utility", estimate_judge_calls(mines), what="use judge")
+        _budget_skip_reason("utility", estimate_judge_calls(mines, batched=True), what="use judge")
         if planned
         else None
     )

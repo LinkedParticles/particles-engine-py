@@ -1139,6 +1139,17 @@
             ],
             "title": "Resolve Actions"
           },
+          "scope_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope Note"
+          },
           "subject_ids": {
             "items": {
               "type": "string"
@@ -2588,6 +2599,17 @@
             "title": "Particle B",
             "type": "string"
           },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
           "relation_type": {
             "default": "CO_EVIDENTIAL",
             "title": "Relation Type",
@@ -2994,6 +3016,42 @@
           "token"
         ],
         "title": "ObjectShape",
+        "type": "string"
+      },
+      "ObserverScopeBrief": {
+        "description": "A belief's observer scope on a curation card: display only.\n\nDerived at read time from the corpus entries that currently state the\nbelief, exactly as the read path derives it, and never stored. Curation\nstays observer-blind: the scope filters no card and moves no leverage.\n``widened`` records an operator's standing judgement that the belief\napplies everywhere, which puts it in view for every project whatever its\nderived scope says.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ObserverScopeKind"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "widened": {
+            "default": false,
+            "title": "Widened",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ObserverScopeBrief",
+        "type": "object"
+      },
+      "ObserverScopeKind": {
+        "description": "Which projects a belief is in view for, as a curation card shows it.",
+        "enum": [
+          "global",
+          "projects",
+          "unattributed",
+          "lapsed"
+        ],
+        "title": "ObserverScopeKind",
         "type": "string"
       },
       "ObserverScopeNote": {
@@ -3613,6 +3671,16 @@
           "effective_confidence": {
             "title": "Effective Confidence",
             "type": "number"
+          },
+          "observer_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ObserverScopeBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "particle_id": {
             "title": "Particle Id",
@@ -10544,7 +10612,7 @@
     },
     "/trust/rules": {
       "post": {
-        "description": "Add or update a source-trust rule (HTTP mirror of `trust set`).",
+        "description": "Add or update a source-trust rule (HTTP mirror of `trust set`).\n\nTrust policy is the operator's judgment, and it decides future conflicts.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "set_trust_rule_endpoint_trust_rules_post",
         "requestBody": {
           "content": {
@@ -10598,7 +10666,7 @@
     },
     "/trust/statements": {
       "post": {
-        "description": "Write an OPERATOR_DIRECT SourceTrustStatement and run its cascade.",
+        "description": "Write an OPERATOR_DIRECT SourceTrustStatement and run its cascade.\n\nThe cascade can resolve a held conflict, so this route carries a review's\nauthority. Refused (503) under the dev-key skip, even from loopback: it\nneeds a real bearer.",
         "operationId": "set_trust_statement_endpoint_trust_statements_post",
         "requestBody": {
           "content": {

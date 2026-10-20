@@ -36,6 +36,18 @@ class NumistaImporter:
     def accepts_url(self, url: str) -> bool:
         return bool(NUMISTA_COIN_RE.search(url) or NUMISTA_ISSUER_RE.search(url))
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the entry again for ``particles corpus refresh``.
+
+        A coin URI-R is the Numista web page while the stored blob is the API's
+        JSON, so it goes through the API (and needs ``NUMISTA_API_KEY``); a
+        listing URI-R is the page that was stored.
+        """
+        m = NUMISTA_COIN_RE.search(uri_r)
+        if m:
+            return await _fetch_coin(m.group(1) or m.group(2))
+        return await _fetch_listing_html(uri_r)
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -57,20 +69,7 @@ class NumistaImporter:
         deposited_by: str,
         tags: list[str],
     ) -> tuple[str, str]:
-        from particles.http import get_capped, particles_client
-        from particles.secrets import get_numista_api_key
-
-        api_key = get_numista_api_key()
-        api_url = f"{NUMISTA_API_BASE}/types/{coin_id}"
-        async with particles_client() as client:
-            resp = await get_capped(client, api_url, headers={"Numista-API-Key": api_key})
-        if resp.status_code == 429:
-            raise ValueError("Numista API quota exhausted (HTTP 429). Monthly limit reached.")
-        if resp.status_code == 404:
-            raise ValueError(f"Numista coin type {coin_id} not found (404)")
-        resp.raise_for_status()
-
-        content = resp.content
+        content = await _fetch_coin(coin_id)
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
 
@@ -98,18 +97,7 @@ class NumistaImporter:
         deposited_by: str,
         tags: list[str],
     ) -> tuple[str, str]:
-        from particles.http import get_capped, particles_client
-
-        async with particles_client() as client:
-            resp = await get_capped(client, url)
-        if resp.status_code == 403:
-            raise ValueError(
-                f"Numista listing page blocked (403) for {url!r}. "
-                "The page may require authentication or the URL is not a public listing."
-            )
-        resp.raise_for_status()
-
-        content = resp.content
+        content = await _fetch_listing_html(url)
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
 
@@ -129,3 +117,35 @@ class NumistaImporter:
             tags=tags,
             warc_record_type=WarcRecordType.RESPONSE,
         )
+
+
+async def _fetch_coin(coin_id: str) -> bytes:
+    """The Numista API's JSON for one coin type."""
+    from particles.http import get_capped, particles_client
+    from particles.secrets import get_numista_api_key
+
+    api_key = get_numista_api_key()
+    api_url = f"{NUMISTA_API_BASE}/types/{coin_id}"
+    async with particles_client() as client:
+        resp = await get_capped(client, api_url, headers={"Numista-API-Key": api_key})
+    if resp.status_code == 429:
+        raise ValueError("Numista API quota exhausted (HTTP 429). Monthly limit reached.")
+    if resp.status_code == 404:
+        raise ValueError(f"Numista coin type {coin_id} not found (404)")
+    resp.raise_for_status()
+    return resp.content
+
+
+async def _fetch_listing_html(url: str) -> bytes:
+    """A public catalogue listing page, stored as raw HTML."""
+    from particles.http import get_capped, particles_client
+
+    async with particles_client() as client:
+        resp = await get_capped(client, url)
+    if resp.status_code == 403:
+        raise ValueError(
+            f"Numista listing page blocked (403) for {url!r}. "
+            "The page may require authentication or the URL is not a public listing."
+        )
+    resp.raise_for_status()
+    return resp.content

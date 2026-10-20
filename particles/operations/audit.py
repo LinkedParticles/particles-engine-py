@@ -239,9 +239,14 @@ class OutputModel:
     #: The config keys the figures came from, for the printed estimate.
     basis: str
 
-    def expected(self, chars: int) -> float:
-        """Expected output of one call that reads ``chars`` characters of source."""
-        return self.base + self.per_char * chars
+    def expected(self, chars: int, density: float = 1.0) -> float:
+        """Expected output of one call that reads ``chars`` characters of source.
+
+        ``density`` scales the per-character part only, for a source type that
+        states fewer claims per character than the documents the rate was
+        fitted on (``audit.estimate_output_scale_by_source_type``).
+        """
+        return self.base + self.per_char * density * chars
 
 
 def extraction_output_model(provider: str, model: str) -> OutputModel:
@@ -280,6 +285,26 @@ def chunk_sizes(chars: int) -> list[int]:
     full, rest = divmod(chars, cfg.html_chunk_size)
     sizes = [cfg.html_chunk_size] * full + ([rest] if rest else [])
     return sizes[: cfg.max_llm_calls_per_source]
+
+
+@dataclass(frozen=True)
+class ExtractionCall:
+    """One extraction call as an estimate sees it."""
+
+    #: Source characters the call extracts from.
+    chars: int
+    #: Already-extracted text sent before them as context on an append-only
+    #: delta read: billed as input, extracted from never.
+    context_chars: int = 0
+    #: Scale on the per-character output rate for the call's source type
+    #: (:func:`output_density`).
+    density: float = 1.0
+
+
+def output_density(source_type: object) -> float:
+    """``audit.estimate_output_scale_by_source_type`` for ``source_type``; 1 when unlisted."""
+    scales = get_config().audit.estimate_output_scale_by_source_type
+    return scales.get(source_type, 1.0) if isinstance(source_type, str) else 1.0
 
 
 @dataclass(frozen=True)
@@ -327,6 +352,36 @@ def estimate_extraction(char_counts: Sequence[int], *, already_captured: int = 0
     sizes them and drops what is already captured); ``already_captured`` is
     how many harvested entries it skips, disclosed beside the count.
     """
+    entries = 0
+    unread_chars = 0
+    calls: list[ExtractionCall] = []
+    for n in char_counts:
+        if n <= 0:
+            continue
+        entries += 1
+        sizes = chunk_sizes(n)
+        calls.extend(ExtractionCall(chars=size) for size in sizes)
+        unread_chars += n - sum(sizes)
+    return estimate_extraction_calls(
+        calls, entries=entries, unread_chars=unread_chars, already_captured=already_captured
+    )
+
+
+def estimate_extraction_calls(
+    planned: Sequence[ExtractionCall],
+    *,
+    entries: int,
+    unread_chars: int = 0,
+    already_captured: int = 0,
+    chars_per_token: float = 4.0,
+) -> AuditEstimate:
+    """:func:`estimate_extraction` over calls a caller has already planned.
+
+    For a caller that sees more than source sizes: the consolidation dry run
+    plans each snapshot's calls as the extractor will make them (the
+    append-only tail with its context, chunks carried forward left out) and
+    passes the extraction model's characters per token.
+    """
     config = get_config()
     cfg = config.extraction
     audit_cfg = config.audit
@@ -337,44 +392,39 @@ def estimate_extraction(char_counts: Sequence[int], *, already_captured: int = 0
     spread = audit_cfg.estimate_output_spread
     retry_enabled = cfg.retry_max_tokens > cfg.max_tokens
 
-    entries = 0
-    read_chars = 0
-    unread_chars = 0
-    chunks: list[int] = []
-    for n in char_counts:
-        if n <= 0:
-            continue
-        entries += 1
-        sizes = chunk_sizes(n)
-        chunks.extend(sizes)
-        read_chars += sum(sizes)
-        unread_chars += n - sum(sizes)
-    calls = len(chunks)
+    chunks = [call.chars for call in planned]
+    read_chars = sum(chunks)
+    sent_chars = read_chars + sum(call.context_chars for call in planned)
+    calls = len(planned)
 
     # ~4 chars per token is the standard rough conversion; the estimate is a
     # magnitude signal for the confirm gate, not a billing quote.
-    source_tokens_total = read_chars // 4
+    source_tokens_total = int(sent_chars / chars_per_token)
     input_tokens = source_tokens_total + calls * cfg.estimate_prompt_overhead_tokens
 
     # Each end of the band takes every call at that end of its spread, so a
     # call near the first budget retries at the high end and not at the low.
     low = [
         _billed_output(
-            output_model.expected(n) * (1 - spread), cfg.max_tokens, cfg.retry_max_tokens
+            output_model.expected(c.chars, c.density) * (1 - spread),
+            cfg.max_tokens,
+            cfg.retry_max_tokens,
         )
-        for n in chunks
+        for c in planned
     ]
     high = [
         _billed_output(
-            output_model.expected(n) * (1 + spread), cfg.max_tokens, cfg.retry_max_tokens
+            output_model.expected(c.chars, c.density) * (1 + spread),
+            cfg.max_tokens,
+            cfg.retry_max_tokens,
         )
-        for n in chunks
+        for c in planned
     ]
     # The middle weighs each call's retry by its chance of passing the budget.
     expected_out = 0.0
     length_retries = 0.0
-    for n in chunks:
-        want = output_model.expected(n)
+    for call in planned:
+        want = output_model.expected(call.chars, call.density)
         if not retry_enabled:
             expected_out += min(want, cfg.max_tokens)
             continue
@@ -401,8 +451,9 @@ def estimate_extraction(char_counts: Sequence[int], *, already_captured: int = 0
     per_call_input = input_tokens / calls if calls else 0.0
     retry_input = round(
         sum(
-            n // 4 + cfg.estimate_prompt_overhead_tokens
-            for n, c in zip(chunks, high, strict=True)
+            int((call.chars + call.context_chars) / chars_per_token)
+            + cfg.estimate_prompt_overhead_tokens
+            for call, c in zip(planned, high, strict=True)
             if c.retried
         )
         + high_other * per_call_input

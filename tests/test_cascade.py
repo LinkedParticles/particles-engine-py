@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from particles.core.schema import (
@@ -14,6 +16,7 @@ from particles.core.schema import (
     SourceRefType,
     SourceTrustStatement,
 )
+from particles.core.status import Status
 from particles.extraction.registry import infer_domain
 
 # ---------------------------------------------------------------------------
@@ -561,10 +564,14 @@ class TestRunTrustCascade:
         assert loser is not None
         assert loser.status == Status.PROVENANCE_STALE
 
-        # Verify INCONSISTENCY was resolved
+        # Verify INCONSISTENCY was closed as review closes one: retracted
+        # (the §6.6 wrapper-terminal rule), never PROVENANCE_STALE.
+        from particles.core.conflict_review import CLOSED_RECORD
+
         inc_after = await get_particle(db_session, inc.id)  # type: ignore[arg-type]
         assert inc_after is not None
-        assert inc_after.status == Status.PROVENANCE_STALE
+        assert (inc_after.status, inc_after.status_reason) == CLOSED_RECORD
+        assert inc_after.status == Status.RETRACTED
 
     @pytest.mark.asyncio
     async def test_cascade_over_quarantined_constituents(self, db_session: object) -> None:
@@ -599,7 +606,8 @@ class TestRunTrustCascade:
         winner = await get_particle(db_session, particle_a.id)  # type: ignore[arg-type]
         assert winner is not None and winner.status == Status.ACTIVE
         inc_after = await get_particle(db_session, inc.id)  # type: ignore[arg-type]
-        assert inc_after is not None and inc_after.status == Status.PROVENANCE_STALE
+        assert inc_after is not None and inc_after.status == Status.RETRACTED
+        assert inc_after.status_reason == StatusReason.CONFLICT_RESOLVED
 
     @pytest.mark.asyncio
     async def test_cascade_promotes_quarantined_winner(self, db_session: object) -> None:
@@ -643,7 +651,8 @@ class TestRunTrustCascade:
         assert len(minted) == 1
         assert minted[0].content == particle_b.content
         inc_after = await get_particle(db_session, inc.id)  # type: ignore[arg-type]
-        assert inc_after is not None and inc_after.status == Status.PROVENANCE_STALE
+        assert inc_after is not None and inc_after.status == Status.RETRACTED
+        assert inc_after.status_reason == StatusReason.CONFLICT_RESOLVED
 
     @pytest.mark.asyncio
     async def test_cascade_no_match_different_domain(self, db_session: object) -> None:
@@ -681,3 +690,83 @@ class TestRunTrustCascade:
 
         resolved = await run_trust_cascade(db_session, stmt)  # type: ignore[arg-type]
         assert resolved == 0
+
+
+# ---------------------------------------------------------------------------
+# The closed record (finding 10 of the Atlas report review; §6.6 wrapper-terminal rule)
+# ---------------------------------------------------------------------------
+
+
+async def _cascade_close(db_session: Any) -> tuple[Any, Any, Any]:
+    """Seed a quarantined conflict and let an OPERATOR_DIRECT cascade close it for A."""
+    from particles.operations.cascade import run_trust_cascade
+    from particles.store.trust_store import insert_trust_statement
+
+    particle_a, particle_b, inc = await _seed_quarantined_conflict(db_session)
+    stmt = SourceTrustStatement(
+        domain="numismatics",
+        source_ref=SourceRef(type=SourceRefType.SOURCE_TYPE, value="NUMISTA_API_COIN"),
+        trust_rank=0.90,
+        policy_provenance=PolicyProvenance.OPERATOR_DIRECT,
+        asserted_by="operator",
+    )
+    await insert_trust_statement(db_session, stmt)
+    assert await run_trust_cascade(db_session, stmt) == 1
+    await db_session.commit()
+    return particle_a, particle_b, inc
+
+
+@pytest.mark.asyncio
+class TestCascadeClosedRecord:
+    async def test_record_is_retracted_and_named_by_its_review(self, db_session: Any) -> None:
+        """The cascade closes a record as review does, and its REVIEW particle,
+        the one trace it leaves in place of an event, names that record."""
+        from particles.core.conflict_review import CLOSED_RECORD
+        from particles.store.particle_store import (
+            get_cascade_closed_record_ids,
+            get_inconsistency_particles,
+            get_particle,
+        )
+
+        _a, _b, inc = await _cascade_close(db_session)
+
+        record = await get_particle(db_session, inc.id)
+        assert record is not None
+        assert (record.status, record.status_reason) == CLOSED_RECORD
+        assert record.id not in {p.id for p in await get_inconsistency_particles(db_session)}
+        assert await get_cascade_closed_record_ids(db_session) == {inc.id}
+
+    async def test_a_closed_record_is_no_retired_value_tombstone(self, db_session: Any) -> None:
+        """The tombstone index's question, answered.
+
+        ``(PROVENANCE_STALE, CONFLICT_RESOLVED)`` is a judgment-retirement pair,
+        and the index's eligibility gates (truth-apt, asserted, not
+        DOCUMENT_META) do not exclude a record: it is ``FALSIFIABLE`` by
+        default and carries no particle type of its own. A record the cascade
+        left in that state was therefore registered as a retired value, so a
+        candidate restating its exact text would have been held. Retracted
+        with ``CONFLICT_RESOLVED`` it is outside the set, as a reviewed record
+        always was.
+        """
+        import sqlalchemy as sa
+
+        from particles.ingest.duplicate_suppression import build_retired_value_index
+        from particles.store.particle_store import get_particle
+
+        _a, _b, inc = await _cascade_close(db_session)
+        record = await get_particle(db_session, inc.id)
+        assert record is not None
+        restatement = record.model_copy(update={"id": "restatement", "status": Status.ACTIVE})
+
+        index = await build_retired_value_index(db_session, [record.content])
+        assert index.find(restatement) is None
+
+        # The state the cascade wrote before 1.192.15, set by hand: the edge is gone.
+        await db_session.execute(
+            sa.text("UPDATE particles SET status = 'PROVENANCE_STALE' WHERE id = :pid"),
+            {"pid": inc.id},
+        )
+        await db_session.commit()
+        index = await build_retired_value_index(db_session, [record.content])
+        held = index.find(restatement)
+        assert held is not None and held.id == inc.id

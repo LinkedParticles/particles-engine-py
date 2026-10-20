@@ -128,10 +128,10 @@ from particles.operations.candidate_pairs import (
     enumerate_candidate_pairs,
 )
 from particles.operations.probe_ledger import recall, remember, remember_rungs
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
 from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
-    get_active_particles_with_embeddings,
     get_particles_by_ids,
 )
 
@@ -717,7 +717,7 @@ async def _check_contradictions(
     # asked of each pair below, so its load is counted.
     candidates = [
         (p, emb)
-        for p, emb in await get_active_particles_with_embeddings(session)
+        for p, emb in await load_active_candidates(session)
         if not is_excluded_document_meta(p.properties) and not is_non_asserted(p.properties)
     ]
     if len(candidates) < 2:

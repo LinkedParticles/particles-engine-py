@@ -136,7 +136,10 @@ Then run `particles init claude-code` with that copy's
 `../particles-runtime/.venv/bin/particles`, which bakes its absolute path into
 the hooks, and register the MCP server with the same executable. To take a
 newer release, check the pinned worktree out at the new tag, run the same
-`uv sync`, and reopen your sessions. The hooks and the MCP registration name
+`uv sync`, run `particles db init` with the pinned executable and the hooks'
+environment if the release ships a migration, and reopen your sessions.
+Nothing else migrates the store: the hooks, the MCP server and scheduled
+consolidation open it as they find it. The hooks and the MCP registration name
 the path, not the version, so neither needs editing. Keep the pin current when
 your working checkout shares a store with it: a newer checkout can migrate the
 store's schema past what the pinned copy knows.
@@ -147,8 +150,12 @@ the install the hooks and the MCP server run and warns when the two differ,
 when that install is a working checkout on a branch, or when it is pinned to a
 tag older than the newest one the checkout has fetched, in which case it prints
 the commands to advance it. It reads local tags only, so fetch first. Its
-`schema:` line warns when the store was migrated by a newer release than the
-one running.
+`schema:` line compares the store's migration with the running install's, both
+ways. A store migrated by a newer release is a warning. A store behind the
+running install fails the doctor, because whatever reads a column the pending
+migration adds fails on it, and the line prints the `db init` command that
+catches the store up. `particles memory consolidate` refuses to start on such a
+store, with the same command, before it spends on any pass.
 
 ### Letting the agent install it
 
@@ -280,7 +287,12 @@ and says that too. Looking a belief up by id (`particle_show`) is never
 filtered. What the agent writes through a bound server is attributed to that
 project: a deposit carries the project's key whatever tags the agent passes,
 and an assertion may cite an existing source only if it is one of that
-project's. Leave the flag off and the server behaves exactly as before.
+project's. A link the agent writes with `link_add` must join two beliefs that
+are already in view for exactly the same projects. Linking two beliefs pools
+their sources, so a link across scopes would move a belief into another
+project's view, or into every project's when the partner is global. The server
+refuses such a link; an operator can still make it with `particles links add`.
+Leave the flag off and the server behaves exactly as before.
 
 **Two projects that disagree both keep their answer.** Once the store has
 been rescoped, a newer claim retires an older one only when every project that

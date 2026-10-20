@@ -105,16 +105,30 @@ class CaseEstimate:
         return self.per_run_usd.get(variant)
 
 
-def _price(price: TokenPrice | None, row: Mapping[str, Any], batched: bool = False) -> float | None:
-    """A token row at list price, the arithmetic ``particles.llm.usage`` prices with."""
+def _price(
+    price: TokenPrice | None,
+    row: Mapping[str, Any],
+    batched: bool = False,
+    selection: ProviderSelection | None = None,
+) -> float | None:
+    """A token row at list price, the arithmetic ``particles.llm.usage`` prices with.
+
+    ``selection`` picks the model's cache-read multiplier; without it the
+    standard ``llm.cache_read_price_multiplier`` applies.
+    """
     if price is None:
         return None
     llm = get_config().llm
+    cache_read = (
+        llm.cache_read_price_multiplier
+        if selection is None
+        else llm.cache_read_multiplier_for(selection)
+    )
     cost = (
         float(
             row.get("input_tokens", 0) * price.input
             + row.get("cache_creation_tokens", 0) * price.input * llm.cache_write_price_multiplier
-            + row.get("cache_read_tokens", 0) * price.input * llm.cache_read_price_multiplier
+            + row.get("cache_read_tokens", 0) * price.input * cache_read
             + row.get("output_tokens", 0) * price.output
         )
         / 1_000_000
@@ -158,7 +172,7 @@ def _from_profile(
         n = 0
         for row in rows:
             selection = pins.get(row["purpose"]) or pins["default"]
-            cost = _price(llm.price_for(selection), row, bool(row.get("batched")))
+            cost = _price(llm.price_for(selection), row, bool(row.get("batched")), selection)
             total = None if cost is None or total is None else total + cost
             n += int(row.get("calls", 0))
         usd[variant] = total

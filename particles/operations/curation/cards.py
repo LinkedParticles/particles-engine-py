@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, computed_field
 
 from particles.config import get_config
 from particles.core.conflict_review import is_quarantined
+from particles.core.observer_scope import BeliefScope, join
 from particles.core.schema import JudgeVerdictKind, Particle
 from particles.core.status import Status
 
@@ -277,6 +278,75 @@ def resolve_actions_for(a: Particle | None, b: Particle | None) -> list[str]:
     return offered
 
 
+class ObserverScopeKind(StrEnum):
+    """Which projects a belief is in view for, as a curation card shows it."""
+
+    GLOBAL = "global"
+    """In view for every project."""
+    PROJECTS = "projects"
+    """In view for the projects named beside it."""
+    UNATTRIBUTED = "unattributed"
+    """A harness deposit no project key was stamped on: in view for no project."""
+    LAPSED = "lapsed"
+    """Its sources once stated it and none still does: in view for no project."""
+
+
+class ObserverScopeBrief(BaseModel):
+    """A belief's observer scope on a curation card: display only.
+
+    Derived at read time from the corpus entries that currently state the
+    belief, exactly as the read path derives it, and never stored. Curation
+    stays observer-blind: the scope filters no card and moves no leverage.
+    ``widened`` records an operator's standing judgement that the belief
+    applies everywhere, which puts it in view for every project whatever its
+    derived scope says.
+    """
+
+    kind: ObserverScopeKind
+    projects: list[str] = Field(default_factory=list)
+    widened: bool = False
+
+
+def scope_brief(scope: BeliefScope, *, widened: bool = False) -> ObserverScopeBrief:
+    """The card's reading of one derived scope."""
+    if scope.is_global:
+        kind = ObserverScopeKind.GLOBAL
+    elif scope.keys:
+        kind = ObserverScopeKind.PROJECTS
+    elif scope.lapsed:
+        kind = ObserverScopeKind.LAPSED
+    else:
+        kind = ObserverScopeKind.UNATTRIBUTED
+    projects = [] if scope.is_global else sorted(scope.keys)
+    return ObserverScopeBrief(kind=kind, projects=projects, widened=widened)
+
+
+def _project_list(keys: list[str]) -> str:
+    """``project a``, ``projects a and b``, ``projects a, b and c``."""
+    if len(keys) == 1:
+        return f"project {keys[0]}"
+    return "projects " + ", ".join(keys[:-1]) + f" and {keys[-1]}"
+
+
+def merge_scope_note(a: BeliefScope, b: BeliefScope) -> str | None:
+    """What a merge does to the observer scope of a duplicate pair, or ``None``.
+
+    A merge records a ``CO_EVIDENTIAL`` edge, and the observer-scope join pools
+    the sources of a co-evidential group, so both beliefs take
+    the union of the two scopes. The note is written only when that union puts
+    a belief in view for a project that did not see it before. Both sides must
+    be sourced beliefs: a derived one keeps the meet of its premises.
+    """
+    merged = join((a, b))
+    if merged.in_view_for_no_project:
+        return None
+    if (a.is_global, a.keys) == (b.is_global, b.keys):
+        return None
+    if merged.is_global:
+        return "Merging puts both beliefs in view for every project, because one of them is global."
+    return f"Merging puts both beliefs in view for {_project_list(sorted(merged.keys))}."
+
+
 class ParticleBrief(BaseModel):
     """A compact summary of one particle a card references.
 
@@ -304,6 +374,9 @@ class ParticleBrief(BaseModel):
     # otherwise unplaceable from the card alone.
     source_uri: str | None = None
     asserted_at: datetime | None = None
+    # Which projects the belief is in view for, read-only. None on a
+    # store that was never rescoped, where no project lens engages.
+    observer_scope: ObserverScopeBrief | None = None
 
 
 class ConflictBrief(BaseModel):
@@ -393,6 +466,10 @@ class CurationCard(BaseModel):
     # from its members' statuses when the slice is served. Every client
     # renders exactly this list. None for every other kind.
     resolve_actions: list[str] | None = None
+    # What merging a DUPLICATE_PAIR does to the pair's observer scope, when the
+    # two sides are in view for different projects (``merge_scope_note``).
+    # Display only; None for every other kind and on a store never rescoped.
+    scope_note: str | None = None
     # The leverage score (§2), filled by leverage.score_cards.
     leverage: float = 0.0
 

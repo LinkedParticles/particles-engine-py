@@ -6,10 +6,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
+import logging
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from particles.core.schema import Snapshot, UncertaintyNature
@@ -20,9 +25,12 @@ from particles.extraction.reddit import (
     SOURCE_TYPE,
     RedditExtractor,
     _build_reddit_chunks,
+    _count_unsettled_below_floor,
     _get_all_qualifying_comments,
+    _get_fetch_provenance,
     _get_post,
     _infer_ticker,
+    _is_score_settled,
     _render_reddit_body,
     _render_reddit_comment_lines,
 )
@@ -248,7 +256,7 @@ class TestRedditImporter:
         content = json.dumps(_REDDIT_BLOB).encode()
 
         with patch(
-            "particles.ingest.importers.reddit._fetch_with_curl",
+            "particles.ingest.importers.reddit._fetch_thread",
             AsyncMock(return_value=content),
         ):
             d = RedditImporter()
@@ -270,7 +278,7 @@ class TestRedditImporter:
         content = json.dumps(_REDDIT_BLOB).encode()
 
         with patch(
-            "particles.ingest.importers.reddit._fetch_with_curl",
+            "particles.ingest.importers.reddit._fetch_thread",
             AsyncMock(return_value=content),
         ):
             d = RedditImporter()
@@ -288,9 +296,15 @@ class TestRedditImporter:
         assert entry.source_type == "REDDIT_POST"
 
     @pytest.mark.asyncio
-    async def test_deposit_share_link_resolves_and_canonicalizes(self, db_session: object) -> None:
+    async def test_deposit_share_link_resolves_and_canonicalizes(
+        self, db_session: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """a `/s/` share link deposits under its resolved `/comments/`
-        permalink, and the `.json` fetch targets that canonical URL."""
+        permalink, and on the direct backend the `.json` fetch targets that
+        canonical URL."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reddit, "fetch_backend", "reddit")
         content = json.dumps(_REDDIT_BLOB).encode()
         canonical = "https://www.reddit.com/r/AIEval/comments/1uf0fkd/slug/"
         fetched: list[str] = []
@@ -331,7 +345,7 @@ class TestRedditImporter:
         canonical = "https://www.reddit.com/r/AIEval/comments/1uf0fkd/slug/"
 
         with patch(
-            "particles.ingest.importers.reddit._fetch_with_curl",
+            "particles.ingest.importers.reddit._fetch_thread",
             AsyncMock(return_value=content),
         ):
             d = RedditImporter()
@@ -356,8 +370,472 @@ class TestRedditImporter:
 
 
 # ---------------------------------------------------------------------------
+# Arctic Shift backend, the default fetch source
+# ---------------------------------------------------------------------------
+
+_PERMALINK = "https://www.reddit.com/r/AIEval/comments/1uf0fkd/slug/"
+_NOW = 1_792_000_000  # arbitrary epoch seconds
+
+
+def _archived_post(*, settled: bool) -> dict[str, Any]:
+    """An archive post record: Reddit's fields plus ``retrieved_on`` and ``_meta``."""
+    return {
+        **_POST_DATA,
+        "id": "1uf0fkd",
+        "is_self": True,
+        "created_utc": _NOW - 3600,
+        "retrieved_on": _NOW - 3500,
+        "_meta": {"retrieved_2nd_on": _NOW} if settled else {},
+    }
+
+
+def _archived_comment(
+    author: str,
+    score: int,
+    body: str,
+    *,
+    settled: bool,
+    replies: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": "t1",
+        "data": {
+            "author": author,
+            "score": score,
+            "body": body,
+            "created_utc": _NOW - 3000,
+            "retrieved_on": _NOW - 2900,
+            "_meta": {"retrieved_2nd_on": _NOW} if settled else {},
+            "replies": {"kind": "Listing", "data": {"children": replies}} if replies else "",
+        },
+    }
+
+
+def _archive_tree(*, settled: bool) -> list[dict[str, Any]]:
+    """Two top-level comments and one nested reply, in the archive's tree shape.
+
+    Unsettled records carry the archive's placeholder score of 1.
+    """
+    reply = _archived_comment(
+        "deep_reply", 30 if settled else 1, "Nested insight.", settled=settled
+    )
+    return [
+        _archived_comment(
+            "bearish_gal",
+            120 if settled else 1,
+            "Management lied.",
+            settled=settled,
+            replies=[reply],
+        ),
+        _archived_comment("low_score", 1, "meh", settled=settled),
+    ]
+
+
+class _ArchiveStub:
+    """Serves the archive's two endpoints and records every request it gets.
+
+    ``queued`` responses are returned first, in order, whatever the path.
+    """
+
+    def __init__(
+        self,
+        *,
+        posts: list[Any] | None = None,
+        tree: list[Any] | None = None,
+        queued: list[httpx.Response] | None = None,
+    ) -> None:
+        self.posts = posts if posts is not None else [_archived_post(settled=True)]
+        self.tree = tree if tree is not None else _archive_tree(settled=True)
+        self.queued = list(queued or [])
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.queued:
+            return self.queued.pop(0)
+        if request.url.path == "/api/posts/ids":
+            return httpx.Response(200, json={"data": self.posts})
+        if request.url.path == "/api/comments/tree":
+            return httpx.Response(200, json={"data": self.tree})
+        return httpx.Response(404)
+
+
+@contextlib.contextmanager
+def _serve_archive(stub: _ArchiveStub) -> Iterator[None]:
+    """Route the importer's ``particles_client()`` to ``stub`` (no network)."""
+
+    @contextlib.asynccontextmanager
+    async def _client(**_kwargs: object) -> AsyncIterator[httpx.AsyncClient]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as client:
+            yield client
+
+    with patch("particles.ingest.importers.reddit.particles_client", _client):
+        yield
+
+
+async def _deposited_blob(db_session: object, snapshot_id: str) -> Any:
+    from particles.corpus.deposit import load_blob
+    from particles.corpus.store import get_snapshot
+
+    snap = await get_snapshot(db_session, snapshot_id)  # type: ignore[arg-type]
+    assert snap is not None
+    return json.loads(load_blob(snap.content_hash))
+
+
+class TestArcticShiftFetch:
+    """The importer fetches thread content from Arctic Shift and stores Reddit's shape."""
+
+    @pytest.mark.asyncio
+    async def test_reassembles_reddit_envelope(self, db_session: object) -> None:
+        """The archive's ``{"data": [...]}`` bodies become Reddit's two listings,
+        which the unchanged parsers read, under the reddit.com URI-R."""
+        from particles.corpus.store import get_entry
+
+        stub = _ArchiveStub()
+        with _serve_archive(stub):
+            entry_id, snapshot_id = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+
+        entry = await get_entry(db_session, entry_id)  # type: ignore[arg-type]
+        assert entry is not None
+        assert entry.uri_r == _PERMALINK
+        assert entry.source_type == SOURCE_TYPE
+
+        data = await _deposited_blob(db_session, snapshot_id)
+        post = _get_post(data)
+        assert post is not None and post["id"] == "1uf0fkd"
+        comments = _get_all_qualifying_comments(data)
+        # The nested reply survives reassembly; the score-1 comment is filtered.
+        assert [c["author"] for c in comments] == ["bearish_gal", "deep_reply"]
+        assert RedditImporter().primary_url(json.dumps(data).encode()) is None  # self-post
+
+        paths = [(r.url.path, dict(r.url.params)) for r in stub.requests]
+        assert paths == [
+            ("/api/posts/ids", {"ids": "1uf0fkd"}),
+            ("/api/comments/tree", {"link_id": "1uf0fkd", "limit": "25000"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_records_archive_provenance(self, db_session: object) -> None:
+        """The blob names the archive host and its capture times, and nothing
+        from this fetch's own clock, so an unchanged record re-deposits to the
+        same bytes."""
+        from particles.corpus.store import get_snapshot
+
+        with _serve_archive(_ArchiveStub()):
+            importer = RedditImporter()
+            _, first = await importer.deposit(db_session, _PERMALINK, "op", [])  # type: ignore[arg-type]
+            _, second = await importer.deposit(db_session, _PERMALINK, "op", [])  # type: ignore[arg-type]
+
+        provenance = _get_fetch_provenance(await _deposited_blob(db_session, first))
+        assert provenance == {
+            "backend": "arctic_shift",
+            "archive": "Arctic Shift",
+            "archive_host": "arctic-shift.photon-reddit.com",
+            "post_id": "1uf0fkd",
+            "post_retrieved_on": _NOW - 3500,
+            "post_retrieved_2nd_on": _NOW,
+            "post_score_settled": True,
+            "comment_count": 3,
+            "comments_retrieved_on_earliest": _NOW - 2900,
+            "comments_retrieved_on_latest": _NOW - 2900,
+            "comments_score_unsettled": 0,
+        }
+        snap_a = await get_snapshot(db_session, first)  # type: ignore[arg-type]
+        snap_b = await get_snapshot(db_session, second)  # type: ignore[arg-type]
+        assert snap_a is not None and snap_b is not None
+        assert snap_a.content_hash == snap_b.content_hash
+
+    @pytest.mark.asyncio
+    async def test_share_link_fetches_resolved_post_from_archive(self, db_session: object) -> None:
+        """The share-link redirect still resolves through Reddit; the content
+        comes from the archive under the resolved post id."""
+        stub = _ArchiveStub()
+        with (
+            _serve_archive(stub),
+            patch(
+                "particles.ingest.importers.reddit._resolve_reddit_redirect",
+                AsyncMock(return_value=_PERMALINK),
+            ),
+        ):
+            await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                "https://www.reddit.com/r/AIEval/s/2KHTCY0Bgq",
+                "test-operator",
+                [],
+            )
+        assert stub.requests[0].url.params["ids"] == "1uf0fkd"
+
+    @pytest.mark.asyncio
+    async def test_not_archived_is_one_clear_failure(self) -> None:
+        """An empty ``data`` list means the archive lacks the post: a
+        SourceFetchError naming Arctic Shift, with no OAuth advice."""
+        from particles.http import SourceFetchError
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        stub = _ArchiveStub(posts=[])
+        with _serve_archive(stub), pytest.raises(SourceFetchError) as ei:
+            await _fetch_thread(_PERMALINK)
+        message = str(ei.value)
+        assert "Arctic Shift" in message and "has not archived" in message
+        assert "OAuth" not in message
+        assert ei.value.status_code == 404
+        assert len(stub.requests) == 1  # no comment-tree request for a missing post
+
+    @pytest.mark.asyncio
+    async def test_error_body_is_a_fetch_failure(self) -> None:
+        """``{"data": null, "error": ...}`` (the archive's timeout answer) is a
+        SourceFetchError carrying the archive's own words, not a traceback."""
+        from particles.http import SourceFetchError
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        busy = httpx.Response(200, json={"data": None, "error": "Timeout. Maybe slow down a bit"})
+        with _serve_archive(_ArchiveStub(queued=[busy])), pytest.raises(SourceFetchError) as ei:
+            await _fetch_thread(_PERMALINK)
+        assert "Timeout. Maybe slow down a bit" in str(ei.value)
+
+    @pytest.mark.asyncio
+    async def test_server_error_is_a_fetch_failure(self) -> None:
+        from particles.http import SourceFetchError
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        with (
+            _serve_archive(_ArchiveStub(queued=[httpx.Response(503)])),
+            pytest.raises(SourceFetchError) as ei,
+        ):
+            await _fetch_thread(_PERMALINK)
+        assert ei.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_429_waits_the_reset_and_retries_once(self) -> None:
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        limited = httpx.Response(429, headers={"X-RateLimit-Reset": "2"})
+        stub = _ArchiveStub(queued=[limited])
+        sleep = AsyncMock()
+        with _serve_archive(stub), patch("particles.ingest.importers.reddit._sleep", sleep):
+            content = await _fetch_thread(_PERMALINK)
+        sleep.assert_awaited_once_with(2.0)
+        assert _get_post(json.loads(content)) is not None
+        assert len(stub.requests) == 3  # the limited post request, its retry, the tree
+
+    @pytest.mark.asyncio
+    async def test_second_429_fails_without_another_wait(self) -> None:
+        from particles.http import SourceFetchError
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        limited = [httpx.Response(429, headers={"X-RateLimit-Reset": "1"}) for _ in range(2)]
+        stub = _ArchiveStub(queued=limited)
+        sleep = AsyncMock()
+        with (
+            _serve_archive(stub),
+            patch("particles.ingest.importers.reddit._sleep", sleep),
+            pytest.raises(SourceFetchError) as ei,
+        ):
+            await _fetch_thread(_PERMALINK)
+        assert ei.value.status_code == 429
+        assert sleep.await_count == 1
+        assert len(stub.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_429_reset_beyond_the_cap_fails_at_once(self) -> None:
+        """A reset further away than ``arctic_shift_max_wait_seconds`` does not
+        stall the deposit."""
+        from particles.http import SourceFetchError
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        limited = httpx.Response(429, headers={"X-RateLimit-Reset": "600"})
+        stub = _ArchiveStub(queued=[limited])
+        sleep = AsyncMock()
+        with (
+            _serve_archive(stub),
+            patch("particles.ingest.importers.reddit._sleep", sleep),
+            pytest.raises(SourceFetchError, match="arctic_shift_max_wait_seconds"),
+        ):
+            await _fetch_thread(_PERMALINK)
+        sleep.assert_not_awaited()
+        assert len(stub.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_reddit_backend_routes_to_curl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``fetch_backend: reddit`` keeps the direct ``.json`` fetch and never
+        touches the archive."""
+        from particles.config import get_config
+        from particles.ingest.importers.reddit import _fetch_thread
+
+        monkeypatch.setattr(get_config().reddit, "fetch_backend", "reddit")
+        curl = AsyncMock(return_value=b"[]")
+        stub = _ArchiveStub()
+        with (
+            _serve_archive(stub),
+            patch("particles.ingest.importers.reddit._fetch_with_curl", curl),
+        ):
+            assert await _fetch_thread(_PERMALINK) == b"[]"
+        curl.assert_awaited_once_with(_PERMALINK + ".json?limit=200")
+        assert stub.requests == []
+
+
+class TestUnsettledArchiveScores:
+    """Archive scores read 0 or 1 until the second pass; the deposit says so."""
+
+    @pytest.mark.asyncio
+    async def test_unsettled_deposit_warns_and_extractor_notes_it(
+        self, db_session: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stub = _ArchiveStub(
+            posts=[_archived_post(settled=False)], tree=_archive_tree(settled=False)
+        )
+        with (
+            _serve_archive(stub),
+            caplog.at_level(logging.WARNING, logger="particles.ingest.importers.reddit"),
+        ):
+            _, snapshot_id = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "3 of 3 comments" in warnings[0] and "corpus refresh" in warnings[0]
+
+        data = await _deposited_blob(db_session, snapshot_id)
+        assert _get_all_qualifying_comments(data) == []  # the floor still applies
+        provenance = _get_fetch_provenance(data)
+        assert provenance is not None
+        assert provenance["post_score_settled"] is False
+        assert provenance["comments_score_unsettled"] == 3
+
+        doc = RedditExtractor()._normalise(json.dumps(data).encode(), _make_snapshot())
+        notes = [n for n in doc.quality_notes if n.startswith("REDDIT_SCORES_UNSETTLED")]
+        assert len(notes) == 1 and "3 of 3 comments" in notes[0]
+
+    @pytest.mark.asyncio
+    async def test_settled_deposit_is_quiet(
+        self, db_session: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            _serve_archive(_ArchiveStub()),
+            caplog.at_level(logging.WARNING, logger="particles.ingest.importers.reddit"),
+        ):
+            _, snapshot_id = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+        data = await _deposited_blob(db_session, snapshot_id)
+        doc = RedditExtractor()._normalise(json.dumps(data).encode(), _make_snapshot())
+        assert not any(n.startswith("REDDIT_SCORES_UNSETTLED") for n in doc.quality_notes)
+
+    def test_reddit_served_blob_is_never_unsettled(self) -> None:
+        """A blob without the provenance record came from Reddit, whose scores
+        are live: the low-score comment there is a real low score."""
+        assert _count_unsettled_below_floor(_REDDIT_BLOB) == (0, 0)
+
+    def test_late_first_capture_counts_as_settled(self) -> None:
+        """A record the archive first captured long after it was made (a
+        historical import) carries a real score with no second pass."""
+        late = {"created_utc": _NOW, "retrieved_on": _NOW + 40 * 3600, "_meta": {}}
+        fresh = {"created_utc": _NOW, "retrieved_on": _NOW + 60, "_meta": {}}
+        second_pass = {
+            "created_utc": _NOW,
+            "retrieved_on": _NOW + 60,
+            "_meta": {"retrieved_2nd_on": 1},
+        }
+        assert _is_score_settled(late) is True
+        assert _is_score_settled(fresh) is False
+        assert _is_score_settled(second_pass) is True
+        assert _is_score_settled({}) is False
+
+
+# ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
+
+
+class TestRefresh:
+    """``corpus refresh`` re-runs the importer, not a GET of the permalink."""
+
+    @pytest.mark.asyncio
+    async def test_refetch_reproduces_the_deposited_bytes(self, db_session: object) -> None:
+        from particles.corpus.store import get_snapshot
+
+        with _serve_archive(_ArchiveStub()):
+            _, snapshot_id = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+            refetched = await RedditImporter().refetch(_PERMALINK)
+
+        from particles.corpus.deposit import sha256
+
+        snap = await get_snapshot(db_session, snapshot_id)  # type: ignore[arg-type]
+        assert snap is not None and sha256(refetched) == snap.content_hash
+
+    @pytest.mark.asyncio
+    async def test_refresh_picks_up_settled_scores(self, db_session: object) -> None:
+        from particles.corpus.refresh_outcome import RefreshOutcome
+        from particles.operations.corpus_refresh import refresh_entries
+
+        unsettled = _ArchiveStub(
+            posts=[_archived_post(settled=False)], tree=_archive_tree(settled=False)
+        )
+        with _serve_archive(unsettled):
+            entry_id, first_id = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+        await db_session.commit()  # type: ignore[attr-defined]
+
+        settled = _ArchiveStub()
+        # A GET of the reddit.com permalink would go through the ladder's own
+        # client; fail loudly if it is ever reached.
+        with (
+            _serve_archive(settled),
+            patch("particles.corpus.fetch.particles_client", side_effect=AssertionError),
+        ):
+            results = [r async for r in refresh_entries(db_session, [entry_id], force=True)]  # type: ignore[arg-type]
+
+        assert len(results) == 1 and results[0].error is None
+        assert results[0].outcome == RefreshOutcome.CHANGED
+        assert {r.url.host for r in settled.requests} == {"arctic-shift.photon-reddit.com"}
+
+        data = await _deposited_blob(db_session, results[0].snapshot_id or "")
+        assert results[0].snapshot_id != first_id
+        assert [c["author"] for c in _get_all_qualifying_comments(data)] == [
+            "bearish_gal",
+            "deep_reply",
+        ]
+        provenance = _get_fetch_provenance(data)
+        assert provenance is not None and provenance["comments_score_unsettled"] == 0
+
+    @pytest.mark.asyncio
+    async def test_refresh_of_an_unchanged_thread_is_a_revisit(self, db_session: object) -> None:
+        from particles.corpus.refresh_outcome import RefreshOutcome
+        from particles.operations.corpus_refresh import refresh_entries
+
+        with _serve_archive(_ArchiveStub()):
+            entry_id, _ = await RedditImporter().deposit(
+                db_session,  # type: ignore[arg-type]
+                _PERMALINK,
+                "test-operator",
+                [],
+            )
+            await db_session.commit()  # type: ignore[attr-defined]
+            results = [r async for r in refresh_entries(db_session, [entry_id], force=True)]  # type: ignore[arg-type]
+
+        assert results[0].error is None
+        assert results[0].outcome == RefreshOutcome.UNCHANGED_HASH
 
 
 class TestFetchWithCurl:
@@ -400,7 +878,7 @@ class TestFetchWithCurl:
     @pytest.mark.asyncio
     async def test_403_raises_source_fetch_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A 403 (Reddit's bot-wall) is a typed SourceFetchError with status 403
-        and a Reddit-lockdown hint — not a bare RuntimeError/traceback."""
+        that points at the archive backend — not a bare RuntimeError/traceback."""
         from particles.extraction.reddit import _fetch_with_curl
         from particles.http import SourceFetchError
 
@@ -421,7 +899,9 @@ class TestFetchWithCurl:
                 resolve=_stub_resolver(_PUBLIC_ADDR),
             )
         assert ei.value.status_code == 403
-        assert "403" in str(ei.value) and "OAuth" in str(ei.value)
+        # Name the archive backend, never a closed OAuth route.
+        assert "403" in str(ei.value) and "arctic_shift" in str(ei.value)
+        assert "OAuth" not in str(ei.value)
 
     @pytest.mark.asyncio
     async def test_non_http_failure_has_no_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -578,6 +1058,33 @@ class TestResolveRedditRedirect:
             await _resolve_reddit_redirect(
                 "https://www.reddit.com/r/AIEval/s/xyz", resolve=_stub_resolver(_PUBLIC_ADDR)
             )
+
+
+class TestShareLinkRefusal:
+    """The share-link path fails the same clean way as the fetch."""
+
+    @pytest.mark.asyncio
+    async def test_403_is_a_source_fetch_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.extraction.reddit import _resolve_reddit_redirect
+        from particles.http import SourceFetchError
+
+        async def _fake_exec(*argv: str, **kwargs: object) -> MagicMock:
+            proc = MagicMock()
+            proc.returncode = 22
+            proc.communicate = AsyncMock(
+                return_value=(b"", b"curl: (22) The requested URL returned error: 403")
+            )
+            return proc
+
+        monkeypatch.setattr(
+            "particles.extraction.reddit.asyncio.create_subprocess_exec", _fake_exec
+        )
+        with pytest.raises(SourceFetchError) as ei:
+            await _resolve_reddit_redirect(
+                "https://www.reddit.com/r/AIEval/s/xyz", resolve=_stub_resolver(_PUBLIC_ADDR)
+            )
+        assert ei.value.status_code == 403
+        assert "permalink" in str(ei.value) and "OAuth" not in str(ei.value)
 
 
 class TestCurlConnectPin:

@@ -44,6 +44,14 @@ class ImporterPlugin(Protocol):
     use complementary verbs. The contract is unchanged: an importer routes
     URLs to format-specific fetch logic and writes the resulting blob into
     the corpus.
+
+    Two methods are optional and found with ``getattr``: ``primary_url``
+    (follow) and ``refetch``. ``async def refetch(self,
+    uri_r: str) -> bytes`` returns the bytes ``deposit`` would store for the
+    entry whose URI-R is ``uri_r``, fetched the same way, so an unchanged source
+    hashes to the prior snapshot. ``particles corpus refresh`` calls it for an
+    entry this importer accepts; an importer without it makes that refresh
+    fail rather than GET a URI-R that names a different document.
     """
 
     def accepts_url(self, url: str) -> bool:

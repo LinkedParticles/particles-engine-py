@@ -135,6 +135,52 @@ class TestExitCodes:
         assert result.exit_code == 2
         assert "could not start" in result.output
 
+    def _stamp_one_behind(self, db: Path) -> str:
+        import sqlite3
+
+        from alembic.script import ScriptDirectory
+
+        from particles.db import alembic_paths
+
+        head = ScriptDirectory(str(alembic_paths()[1])).get_revision("head")
+        assert head is not None and isinstance(head.down_revision, str)
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE alembic_version (version_num TEXT)")
+            conn.execute("INSERT INTO alembic_version VALUES (?)", (head.down_revision,))
+        return head.down_revision
+
+    def test_a_store_behind_this_install_exits_2_before_any_pass(self, cli_db: Path) -> None:
+        # 2026-10-18: a run against a store one migration behind spent on
+        # extraction and probes, then failed on the column it could not write.
+        parent = self._stamp_one_behind(cli_db)
+        consolidate = AsyncMock(return_value=_report())
+        with patch("particles.operations.consolidation.run_consolidation", consolidate):
+            result = runner.invoke(app, ["memory", "consolidate", "--if-due"])
+        assert result.exit_code == 2, result.output
+        consolidate.assert_not_awaited()
+        assert f"could not start: the store is at migration {parent}, 1 migration behind" in (
+            result.stderr
+        )
+        assert f"DATABASE_URL=sqlite+aiosqlite:///{cli_db} " in result.stderr
+        assert result.stderr.rstrip().endswith(" db init")
+
+    def test_a_store_at_this_install_head_runs(self, cli_db: Path) -> None:
+        import sqlite3
+
+        from alembic.script import ScriptDirectory
+
+        from particles.db import alembic_paths
+
+        head = ScriptDirectory(str(alembic_paths()[1])).get_current_head()
+        with sqlite3.connect(cli_db) as conn:
+            conn.execute("CREATE TABLE alembic_version (version_num TEXT)")
+            conn.execute("INSERT INTO alembic_version VALUES (?)", (head,))
+        consolidate = AsyncMock(return_value=_report())
+        with patch("particles.operations.consolidation.run_consolidation", consolidate):
+            result = runner.invoke(app, ["memory", "consolidate"])
+        assert result.exit_code == 0, result.output
+        consolidate.assert_awaited_once()
+
 
 class TestThreading:
     def test_flags_thread_through_to_operation(self, cli_db: Path) -> None:

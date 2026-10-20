@@ -359,6 +359,34 @@ class TestCoverageAfterAClose:
         assert frozenset((a.id, b.id)) not in await covered_pair_set(db_session)
 
     @pytest.mark.asyncio
+    async def test_a_cascade_close_is_read_as_the_cascade(self, db_session: Any) -> None:
+        """The cascade retracts a record and writes no event (1.192.15): its
+        REVIEW particle, not the record's status, is what names the cause."""
+        from particles.core.conflict_review import CLOSED_RECORD
+        from particles.core.contradiction_disclosure import CloseCause
+        from particles.operations.cascade import _write_cascade_review
+        from particles.operations.contradiction_disclosure import _record_states
+
+        a, b, _, _ = await _evidence(db_session)
+        await run_disclosure(db_session, confirmed=[_pair(a.id, b.id)], mint=True)
+        record = (await _open(db_session))[0]
+        # The cascade's own two writes for the record, in its order.
+        await update_particle_status(db_session, record.id, *CLOSED_RECORD)
+        await _write_cascade_review(
+            db_session,
+            inconsistency_id=record.id,
+            winner_id=a.id,
+            loser_id=b.id,
+            statement_id="stmt-1",
+        )
+        await db_session.commit()
+
+        _, states = await _record_states(db_session)
+        [state] = [s for s in states if s.record_id == record.id]
+        assert not state.open and state.cause is CloseCause.CASCADE
+        assert frozenset((a.id, b.id)) in await covered_pair_set(db_session)
+
+    @pytest.mark.asyncio
     async def test_a_lapse_close_covers_nothing(self, db_session: Any) -> None:
         a, b, _, _ = await _evidence(db_session)
         await run_disclosure(db_session, confirmed=[_pair(a.id, b.id)], mint=True)

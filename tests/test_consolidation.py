@@ -1292,7 +1292,7 @@ class TestReconcileProbeCap:
         ]
         monkeypatch.setattr(
             reconcile_mod,
-            "get_active_particles_with_embeddings",
+            "load_active_candidates",
             AsyncMock(return_value=with_embeddings),
         )
         monkeypatch.setattr(reconcile_mod, "_cosine", lambda a, b: float(a[0] * b[0]))

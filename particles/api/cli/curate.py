@@ -34,6 +34,8 @@ from particles.operations.curation.cards import (
     CardKind,
     ConflictBrief,
     CurationCard,
+    ObserverScopeBrief,
+    ObserverScopeKind,
     ParticleBrief,
     describe_gesture,
 )
@@ -488,7 +490,21 @@ def _brief_meta(brief: ParticleBrief) -> str:
     meta = f"id {brief.particle_id[:8]} · confidence {brief.effective_confidence:.2f}"
     if brief.subject_labels:
         meta += " · subjects: " + ", ".join(brief.subject_labels)
+    if brief.observer_scope is not None:
+        meta += " · in view: " + _scope_text(brief.observer_scope)
     return meta
+
+
+def _scope_text(scope: ObserverScopeBrief) -> str:
+    """Which projects see a belief, as one short phrase."""
+    if scope.widened or scope.kind is ObserverScopeKind.GLOBAL:
+        text = "every project"
+        if scope.widened and scope.kind is not ObserverScopeKind.GLOBAL:
+            text += " (widened)"
+        return text
+    if scope.kind is ObserverScopeKind.PROJECTS:
+        return ", ".join(scope.projects)
+    return f"no project ({scope.kind.value})"
 
 
 @dataclass
@@ -601,6 +617,8 @@ def _render_card(
         if card.verdict.rationale:
             judge += f". {card.verdict.rationale}"
         lines += _wrap(judge, "   ")
+    if card.scope_note:
+        lines += _wrap(card.scope_note, "   ")
 
     for pid in dict.fromkeys(_UUID.findall(card.diagnostic)):
         if pid in related.beliefs and pid not in card.particle_ids:

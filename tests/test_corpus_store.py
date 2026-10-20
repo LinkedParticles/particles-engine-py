@@ -12,9 +12,11 @@ query shape".
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import (
     CorpusEntry,
@@ -27,7 +29,11 @@ from particles.core.schema import (
 from particles.corpus.store import (
     CorpusEntryRow,
     SnapshotRow,
+    get_document_supersession_map,
+    get_entry_source_facts,
     get_entry_uri_map,
+    get_snapshot_source_meta,
+    get_source_types_for_entries,
     resolve_snapshot_for_blob,
 )
 
@@ -451,3 +457,91 @@ async def test_release_extraction_claim_only_releases_in_progress(
     assert rows[claimed].extraction_started_at is None
     assert rows[done].extraction_status == ExtractionStatus.COMPLETE.value
     assert rows[failed].extraction_status == ExtractionStatus.FAILED.value
+
+
+class TestBatchLookupsPastVariableLimit:
+    """The batch lookups survive an id list past SQLite's variable limit.
+
+    SQLite refuses a statement with more than 32,766 bound variables. The query
+    path hands ``get_snapshot_source_meta`` one id per distinct SOURCE snapshot
+    among its candidates (and the entry helpers one per entry), so before these
+    helpers chunked their ``IN`` lists an unfiltered query over a store of about
+    a million beliefs failed with ``too many SQL variables``. Each test asks for
+    more ids than the limit, with the real rows placed after every chunk
+    boundary but the last, and checks the merged result.
+    """
+
+    OVER_LIMIT = 33_000
+    PUBLISHED = datetime(2026, 3, 1)
+
+    async def _seed(self, session: AsyncSession) -> tuple[list[str], list[str]]:
+        """Two entries, two snapshots; returns the over-limit (entry ids, snapshot ids)."""
+        for n in (1, 2):
+            session.add(CorpusEntryRow.from_model(_entry(f"e-{n}", f"https://example.com/{n}")))
+            snap = Snapshot(
+                snapshot_id=f"s-{n}",
+                captured_at=self.PUBLISHED.replace(tzinfo=UTC),
+                content_hash=f"{n}" * 64,
+                extraction_status=ExtractionStatus.COMPLETE,
+                warc_record_type=WarcRecordType.RESPONSE,
+                author_id=f"author:{n}",
+                content_published_at=self.PUBLISHED.replace(tzinfo=UTC),
+            )
+            session.add(SnapshotRow.from_model(snap, f"e-{n}"))
+        await session.flush()
+        row = await session.get(CorpusEntryRow, "e-2")
+        assert row is not None
+        row.document_supersession_json = json.dumps({"key": "adr:0002"})
+        await session.commit()
+        entry_ids = [f"missing-e-{i}" for i in range(self.OVER_LIMIT)] + ["e-1", "e-2"]
+        snapshot_ids = [f"missing-s-{i}" for i in range(self.OVER_LIMIT)] + ["s-1", "s-2"]
+        return entry_ids, snapshot_ids
+
+    @pytest.mark.asyncio
+    async def test_snapshot_source_meta(self, db_session: AsyncSession) -> None:
+        _entry_ids, snapshot_ids = await self._seed(db_session)
+        assert await get_snapshot_source_meta(db_session, snapshot_ids) == {
+            "s-1": (self.PUBLISHED, "author:1"),
+            "s-2": (self.PUBLISHED, "author:2"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_source_types_for_entries(self, db_session: AsyncSession) -> None:
+        entry_ids, _snapshot_ids = await self._seed(db_session)
+        assert await get_source_types_for_entries(db_session, entry_ids) == {
+            "e-1": "WEB_PAGE",
+            "e-2": "WEB_PAGE",
+        }
+
+    @pytest.mark.asyncio
+    async def test_entry_uri_map(self, db_session: AsyncSession) -> None:
+        entry_ids, _snapshot_ids = await self._seed(db_session)
+        assert await get_entry_uri_map(db_session, set(entry_ids)) == {
+            "e-1": "https://example.com/1",
+            "e-2": "https://example.com/2",
+        }
+
+    @pytest.mark.asyncio
+    async def test_entry_source_facts(self, db_session: AsyncSession) -> None:
+        entry_ids, _snapshot_ids = await self._seed(db_session)
+        assert await get_entry_source_facts(db_session, set(entry_ids)) == {
+            "e-1": ("WEB_PAGE", "https://example.com/1"),
+            "e-2": ("WEB_PAGE", "https://example.com/2"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_document_supersession_map(self, db_session: AsyncSession) -> None:
+        entry_ids, _snapshot_ids = await self._seed(db_session)
+        assert await get_document_supersession_map(db_session, set(entry_ids)) == {
+            "e-1": None,
+            "e-2": json.dumps({"key": "adr:0002"}),
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_input(self, db_session: AsyncSession) -> None:
+        """The empty-input results the callers rely on still hold."""
+        assert await get_snapshot_source_meta(db_session, []) == {}
+        assert await get_source_types_for_entries(db_session, []) == {}
+        assert await get_entry_uri_map(db_session, set()) == {}
+        assert await get_entry_source_facts(db_session, set()) == {}
+        assert await get_document_supersession_map(db_session, set()) == {}

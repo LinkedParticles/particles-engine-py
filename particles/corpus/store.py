@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -32,6 +32,22 @@ from particles.db import Base
 from particles.extraction.components import ComponentRecord
 
 log = logging.getLogger(__name__)
+
+_IN_CHUNK = 500
+"""Ids per ``IN (...)`` query in the batch lookups below.
+
+SQLite refuses a statement with more than 32,766 bound variables, and the
+query path hands these helpers one id per candidate's source, so an
+unchunked read fails outright on a large store. 500 matches the chunk the
+other batch reads in this module already use.
+"""
+
+
+def _chunked(ids: Collection[str]) -> Iterator[list[str]]:
+    """Yield ``ids`` in lists of at most :data:`_IN_CHUNK`, in iteration order."""
+    as_list = list(ids)
+    for start in range(0, len(as_list), _IN_CHUNK):
+        yield as_list[start : start + _IN_CHUNK]
 
 
 class CorpusEntryRow(Base):
@@ -446,38 +462,41 @@ async def get_snapshot_source_meta(
 ) -> dict[str, tuple[datetime | None, str | None]]:
     """Batch-load (content_published_at, author_id) keyed by snapshot_id.
 
-    One SELECT for all ids — the query ranker and the §6.4 AUTHOR trust
-    tier both read from this map, so the hot path stays free of
-    per-particle snapshot round trips.
+    One SELECT per :data:`_IN_CHUNK` ids — the query ranker and the §6.4
+    AUTHOR trust tier both read from this map, so the hot path stays free of
+    per-particle snapshot round trips, and an unfiltered query over a large
+    store stays under SQLite's bound-variable limit.
     """
-    if not snapshot_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(
-                SnapshotRow.snapshot_id,
-                SnapshotRow.content_published_at,
-                SnapshotRow.author_id,
-            ).where(SnapshotRow.snapshot_id.in_(snapshot_ids))
-        )
-    ).all()
-    return {snap_id: (pub_at, author_id) for snap_id, pub_at, author_id in rows}
+    meta: dict[str, tuple[datetime | None, str | None]] = {}
+    for chunk in _chunked(snapshot_ids):
+        rows = (
+            await session.execute(
+                select(
+                    SnapshotRow.snapshot_id,
+                    SnapshotRow.content_published_at,
+                    SnapshotRow.author_id,
+                ).where(SnapshotRow.snapshot_id.in_(chunk))
+            )
+        ).all()
+        meta.update({snap_id: (pub_at, author_id) for snap_id, pub_at, author_id in rows})
+    return meta
 
 
 async def get_source_types_for_entries(
     session: AsyncSession, entry_ids: list[str]
 ) -> dict[str, str]:
-    """Batch-load source_type keyed by entry_id."""
-    if not entry_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(CorpusEntryRow.entry_id, CorpusEntryRow.source_type).where(
-                CorpusEntryRow.entry_id.in_(entry_ids)
+    """Batch-load source_type keyed by entry_id, one SELECT per :data:`_IN_CHUNK` ids."""
+    source_types: dict[str, str] = {}
+    for chunk in _chunked(entry_ids):
+        rows = (
+            await session.execute(
+                select(CorpusEntryRow.entry_id, CorpusEntryRow.source_type).where(
+                    CorpusEntryRow.entry_id.in_(chunk)
+                )
             )
-        )
-    ).all()
-    return {entry_id: source_type for entry_id, source_type in rows}
+        ).all()
+        source_types.update({entry_id: source_type for entry_id, source_type in rows})
+    return source_types
 
 
 async def list_entry_tag_rows(session: AsyncSession) -> list[tuple[str, str | None, list[str]]]:
@@ -606,18 +625,20 @@ async def get_entry_uri_map(
     particle). Pass a non-empty set to filter — the wiki exporter only
     needs URIs for entries actually cited by the qualifying particles.
     Returns ``{}`` when ``entry_ids`` is the empty set, skipping the
-    round-trip; otherwise issues one ``SELECT``.
+    round-trip; otherwise issues one ``SELECT`` (one per :data:`_IN_CHUNK`
+    ids when filtering).
 
     The value is ``str | None`` because ``CorpusEntryRow.uri_r`` is
     nullable for synthetic / local-only entries that have no public URL.
     """
-    if entry_ids is not None and not entry_ids:
-        return {}
     stmt = select(CorpusEntryRow.entry_id, CorpusEntryRow.uri_r)
-    if entry_ids is not None:
-        stmt = stmt.where(CorpusEntryRow.entry_id.in_(entry_ids))
-    rows = (await session.execute(stmt)).all()
-    return {entry_id: uri for entry_id, uri in rows}
+    if entry_ids is None:
+        return {entry_id: uri for entry_id, uri in (await session.execute(stmt)).all()}
+    uris: dict[str, str | None] = {}
+    for chunk in _chunked(entry_ids):
+        rows = (await session.execute(stmt.where(CorpusEntryRow.entry_id.in_(chunk)))).all()
+        uris.update({entry_id: uri for entry_id, uri in rows})
+    return uris
 
 
 async def get_entry_source_facts(
@@ -626,18 +647,20 @@ async def get_entry_source_facts(
     """Batch-load ``(source_type, uri_r)`` keyed by entry_id.
 
     What a lens's ``source_type`` and ``url_pattern`` modality rules match on.
-    One ``SELECT``; ``{}`` for the empty set.
+    One ``SELECT`` per :data:`_IN_CHUNK` ids; ``{}`` for the
+    empty set.
     """
-    if not entry_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(CorpusEntryRow.entry_id, CorpusEntryRow.source_type, CorpusEntryRow.uri_r).where(
-                CorpusEntryRow.entry_id.in_(entry_ids)
+    facts: dict[str, tuple[str, str | None]] = {}
+    for chunk in _chunked(entry_ids):
+        rows = (
+            await session.execute(
+                select(
+                    CorpusEntryRow.entry_id, CorpusEntryRow.source_type, CorpusEntryRow.uri_r
+                ).where(CorpusEntryRow.entry_id.in_(chunk))
             )
-        )
-    ).all()
-    return {entry_id: (source_type, uri) for entry_id, source_type, uri in rows}
+        ).all()
+        facts.update({entry_id: (source_type, uri) for entry_id, source_type, uri in rows})
+    return facts
 
 
 async def get_particle_source_uris(
@@ -664,24 +687,25 @@ async def get_document_supersession_map(
 ) -> dict[str, str | None]:
     """Batch-load ``document_supersession_json`` keyed by entry_id.
 
-    One ``SELECT`` for the given entries. The value is the raw JSON string the
+    One ``SELECT`` per :data:`_IN_CHUNK` entries. The value is the raw JSON string the
     cap. 2 genre adapter stamped at deposit (``{"key": "adr:0166",
     …}``) or ``None`` for any entry that is not a recognised genre. The
     document-precedence tie-break reads the ``key`` from this map to recover the
     ADR id ordinal without re-parsing the source blob. Returns ``{}`` for an
     empty input set, skipping the round-trip.
     """
-    if not entry_ids:
-        return {}
-    rows = (
-        await session.execute(
-            select(
-                CorpusEntryRow.entry_id,
-                CorpusEntryRow.document_supersession_json,
-            ).where(CorpusEntryRow.entry_id.in_(entry_ids))
-        )
-    ).all()
-    return {entry_id: raw for entry_id, raw in rows}
+    supersession: dict[str, str | None] = {}
+    for chunk in _chunked(entry_ids):
+        rows = (
+            await session.execute(
+                select(
+                    CorpusEntryRow.entry_id,
+                    CorpusEntryRow.document_supersession_json,
+                ).where(CorpusEntryRow.entry_id.in_(chunk))
+            )
+        ).all()
+        supersession.update({entry_id: raw for entry_id, raw in rows})
+    return supersession
 
 
 async def count_snapshots_by_extraction_status(session: AsyncSession) -> dict[str, int]:

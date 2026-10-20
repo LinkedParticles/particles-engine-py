@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +64,17 @@ class HackerNewsImporter:
             return None
         return url
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the thread again for ``particles corpus refresh``.
+
+        The URI-R is the HN item page, while the stored blob is the story and
+        comment tree assembled from the Firebase API.
+        """
+        item_id = _parse_item_id(uri_r)
+        if item_id is None:
+            raise ValueError(f"Not a recognised Hacker News URL: {uri_r}")
+        return _serialise(await _fetch_payload(item_id))
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -72,7 +84,6 @@ class HackerNewsImporter:
     ) -> tuple[str, str]:
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import particles_client
 
         item_id = _parse_item_id(url)
         if item_id is None:
@@ -81,12 +92,8 @@ class HackerNewsImporter:
         # Canonical URL is the human-facing item URL — operators searching
         # the corpus by URL paste from their browser, not from the API.
         canonical = f"https://news.ycombinator.com/item?id={item_id}"
-        max_comments = get_config().hackernews.max_comments
-
-        async with particles_client() as client:
-            payload = await _fetch_thread(client, item_id, max_comments)
-
-        content = json.dumps(payload, sort_keys=True).encode("utf-8")
+        payload = await _fetch_payload(item_id)
+        content = _serialise(payload)
         content_hash = sha256(content)
         archive_path = save_blob(content, content_hash)
 
@@ -123,3 +130,16 @@ class HackerNewsImporter:
             author_id=author_id,
             content_published_at=published,
         )
+
+
+async def _fetch_payload(item_id: int) -> dict[str, Any]:
+    """The story and its comment tree, capped at ``hackernews.max_comments``."""
+    from particles.http import particles_client
+
+    async with particles_client() as client:
+        return await _fetch_thread(client, item_id, get_config().hackernews.max_comments)
+
+
+def _serialise(payload: dict[str, Any]) -> bytes:
+    """Key-sorted bytes, so an unchanged thread re-fetches to the same hash."""
+    return json.dumps(payload, sort_keys=True).encode("utf-8")

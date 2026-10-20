@@ -118,7 +118,7 @@ class TestRedditImporterPublishedAt:
         ]
 
         with patch(
-            "particles.ingest.importers.reddit._fetch_with_curl",
+            "particles.ingest.importers.reddit._fetch_thread",
             AsyncMock(return_value=json.dumps(blob).encode()),
         ):
             d = RedditImporter()

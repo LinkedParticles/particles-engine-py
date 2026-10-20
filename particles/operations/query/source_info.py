@@ -6,7 +6,7 @@
 
 ``load_source_rows`` resolves each particle's SOURCE provenance ref to its
 snapshot (``content_published_at``, ``author_id``) and corpus entry
-(``source_type``, ``entry_id``, ``uri_r``) in three batch queries, keyed by
+(``source_type``, ``entry_id``, ``uri_r``) in three batch reads, keyed by
 particle id — the ranker applies ``recency_factor`` per particle and
 evaluates the ``TrustPolicy`` against the entry + author fields.
 
@@ -35,8 +35,9 @@ async def load_source_rows(
     """Return {particle_id: (content_published_at, source_type, entry_id, uri_r, author_id)}.
 
     Resolves each particle's SOURCE provenance ref to its snapshot and corpus
-    entry in three batch queries (snapshot meta, entry source_types, entry
-    URIs). ``author_id`` comes from the SOURCE snapshot (§6.5) and feeds the
+    entry in three batch reads (snapshot meta, entry source_types, entry
+    URIs), each chunked so a whole-store candidate set stays under SQLite's
+    bound-variable limit. ``author_id`` comes from the SOURCE snapshot (§6.5) and feeds the
     §6.4 AUTHOR trust tier.
     """
     # Collect unique snapshot_ids and entry_ids from SOURCE provenance refs

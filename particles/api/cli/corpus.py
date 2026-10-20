@@ -363,6 +363,11 @@ def corpus_delete_cmd(
     next-earliest one becomes the age anchor. The delete is recorded as a
     CORPUS_ENTRY_DELETED event that holds the entry id and counts, not the
     deleted content.
+
+    A deleted particle that was retracted, superseded or lost a reviewed
+    conflict takes that judgment with it. A later deposit of the same claim
+    then mints it ACTIVE again instead of holding it for review. The preview
+    counts these before the confirm prompt.
     """
     run(_corpus_delete(entry_id, yes))
 
@@ -394,6 +399,13 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
         if n_moved:
             strip_line += f" ({n_moved} with a new earliest source)"
         typer.echo(strip_line)
+        n_judged = len(plan.judgments_deleted)
+        if n_judged:
+            typer.echo(
+                f"Judgments: {n_judged} of the deleted particles were retired by a judgment;"
+                " the judgment is erased with them, and a later deposit of the same claim"
+                " mints it ACTIVE again"
+            )
 
         if not yes:
             confirm("Delete this entry and all its data?", abort=True)
@@ -404,6 +416,8 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
     parts = [f"{result.particles_deleted} particles removed"]
     if result.particles_stripped:
         parts.append(f"{result.particles_stripped} kept with refs stripped")
+    if result.judgments_deleted:
+        parts.append(f"{result.judgments_deleted} retirement judgments erased")
     if result.subjects_orphaned:
         parts.append(f"{result.subjects_orphaned} orphaned subjects")
     if result.synthesis_rows_deleted:
@@ -645,6 +659,12 @@ def corpus_refresh_cmd(
 
     This is the on-demand form of consolidation pass 0.5; the scheduled cycle
     runs the same sweep nightly.
+
+    Given one entry, a URL entry is re-checked too. An entry a domain importer
+    deposited (Reddit, Hacker News, Mastodon, GitHub, Wikidata, Nomisma,
+    Numista) is fetched again by that importer, the way its deposit was, and
+    any other URL with a GET. A new Reddit snapshot this way picks up the
+    archive's settled comment scores.
     """
     configure_logging(verbose, False)
     run(_corpus_refresh(entry_id, force, backfill_cascade, yes))
@@ -758,7 +778,8 @@ async def _corpus_refresh(
 
     refused_note = f", {refused} refused (network.egress)" if refused else ""
     typer.echo(
-        f"\nChecked {len(targets)} local source(s): {changed} changed, "
+        f"\nChecked {len(targets)} {'source' if entry_id is not None else 'local source(s)'}: "
+        f"{changed} changed, "
         f"{unchanged} unchanged, {missing} missing{refused_note}."
     )
     if changed:

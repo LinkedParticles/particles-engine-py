@@ -1020,7 +1020,9 @@ def install_report(
         )
         lines.append(f"{pad}  git -C {root} checkout --detach {pin.newest_tag}")
         lines.append(f"{pad}  uv sync --project {root} --frozen --no-dev")
-        lines.append(f"{pad}then reopen running sessions.")
+        lines.append(f"{pad}then re-run this doctor: its schema: line prints the `db init` that")
+        lines.append(f"{pad}migrates the store when the new release needs one. Then reopen")
+        lines.append(f"{pad}running sessions.")
     else:
         lines.append(
             f"{pad}pinned at {pin.tag}, the newest tag fetched (`git fetch --tags` to check)"

@@ -23,6 +23,8 @@ export type CurationCard = Schemas["CurationCard"];
 export type CurationQueueResponse = Schemas["CurationQueueResponse"];
 export type CardKind = Schemas["CardKind"];
 export type ParticleBrief = Schemas["ParticleBrief"];
+/** which projects a briefed belief is in view for (display only). */
+export type ObserverScopeBrief = Schemas["ObserverScopeBrief"];
 /** Both sides (claims A and B) of the INCONSISTENCY behind a contested card. */
 export type ConflictBrief = Schemas["ConflictBrief"];
 /** the LLM judge's advisory same-claim verdict on a duplicate-pair card. */

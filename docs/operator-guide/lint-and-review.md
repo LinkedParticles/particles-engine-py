@@ -21,12 +21,24 @@ The headline findings (the statuses in the third column are defined in
 
 | Finding | Cause | Status transition (with `--fix`) |
 |---|---|---|
-| `STALENESS` | A particle's `valid_until` has passed | `PROVENANCE_STALE` (reason `VALIDITY_EXPIRED`); next reindex re-extracts |
+| `STALENESS` | A particle's `valid_until` has passed | `PROVENANCE_STALE` (reason `VALIDITY_EXPIRED`); next reindex re-extracts. Applied only when you run `lint --fix` (see the note below the table) |
 | `RETRACTION_CASCADE` | A particle's provenance chain includes a `RETRACTED` / `SUPERSEDED` particle | `PROVENANCE_STALE` (reason `RETRACTED_DEPENDENCY`) |
 | `CORPUS_LINK_INTEGRITY` | A particle references a snapshot that no longer exists | `PROVENANCE_STALE` (reason `CORPUS_ENTRY_MISSING`) |
 | `CONTRADICTION` (with `--semantic`) | Two ACTIVE truth-apt particles semantically contradict (LLM-judged), including claims from **different** sources. Candidate pairs are gated by embedding similarity (`lint.contradiction_candidate_threshold`, default 0.6) so the store-wide check does not pay an O(n²) LLM cost. | Report-only; resolve via `particles review`. Lint never creates the `INCONSISTENCY` wrapper itself; the §6.6 extraction-time ladder does. |
 | `NO_SUBJECT` | An ACTIVE CLAIM particle has zero subjects (§6.7 says it SHOULD have ≥ 1), e.g. an import or extraction that could not resolve any subject. Zero-subject claims land in the store rather than being rejected, but are unreachable by subject-filtered query. The §9 populations that legitimately have none are excluded: DOCUMENT_META claims, non-asserted (DECLINED / HYPOTHETICAL) claims, and claims marked `extraction:subject_scope = SELF`, i.e. journal claims about the author, whose subject the privacy gate withholds. Same predicate as the conformance `subject_ids` floor | Surfaced for manual decision (re-extract, link a subject, or retract) |
 | `RECENCY_DECAY` | An ACTIVE particle whose `effective_confidence` is materially discounted by **content age** alone: its source's `recency_factor` has fallen so that `1 - recency_factor ≥ lint.recency_decay_threshold` (default 0.5). Sources with no decay config or no known publication date never fire. | **Report-only WARNING**; never flips status (age decay is a recoverable discount, not a provenance break). Re-fetch / reindex if a fresher source version exists. |
+
+**An expired claim stays answerable until you retire it.** Expiry is
+operator-invoked on purpose: the extractor records `valid_until`,
+and only `particles lint --fix` turns a passed boundary into a retirement. The
+scheduled consolidation cycle does not run it, and plain `query` and the
+session digest do not read `valid_until`, so between the boundary and your
+next `lint --fix` the claim is still `ACTIVE` and can be returned. A question
+about a period is not affected: the window route (`query --during`, `--on`)
+and the as-of lens both evaluate `valid_until` against the instant they are
+asked about. Run `lint --fix` on the schedule you want expiry to take effect;
+the retirement is dated when it is applied, and it writes no operator event
+(see [Auditing](auditing.md#what-gets-logged)).
 
 Beyond these, lint reports coverage and quality diagnostics
 (`ORPHAN`, `PHANTOM_SUBJECT`, `LOW_COVERAGE_SUBJECT`,

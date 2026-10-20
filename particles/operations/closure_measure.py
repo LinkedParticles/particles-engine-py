@@ -16,6 +16,11 @@ and writes them to its ``CONSOLIDATION_RUN`` event under the ``closure`` key
   The definitions and the split are the pure
   :mod:`particles.core.closure_measure`.
 
+Beside the split, the measure counts the window's autonomous INCONSISTENCY
+closures by cause, and the held claims among them returned to the store with
+no review (the second reading's withdrawal, and the held-claim
+release). ``--history`` adds the same counts over the whole store.
+
 The window opens where the previous run's window closed (its recorded
 ``window_end``, or its ``completed_at`` for a run that predates the measure)
 and closes when this run measures, so consecutive windows tile the log with no
@@ -37,11 +42,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.closure_measure import (
     GESTURE_RETIREMENT_EVENTS,
+    REVIEW_EVENT,
     TRANSITION_KINDS,
+    ClosureTally,
     GestureEvent,
     Retirement,
+    closure_from_payload,
     contested_fraction,
     share,
+    tally_closures,
     tally_transitions,
 )
 from particles.operations.abstraction import ABSTRACTION_ACTOR
@@ -76,6 +85,18 @@ class ClosureMeasure(BaseModel):
     transitions: dict[str, dict[str, int]] = Field(default_factory=dict)
     autonomous_by_reason: dict[str, int] = Field(default_factory=dict)
     gesture_by_actor: dict[str, int] = Field(default_factory=dict)
+    #: Autonomous INCONSISTENCY closures by cause; ``None`` on a run recorded
+    #: before the measure counted them.
+    closed_by_cause: dict[str, int] | None = None
+    #: The closures among them that returned a held claim to the store.
+    released_by_cause: dict[str, int] | None = None
+
+    @property
+    def released(self) -> int | None:
+        """Held claims returned without review; ``None`` when the run did not count them."""
+        if self.released_by_cause is None:
+            return None
+        return sum(self.released_by_cause.values())
 
     @property
     def contested_fraction(self) -> float | None:
@@ -100,6 +121,7 @@ class ClosureMeasure(BaseModel):
         data["autonomous"] = self.autonomous
         data["gesture"] = self.gesture
         data["autonomous_share"] = self.autonomous_share
+        data["released"] = self.released
         return data
 
 
@@ -190,6 +212,7 @@ async def measure_closure(
     promoted = await list_ids_asserted_by_in_range(
         session, ABSTRACTION_ACTOR, since=window_start, until=window_end
     )
+    closures = tally_closures([closure_from_payload(e.payload) for e in closed])
     tally = tally_transitions(
         retirements=retirements,
         gestures=gestures,
@@ -206,6 +229,8 @@ async def measure_closure(
         transitions={k: tally.by_kind[k] for k in TRANSITION_KINDS},
         autonomous_by_reason=tally.autonomous_by_reason,
         gesture_by_actor=tally.gesture_by_actor,
+        closed_by_cause=closures.closed_by_cause,
+        released_by_cause=closures.released_by_cause,
     )
 
 
@@ -222,6 +247,25 @@ class ClosureHistoryRow(BaseModel):
     measure: ClosureMeasure
 
 
+class StoreClosures(BaseModel):
+    """INCONSISTENCY closures over the whole event log, whatever the run records hold."""
+
+    #: Autonomous closures by cause.
+    closed_by_cause: dict[str, int] = Field(default_factory=dict)
+    #: The closures among them that returned a held claim to the store.
+    released_by_cause: dict[str, int] = Field(default_factory=dict)
+    #: Records a review resolved: the closures a person made.
+    reviewed: int = 0
+
+    @property
+    def closed(self) -> int:
+        return sum(self.closed_by_cause.values())
+
+    @property
+    def released(self) -> int:
+        return sum(self.released_by_cause.values())
+
+
 class ClosureHistory(BaseModel):
     """Every measured run by one actor, oldest first."""
 
@@ -230,6 +274,9 @@ class ClosureHistory(BaseModel):
     runs: list[ClosureHistoryRow] = Field(default_factory=list)
     #: Runs by the same actor whose record predates the measure.
     unmeasured_runs: int = 0
+    #: Closures since the store began, read from the event log rather than
+    #: the run records, so runs that predate the measure are counted too.
+    since_start: StoreClosures = Field(default_factory=StoreClosures)
 
     def payload(self) -> dict[str, Any]:
         """The ``--format json`` shape: each row with both derived ratios."""
@@ -237,6 +284,11 @@ class ClosureHistory(BaseModel):
             "store": self.store,
             "actor": self.actor,
             "unmeasured_runs": self.unmeasured_runs,
+            "since_start": {
+                **self.since_start.model_dump(mode="json"),
+                "closed": self.since_start.closed,
+                "released": self.since_start.released,
+            },
             "runs": [
                 {"event_id": r.event_id, "run_at": r.run_at.isoformat(), **r.measure.payload()}
                 for r in self.runs
@@ -244,13 +296,26 @@ class ClosureHistory(BaseModel):
         }
 
 
+async def store_closures(session: AsyncSession) -> StoreClosures:
+    """Count every INCONSISTENCY closure in the event log, by cause and by who closed it."""
+    closed = await list_events_in_range(session, event_type=OperatorEventType.INCONSISTENCY_CLOSED)
+    tally: ClosureTally = tally_closures([closure_from_payload(e.payload) for e in closed])
+    reviews = await list_events_in_range(session, event_type=OperatorEventType(REVIEW_EVENT))
+    return StoreClosures(
+        closed_by_cause=tally.closed_by_cause,
+        released_by_cause=tally.released_by_cause,
+        reviewed=len(reviews),
+    )
+
+
 async def closure_history(session: AsyncSession, *, store: str, actor: str) -> ClosureHistory:
     """Read the measure back from every ``CONSOLIDATION_RUN`` this actor recorded.
 
     The interactive audit writes the same event type under its own actor and
     never measures, so it is filtered out rather than counted as unmeasured.
+    The store-wide closure counts come from the event log itself.
     """
-    history = ClosureHistory(store=store, actor=actor)
+    history = ClosureHistory(store=store, actor=actor, since_start=await store_closures(session))
     events = await list_events_in_range(session, event_type=OperatorEventType.CONSOLIDATION_RUN)
     for event in events:
         if event.actor != actor:
@@ -276,6 +341,23 @@ def _percent(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
 
 
+def _by_cause(counts: dict[str, int]) -> str:
+    return ", ".join(f"{cause} {n}" for cause, n in counts.items())
+
+
+def _closures_line(closed_by_cause: dict[str, int], released_by_cause: dict[str, int]) -> str:
+    closed = sum(closed_by_cause.values())
+    released = sum(released_by_cause.values())
+    line = (
+        f"{closed} INCONSISTENCY record(s) closed by the nightly passes "
+        f"[{_by_cause(closed_by_cause)}]; {released} held claim(s) returned "
+        "to the store without review"
+    )
+    if released:
+        line += f" [{_by_cause(released_by_cause)}]"
+    return line
+
+
 def render_closure_lines(measure: ClosureMeasure, previous: ClosureMeasure | None) -> list[str]:
     """The run report's two lines: the contested fraction, then the transition split."""
     bases = ", ".join(f"{b} {n}" for b, n in measure.contested_by_basis.items())
@@ -299,7 +381,11 @@ def render_closure_lines(measure: ClosureMeasure, previous: ClosureMeasure | Non
     )
     if total:
         transitions += f" ({_percent(measure.autonomous_share)} autonomous)"
-    return [contested, transitions]
+    lines = [contested, transitions]
+    if measure.closed_by_cause:
+        released = measure.released_by_cause or {}
+        lines.append(f"  closures         {_closures_line(measure.closed_by_cause, released)}")
+    return lines
 
 
 def render_closure_history(history: ClosureHistory) -> str:
@@ -316,19 +402,35 @@ def render_closure_history(history: ClosureHistory) -> str:
     else:
         header = (
             f"  {'run (UTC)':<16}  {'active':>7}  {'contested':>9}  {'fraction':>8}  "
-            f"{'transitions':>11}  {'autonomous':>10}  {'gesture':>7}  {'auto share':>10}"
+            f"{'transitions':>11}  {'autonomous':>10}  {'gesture':>7}  {'auto share':>10}  "
+            f"{'released':>8}"
         )
         lines.append(header)
         for row in history.runs:
             m = row.measure
+            released = "n/a" if m.released is None else str(m.released)
             lines.append(
                 f"  {row.run_at:%Y-%m-%d %H:%M}  {m.active:>7}  {m.contested:>9}  "
                 f"{_percent(m.contested_fraction):>8}  {m.autonomous + m.gesture:>11}  "
-                f"{m.autonomous:>10}  {m.gesture:>7}  {_percent(m.autonomous_share):>10}"
+                f"{m.autonomous:>10}  {m.gesture:>7}  {_percent(m.autonomous_share):>10}  "
+                f"{released:>8}"
             )
     if history.unmeasured_runs:
         lines.append("")
         lines.append(
             f"  {history.unmeasured_runs} earlier run(s) by {history.actor} predate the measure."
+        )
+    totals = history.since_start
+    lines.append("")
+    if totals.closed:
+        lines.append(
+            "  Since the store began: "
+            f"{_closures_line(totals.closed_by_cause, totals.released_by_cause)}; "
+            f"{totals.reviewed} resolved by review."
+        )
+    else:
+        lines.append(
+            "  Since the store began: no INCONSISTENCY record closed by the nightly passes; "
+            f"{totals.reviewed} resolved by review."
         )
     return "\n".join(lines) + "\n"

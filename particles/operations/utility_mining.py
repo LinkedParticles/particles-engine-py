@@ -75,8 +75,8 @@ from particles.operations.utility_exposure import (
     SessionFrame,
     session_frame,
 )
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.particle_store import (
-    get_active_particles_with_embeddings,
     get_particles_by_status,
 )
 from particles.store.utility_store import record_utility_events
@@ -333,7 +333,7 @@ async def _prefilter_behavioural_candidates(
         return unmatched[:limit], excluded, False
     summary = head_and_tail(action_lines)
     action_vec = model.encode([summary], convert_to_numpy=True, normalize_embeddings=True)[0]
-    vec_by_id = {p.id: vec for p, vec in await get_active_particles_with_embeddings(session)}
+    vec_by_id = {p.id: vec for p, vec in await load_active_candidates(session)}
     ranked = sorted(
         unmatched,
         key=lambda p: cosine_similarity(action_vec, vec_by_id[p.id]) if p.id in vec_by_id else -1.0,
@@ -897,10 +897,17 @@ async def plan_harvested_session(
     )
 
 
-def estimate_judge_calls(mines: Sequence[SessionMine]) -> PassEstimate:
-    """List price of every matcher call ``mines`` would make, from the prompts' own size."""
+def estimate_judge_calls(mines: Sequence[SessionMine], *, batched: bool = False) -> PassEstimate:
+    """List price of every matcher call ``mines`` would make, from the prompts' own size.
+
+    ``batched`` when the calls go as one latency-tolerant set (the
+    consolidation cycle's pass 5), so they are priced at the batch discount.
+    """
     return requests_estimate(
-        "use_judge", [r for m in mines for r in m.requests()], _MATCHER_MAX_TOKENS
+        "use_judge",
+        [r for m in mines for r in m.requests()],
+        _MATCHER_MAX_TOKENS,
+        batched=batched,
     )
 
 

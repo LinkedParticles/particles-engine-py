@@ -116,7 +116,9 @@ def _probe(value: bool | None):  # type: ignore[no-untyped-def]
 
 class TestReconcileSupersessionSweep:
     @pytest.mark.asyncio
-    async def test_constitutive_superseded_is_demoted(self, db_session: AsyncSession) -> None:
+    async def test_constitutive_superseded_is_demoted(
+        self, db_session: AsyncSession, candidate_cache_mode: str
+    ) -> None:
         # The flagship — the superseded claim is CONSTITUTIVE (non-truth-apt),
         # the exact case cap. 2 could not reach; the fix retires it.
         superseded_id, superseding_id = await _setup_flagship(
@@ -283,7 +285,7 @@ async def test_a_demotion_is_committed_before_the_next_probe(
     sims = [0.95, 0.90, 0.85]
     monkeypatch.setattr(
         reconcile_mod,
-        "get_active_particles_with_embeddings",
+        "load_active_candidates",
         AsyncMock(
             return_value=[(sup, np.array([1.0], dtype=np.float32))]
             + [(p, np.array([s], dtype=np.float32)) for p, s in zip(subs, sims, strict=True)]

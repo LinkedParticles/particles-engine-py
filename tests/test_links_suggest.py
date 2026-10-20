@@ -88,7 +88,9 @@ async def _seed_pair(
 
 
 @pytest.mark.asyncio
-async def test_report_proposes_high_similarity_pair(db_session: AsyncSession) -> None:
+async def test_report_proposes_high_similarity_pair(
+    db_session: AsyncSession, candidate_cache_mode: str
+) -> None:
     """REPORT mode surfaces a same-Subject pair above threshold as a candidate."""
     subj = await _seed_pair(db_session)
 
@@ -447,7 +449,9 @@ async def test_scope_judge_order_is_intra_scope_pairs_first(
 
 
 @pytest.mark.asyncio
-async def test_store_wide_scan_issues_one_embedding_fetch(db_session: AsyncSession) -> None:
+async def test_store_wide_scan_issues_one_embedding_fetch(
+    db_session: AsyncSession, candidate_cache_mode: str
+) -> None:
     """A store-wide scan fetches embeddings ONCE, not once per Subject.
 
     This loop used to issue one ``get_active_particles_with_embeddings(
@@ -456,7 +460,7 @@ async def test_store_wide_scan_issues_one_embedding_fetch(db_session: AsyncSessi
     in the 172 s curation-queue build. Guard the fix: if this
     assertion ever reads more than one call, the N+1 is back.
     """
-    import particles.store.particle_store as ps
+    import particles.store.candidate_cache as cc
 
     await _seed_pair(db_session)
     # A second Subject, so a per-Subject implementation would fetch twice.
@@ -469,14 +473,14 @@ async def test_store_wide_scan_issues_one_embedding_fetch(db_session: AsyncSessi
     )
     await db_session.commit()
 
-    real = ps.get_active_particles_with_embeddings
+    real = cc.load_active_candidates
     calls: list[str | None] = []
 
     async def counting(session, *a, **kw):  # type: ignore[no-untyped-def]
         calls.append(kw.get("subject_id"))
         return await real(session, *a, **kw)
 
-    with patch.object(ps, "get_active_particles_with_embeddings", counting):
+    with patch.object(cc, "load_active_candidates", counting):
         report = await suggest_co_evidential(db_session, mode=SuggestMode.REPORT)
 
     assert calls == [None], f"expected one store-wide fetch, got {len(calls)}: {calls}"
@@ -491,17 +495,17 @@ async def test_single_subject_scan_keeps_the_targeted_query(db_session: AsyncSes
     The batch path is for the store-wide scan; making a single-Subject lookup
     read every ACTIVE particle would trade one N+1 for a different regression.
     """
-    import particles.store.particle_store as ps
+    import particles.store.candidate_cache as cc
 
     subj = await _seed_pair(db_session)
-    real = ps.get_active_particles_with_embeddings
+    real = cc.load_active_candidates
     calls: list[str | None] = []
 
     async def counting(session, *a, **kw):  # type: ignore[no-untyped-def]
         calls.append(kw.get("subject_id"))
         return await real(session, *a, **kw)
 
-    with patch.object(ps, "get_active_particles_with_embeddings", counting):
+    with patch.object(cc, "load_active_candidates", counting):
         report = await suggest_co_evidential(db_session, subject_id=subj.id)
 
     assert calls == [subj.id]

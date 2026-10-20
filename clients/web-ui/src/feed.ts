@@ -15,6 +15,7 @@ import {
   ConflictBrief,
   CurationCard,
   DuplicateVerdict,
+  ObserverScopeBrief,
   ParticleBrief,
   ParticlesApiClient,
   QueueOptions,
@@ -340,6 +341,14 @@ export class CurationFeed {
     // the LLM was unavailable — the card then falls back to the brief.
     if (card.verdict) {
       nodes.push(renderVerdict(card.verdict));
+    }
+    // a merge pools the pair's sources, so a duplicate pair whose
+    // sides are in view for different projects says what merging does.
+    if (card.scope_note) {
+      const note = document.createElement("div");
+      note.className = "verdict";
+      note.textContent = card.scope_note;
+      nodes.push(note);
     }
     if (card.corpus_url) {
       if (nodes.length) nodes.push(document.createElement("br"));
@@ -837,6 +846,7 @@ function renderBrief(b: ParticleBrief): HTMLElement {
   }
   if (b.status) bits.push(statusText(b.status, b.status_reason));
   if (b.asserted_at) bits.push(`asserted ${String(b.asserted_at).slice(0, 10)}`);
+  if (b.observer_scope) bits.push(`in view: ${scopeText(b.observer_scope)}`);
   if (bits.length) {
     const meta = document.createElement("div");
     meta.className = "particle-meta";
@@ -869,6 +879,18 @@ function renderBrief(b: ParticleBrief): HTMLElement {
     item.appendChild(src);
   }
   return item;
+}
+
+/**
+ * Which projects see a belief, read-only and server-derived. The
+ * engine omits it on a store that was never rescoped.
+ */
+function scopeText(s: ObserverScopeBrief): string {
+  if (s.widened || s.kind === "global") {
+    return s.widened && s.kind !== "global" ? "every project (widened)" : "every project";
+  }
+  if (s.kind === "projects") return (s.projects ?? []).join(", ");
+  return `no project (${s.kind})`;
 }
 
 /**

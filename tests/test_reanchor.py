@@ -427,7 +427,9 @@ class TestPure:
 
 @pytest.mark.asyncio
 class TestDelhi:
-    async def test_the_walking_claim_is_restated(self, db_session: Any, bow: None) -> None:
+    async def test_the_walking_claim_is_restated(
+        self, db_session: Any, bow: None, candidate_cache_mode: str
+    ) -> None:
         from particles.operations.reanchor import run_reanchor
         from particles.store.particle_store import get_particles_by_status
 

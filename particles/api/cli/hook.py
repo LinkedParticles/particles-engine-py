@@ -968,7 +968,8 @@ def _run_doctor(store: str) -> bool:
     if not tables_ok:
         return False
 
-    for line in _check_schema(store):
+    schema_ok, schema_lines = _check_schema(store)
+    for line in schema_lines:
         typer.echo(f"  {line}")
 
     blob_lines = _check_blobs(store)
@@ -990,6 +991,10 @@ def _run_doctor(store: str) -> bool:
     for line in _check_egress():
         typer.echo(f"  {line}")
 
+    if not schema_ok:
+        typer.echo("  ✗ Store resolves but is behind this install's migrations. Run the")
+        typer.echo("    `db init` command on the schema: line above, then re-run the doctor.")
+        return False
     typer.echo("  ✓ Store resolves and is initialized from this directory.")
     return True
 
@@ -1097,36 +1102,42 @@ def _check_install() -> list[str]:
     )
 
 
-def _check_schema(store: str) -> list[str]:
-    """Warn when the store was migrated past what this install knows.
+def _check_schema(store: str) -> tuple[bool, list[str]]:
+    """Compare the store's migration with this install's head, in both directions.
 
-    A newer Particles sharing the store (a development checkout, say) upgrades
-    its schema on first use; an older install then reads tables it does not
-    understand. A store with no ``alembic_version`` table reports nothing.
+    Behind is the failure: the hooks, the MCP server and scheduled
+    consolidation never migrate, so code that reads a column a pending
+    migration adds fails until ``db init`` runs with this install (an install
+    advanced past a release with a migration, 2026-10-17). Ahead is advisory: a
+    newer Particles sharing the store (a development checkout, say) upgraded
+    it, and an older install then reads tables it does not understand. A store
+    with no ``alembic_version`` table reports nothing.
     """
-    from alembic.script import ScriptDirectory
-    from sqlalchemy import text
-
-    from particles.db import alembic_paths, session_scope
-
-    async def _revisions() -> list[str]:
-        async with session_scope(store) as session:
-            rows = await session.execute(text("SELECT version_num FROM alembic_version"))
-            return [str(r[0]) for r in rows]
+    from particles.api.cli._schema import behind_summary, migrate_command
+    from particles.db import schema_state
 
     try:
-        stored = asyncio.run(_revisions())
-        known = {s.revision for s in ScriptDirectory(str(alembic_paths()[1])).walk_revisions()}
+        state = asyncio.run(schema_state(store))
     except Exception:  # noqa: BLE001 — doctor reports, never crashes
-        return []
-    unknown = [rev for rev in stored if rev not in known]
-    if not unknown:
-        return []
-    return [
-        f"schema:         ⚠ the store is at migration {', '.join(unknown)}, which this "
-        "install does not know.",
-        "                A newer Particles migrated it. Upgrade the install the hooks and the "
-        "MCP server run.",
+        return True, []
+    if state is None:
+        return True, []
+    if state.unknown:
+        return True, [
+            f"schema:         ⚠ the store is at migration {', '.join(state.unknown)}, which this "
+            "install does not know.",
+            "                A newer Particles migrated it. Upgrade the install the hooks and the "
+            "MCP server run.",
+        ]
+    if not state.pending:
+        return True, [f"schema:         migration {', '.join(state.stored)}, this install's head"]
+    pad = " " * 16
+    return False, [
+        f"schema:         ✗ {behind_summary(state)}.",
+        f"{pad}Scheduled consolidation, the hooks and the MCP server fail on what",
+        f"{pad}{', '.join(state.pending)} {'adds' if len(state.pending) == 1 else 'add'} "
+        "until this install migrates the store:",
+        f"{pad}  {migrate_command(store)}",
     ]
 
 

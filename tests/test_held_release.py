@@ -534,9 +534,9 @@ class TestRaces:
 
         async def check_then_cascade(*args: Any, **kwargs: Any) -> Any:
             out = await real_check(*args, **kwargs)
-            # The trust cascade's closure shape: the wrapper PROVENANCE_STALE, no event.
+            # The trust cascade's closure shape: the record retracted, no event.
             await update_particle_status(
-                db_session, record.id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
+                db_session, record.id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
             )
             await db_session.commit()
             return out

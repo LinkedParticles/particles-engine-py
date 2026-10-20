@@ -791,8 +791,8 @@ async def _clusters_over(members: list[Particle]) -> list[ab._Cluster]:
         patch.object(ab, "list_all_subjects", new=AsyncMock(return_value=[_FakeSubject("subj-1")])),
         patch.object(
             ab,
-            "get_active_particles_with_embeddings",
-            new=AsyncMock(return_value=[(p, emb) for p in members]),
+            "_candidates_by_subject",
+            new=AsyncMock(return_value={"subj-1": [(p, emb) for p in members]}),
         ),
     ):
         return await ab._find_clusters(None, scope_ids=None)  # type: ignore[arg-type]
@@ -825,6 +825,59 @@ class TestTemporalEligibility:
         members = [_specific(f"the durable claim {i}") for i in range(3)]
         members[0] = _specific("the deploy ran on 2026-07-18")
         assert await _clusters_over(members) == []
+
+    @pytest.mark.asyncio
+    async def test_clusters_from_the_store(self, db_session, candidate_cache_mode: str) -> None:
+        """The per-subject loads find the same cluster, through the candidate cache or not."""
+        from particles.core.schema import Subject
+        from particles.store.subject_store import insert_subject
+
+        _enable()
+        subject = Subject(canonical_name="The release process", asserted_by="test")
+        other = Subject(canonical_name="Something else", asserted_by="test")
+        await insert_subject(db_session, subject)
+        await insert_subject(db_session, other)
+        members = [_specific(f"the durable claim {i}", subjects=[subject.id]) for i in range(3)]
+        for i, p in enumerate(members):
+            await insert_particle(db_session, p, embedding=[1.0, 0.01 * i, 0.0])
+        await insert_particle(
+            db_session,
+            _specific("an unrelated claim", subjects=[other.id]),
+            embedding=[0.0, 0.0, 1.0],
+        )
+        await db_session.commit()
+
+        clusters = await ab._find_clusters(db_session, scope_ids=None)
+        assert [(c.subject_id, c.member_ids) for c in clusters] == [
+            (subject.id, frozenset(p.id for p in members))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_groups_are_the_per_subject_loads(self, db_session) -> None:
+        """Each subject's group is that subject's filtered load: same rows, same order."""
+        from particles.core.schema import Subject
+        from particles.store.particle_store import get_active_particles_with_embeddings
+        from particles.store.subject_store import insert_subject
+
+        a = Subject(canonical_name="Subject A", asserted_by="test")
+        b = Subject(canonical_name="Subject B", asserted_by="test")
+        await insert_subject(db_session, a)
+        await insert_subject(db_session, b)
+        links = [[a.id], [b.id], [a.id, b.id], [a.id], [], [b.id, a.id]]
+        for i, subjects in enumerate(links):
+            # Confidence ties (0.9 twice, 0.5 twice) are ordered by rowid.
+            value = (0.9, 0.5, 0.7)[i % 3]
+            await insert_particle(
+                db_session,
+                _specific(f"claim {i}", value=value, subjects=subjects or ["none"]),
+                embedding=[1.0, float(i), 0.0],
+            )
+        await db_session.commit()
+
+        groups = await ab._candidates_by_subject(db_session)
+        for subject in (a, b):
+            direct = await get_active_particles_with_embeddings(db_session, subject_id=subject.id)
+            assert [p.id for p, _ in groups[subject.id]] == [p.id for p, _ in direct]
 
     @pytest.mark.asyncio
     async def test_knob_off_restores_old_behaviour(self) -> None:

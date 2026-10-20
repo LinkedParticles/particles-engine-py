@@ -4,8 +4,12 @@
 
 """SQLAlchemy ORM models and repository for the particle store (§8).
 
-Embeddings are stored as numpy arrays serialized to bytes and loaded into memory
-for cosine similarity search — acceptable for the v0.2 target of ≤10⁵ particles.
+Embeddings are stored as JSON text (``embedding_json``, a list of floats) and
+decoded into ``float32`` arrays for cosine similarity search, which reads every
+ACTIVE candidate. Semantic query reads them through
+:mod:`particles.store.candidate_cache`, which keeps the decoded candidates of a
+store in memory between queries; the measured cost at each store size is in
+``docs/benchmarks/query-latency.md``.
 """
 
 from __future__ import annotations
@@ -29,12 +33,14 @@ from sqlalchemy import (
     delete,
     false,
     func,
+    literal_column,
     or_,
     select,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
 
+from particles.core.conflict_review import CASCADE_ACTOR, cascade_reviewed_record_id
 from particles.core.contradiction_disclosure import ORIGIN_KEY, is_census_record
 from particles.core.duplicate_key import content_hash
 from particles.core.fingerprint import context_fingerprint
@@ -243,6 +249,10 @@ class ParticleRow(Base):
         # the window route selects dated claims across statuses,
         # and the backfill's scope is "ACTIVE and undated".
         Index("ix_particles_status_valid_from", "status", "valid_from"),
+        # the schema-version guard asks "is any ACTIVE row on another
+        # version?" before every query; two range seeks on this answer it
+        # without reading the table (has_active_schema_mismatch).
+        Index("ix_particles_status_schema_version", "status", "schema_version"),
     )
 
     def to_model(self) -> Particle:
@@ -1191,10 +1201,12 @@ async def get_census_records(session: AsyncSession) -> list[Particle]:
     """Every census INCONSISTENCY record the nightly disclosure opened, open or closed.
 
     A record keeps its ``conflict:origin`` marker for life, so the closed ones
-    (``RETRACTED`` by review, lapse or regroup; ``PROVENANCE_STALE`` by the
-    trust cascade) are found the same way as the open ones. The ``LIKE`` is a
-    cheap pre-filter over the three statuses a record can hold; the marker is
-    confirmed on the parsed properties.
+    (``RETRACTED`` by every close path) are found the same way as the open
+    ones. ``PROVENANCE_STALE`` stays in the status filter for a record the
+    trust cascade closed before 1.192.15 and that came back through a restore
+    of an older bundle, which migration 053 never saw. The ``LIKE`` is a cheap
+    pre-filter over those statuses; the marker is confirmed on the parsed
+    properties.
     """
     result = await session.execute(
         select(ParticleRow).where(
@@ -1209,6 +1221,22 @@ async def get_census_records(session: AsyncSession) -> list[Particle]:
         )
     )
     return [p for p in (row.to_model() for row in result.scalars().all()) if is_census_record(p)]
+
+
+async def get_cascade_closed_record_ids(session: AsyncSession) -> set[str]:
+    """The INCONSISTENCY records the trust cascade closed, read off its REVIEW particles.
+
+    The cascade writes no operator event, so the REVIEW particle it writes per
+    record (``asserted_by`` :data:`~particles.core.conflict_review.CASCADE_ACTOR`)
+    is what tells a cascade close from a review.
+    """
+    result = await session.execute(
+        select(ParticleRow.content).where(
+            ParticleRow.particle_type == ParticleType.REVIEW.value,
+            ParticleRow.asserted_by == CASCADE_ACTOR,
+        )
+    )
+    return {rid for (content,) in result.all() if (rid := cascade_reviewed_record_id(content))}
 
 
 async def get_inconsistency_backrefs(session: AsyncSession) -> dict[str, str]:
@@ -1276,19 +1304,41 @@ async def get_active_particles_with_embeddings(
     min_confidence: float = 0.0,
     subject_id: str | None = None,
 ) -> list[tuple[Particle, np.ndarray[Any, np.dtype[np.float32]]]]:
-    """Return all ACTIVE particles that have embeddings, for cosine similarity search."""
+    """Return all ACTIVE particles that have embeddings, for cosine similarity search.
+
+    Rows come back in ``(confidence_value, rowid)`` order: the order SQLite's
+    scan of ``ix_particles_status_confidence`` has always produced, made
+    explicit so the subject-filtered plan below and the candidate cache
+    (:mod:`particles.store.candidate_cache`) return the same order. The order
+    matters downstream only for ties, which a stable sort keeps in it.
+    """
     from particles.store.subject_store import ParticleSubjectRow
 
-    q = select(ParticleRow).where(
-        ParticleRow.status == Status.ACTIVE.value,
-        ParticleRow.confidence_value >= min_confidence,
-        ParticleRow.embedding_json.isnot(None),
-    )
-    if subject_id is not None:
-        q = q.join(
-            ParticleSubjectRow,
-            ParticleSubjectRow.particle_id == ParticleRow.id,
-        ).where(ParticleSubjectRow.subject_id == subject_id)
+    if subject_id is None:
+        q = select(ParticleRow).where(
+            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.confidence_value >= min_confidence,
+            ParticleRow.embedding_json.isnot(None),
+        )
+    else:
+        # Start from the subject's links, not from every ACTIVE row. With no
+        # table statistics SQLite prefers ix_particles_status_confidence for
+        # the status and confidence terms and probes the join once per ACTIVE
+        # row; ``|| ''`` and ``+ 0`` leave the comparisons unchanged and make
+        # those two terms unindexable (SQLite's documented way to disqualify
+        # an index), so the plan walks ix_particle_subjects_subject_id and
+        # looks each linked particle up by id.
+        q = (
+            select(ParticleRow)
+            .join(ParticleSubjectRow, ParticleSubjectRow.particle_id == ParticleRow.id)
+            .where(
+                ParticleSubjectRow.subject_id == subject_id,
+                ParticleRow.status.concat("") == Status.ACTIVE.value,
+                (ParticleRow.confidence_value + 0) >= min_confidence,
+                ParticleRow.embedding_json.isnot(None),
+            )
+        )
+    q = q.order_by(ParticleRow.confidence_value, literal_column("particles.rowid"))
     result = await session.execute(q)
     rows = result.scalars().all()
     current_id = get_embedding_model_id()
@@ -1303,17 +1353,27 @@ async def get_active_particles_with_embeddings(
         if stored_id != current_id:
             skipped += 1
             continue
-        emb = np.array(json.loads(row.embedding_json), dtype=np.float32)  # type: ignore[arg-type]
+        emb = decode_embedding(row.embedding_json)  # type: ignore[arg-type]
         out.append((row.to_model(), emb))
     if skipped:
-        log.warning(
-            "Skipped %d ACTIVE particle(s) whose embedding model id != %r during "
-            "cosine search — their vectors live in a different embedding space. "
-            "Re-extract / re-embed them to make them searchable again.",
-            skipped,
-            current_id,
-        )
+        log_skipped_embedding_models(skipped, current_id)
     return out
+
+
+def decode_embedding(embedding_json: str) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """The stored JSON embedding as the ``float32`` vector every loader returns."""
+    return np.array(json.loads(embedding_json), dtype=np.float32)
+
+
+def log_skipped_embedding_models(skipped: int, current_id: str) -> None:
+    """Warn that ``skipped`` ACTIVE rows were left out of a cosine search."""
+    log.warning(
+        "Skipped %d ACTIVE particle(s) whose embedding model id != %r during "
+        "cosine search — their vectors live in a different embedding space. "
+        "Re-extract / re-embed them to make them searchable again.",
+        skipped,
+        current_id,
+    )
 
 
 async def get_active_particles_with_claims(
@@ -2512,6 +2572,22 @@ async def count_structured_claim_coverage(session: AsyncSession) -> dict[str, An
         "annotated": sum(by_structurizer.values()),
         "by_structurizer": by_structurizer,
     }
+
+
+async def has_active_schema_mismatch(session: AsyncSession, schema_version: str) -> bool:
+    """True when any ACTIVE particle carries a ``schema_version`` other than this one.
+
+    Two range seeks on ``ix_particles_status_schema_version`` (below and above
+    the version), so the cost does not grow with the store. ``!=`` would scan
+    every ACTIVE index entry, which is why the comparison is split.
+    """
+    active = ParticleRow.status == Status.ACTIVE.value
+    # Selecting the indexed column keeps both lookups on the index alone.
+    version = ParticleRow.schema_version
+    below = select(version).where(active, version < schema_version)
+    above = select(version).where(active, version > schema_version)
+    result = await session.execute(select(or_(below.exists(), above.exists())))
+    return bool(result.scalar_one())
 
 
 async def count_active_particles_by_schema_version(session: AsyncSession) -> dict[str, int]:

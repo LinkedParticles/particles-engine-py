@@ -26,6 +26,17 @@ class NomismaImporter:
     def accepts_url(self, url: str) -> bool:
         return bool(_NOMISMA_URL_RE.match(url))
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the concept again for ``particles corpus refresh``.
+
+        The URI-R is the concept IRI, an identifier stored in ``http://`` form;
+        the stored blob is its ``.jsonld`` document, fetched over HTTPS.
+        """
+        m = _NOMISMA_URL_RE.match(uri_r)
+        if m is None:
+            raise ValueError(f"Not a recognised Nomisma concept URI: {uri_r}")
+        return await _fetch_jsonld(m.group(1))
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -38,28 +49,7 @@ class NomismaImporter:
         concept_id = m.group(1)
         # Canonical concept IRI (what we store as uri_r)
         canonical_uri = f"http://nomisma.org/id/{concept_id}"
-        # Nomisma publishes a stable JSON-LD document URI distinct from the
-        # concept IRI. Fetch over HTTPS (nomisma.org serves it) so the
-        # document is not retrievable in cleartext — the one MITM-reachable
-        # leg flagged by security finding F14. The concept IRI stored as
-        # ``uri_r`` keeps its canonical ``http://`` form (it is an identifier,
-        # never dereferenced here).
-        jsonld_uri = f"https://nomisma.org/id/{concept_id}.jsonld"
-
-        from particles.http import get_capped, particles_client
-
-        async with particles_client() as client:
-            resp = await get_capped(client, jsonld_uri, follow_redirects=True)
-        if resp.status_code == 404:
-            raise ValueError(f"Nomisma concept {concept_id!r} not found (404)")
-        resp.raise_for_status()
-
-        content = resp.content
-        if not content:
-            raise ValueError(
-                f"Nomisma returned empty body for {concept_id!r} "
-                f"(status {resp.status_code}, URL {resp.url})"
-            )
+        content = await _fetch_jsonld(concept_id)
 
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
@@ -80,3 +70,30 @@ class NomismaImporter:
             tags=tags,
             warc_record_type=WarcRecordType.RESPONSE,
         )
+
+
+async def _fetch_jsonld(concept_id: str) -> bytes:
+    """The concept's JSON-LD document."""
+    # Nomisma publishes a stable JSON-LD document URI distinct from the
+    # concept IRI. Fetch over HTTPS (nomisma.org serves it) so the
+    # document is not retrievable in cleartext — the one MITM-reachable
+    # leg flagged by security finding F14. The concept IRI stored as
+    # ``uri_r`` keeps its canonical ``http://`` form (it is an identifier,
+    # never dereferenced here).
+    jsonld_uri = f"https://nomisma.org/id/{concept_id}.jsonld"
+
+    from particles.http import get_capped, particles_client
+
+    async with particles_client() as client:
+        resp = await get_capped(client, jsonld_uri, follow_redirects=True)
+    if resp.status_code == 404:
+        raise ValueError(f"Nomisma concept {concept_id!r} not found (404)")
+    resp.raise_for_status()
+
+    content = resp.content
+    if not content:
+        raise ValueError(
+            f"Nomisma returned empty body for {concept_id!r} "
+            f"(status {resp.status_code}, URL {resp.url})"
+        )
+    return content

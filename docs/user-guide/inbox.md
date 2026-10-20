@@ -267,8 +267,11 @@ running with the development key and your phone isn't loopback. Set a real
 the SSRF guard (above), or the fetch failed. The engine log names the actual
 cause; the response deliberately does not.
 
-**`502` with an upstream detail.** The origin refused the fetch; Reddit's bot
-wall is the common one. The request was fine; the source is the problem.
+**`502` with an upstream detail.** The origin refused the fetch. For Reddit,
+the common causes are a thread the Arctic Shift archive has not captured yet
+(the importer reads thread content from that archive, because Reddit blocks
+unauthenticated access to its own) and the archive's rate limit. The request
+was fine; the source is the problem.
 
 **Connection can't be established / times out.** The engine isn't reachable
 from the phone: wrong host, wrong port, bound to loopback only, or the phone

@@ -52,6 +52,9 @@ def review_cmd(
 
     A --bulk DISCARD lists every conflict with both sides and asks before it
     retracts anything (skip the prompt with --yes). Retraction has no undo.
+    DISCARD is not a verdict on either value, so a later restatement of a
+    discarded claim is not held for review. To keep a value out for good, use
+    `particles particle retract` instead.
     """
     # Bulk resolution
     if bulk is not None:

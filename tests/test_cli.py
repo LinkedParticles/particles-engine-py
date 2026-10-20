@@ -2092,6 +2092,34 @@ class TestParticleCommand:
         assert result.exit_code == 0, result.output
         assert "Model:" not in result.output
 
+    def test_particle_show_reports_the_retirement_reason(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        """A retired belief names why it stopped; an ACTIVE one carries no Reason line."""
+        from particles.core.status import Status, StatusReason
+        from particles.db import session_scope
+        from particles.store.particle_store import update_particle_status
+
+        expired = _run_async(_add_active_particle(content="The offer runs through 2025."))
+        live = _run_async(_add_active_particle(content="The offer is open to members."))
+
+        async def _expire() -> None:
+            async with session_scope() as session:
+                await update_particle_status(
+                    session, expired, Status.PROVENANCE_STALE, StatusReason.VALIDITY_EXPIRED
+                )
+                await session.commit()
+
+        _run_async(_expire())
+
+        result = _invoke(runner, ["particle", "show", expired[:8]])
+        assert result.exit_code == 0, result.output
+        assert "Reason:       VALIDITY_EXPIRED" in result.output
+
+        result = _invoke(runner, ["particle", "show", live[:8]])
+        assert result.exit_code == 0, result.output
+        assert "Reason:" not in result.output
+
     def test_particle_show_unknown_id_errors(self, runner: CliRunner, cli_db: Path) -> None:
         result = runner.invoke(app, ["particle", "show", "0000dead-0000-0000-0000-000000000000"])
         assert result.exit_code != 0

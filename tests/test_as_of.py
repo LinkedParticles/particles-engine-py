@@ -549,6 +549,19 @@ async def _seed_conflict(session: Any) -> tuple[Particle, Particle, Particle]:
     return a, b, record
 
 
+def _load_migration_053() -> Any:
+    """Alembic 053 as a module, so its data move runs against the test store."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path("alembic/versions/053_cascade_closed_records_retracted.py")
+    spec = importlib.util.spec_from_file_location("_m053", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _aware(dt: datetime) -> datetime:
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
 
@@ -641,18 +654,45 @@ class TestResolvedBornRetired:
 
     async def test_trust_cascade_resolution(self, db_session: Any) -> None:
         """The cascade's writes (operations/cascade.py): the loser's reason flip
-        and the record demoted to PROVENANCE_STALE, with no event to date either."""
-        from particles.core.conflict_review import Demotion
+        and the record retracted, with no event to date either."""
+        from particles.core.conflict_review import CLOSED_RECORD, Demotion
         from particles.operations._quarantine import apply_demotion
         from particles.store.particle_store import update_particle_status
 
         _a, b, record = await _seed_conflict(db_session)
         await apply_demotion(db_session, b.id, Demotion.REASON_FLIP)
-        await update_particle_status(
-            db_session, record.id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
-        )
+        await update_particle_status(db_session, record.id, *CLOSED_RECORD)
         await db_session.commit()
 
+        await self._assert_never_believed(db_session, b.id, record.id)
+
+    async def test_cascade_record_migrated_by_053_reads_the_same(self, db_session: Any) -> None:
+        """A record the cascade closed before 1.192.15 (PROVENANCE_STALE) and the
+        same record after migration 053 (RETRACTED) are both never believed:
+        the lens reads ``born_retired``, which the migration does not touch."""
+        import sqlalchemy as sa
+
+        from particles.core.conflict_review import Demotion
+        from particles.operations._quarantine import apply_demotion
+
+        _a, b, record = await _seed_conflict(db_session)
+        await apply_demotion(db_session, b.id, Demotion.REASON_FLIP)
+        # The pre-fix state, written by hand: the edge is gone from the table.
+        await db_session.execute(
+            sa.text(
+                "UPDATE particles SET status = 'PROVENANCE_STALE',"
+                " status_reason = 'CONFLICT_RESOLVED' WHERE id = :pid"
+            ),
+            {"pid": record.id},
+        )
+        await db_session.commit()
+        await self._assert_never_believed(db_session, b.id, record.id)
+
+        connection = await db_session.connection()
+        moved = await connection.run_sync(_load_migration_053().retract_cascade_closed_records)
+        await db_session.commit()
+        assert moved == 1
+        db_session.expire_all()
         await self._assert_never_believed(db_session, b.id, record.id)
 
     async def test_undated_retirement_lint_excludes_resolved(self, db_session: Any) -> None:

@@ -22,9 +22,12 @@ import pytest
 from typer.testing import CliRunner
 
 from particles.core.closure_measure import (
+    Closure,
     GestureEvent,
     Retirement,
+    closure_from_payload,
     contested_fraction,
+    tally_closures,
     tally_transitions,
 )
 from particles.core.schema import (
@@ -172,6 +175,32 @@ class TestTally:
         assert tally.autonomous_share == 0.75
 
 
+class TestClosures:
+    def test_a_close_that_names_a_successor_or_twin_released_a_claim(self) -> None:
+        assert closure_from_payload({"cause": "withdrawn", "successor": "s1"}) == Closure(
+            "withdrawn", released=True
+        )
+        assert closure_from_payload({"cause": "partner_retired", "folded_into": "t1"}).released
+        assert not closure_from_payload({"cause": "lapsed"}).released
+
+    def test_a_close_without_a_cause_still_counts(self) -> None:
+        assert closure_from_payload(None) == Closure("UNSPECIFIED")
+        assert closure_from_payload({"cause": ""}).cause == "UNSPECIFIED"
+
+    def test_the_tally_counts_closures_and_releases_per_cause(self) -> None:
+        tally = tally_closures(
+            [
+                Closure("withdrawn", released=True),
+                Closure("withdrawn"),
+                Closure("lapsed"),
+                Closure("partner_retired", released=True),
+            ]
+        )
+        assert tally.closed_by_cause == {"lapsed": 1, "partner_retired": 1, "withdrawn": 2}
+        assert tally.released_by_cause == {"partner_retired": 1, "withdrawn": 1}
+        assert (tally.closed, tally.released) == (4, 2)
+
+
 # ---------------------------------------------------------------------------
 # The gather over a real store
 # ---------------------------------------------------------------------------
@@ -208,6 +237,13 @@ async def _seed(session: AsyncSession) -> None:
         refs=[(EventRefKind.PARTICLE, "closed-record")],
         payload={"cause": "lapsed"},
     )
+    await record_event(
+        session,
+        actor="memory-consolidate",
+        event_type=OperatorEventType.INCONSISTENCY_CLOSED,
+        refs=[(EventRefKind.PARTICLE, "withdrawn-record")],
+        payload={"cause": "withdrawn", "origin": "extraction", "successor": "restored"},
+    )
     await session.commit()
 
 
@@ -224,12 +260,15 @@ class TestMeasure:
         assert measure.contested_by_basis == {"inconsistency": 1}
         assert measure.transitions == {
             "retirement": {"autonomous": 1, "gesture": 1},
-            "contradiction_closed": {"autonomous": 1, "gesture": 0},
+            "contradiction_closed": {"autonomous": 2, "gesture": 0},
             "promotion": {"autonomous": 0, "gesture": 0},
         }
         assert measure.autonomous_by_reason == {"SUPERSEDED_BY_UPDATE": 1}
         assert measure.gesture_by_actor == {"curate": 1}
-        assert measure.autonomous_share == pytest.approx(2 / 3)
+        assert measure.autonomous_share == pytest.approx(3 / 4)
+        assert measure.closed_by_cause == {"lapsed": 1, "withdrawn": 1}
+        assert measure.released_by_cause == {"withdrawn": 1}
+        assert measure.released == 1
 
     @pytest.mark.asyncio
     async def test_a_window_that_opens_later_sees_none_of_it(
@@ -245,6 +284,7 @@ class TestMeasure:
         assert (measure.contested, measure.active) == (1, 2)
         assert measure.autonomous + measure.gesture == 0
         assert measure.autonomous_share is None
+        assert measure.released == 0
 
     @pytest.mark.asyncio
     async def test_promotions_split_by_the_accept_event(self, db_session: AsyncSession) -> None:
@@ -280,13 +320,21 @@ class TestMeasure:
         )
         payload = measure.payload()
         assert payload["contested_fraction"] == 0.5
-        assert payload["autonomous"] == 2
+        assert payload["autonomous"] == 3
         assert payload["gesture"] == 1
+        assert payload["released"] == 1
 
         back = measure_from_payload({"closure": json.loads(json.dumps(payload))})
         assert back is not None
         assert back.transitions == measure.transitions
         assert back.window_end == measure.window_end
+        assert back.released_by_cause == {"withdrawn": 1}
+
+    def test_a_record_from_before_the_release_count_reads_as_not_counted(self) -> None:
+        old = _measure(datetime(2026, 10, 3, tzinfo=UTC)).model_dump(mode="json")
+        back = measure_from_payload({"closure": old})
+        assert back is not None
+        assert back.released is None
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +415,36 @@ class TestHistory:
         assert "20.0%" in rendered
         assert "75.0%" in rendered
         assert "1 earlier run(s) by memory-consolidate predate the measure." in rendered
+        # A run recorded before the release count shows it as not counted.
+        assert rendered.splitlines()[3].rstrip().endswith("n/a")
+        assert "no INCONSISTENCY record closed by the nightly passes" in rendered
+
+    @pytest.mark.asyncio
+    async def test_store_wide_closures_include_runs_that_predate_the_measure(
+        self, db_session: AsyncSession
+    ) -> None:
+        # Two closes and a review, and no measured run at all: the totals come
+        # from the event log, not from the run records.
+        await _seed(db_session)
+        await record_event(
+            db_session,
+            actor="review",
+            event_type=OperatorEventType.REVIEW_RESOLVED,
+            refs=[(EventRefKind.PARTICLE, _INC)],
+        )
+        await db_session.commit()
+
+        history = await closure_history(db_session, store="default", actor="memory-consolidate")
+        assert history.runs == []
+        assert history.since_start.closed_by_cause == {"lapsed": 1, "withdrawn": 1}
+        assert history.since_start.released == 1
+        assert history.since_start.reviewed == 1
+        rendered = render_closure_history(history)
+        assert (
+            "Since the store began: 2 INCONSISTENCY record(s) closed by the nightly passes "
+            "[lapsed 1, withdrawn 1]; 1 held claim(s) returned to the store without review "
+            "[withdrawn 1]; 1 resolved by review." in rendered
+        )
 
     def test_an_empty_history_says_how_to_start_one(self) -> None:
         from particles.operations.closure_measure import ClosureHistory
@@ -393,6 +471,23 @@ class TestRender:
         assert "(n/a)" in contested
         assert "since the store began" in transitions
         assert "autonomous)" not in transitions
+
+    def test_closures_get_a_line_only_when_a_pass_closed_something(self) -> None:
+        end = datetime(2026, 10, 3, tzinfo=UTC)
+        quiet = ClosureMeasure(window_end=end, closed_by_cause={}, released_by_cause={})
+        assert len(render_closure_lines(quiet, None)) == 2
+
+        busy = ClosureMeasure(
+            window_end=end,
+            closed_by_cause={"lapsed": 1, "withdrawn": 2},
+            released_by_cause={"withdrawn": 2},
+        )
+        closures = render_closure_lines(busy, None)[2]
+        assert closures == (
+            "  closures         3 INCONSISTENCY record(s) closed by the nightly passes "
+            "[lapsed 1, withdrawn 2]; 2 held claim(s) returned to the store without review "
+            "[withdrawn 2]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +532,14 @@ class TestHistoryCli:
         data = json.loads(result.output)
         assert data["runs"][0]["contested_fraction"] == 0.2
         assert data["runs"][0]["autonomous_share"] == 0.75
+        assert data["runs"][0]["released"] is None
+        assert data["since_start"] == {
+            "closed_by_cause": {},
+            "released_by_cause": {},
+            "reviewed": 0,
+            "closed": 0,
+            "released": 0,
+        }
 
     def test_refuses_to_combine_with_a_run_flag(self, cli_db: Path) -> None:
         from particles.api.cli import app

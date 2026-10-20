@@ -48,8 +48,8 @@ from particles.operations.consolidation import (
     _plan_utility,
     _reanchor_estimate,
     _semantic_availability,
-    _snapshot_sizes,
     _utcnow,
+    extraction_plan_estimate,
     latest_census_event,
     latest_run_event,
     paraphrase_estimate,
@@ -57,6 +57,7 @@ from particles.operations.consolidation import (
 )
 from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.curation.collect import collect_cards
+from particles.operations.extraction_reads import ReadSummary
 from particles.operations.held_release import run_release
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.paraphrases import run_paraphrases
@@ -65,7 +66,6 @@ from particles.operations.reconcile import count_supersession_candidates, count_
 from particles.operations.spend_estimate import (
     PassEstimate,
     context_call_estimate,
-    extraction_estimate,
     probe_estimate,
 )
 from particles.operations.utility_mining import estimate_judge_calls
@@ -154,6 +154,19 @@ def _skipped(name: str, reason: str) -> PlannedPass:
     return _planned(name, reason, action="skip")
 
 
+def _describe_reads(reads: ReadSummary) -> str:
+    """What pass 1 would read: the tails, the carried chunks, the capped ones."""
+    text = f"would read {reads.read_chars:,} of {reads.whole_chars:,} characters"
+    notes: list[str] = []
+    if reads.delta:
+        notes.append(f"{_plural(reads.delta, 'append-only tail')}")
+    if reads.carried:
+        notes.append(f"{_plural(reads.carried, 'chunk')} carried forward")
+    if reads.capped:
+        notes.append(f"{_plural(reads.capped, 'chunk')} past extraction.max_llm_calls_per_source")
+    return text + (f" ({', '.join(notes)})" if notes else "")
+
+
 async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass list
     session: AsyncSession,
     *,
@@ -206,8 +219,9 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
         )
     else:
         chosen = _extract_selection(pending, batching=cfg.extract_batching)
-        sizes = await _snapshot_sizes(session, [snapshot_id for _, snapshot_id in chosen])
-        estimate = extraction_estimate(sizes)
+        estimate, reads = await extraction_plan_estimate(
+            session, chosen, batching=cfg.extract_batching
+        )
         # say how many of the chosen came from the priority class.
         priority = set(cfg.priority_tags)
         tagged = {item.snapshot_id for item in pending if item.tags & priority}
@@ -218,9 +232,8 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
                 "extract",
                 f"would extract {len(chosen)} of {_plural(len(pending), 'pending snapshot')} "
                 f"(consolidation.max_pending_entries = {cfg.max_pending_entries}"
-                f"{priority_note}), "
-                f"{sum(sizes):,} source bytes; listed before the run's stale-claim reset "
-                "and superseded-generation collapse",
+                f"{priority_note}), {_describe_reads(reads)}; listed before the run's "
+                "stale-claim reset and superseded-generation collapse",
                 estimate,
             )
         )
@@ -428,7 +441,7 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
                 f"would make {_plural(groups, 'judge call')} "
                 f"(utility.mining.max_behavioural_calls = "
                 f"{config.utility.mining.max_behavioural_calls})",
-                estimate_judge_calls(mines),
+                estimate_judge_calls(mines, batched=True),
             )
         )
 
@@ -556,7 +569,8 @@ def render_consolidation_plan(plan: ConsolidationPlan) -> str:
         "These are list-price estimates over estimated tokens (llm.price_per_mtok and the "
         "per-call figures "
         + (", ".join(bases) if bases else "audit.estimate_*")
-        + "), with no batch or prompt-cache discount. A metered run prints its measured "
+        + "). Batch and prompt-cache pricing apply only where the run would use them, "
+        "and the output figures lean high. A metered run prints its measured "
         f'cost afterwards as the "{MEASURED_LINE}" line and records it on the '
         "CONSOLIDATION_RUN event; compare the two."
     )

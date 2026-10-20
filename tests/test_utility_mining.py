@@ -422,7 +422,7 @@ class TestBehaviouralPrefilter:
         async def fake_embeddings(*a: object, **k: object) -> list[object]:
             return [(b, vecs[b.id]) for b in beliefs if b.id in vecs]
 
-        monkeypatch.setattr(um, "get_active_particles_with_embeddings", fake_embeddings)
+        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
 
         kept, excluded, ranked = await _prefilter_behavioural_candidates(
             db_session,  # type: ignore[arg-type]
@@ -431,6 +431,31 @@ class TestBehaviouralPrefilter:
             1,
         )
         assert [p.id for p in kept] == ["p-b"]
+        assert excluded == 2
+        assert ranked is True
+
+    @pytest.mark.asyncio
+    async def test_ranks_by_the_stored_vectors(
+        self, db_session: object, monkeypatch: pytest.MonkeyPatch, candidate_cache_mode: str
+    ) -> None:
+        """The ranking reads each belief's stored vector, through the candidate cache or not."""
+        from particles.operations.utility_mining import _prefilter_behavioural_candidates
+        from particles.store.particle_store import insert_particle
+
+        monkeypatch.setattr("particles.embeddings.get_embedding_model", _FakeEmbeddingModel)
+        beliefs = [_belief(f"p-{name}", name) for name in ("a", "b", "c", "none")]
+        vectors = {"p-a": [0.0, 1.0], "p-b": [1.0, 0.0], "p-c": [0.6, 0.8], "p-none": None}
+        for b in beliefs:
+            await insert_particle(db_session, b, embedding=vectors[b.id])  # type: ignore[arg-type]
+        await db_session.commit()  # type: ignore[attr-defined]
+
+        kept, excluded, ranked = await _prefilter_behavioural_candidates(
+            db_session,  # type: ignore[arg-type]
+            beliefs,
+            ["[tool: Bash — x]"],
+            2,
+        )
+        assert [p.id for p in kept] == ["p-b", "p-c"]
         assert excluded == 2
         assert ranked is True
 
@@ -449,7 +474,7 @@ class TestBehaviouralPrefilter:
         async def fake_embeddings(*a: object, **k: object) -> list[object]:
             return [(beliefs[1], np.array([1.0, 0.0], dtype=np.float32))]
 
-        monkeypatch.setattr(um, "get_active_particles_with_embeddings", fake_embeddings)
+        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
 
         kept, excluded, ranked = await _prefilter_behavioural_candidates(
             db_session,  # type: ignore[arg-type]
@@ -563,7 +588,7 @@ class TestBehaviouralPrefilter:
         async def fake_embeddings(*a: object, **k: object) -> list[object]:
             return [(b, vecs[b.id]) for b in actives if b.id in vecs]
 
-        monkeypatch.setattr(um, "get_active_particles_with_embeddings", fake_embeddings)
+        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
         get_config().utility.mining.behavioural_matching = True
         get_config().utility.mining.behavioural_candidate_limit = 1
 

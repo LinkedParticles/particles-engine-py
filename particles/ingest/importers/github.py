@@ -24,7 +24,7 @@ import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from particles.config import get_config
 from particles.extraction.github._shared import (
@@ -56,6 +56,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class _Fetched(NamedTuple):
+    """One fetch's bytes plus the attribution the deposit stamps on the entry."""
+
+    content: bytes
+    author_id: str | None
+    content_published_at: datetime | None
+    detail: str
+
+
 class GitHubImporter:
     """Single importer for GitHub repos, gists, and Pages."""
 
@@ -68,6 +77,16 @@ class GitHubImporter:
             or _REPO_ROOT_RE.match(url)
         )
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the entry again for ``particles corpus refresh``.
+
+        A repo file and a gist are stored as the GitHub API serves them (a
+        decoded file body; the gist JSON with its comments embedded), not as
+        the page the URI-R names, so a refresh fetches the way the deposit did.
+        """
+        _source_type, _uri_r, fetched = await self._fetch(uri_r)
+        return fetched.content
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -75,6 +94,38 @@ class GitHubImporter:
         deposited_by: str,
         tags: list[str],
     ) -> tuple[str, str]:
+        from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
+        from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
+
+        source_type, canonical, fetched = await self._fetch(url)
+        content = fetched.content
+        content_hash = sha256(content)
+        archive_path = save_blob(content, content_hash)
+        log.info(
+            "Deposited GitHub %s (%d bytes, author=%s, published=%s)",
+            fetched.detail,
+            len(content),
+            fetched.author_id,
+            fetched.content_published_at,
+        )
+        return await write_entry_and_snapshot(
+            session=session,
+            uri_r=canonical,
+            source_type=source_type,
+            mutability=Mutability.MUTABLE,
+            fetch_policy=FetchPolicy.LAZY,
+            content=content,
+            content_hash=content_hash,
+            archive_path=archive_path,
+            deposited_by=deposited_by,
+            tags=tags,
+            warc_record_type=WarcRecordType.RESPONSE,
+            author_id=fetched.author_id,
+            content_published_at=fetched.content_published_at,
+        )
+
+    async def _fetch(self, url: str) -> tuple[str, str, _Fetched]:
+        """Classify ``url`` and fetch it: ``(source_type, uri_r, fetched)``."""
         log.debug("GitHubImporter: parsing %s", url)
         auth_present = get_github_api_key_optional() is not None
         log.debug("GitHubImporter: GITHUB_API_KEY %s", "set" if auth_present else "not set")
@@ -83,11 +134,11 @@ class GitHubImporter:
         if pages is not None:
             username, path = pages
             log.debug("GitHubImporter: classified as PAGES (user=%s)", username)
-            return await self._deposit_pages(session, url, username, path, deposited_by, tags)
+            return SOURCE_TYPE_PAGES, url, await _fetch_pages(url, username, path)
         gist = _parse_gist_url(url)
         if gist is not None:
             log.debug("GitHubImporter: classified as GIST (id=%s)", gist[1])
-            return await self._deposit_gist(session, url, gist[1], deposited_by, tags)
+            return SOURCE_TYPE_GIST, url, await _fetch_gist(url, gist[1])
         canonical = _normalize_raw_url(url)
         parsed = _parse_repo_url(canonical)
         if parsed is not None:
@@ -99,285 +150,152 @@ class GitHubImporter:
                 branch,
                 file_path,
             )
-            return await self._deposit_repo(
-                session, canonical, owner, repo, branch, file_path, deposited_by, tags
-            )
+            return SOURCE_TYPE_REPO, canonical, await _fetch_repo(owner, repo, branch, file_path)
         raise ValueError(f"URL not recognised by GitHubImporter: {url}")
 
-    # -- repo ---------------------------------------------------------------
 
-    async def _deposit_repo(
-        self,
-        session: AsyncSession,
-        canonical_url: str,
-        owner: str,
-        repo: str,
-        branch: str | None,
-        path: str | None,
-        deposited_by: str,
-        tags: list[str],
-    ) -> tuple[str, str]:
-        from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
-        from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import particles_client
+# -- repo -------------------------------------------------------------------
 
+
+async def _fetch_repo(owner: str, repo: str, branch: str | None, path: str | None) -> _Fetched:
+    from particles.http import particles_client
+
+    async with particles_client(extra_headers=_api_headers()) as client:
+        if path is None:
+            api_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/readme"
+        else:
+            api_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}"
+            if branch:
+                api_url = f"{api_url}?ref={branch}"
+        resp = await _github_get(client, api_url)
+        _raise_for_github_error(resp, api_url)
+        api_data: dict[str, Any] = resp.json()
+
+        encoding = str(api_data.get("encoding") or "base64")
+        content_b64 = str(api_data.get("content") or "")
+        if encoding == "base64":
+            content = base64.b64decode(content_b64) if content_b64 else b""
+        else:
+            content = content_b64.encode("utf-8", errors="replace")
+
+        actual_path = str(api_data.get("path") or path or "README")
+
+        author_id, content_published_at = await _fetch_last_commit_meta(
+            client, owner, repo, actual_path, branch
+        )
+
+    if author_id is None:
+        author_id = f"github:{owner}"
+    return _Fetched(content, author_id, content_published_at, f"repo {owner}/{repo}/{actual_path}")
+
+
+# -- gist -------------------------------------------------------------------
+
+
+async def _fetch_gist(url: str, gist_id: str) -> _Fetched:
+    from particles.http import TransientHttpError, get_with_retry, particles_client
+
+    api_url = f"{GITHUB_API_BASE}/gists/{gist_id}"
+    # Try the REST API first. Large gists trip an internal serialization
+    # limit on GitHub's side and return a stable cached 502 — when that
+    # happens we clone the gist's git repo (anonymous, public-only) and
+    # synthesize a gist-shaped JSON blob so the extractor is unchanged.
+    try:
         async with particles_client(extra_headers=_api_headers()) as client:
-            if path is None:
-                api_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/readme"
-            else:
-                api_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}"
-                if branch:
-                    api_url = f"{api_url}?ref={branch}"
-            resp = await _github_get(client, api_url)
+            resp = await get_with_retry(client, api_url, label="GitHub API")
             _raise_for_github_error(resp, api_url)
-            api_data: dict[str, Any] = resp.json()
-
-            encoding = str(api_data.get("encoding") or "base64")
-            content_b64 = str(api_data.get("content") or "")
-            if encoding == "base64":
-                content = base64.b64decode(content_b64) if content_b64 else b""
-            else:
-                content = content_b64.encode("utf-8", errors="replace")
-
-            actual_path = str(api_data.get("path") or path or "README")
-
-            author_id, content_published_at = await _fetch_last_commit_meta(
-                client, owner, repo, actual_path, branch
-            )
-
-        if author_id is None:
-            author_id = f"github:{owner}"
-
-        content_hash = sha256(content)
-        archive_path = save_blob(content, content_hash)
-        log.info(
-            "Deposited GitHub repo %s/%s/%s (%d bytes, author=%s)",
-            owner,
-            repo,
-            actual_path,
-            len(content),
-            author_id,
-        )
-        return await write_entry_and_snapshot(
-            session=session,
-            uri_r=canonical_url,
-            source_type=SOURCE_TYPE_REPO,
-            mutability=Mutability.MUTABLE,
-            fetch_policy=FetchPolicy.LAZY,
-            content=content,
-            content_hash=content_hash,
-            archive_path=archive_path,
-            deposited_by=deposited_by,
-            tags=tags,
-            warc_record_type=WarcRecordType.RESPONSE,
-            author_id=author_id,
-            content_published_at=content_published_at,
-        )
-
-    # -- gist ---------------------------------------------------------------
-
-    async def _deposit_gist(
-        self,
-        session: AsyncSession,
-        url: str,
-        gist_id: str,
-        deposited_by: str,
-        tags: list[str],
-    ) -> tuple[str, str]:
-        from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
-        from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import TransientHttpError, get_with_retry, particles_client
-
-        api_url = f"{GITHUB_API_BASE}/gists/{gist_id}"
-        # Try the REST API first. Large gists trip an internal serialization
-        # limit on GitHub's side and return a stable cached 502 — when that
-        # happens we clone the gist's git repo (anonymous, public-only) and
-        # synthesize a gist-shaped JSON blob so the extractor is unchanged.
-        try:
-            async with particles_client(extra_headers=_api_headers()) as client:
-                resp = await get_with_retry(client, api_url, label="GitHub API")
-                _raise_for_github_error(resp, api_url)
-                data: dict[str, Any] = resp.json()
-                comments = await _fetch_gist_comments(client, gist_id)
-        except TransientHttpError as exc:
-            log.warning(
-                "GitHub gist API exhausted retries for %s; falling back to git clone: %s",
-                gist_id,
-                exc,
-            )
-            return await self._deposit_gist_via_git(session, url, gist_id, deposited_by, tags)
-
-        login = ((data.get("owner") or {}) if isinstance(data.get("owner"), dict) else {}).get(
-            "login"
-        )
-        author_id = f"github:{login}" if login else None
-        content_published_at = _parse_iso_utc(data.get("updated_at") or data.get("created_at"))
-
-        # Embed comments in the stored envelope so extraction is reproducible
-        # from the snapshot blob alone (no second API call at extract time).
-        data["comments"] = comments
-        content = json.dumps(data, sort_keys=True).encode()
-
-        content_hash = sha256(content)
-        archive_path = save_blob(content, content_hash)
-        log.info(
-            "Deposited GitHub gist %s (%d bytes, author=%s, %d comments)",
-            gist_id,
-            len(content),
-            author_id,
-            len(comments),
-        )
-        return await write_entry_and_snapshot(
-            session=session,
-            uri_r=url,
-            source_type=SOURCE_TYPE_GIST,
-            mutability=Mutability.MUTABLE,
-            fetch_policy=FetchPolicy.LAZY,
-            content=content,
-            content_hash=content_hash,
-            archive_path=archive_path,
-            deposited_by=deposited_by,
-            tags=tags,
-            warc_record_type=WarcRecordType.RESPONSE,
-            author_id=author_id,
-            content_published_at=content_published_at,
-        )
-
-    async def _deposit_gist_via_git(
-        self,
-        session: AsyncSession,
-        url: str,
-        gist_id: str,
-        deposited_by: str,
-        tags: list[str],
-    ) -> tuple[str, str]:
-        """Fallback for gists too large for the REST API.
-
-        Gists are real git repos hosted at ``https://gist.github.com/{id}.git``.
-        Public gists clone anonymously over HTTPS without a token. We
-        synthesize a JSON envelope shaped like the REST API response so
-        ``GitHubGistExtractor`` needs no changes — losing only ``description``
-        and precise ``created_at`` (we approximate ``updated_at`` with the
-        last-commit committer date).
-
-        Comments are still fetched via the REST API (a separate endpoint that
-        works even when ``/gists/{id}`` returns a stable 5xx for large blobs).
-        """
-        from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
-        from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import particles_client
-
-        parsed = _parse_gist_url(url)
-        if parsed is None:
-            raise ValueError(f"Cannot parse gist URL for git fallback: {url}")
-        owner_login = parsed[0]
-
-        files, last_commit_iso = await _clone_gist_files(gist_id)
-
-        async with particles_client(extra_headers=_api_headers()) as client:
+            data: dict[str, Any] = resp.json()
             comments = await _fetch_gist_comments(client, gist_id)
-
-        envelope = {
-            "id": gist_id,
-            "description": "",
-            "owner": {"login": owner_login},
-            "files": files,
-            "comments": comments,
-            "created_at": last_commit_iso,
-            "updated_at": last_commit_iso,
-            "_fallback": "git-clone",
-        }
-        content = json.dumps(envelope, sort_keys=True).encode()
-
-        author_id = f"github:{owner_login}"
-        content_published_at = _parse_iso_utc(last_commit_iso)
-
-        content_hash = sha256(content)
-        archive_path = save_blob(content, content_hash)
-        log.info(
-            "Deposited GitHub gist %s via git fallback "
-            "(%d bytes, %d files, %d comments, author=%s)",
+    except TransientHttpError as exc:
+        log.warning(
+            "GitHub gist API exhausted retries for %s; falling back to git clone: %s",
             gist_id,
-            len(content),
-            len(files),
-            len(comments),
-            author_id,
+            exc,
         )
-        return await write_entry_and_snapshot(
-            session=session,
-            uri_r=url,
-            source_type=SOURCE_TYPE_GIST,
-            mutability=Mutability.MUTABLE,
-            fetch_policy=FetchPolicy.LAZY,
-            content=content,
-            content_hash=content_hash,
-            archive_path=archive_path,
-            deposited_by=deposited_by,
-            tags=tags,
-            warc_record_type=WarcRecordType.RESPONSE,
-            author_id=author_id,
-            content_published_at=content_published_at,
-        )
+        return await _fetch_gist_via_git(url, gist_id)
 
-    # -- pages --------------------------------------------------------------
+    login = ((data.get("owner") or {}) if isinstance(data.get("owner"), dict) else {}).get("login")
+    author_id = f"github:{login}" if login else None
+    content_published_at = _parse_iso_utc(data.get("updated_at") or data.get("created_at"))
 
-    async def _deposit_pages(
-        self,
-        session: AsyncSession,
-        url: str,
-        username: str,
-        path: str,
-        deposited_by: str,
-        tags: list[str],
-    ) -> tuple[str, str]:
-        from email.utils import parsedate_to_datetime
+    # Embed comments in the stored envelope so extraction is reproducible
+    # from the snapshot blob alone (no second API call at extract time).
+    data["comments"] = comments
+    content = json.dumps(data, sort_keys=True).encode()
+    return _Fetched(
+        content, author_id, content_published_at, f"gist {gist_id} ({len(comments)} comments)"
+    )
 
-        from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
-        from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import particles_client
 
-        async with particles_client() as client:
-            resp = await _github_get(client, url)
-        _raise_for_github_error(resp, url)
-        content = resp.content
+async def _fetch_gist_via_git(url: str, gist_id: str) -> _Fetched:
+    """Fallback for gists too large for the REST API.
 
-        author_id = f"github:{username}"
-        content_published_at = _date_from_path(path)
-        if content_published_at is None:
-            lm = resp.headers.get("Last-Modified")
-            if lm:
-                try:
-                    parsed = parsedate_to_datetime(lm)
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=UTC)
-                    content_published_at = parsed
-                except (TypeError, ValueError):
-                    content_published_at = None
+    Gists are real git repos hosted at ``https://gist.github.com/{id}.git``.
+    Public gists clone anonymously over HTTPS without a token. We
+    synthesize a JSON envelope shaped like the REST API response so
+    ``GitHubGistExtractor`` needs no changes — losing only ``description``
+    and precise ``created_at`` (we approximate ``updated_at`` with the
+    last-commit committer date).
 
-        content_hash = sha256(content)
-        archive_path = save_blob(content, content_hash)
-        log.info(
-            "Deposited GitHub Pages %s (%d bytes, author=%s, published=%s)",
-            url,
-            len(content),
-            author_id,
-            content_published_at,
-        )
-        return await write_entry_and_snapshot(
-            session=session,
-            uri_r=url,
-            source_type=SOURCE_TYPE_PAGES,
-            mutability=Mutability.MUTABLE,
-            fetch_policy=FetchPolicy.LAZY,
-            content=content,
-            content_hash=content_hash,
-            archive_path=archive_path,
-            deposited_by=deposited_by,
-            tags=tags,
-            warc_record_type=WarcRecordType.RESPONSE,
-            author_id=author_id,
-            content_published_at=content_published_at,
-        )
+    Comments are still fetched via the REST API (a separate endpoint that
+    works even when ``/gists/{id}`` returns a stable 5xx for large blobs).
+    """
+    from particles.http import particles_client
+
+    parsed = _parse_gist_url(url)
+    if parsed is None:
+        raise ValueError(f"Cannot parse gist URL for git fallback: {url}")
+    owner_login = parsed[0]
+
+    files, last_commit_iso = await _clone_gist_files(gist_id)
+
+    async with particles_client(extra_headers=_api_headers()) as client:
+        comments = await _fetch_gist_comments(client, gist_id)
+
+    envelope = {
+        "id": gist_id,
+        "description": "",
+        "owner": {"login": owner_login},
+        "files": files,
+        "comments": comments,
+        "created_at": last_commit_iso,
+        "updated_at": last_commit_iso,
+        "_fallback": "git-clone",
+    }
+    content = json.dumps(envelope, sort_keys=True).encode()
+    return _Fetched(
+        content,
+        f"github:{owner_login}",
+        _parse_iso_utc(last_commit_iso),
+        f"gist {gist_id} via git fallback ({len(files)} files, {len(comments)} comments)",
+    )
+
+
+# -- pages ------------------------------------------------------------------
+
+
+async def _fetch_pages(url: str, username: str, path: str) -> _Fetched:
+    from email.utils import parsedate_to_datetime
+
+    from particles.http import particles_client
+
+    async with particles_client() as client:
+        resp = await _github_get(client, url)
+    _raise_for_github_error(resp, url)
+    content = resp.content
+
+    content_published_at = _date_from_path(path)
+    if content_published_at is None:
+        lm = resp.headers.get("Last-Modified")
+        if lm:
+            try:
+                parsed = parsedate_to_datetime(lm)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                content_published_at = parsed
+            except (TypeError, ValueError):
+                content_published_at = None
+    return _Fetched(content, f"github:{username}", content_published_at, f"Pages {url}")
 
 
 # ---------------------------------------------------------------------------

@@ -179,7 +179,7 @@ async def suggest_co_evidential(
             written in that case.
     """
     from particles.config import get_config
-    from particles.store.particle_store import get_active_particles_with_embeddings
+    from particles.store.candidate_cache import load_active_candidates
     from particles.store.relation_store import get_all_relations
     from particles.store.subject_store import (
         get_subject,
@@ -234,16 +234,12 @@ async def suggest_co_evidential(
         for subject in subjects:
             by_subject[subject.id] = [
                 (p, e)
-                for p, e in await get_active_particles_with_embeddings(
-                    session, subject_id=subject.id
-                )
+                for p, e in await load_active_candidates(session, subject_id=subject.id)
                 if is_pair_eligible(p)
             ]
     else:
         eligible = {
-            p.id: (p, e)
-            for p, e in await get_active_particles_with_embeddings(session)
-            if is_pair_eligible(p)
+            p.id: (p, e) for p, e in await load_active_candidates(session) if is_pair_eligible(p)
         }
         wanted = {s.id for s in subjects}
         for pid, sid in await list_particle_subject_pairs(session):

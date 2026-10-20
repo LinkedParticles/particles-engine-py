@@ -7,7 +7,9 @@
 The one per-entry loop behind ``particles corpus refresh`` and consolidation
 pass 0.5. For each entry it gathers the latest snapshot id, calls
 :func:`~particles.corpus.fetch.maybe_refetch`, and classifies the result with
-the pure :func:`~particles.corpus.refresh_outcome.classify_refresh`.
+the pure :func:`~particles.corpus.refresh_outcome.classify_refresh`. It hands
+the importer registry to the ladder, so an entry an importer owns is re-fetched
+by that importer rather than by a GET of its URI-R.
 
 Each entry commits on its own, and a failure rolls back that entry only and is
 reported on its result, so one bad source never stops the sweep. Results are
@@ -24,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.corpus.fetch import maybe_refetch
 from particles.corpus.refresh_outcome import RefreshOutcome, classify_refresh
 from particles.corpus.store import list_snapshots_for_entry
+from particles.ingest.importers.registry import get_importers
 
 
 @dataclass(frozen=True)
@@ -51,10 +54,11 @@ async def refresh_entries(
         One :class:`RefreshResult` per entry. ``outcome`` is None exactly when
         ``error`` is set.
     """
+    importers = get_importers()
     for entry_id in entry_ids:
         try:
             before_id = await _latest_snapshot_id(session, entry_id)
-            snap = await maybe_refetch(session, entry_id, force=force)
+            snap = await maybe_refetch(session, entry_id, force=force, importers=importers)
             outcome = classify_refresh(before_id, snap)
             await session.commit()
         except Exception as exc:  # noqa: BLE001 — one bad source must not stop the sweep

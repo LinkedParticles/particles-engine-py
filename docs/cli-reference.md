@@ -220,6 +220,9 @@ List or resolve INCONSISTENCY particles.
 
 A --bulk DISCARD lists every conflict with both sides and asks before it
 retracts anything (skip the prompt with --yes). Retraction has no undo.
+DISCARD is not a verdict on either value, so a later restatement of a
+discarded claim is not held for review. To keep a value out for good, use
+`particles particle retract` instead.
 
 **Usage**:
 
@@ -620,6 +623,7 @@ $ particles benchmark [OPTIONS] COMMAND [ARGS]...
 * `memory`: The LongMemEval agent-memory benchmark...
 * `rot`: The memory-rot benchmark.
 * `relevance-floor`: The relevance-floor benchmark: how often...
+* `query-latency`: Query latency of the semantic retrieval...
 * `trip-vs-move`: The trip-versus-move case end to end,...
 * `update-gate`: The registered update-gate pair sets...
 
@@ -887,6 +891,77 @@ $ particles benchmark relevance-floor resweep [OPTIONS] {report}
 **Options**:
 
 * `--floor <float>`: A floor to evaluate; repeat for several (default: benchmark_relevance_floor.floors).
+* `--help`: Show this message and exit.
+
+### `particles benchmark query-latency`
+
+Query latency of the semantic retrieval path by stage, over seeded synthetic stores. `run` measures (resumable), `report` renders a run.
+
+**Usage**:
+
+```console
+$ particles benchmark query-latency [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `run`: Measure query latency by stage at each...
+* `report`: Render a query-latency run: per-stage...
+
+#### `particles benchmark query-latency run`
+
+Measure query latency by stage at each store size. No LLM call, no user store.
+
+Builds a seeded synthetic store per size (cached), then times
+`retrieve_ranked` in cold cells (a fresh process, one question each) and warm
+cells (one process, many questions), unfiltered and subject-filtered. Each
+cell runs in its own process and writes its own result file, so a run
+interrupted by a disconnect or a reboot resumes where it stopped. Timed runs
+belong on a quiet machine; the result records the load average.
+
+**Usage**:
+
+```console
+$ particles benchmark query-latency run [OPTIONS]
+```
+
+**Options**:
+
+* `--work-dir <path>`: Where the cached stores, the per-cell results and the logs live. Re-running with the same directory skips the cells already finished.  [default: ~/.particles/benchmark/query-latency]
+* `--sizes <str>`: Comma-separated ACTIVE-row counts (k and M suffixes accepted).  [default: 10k,56k,100k,300k,1M]
+* `--seed <int>`: Store and question seed.
+* `--cold-runs <int range>`: Fresh-process single-question runs per size and variant.  [default: 5; x>=0]
+* `--warm-questions <int range>`: Timed questions in each warm cell.  [default: 50; x>=1]
+* `--warm-budget <float range>`: Seconds a warm cell may spend before it stops asking (after 5 questions); 0 for no budget.  [default: 2400.0; x>=0.0]
+* `--encoder / --no-encoder`: Encode each question with the real encoder, or score a fixed seeded query vector and load no model (the hardware-reference run).  [default: encoder]
+* `--variant <str>`: unfiltered and/or subject (default: both). Repeat for several.
+* `--cell-timeout <float range>`: Seconds before a cell's process is killed.  [default: 7200.0; x>=1.0]
+* `--swap-guard-gib <float range>`: Kill a cell when system swap grows by more than this many GiB.  [default: 8.0; x>=0.5]
+* `--retry-failed`: Re-run cells recorded as failed, timed out or skipped.
+* `--help`: Show this message and exit.
+
+#### `particles benchmark query-latency report`
+
+Render a query-latency run: per-stage tables, counts, and the scaling slope.
+
+**Usage**:
+
+```console
+$ particles benchmark query-latency report [OPTIONS]
+```
+
+**Options**:
+
+* `--work-dir <path>`: The run's work directory.  [default: ~/.particles/benchmark/query-latency]
+* `--format <str>`: "markdown" (default) or "json" (the summary).  [default: markdown]
+* `-o, --output <path>`: Write the report here.
+* `--export-dir <path>`: Write one raw JSON per store size here as well, host paths cut to file names.
+* `--prefix <str>`: File-name prefix of the exported JSON.  [default: query-latency]
+* `--raw-link <str>`: Link each Markdown row to its raw JSON: a template with {size} (10k, 1M, …).
 * `--help`: Show this message and exit.
 
 ### `particles benchmark trip-vs-move`
@@ -1172,6 +1247,11 @@ next-earliest one becomes the age anchor. The delete is recorded as a
 CORPUS_ENTRY_DELETED event that holds the entry id and counts, not the
 deleted content.
 
+A deleted particle that was retracted, superseded or lost a reviewed
+conflict takes that judgment with it. A later deposit of the same claim
+then mints it ACTIVE again instead of holding it for review. The preview
+counts these before the confirm prompt.
+
 **Usage**:
 
 ```console
@@ -1246,6 +1326,12 @@ consolidation run) turns that into current beliefs.
 
 This is the on-demand form of consolidation pass 0.5; the scheduled cycle
 runs the same sweep nightly.
+
+Given one entry, a URL entry is re-checked too. An entry a domain importer
+deposited (Reddit, Hacker News, Mastodon, GitHub, Wikidata, Nomisma,
+Numista) is fetched again by that importer, the way its deposit was, and
+any other URL with a GET. A new Reddit snapshot this way picks up the
+archive's settled comment scores.
 
 **Usage**:
 
@@ -2983,7 +3069,7 @@ $ particles memory consolidate [OPTIONS]
 * `--output <path>`: Write the run report as Markdown to FILE as well.
 * `--format <str>`: Terminal format: markdown (default) or json.  [default: markdown]
 * `--dry-run`: Run each pass's gather only and report the snapshots and pairs it would extract or probe, with a list-price estimate per pass. Writes nothing and makes no LLM call.
-* `--history`: Print the contested fraction and the autonomous share of lifecycle transitions that each past run recorded, oldest first. Runs nothing.
+* `--history`: Print the contested fraction, the autonomous share of lifecycle transitions, and the held claims returned without review that each past run recorded, oldest first, then the closures since the store began. Runs nothing.
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
 * `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.

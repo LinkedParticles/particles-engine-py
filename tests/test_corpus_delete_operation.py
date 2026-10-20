@@ -312,6 +312,7 @@ class TestDeleteEntry:
             "particles_deleted": 1,
             "particles_stripped": 1,
             "anchors_moved": 1,
+            "judgments_deleted": 0,
             "snapshots_deleted": 1,
             "subjects_orphaned": 1,
             "synthesis_rows_deleted": 0,
@@ -336,6 +337,37 @@ class TestDeleteEntry:
         assert result.particles_deleted == 0
         events = await list_events(db_session, event_type=OperatorEventType.CORPUS_ENTRY_DELETED)
         assert len(events) == 1
+
+    async def test_judgment_retired_rows_are_counted(self, db_session: AsyncSession) -> None:
+        # The rejected-value tombstone is the retired row itself, so
+        # deleting it forgets the judgment. The plan, the result and the event
+        # count such rows; a source-retracted row is not a judgment and is not
+        # counted, nor is a retired row the delete only strips.
+        from particles.core.status import StatusReason
+        from particles.store.particle_store import update_particle_status
+
+        s = await _seed(db_session)
+        judged = await _particle(db_session, [_src(s.entry)], content="A retracted claim.")
+        source_retracted = await _particle(db_session, [_src(s.entry)], content="Another claim.")
+        await update_particle_status(
+            db_session, judged, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
+        )
+        await update_particle_status(
+            db_session, source_retracted, Status.RETRACTED, StatusReason.SOURCE_RETRACTED
+        )
+        await update_particle_status(
+            db_session, s.shared, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
+        )
+        await db_session.commit()
+
+        plan = await plan_entry_deletion(db_session, s.entry)
+        assert plan.judgments_deleted == [judged]
+
+        result = await delete_entry(db_session, s.entry)
+        await db_session.commit()
+        assert result.judgments_deleted == 1
+        events = await list_events(db_session, event_type=OperatorEventType.CORPUS_ENTRY_DELETED)
+        assert events[0].payload["judgments_deleted"] == 1
 
     async def test_strip_refuses_to_remove_the_last_source(self, db_session: AsyncSession) -> None:
         s = await _seed(db_session)
@@ -368,6 +400,7 @@ class TestCorpusDeleteCli:
         assert "1 will be deleted" in result.output
         assert "1 kept" in result.output
         assert "1 with a new earliest source" in result.output
+        assert "Judgments:" not in result.output
 
         async def _still_there() -> bool:
             from particles.db import session_scope
@@ -383,3 +416,24 @@ class TestCorpusDeleteCli:
         assert result.exit_code == 0, result.output
         assert "1 particles removed" in result.output
         assert "1 kept with refs stripped" in result.output
+
+    def test_preview_warns_that_judgments_go_too(self, cli_db: Path) -> None:
+        async def _retract_sole() -> _Seeded:
+            from particles.core.status import StatusReason
+            from particles.db import session_scope
+            from particles.store.particle_store import update_particle_status
+
+            async with session_scope() as session:
+                s = await _seed(session)
+                await update_particle_status(
+                    session, s.sole, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
+                )
+                await session.commit()
+                return s
+
+        s = _run_async(_retract_sole())
+        result = CliRunner().invoke(app, ["corpus", "delete", s.entry[:8], "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Judgments: 1 of the deleted particles were retired by a judgment" in result.output
+        assert "mints it ACTIVE again" in result.output
+        assert "1 retirement judgments erased" in result.output

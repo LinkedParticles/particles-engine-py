@@ -849,9 +849,11 @@ async def corpus_deposit_url(
         await session.commit()
     except SourceFetchError as exc:
         # Expected upstream condition — the origin refused/failed the fetch (e.g.
-        # Reddit's 403 bot-wall), not an SDK bug. Log without a stack trace and
-        # map to 502 Bad Gateway with the origin detail (the client request was
-        # well-formed; the upstream is the problem).
+        # a Reddit thread the Arctic Shift archive has not captured, the
+        # archive's rate limit, or Reddit's own 403 bot-wall on the direct
+        # backend), not an SDK bug. Log without a stack trace and map to 502 Bad
+        # Gateway with the origin detail, which names the source and the remedy
+        # (the client request was well-formed; the upstream is the problem).
         log.warning("deposit_url: upstream fetch failed for %r: %s", req.url, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except EgressRefused:
@@ -2242,6 +2244,11 @@ class LinkRequest(BaseModel):
     particle_b: str
     relation_type: str = "CO_EVIDENTIAL"
     confidence: float = 1.0
+    # the project a project-bound agent surface links as. Set by
+    # that surface (the MCP server's launch binding), not by the agent. With it,
+    # a CO_EVIDENTIAL link between beliefs whose observer scopes differ is
+    # refused (400), because the link would change those scopes.
+    project_key: str | None = None
 
 
 class LinkDeleteResponse(BaseModel):
@@ -2253,8 +2260,8 @@ async def create_link_endpoint(
     req: LinkRequest, session: WriteSessionDep, _auth: AuthDep
 ) -> ParticleRelation:
     """Create a typed relation between two particles (HTTP mirror of `links add`)."""
-    from particles.core.schema import RelationCreatedBy, RelationType
-    from particles.store.relation_store import create_relation
+    from particles.core.schema import RelationType
+    from particles.operations.agent_write import link_particles
 
     try:
         rtype = RelationType(req.relation_type)
@@ -2263,13 +2270,13 @@ async def create_link_endpoint(
             status_code=400, detail=f"Unknown relation_type {req.relation_type!r}"
         ) from exc
     try:
-        relation = await create_relation(
+        relation = await link_particles(
             session,
             req.particle_a,
             req.particle_b,
-            rtype,
-            RelationCreatedBy.MANUAL_CLI,
+            relation_type=rtype.value,
             confidence=req.confidence,
+            project_key=req.project_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2379,9 +2386,13 @@ class TrustRuleRequest(BaseModel):
 
 @app.post("/trust/rules", response_model=StatusResponse, responses=_ERR400)
 async def set_trust_rule_endpoint(
-    req: TrustRuleRequest, session: WriteSessionDep, _auth: AuthDep
+    req: TrustRuleRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> StatusResponse:
-    """Add or update a source-trust rule (HTTP mirror of `trust set`)."""
+    """Add or update a source-trust rule (HTTP mirror of `trust set`).
+
+    Trust policy is the operator's judgment, and it decides future conflicts.
+    Refused (503) under the dev-key skip, even from loopback: it needs a real
+    bearer."""
     from particles.store.trust_store import upsert_trust_rule
 
     if req.scope not in ("domain", "url_pattern"):
@@ -2418,9 +2429,13 @@ class TrustStatementResponse(BaseModel):
 
 @app.post("/trust/statements", response_model=TrustStatementResponse, responses=_ERR400)
 async def set_trust_statement_endpoint(
-    req: TrustStatementRequest, session: WriteSessionDep, _auth: AuthDep
+    req: TrustStatementRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> TrustStatementResponse:
-    """Write an OPERATOR_DIRECT SourceTrustStatement and run its cascade."""
+    """Write an OPERATOR_DIRECT SourceTrustStatement and run its cascade.
+
+    The cascade can resolve a held conflict, so this route carries a review's
+    authority. Refused (503) under the dev-key skip, even from loopback: it
+    needs a real bearer."""
     from particles.core.schema import (
         PolicyProvenance,
         SourceRef,

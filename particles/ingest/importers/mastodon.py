@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +82,19 @@ class MastodonImporter:
         parsed = _parse_status_route(url)
         return parsed[0] if parsed else None
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the thread again for ``particles corpus refresh``.
+
+        The URI-R is the status API URL, while the stored blob also carries the
+        context tree from a second API call, so a GET of the URI-R alone would
+        drop every reply.
+        """
+        parsed = _parse_status_route(uri_r)
+        if parsed is None:
+            raise ValueError(f"Not a recognised Mastodon URL: {uri_r}")
+        home_instance, status_id, _handle_hint = parsed
+        return _serialise(await _fetch_payload(home_instance, status_id))
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -90,7 +104,6 @@ class MastodonImporter:
     ) -> tuple[str, str]:
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
-        from particles.http import particles_client
 
         parsed = _parse_status_route(url)
         if parsed is None:
@@ -104,12 +117,8 @@ class MastodonImporter:
         # serves the same bytes both times — which it always does for a
         # public unedited status).
         canonical = _status_api_url(home_instance, status_id)
-        max_replies = get_config().mastodon.max_replies
-
-        async with particles_client() as client:
-            payload = await _fetch_thread(client, home_instance, status_id, max_replies)
-
-        content = json.dumps(payload, sort_keys=True).encode("utf-8")
+        payload = await _fetch_payload(home_instance, status_id)
+        content = _serialise(payload)
         content_hash = sha256(content)
         archive_path = save_blob(content, content_hash)
 
@@ -162,3 +171,18 @@ class MastodonImporter:
             author_id=author_id,
             content_published_at=published,
         )
+
+
+async def _fetch_payload(home_instance: str, status_id: str) -> dict[str, Any]:
+    """The status and its context tree, capped at ``mastodon.max_replies``."""
+    from particles.http import particles_client
+
+    async with particles_client() as client:
+        return await _fetch_thread(
+            client, home_instance, status_id, get_config().mastodon.max_replies
+        )
+
+
+def _serialise(payload: dict[str, Any]) -> bytes:
+    """Key-sorted bytes, so an unchanged thread re-fetches to the same hash."""
+    return json.dumps(payload, sort_keys=True).encode("utf-8")

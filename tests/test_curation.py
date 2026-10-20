@@ -1764,3 +1764,169 @@ class TestGatedSubjectsCard:
         )
         [bucket] = build_buckets([card], exemplars_per_class=3)
         assert bucket.kind is CardKind.GATED_SUBJECTS and bucket.count == 3
+
+
+class TestObserverScopeOnCards:
+    """Each brief names which projects see its belief; display only (Atlas review finding 8)."""
+
+    @staticmethod
+    def _pair(a: str, b: str) -> CurationCard:
+        return CurationCard(
+            kind=CardKind.DUPLICATE_PAIR,
+            particle_ids=[a, b],
+            diagnostic="Possible duplicate",
+            suggested_gestures=gestures_for(CardKind.DUPLICATE_PAIR),
+        )
+
+    def test_scope_brief_per_class(self) -> None:
+        from particles.core.observer_scope import (
+            GLOBAL_SCOPE,
+            LAPSED_SCOPE,
+            UNATTRIBUTED_SCOPE,
+            BeliefScope,
+        )
+        from particles.operations.curation.cards import ObserverScopeKind, scope_brief
+
+        keyed = scope_brief(BeliefScope(keys=frozenset({"-b", "-a"})))
+        assert (keyed.kind, keyed.projects) == (ObserverScopeKind.PROJECTS, ["-a", "-b"])
+        assert scope_brief(GLOBAL_SCOPE).kind is ObserverScopeKind.GLOBAL
+        assert scope_brief(UNATTRIBUTED_SCOPE).kind is ObserverScopeKind.UNATTRIBUTED
+        assert scope_brief(LAPSED_SCOPE).kind is ObserverScopeKind.LAPSED
+        assert scope_brief(UNATTRIBUTED_SCOPE, widened=True).widened
+
+    def test_merge_note_names_what_a_merge_puts_in_view(self) -> None:
+        from particles.core.observer_scope import (
+            GLOBAL_SCOPE,
+            LAPSED_SCOPE,
+            UNATTRIBUTED_SCOPE,
+            BeliefScope,
+        )
+        from particles.operations.curation.cards import merge_scope_note
+
+        def keyed(*keys: str) -> BeliefScope:
+            return BeliefScope(keys=frozenset(keys))
+
+        assert merge_scope_note(keyed("-a"), keyed("-b")) == (
+            "Merging puts both beliefs in view for projects -a and -b."
+        )
+        assert merge_scope_note(keyed("-a"), keyed("-b", "-c")) == (
+            "Merging puts both beliefs in view for projects -a, -b and -c."
+        )
+        assert "every project" in (merge_scope_note(keyed("-a"), GLOBAL_SCOPE) or "")
+        # An unattributed side is put in view for the other side's project.
+        assert merge_scope_note(keyed("-a"), UNATTRIBUTED_SCOPE) == (
+            "Merging puts both beliefs in view for project -a."
+        )
+        # Nothing changes for any project: no note.
+        assert merge_scope_note(keyed("-a"), keyed("-a")) is None
+        assert merge_scope_note(GLOBAL_SCOPE, GLOBAL_SCOPE) is None
+        assert merge_scope_note(UNATTRIBUTED_SCOPE, LAPSED_SCOPE) is None
+
+    @pytest.mark.asyncio
+    async def test_briefs_carry_each_beliefs_scope_on_a_rescoped_store(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation.cards import ObserverScopeKind
+        from particles.operations.curation.session import _attach_particle_briefs
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+        from tests._observer_scope import (
+            belief,
+            generation,
+            project_source_tags,
+            rescoped,
+            source,
+        )
+
+        mine = await belief(
+            db_session,
+            "A deploys Fridays.",
+            await source(db_session, "a", project_source_tags("-a")),
+        )
+        world = await belief(
+            db_session, "Pluto has five moons.", await source(db_session, "w", ["web"])
+        )
+        gap = await belief(
+            db_session, "Keyless harness claim.", await source(db_session, "h", ["claude-code"])
+        )
+        old = await generation(db_session, "g", "v1", project_source_tags("-a"))
+        gone = await belief(db_session, "Dropped by its source.", old)
+        await generation(db_session, "g", "v2", project_source_tags("-a"))
+        wide = await belief(
+            db_session,
+            "B deploys Mondays.",
+            await source(db_session, "b", project_source_tags("-b")),
+        )
+        await rescoped(db_session)
+        await widen(db_session, ScopeTarget.PARTICLE, wide.id, actor="op")
+        await db_session.flush()
+
+        ids = [mine.id, world.id, gap.id, gone.id, wide.id]
+        card = CurationCard(kind=CardKind.STALE, particle_ids=ids, diagnostic="")
+        await _attach_particle_briefs(db_session, [card])
+        scope = {b.particle_id: b.observer_scope for b in card.particles if b.observer_scope}
+        assert scope.keys() == set(ids)
+        assert scope[mine.id].kind is ObserverScopeKind.PROJECTS
+        assert scope[mine.id].projects == ["-a"]
+        assert scope[world.id].kind is ObserverScopeKind.GLOBAL
+        assert scope[gap.id].kind is ObserverScopeKind.UNATTRIBUTED
+        assert scope[gone.id].kind is ObserverScopeKind.LAPSED
+        assert scope[wide.id].widened
+        assert not scope[mine.id].widened
+
+    @pytest.mark.asyncio
+    async def test_a_cross_scope_duplicate_pair_says_what_a_merge_does(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation.session import _attach_particle_briefs
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        in_a = await source(db_session, "a", project_source_tags("-a"))
+        a1 = await belief(db_session, "Deploys run on Fridays.", in_a)
+        a2 = await belief(db_session, "Deploys happen on Fridays.", in_a)
+        b = await belief(
+            db_session,
+            "Deploys run Fridays.",
+            await source(db_session, "b", project_source_tags("-b")),
+        )
+        derived = await belief(db_session, "Deploys run weekly.", premises=(a1.id,))
+        await rescoped(db_session)
+        await db_session.flush()
+
+        cross, same, from_derived = (
+            self._pair(a1.id, b.id),
+            self._pair(a1.id, a2.id),
+            self._pair(b.id, derived.id),
+        )
+        await _attach_particle_briefs(db_session, [cross, same, from_derived])
+        assert cross.scope_note == "Merging puts both beliefs in view for projects -a and -b."
+        assert same.scope_note is None
+        # A derived belief keeps the meet of its premises whatever it is linked to.
+        assert from_derived.scope_note is None
+        # Display only: the briefs and the card's identity are what they were.
+        assert cross.key == f"duplicate_pair:{'|'.join(sorted([a1.id, b.id]))}"
+
+    @pytest.mark.asyncio
+    async def test_a_store_never_rescoped_shows_no_scope(self, db_session: AsyncSession) -> None:
+        from particles.operations.curation.session import _attach_particle_briefs
+        from tests._observer_scope import belief, project_source_tags, source
+
+        a = await belief(
+            db_session,
+            "Deploys run on Fridays.",
+            await source(db_session, "a", project_source_tags("-a")),
+        )
+        b = await belief(
+            db_session,
+            "Deploys run Fridays.",
+            await source(db_session, "b", project_source_tags("-b")),
+        )
+        await db_session.flush()
+
+        card = self._pair(a.id, b.id)
+        await _attach_particle_briefs(db_session, [card])
+        assert [x.observer_scope for x in card.particles] == [None, None]
+        assert card.scope_note is None
+        dumped = card.model_dump(mode="json")
+        assert dumped["scope_note"] is None
+        assert all(p["observer_scope"] is None for p in dumped["particles"])

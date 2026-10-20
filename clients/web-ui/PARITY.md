@@ -49,7 +49,10 @@ backlog it was cut from (`Top N of M cards open, by leverage`, from the
 response's `open_count`); a spent batch says how many remain and offers a
 refresh. Each card leads with the engine's `title` and `question`, then the
 briefs: claim, subjects, effective confidence, status, asserted date and
-source URI. Status is shown as the raw `status / status_reason` pair,
+source URI. On a rescoped store each brief also names which projects the belief
+is in view for (`observer_scope`), and a duplicate pair whose sides
+are in view for different projects carries the engine's `scope_note` saying
+what a merge would do to that. Both are server-derived and display only. Status is shown as the raw `status / status_reason` pair,
 verbatim, followed by a one-line plain reading of the reason; the Browse
 detail panel shows the same pair. The reading is a label table in the client,
 not an epistemic computation. The resolve sheet words "Keep B" and "Both

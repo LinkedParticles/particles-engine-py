@@ -18,8 +18,11 @@ unchanged (invariant §1). Which stores a caller may reach (auth / ACL /
 provisioning) is a separate access-control layer above this one; this
 layer only resolves a handle to a DSN and hands back a session.
 
-``storage.database_url`` defaults to SQLite (development). Set to a
-``postgresql+asyncpg://...`` URL for production.
+``storage.database_url`` defaults to SQLite, the only backend the package
+ships a driver for. A ``postgresql+asyncpg://...`` URL is accepted, but
+``asyncpg`` is not a dependency and must be installed separately. A Postgres
+deployment is deferred, not supported, as the operator guide's container page
+says.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -536,3 +540,52 @@ async def create_tables(store: StoreHandle = DEFAULT_STORE) -> None:
     alembic_cfg.attributes["store_url"] = store_url
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, command.upgrade, alembic_cfg, "head")
+
+
+@dataclass(frozen=True)
+class SchemaState:
+    """Where a store's migrations stand against the ones this install ships.
+
+    Attributes:
+        stored: The revisions in the store's ``alembic_version`` table.
+        unknown: Stored revisions this install does not ship, so a newer
+            Particles migrated the store past it.
+        pending: This install's revisions the store has not run, oldest first.
+            Code that reads a table or column one of them adds fails on it.
+    """
+
+    stored: tuple[str, ...]
+    unknown: tuple[str, ...]
+    pending: tuple[str, ...]
+
+
+async def schema_state(store: StoreHandle = DEFAULT_STORE) -> SchemaState | None:
+    """Compare ``store``'s Alembic revision with this install's migration head, both ways.
+
+    Reads the ``alembic_version`` table and walks the migrations directory
+    :func:`alembic_paths` resolves; it never upgrades. Returns ``None`` for a
+    store with no ``alembic_version`` rows (one built by ``create_all``, as the
+    test fixtures are), since there is nothing to compare.
+
+    Raises:
+        Exception: Whatever reading the store or the migrations directory
+            raises, including a store with no ``alembic_version`` table.
+            Callers that only advise catch it.
+    """
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text
+
+    async with session_scope(store) as session:
+        rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        stored = tuple(str(r[0]) for r in rows)
+    if not stored:
+        return None
+    script = ScriptDirectory(str(alembic_paths()[1]))
+    known = {s.revision for s in script.walk_revisions()}
+    unknown = tuple(rev for rev in stored if rev not in known)
+    pending: tuple[str, ...] = ()
+    if not unknown:
+        # Newest first from the heads down to (not including) each stored revision.
+        walked = script.iterate_revisions("heads", stored)
+        pending = tuple(reversed([s.revision for s in walked if s.revision not in stored]))
+    return SchemaState(stored=stored, unknown=unknown, pending=pending)

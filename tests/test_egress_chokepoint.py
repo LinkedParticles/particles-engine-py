@@ -319,6 +319,18 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
         "run; the child's own calls go through the SDK's checked "
         "transports under the operator's network.egress, copied into its config",
     ),
+    ("benchmark/query_latency/runner.py", "_run_child", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: starts this interpreter "
+        "(sys.executable -m the SDK's own cell module) for one benchmark cell; the "
+        "cell reads a local SQLite file and loads the encoder through the SDK",
+    ),
+    ("benchmark/query_latency/cell.py", "_cmd", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: `git rev-parse HEAD` over "
+        "the package's own checkout and `sysctl -n` hardware reads, for the "
+        "result's reproduction tuple; never fetches",
+    ),
 }
 
 

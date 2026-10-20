@@ -535,7 +535,9 @@ async def _update_events(session: Any) -> list[Any]:
 
 @pytest.mark.asyncio
 class TestPipeline:
-    async def test_a_cross_session_update_supersedes(self, db_session: Any, bow: None) -> None:
+    async def test_a_cross_session_update_supersedes(
+        self, db_session: Any, bow: None, candidate_cache_mode: str
+    ) -> None:
         ex = _OneClaim()
         await _say(db_session, ex, BOSTON, day=1)
         [new] = await _say(db_session, ex, DENVER, day=9)
@@ -772,7 +774,11 @@ class TestSlotRule:
         bow.assert_not_awaited()
 
     async def test_the_sweep_leaves_a_different_slot_pair_alone(
-        self, db_session: Any, bow: AsyncMock, monkeypatch: pytest.MonkeyPatch
+        self,
+        db_session: Any,
+        bow: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+        candidate_cache_mode: str,
     ) -> None:
         from particles.config import get_config
         from particles.operations import reconcile as reconcile_mod
@@ -805,7 +811,7 @@ class TestSlotRule:
         update_probe.assert_any_await(FAVOURITE, NOT_YET)
 
     async def test_an_agent_keeps_its_own_belief_in_another_slot(
-        self, db_session: Any, bow: AsyncMock
+        self, db_session: Any, bow: AsyncMock, candidate_cache_mode: str
     ) -> None:
         agent = TestAgentAssertionPath()
         await agent._assert(db_session, FAVOURITE, at=T0)

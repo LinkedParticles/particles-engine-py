@@ -2,7 +2,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cross-pass exact-duplicate suppression at write time.
+"""Cross-pass exact-duplicate suppression at write time, and the
+rejected-value tombstone.
+
+The tombstone is :data:`JUDGMENT_RETIREMENTS`: a claim retired by a judgment
+about its value keeps its identity key, and a later restatement of that key is
+held for review instead of re-entering ACTIVE (the pipeline's
+``_hold_retired_reassertion``). The key is the one this module's duplicate
+index uses, so the retired row itself is the tombstone. A ``corpus delete``
+that removes the row's only source removes the tombstone with it, and a
+content-free tombstone that would survive the delete is not built yet
+(D1).
 
 The prevention-side twin of Tier-A auto-merge, and the cross-pass
 sibling of :mod:`particles.ingest.candidate_dedup` (which folds duplicates

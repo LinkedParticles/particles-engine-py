@@ -236,7 +236,7 @@ async def _run(session: Any, cursor: Cursor | None = None, **kwargs: Any) -> Any
 
 class TestTheSurvivor:
     async def test_two_changes_retire_the_other_phrasing(
-        self, db_session: Any, probe: Callable[..., _Probe]
+        self, db_session: Any, probe: Callable[..., _Probe], candidate_cache_mode: str
     ) -> None:
         _, c = await _trip(db_session)
         scripted = probe()

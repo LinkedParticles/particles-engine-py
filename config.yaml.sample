@@ -569,6 +569,11 @@ llm:  # [client]
   # at 1.25x input and a cache read at 0.1x.
   cache_write_price_multiplier: 1.25
   cache_read_price_multiplier: 0.1
+  # Per-model cache-read multipliers, keyed like price_per_mtok, for models the
+  # pricing page bills below 0.1x. Three ship and stay unless an entry here
+  # names the same key: claude-sonnet-5-5 and claude-opus-5-5 at 0.05,
+  # claude-fable-5-1 at 0.025 (pricing page, read 2026-10-18).
+  cache_read_price_multiplier_by_model: {}
 
 extraction:  # [client]
   # NOTE: `extraction.model` moved to `llm.default.model`. The old
@@ -639,6 +644,12 @@ extraction:  # [client]
   # `particles audit` estimate and the memory-rot benchmark. (Formerly
   # benchmark_rot.estimate_extraction_prompt_overhead_tokens; migrated.)
   estimate_prompt_overhead_tokens: 2500
+  # The part of that prompt sent as a prompt-cache prefix: the consolidation
+  # estimate adds it per call at the model's cache-read price
+  # (llm.cache_read_price_multiplier_by_model), or as plain input when
+  # llm.prompt_cache.enabled is off. claude-sonnet-5-5 wrote a 2,868-token
+  # prefix on each metered night of 2026-10-12 to 10-16.
+  estimate_cached_prefix_tokens: 2900
   # Skip superseded generations of a MUTABLE source. Extraction is
   # deferred by default, so a file edited in N sessions between two passes has
   # N pending snapshots. With this on, the bulk paths (`extract --all-pending`,
@@ -1269,6 +1280,12 @@ utility:  # [engine]
     # on the first beliefs in list order — near-random coverage of a large
     # store. 0 disables the filter (every unmatched belief competes).
     behavioural_candidate_limit: 200
+    # Characters per input token the consolidation estimate prices a judge
+    # prompt at. The prompt is mostly tool-call lines (paths, ids, commands),
+    # which tokenize denser than prose: 2.1 to 2.6 on claude-sonnet-5-5 on the
+    # metered nights of 2026-10-12 to 10-16. The lower figure keeps the
+    # estimate above the bill.
+    estimate_chars_per_token: 2.1
   # What ONE explicit operator gesture (`particles memory useful <id>`)
   # is worth relative to one mined event. This is not a lens/`utility_rules`
   # field: it parameterises evidence *production* in this store, not the portable
@@ -1566,6 +1583,23 @@ reddit:  # [client]
   top_comment_count: 200
   # Maximum characters per comment body in the LLM prompt.
   comment_body_limit: 1000
+  # The four fetch settings below are read by the Engine's Reddit importer at
+  # deposit time, not by the extractor.
+  # Where a thread's post and comments are fetched from: "arctic_shift" (the
+  # Arctic Shift archive, a free third-party mirror of Reddit) or "reddit"
+  # (Reddit's own .json endpoint, which now answers 403 to unauthenticated
+  # clients from most networks). Share links (/r/<sub>/s/<id>) are always
+  # resolved through reddit.com. Archive scores read 0 or 1 until the archive's
+  # second pass, about 36 hours after a post or comment is made; run
+  # `particles corpus refresh <entry>` after that to pick up settled scores.
+  fetch_backend: arctic_shift
+  # Arctic Shift API host.
+  arctic_shift_base_url: https://arctic-shift.photon-reddit.com
+  # Most comments one deposit pulls from the archive's comment tree.
+  arctic_shift_comment_limit: 25000
+  # Longest HTTP 429 rate-limit wait honoured before the single retry; a longer
+  # reset fails the deposit instead of stalling it.
+  arctic_shift_max_wait_seconds: 30
 
 hackernews:  # [client]
   # Maximum comments the importer fetches per HN thread (one Firebase
@@ -1671,6 +1705,23 @@ query:  # [engine]
   # are shown with the answer, and nothing is dropped or stored. A request's
   # `grounded` field (CLI --grounded / --ungrounded) overrides this per call.
   grounded_answers: false
+  # Keep each store's ACTIVE candidates (their particles and decoded
+  # embeddings) in memory between reads in a long-running process (the MCP
+  # server, the API, a reindex or consolidation run), re-reading only the rows
+  # the store's change journal names as changed since the last read, whichever
+  # process changed them. Semantic query, each extraction pass, each agent
+  # assertion and the maintenance passes read through it. Results are
+  # identical either way. Off, every one of those reads decodes every ACTIVE
+  # candidate again, about 4.5 s at 56k beliefs (docs/benchmarks/query-latency.md).
+  # The cost is memory: one decoded row per ACTIVE belief for the life of the
+  # process.
+  candidate_cache: true
+  # After building a cache of at least this many rows, exempt the process's
+  # live objects from Python's cyclic garbage collector (gc.freeze). Without
+  # it, a full collection walks every cached object, about 0.3 s at 56k rows,
+  # and a query sets one off more often than not. The setting is process-wide,
+  # which matters to an application that embeds the SDK; 0 never freezes.
+  candidate_cache_freeze_rows: 10000
 
 contestedness:  # [client]
   # per-claim contestedness is the max−min spread of a claim's
@@ -2086,6 +2137,13 @@ audit:  # [engine]
   # 0317): claude-sonnet-5-5 at 0.534 and claude-sonnet-4-6 at 0.800, both
   # measured on identical extraction calls.
   estimate_output_scale_by_model: {}
+  # Multiplies the per-character rate (not the per-call base) for a source
+  # type that states fewer claims per character than the memory notes and
+  # design records it was fitted on. Read by the consolidation estimate. One
+  # entry ships and stays unless an entry here names the same key:
+  # CONVERSATION at 0.4 (a transcript states about 1.9 claims per 1,000
+  # characters against about 5).
+  estimate_output_scale_by_source_type: {}
   # The expected range takes every call at (1 - spread) up to every call at
   # (1 + spread) of its figure. A call whose output passes
   # extraction.max_tokens at that end is billed that whole budget plus a retry
