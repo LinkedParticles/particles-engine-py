@@ -92,6 +92,7 @@ from particles.operations.source_passage import (
     derive_passage,
     extractor_view_text,
 )
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import (
     EventRefKind,
     OperatorEventType,
@@ -103,7 +104,6 @@ from particles.store.particle_store import (
     count_update_retirements_after,
     get_active_particles_by_content_hashes,
     get_active_particles_for_entry,
-    get_active_particles_with_embeddings,
     get_particles_by_ids,
     get_update_retirements_after,
     insert_particle,
@@ -1123,7 +1123,7 @@ async def run_reanchor(
                 )
         by_id = {c.id: c for c in chosen}
         if index is None:
-            index = _Pool(await get_active_particles_with_embeddings(session))
+            index = _Pool(await load_active_candidates(session))
         for verdict in verdicts:
             if verdict.verdict is DependencyVerdict.HOLDS:
                 report.holds += 1

@@ -55,7 +55,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.conflict_review import conflict_pair_ids, is_quarantined
+from particles.core.conflict_review import CLOSED_RECORD, conflict_pair_ids, is_quarantined
 from particles.core.contradiction_disclosure import DISCLOSURE_ACTOR, CloseCause
 from particles.core.generics import is_generic_claim
 from particles.core.held_release import (
@@ -70,7 +70,7 @@ from particles.core.held_release import (
 from particles.core.observer_scope import PairPrecondition
 from particles.core.schema import Particle
 from particles.core.stance import stance_holder
-from particles.core.status import Status, StatusReason
+from particles.core.status import Status
 from particles.db import write_transaction
 from particles.embeddings import get_embedding_model
 from particles.ingest.duplicate_suppression import build_duplicate_index
@@ -394,9 +394,7 @@ async def _release(
             report.closed_meanwhile += 1
             return None
         record, held = reread
-        await update_particle_status(
-            session, record.id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
-        )
+        await update_particle_status(session, record.id, *CLOSED_RECORD)
         key, landed = await restore_held_claim(session, held)
         standing: list[Particle] = []
         if decision.declined:

@@ -309,7 +309,9 @@ async def test_lsem01_excludes_non_falsifiable(db_session: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lsem01_detects_cross_source_contradiction(db_session: object) -> None:
+async def test_lsem01_detects_cross_source_contradiction(
+    db_session: object, candidate_cache_mode: str
+) -> None:
     """L-SEM-01 flags a contradiction across two DIFFERENT corpus entries.
 
     The same-source guard is gone: two near-identical-embedding claims from

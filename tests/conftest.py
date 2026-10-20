@@ -116,6 +116,51 @@ def second_reading_confirms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(second_reading, "_llm_verify_contradiction", _confirm)
 
 
+@pytest.fixture(autouse=True)
+def cached_particles_stay_unchanged() -> Generator[None, None, None]:
+    """Fail any test whose code changes a particle the candidate cache shares.
+
+    The cache (:mod:`particles.store.candidate_cache`) hands every reader in a
+    process the same ``Particle`` objects, and the extraction pipeline and the
+    maintenance passes read through it. A reader that wrote into one would
+    change what every later reader is served, and nothing would raise. Each
+    cached particle is compared with what it was decoded as, every time the
+    cache serves it and again at teardown. It patches by hand rather than through
+    ``monkeypatch``: requesting that fixture here would set it up before
+    ``no_env_leak`` and so tear it down after, which reports every test's own
+    ``monkeypatch.setenv`` as a leak.
+    """
+    from particles.store import candidate_cache
+
+    decoded: dict[int, tuple[Any, dict[str, Any]]] = {}
+    real_entry = candidate_cache._entry
+    real_select = candidate_cache._select
+
+    def check(particles: Any) -> None:
+        for p in particles:
+            kept = decoded.get(id(p))
+            if kept is not None and p.model_dump() != kept[1]:
+                pytest.fail(f"a reader changed cached particle {p.id} in place")
+
+    def entry(row: Any, rowid: int) -> Any:
+        made = real_entry(row, rowid)
+        decoded[id(made.particle)] = (made.particle, made.particle.model_dump())
+        return made
+
+    def select(state: Any, min_confidence: float, allowed: Any) -> Any:
+        check(e.particle for e in state.ordered)
+        return real_select(state, min_confidence, allowed)
+
+    candidate_cache._entry = entry  # type: ignore[assignment]
+    candidate_cache._select = select  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        candidate_cache._entry = real_entry  # type: ignore[assignment]
+        candidate_cache._select = real_select  # type: ignore[assignment]
+    check(p for p, _ in decoded.values())
+
+
 # The engine's bearer-token pair: the key the server expects, and the
 # token an HTTP client sends to it.
 _ENGINE_BEARER_VARS = ("PARTICLES_API_KEY", "PARTICLES_ENGINE_TOKEN")
@@ -287,6 +332,44 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     # ``RuntimeError: Event loop is closed`` when it tries to schedule
     # cleanup work on the dead loop.
     await engine.dispose()
+
+
+@pytest_asyncio.fixture(params=["off", "warm"])
+async def candidate_cache_mode(
+    request: pytest.FixtureRequest, db_session: AsyncSession
+) -> AsyncGenerator[str, None]:
+    """Run a test twice: with the candidate cache off, and through a warm one.
+
+    The readers of the ACTIVE candidate set (the extraction pipeline, the
+    write-time reconciliation seam, the maintenance passes) read through
+    :mod:`particles.store.candidate_cache`. A test that takes this fixture pins
+    the same expected output both ways. ``off`` is the uncached loader every
+    reader ran before. ``warm`` builds the cache before the test writes
+    anything, so every row the test seeds arrives through the change journal
+    as it would in a long-lived process, and makes the fallback loader raise,
+    so a read that skipped the cache fails the test.
+    """
+    from particles.config import get_config
+    from particles.store import candidate_cache
+    from particles.store.candidate_cache import cached_rows, load_active_candidates
+
+    if request.param == "off":
+        get_config().query.candidate_cache = False
+        yield "off"
+        assert cached_rows(db_session) is None
+        return
+    await load_active_candidates(db_session)
+    assert cached_rows(db_session) is not None
+
+    async def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a reader went past the warm candidate cache")
+
+    fallback = candidate_cache.get_active_particles_with_embeddings
+    candidate_cache.get_active_particles_with_embeddings = refuse  # type: ignore[assignment]
+    try:
+        yield "warm"
+    finally:
+        candidate_cache.get_active_particles_with_embeddings = fallback
 
 
 @pytest_asyncio.fixture

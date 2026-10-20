@@ -50,14 +50,23 @@ from pydantic import BaseModel
 
 from particles.config import get_config
 from particles.core.granularity import granularity_violation
-from particles.core.observer_scope import PROJECT_TAG_PREFIX, project_keys, project_tag
+from particles.core.observer_scope import (
+    PROJECT_TAG_PREFIX,
+    describe_scope,
+    project_keys,
+    project_tag,
+    same_scope,
+)
 from particles.core.schema import (
     Confidence,
     Particle,
+    ParticleRelation,
     ParticleType,
     PolicyProvenance,
     ProvenanceRef,
     ProvenanceRefType,
+    RelationCreatedBy,
+    RelationType,
     SourceRef,
     SourceRefType,
     SourceTrustStatement,
@@ -69,6 +78,9 @@ from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import deposit_text as _deposit_text_seam
 from particles.extraction.registry import infer_domain
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+from particles.store.observer_scope_join import lens_may_engage, load_scopes
+from particles.store.particle_store import get_particle
+from particles.store.relation_store import create_relation
 
 
 class AgentWriteResult(BaseModel):
@@ -761,4 +773,48 @@ async def deposit_conversation_text(
         source_type=SourceType.CONVERSATION,
         tags=_scope_tags(tags, project_key),
         author_id=identity,
+    )
+
+
+async def link_particles(
+    session: Any,
+    particle_a: str,
+    particle_b: str,
+    *,
+    relation_type: str,
+    confidence: float,
+    project_key: str | None = None,
+) -> ParticleRelation:
+    """Write a typed relation, refusing a project-bound link that changes an observer scope.
+
+    A ``CO_EVIDENTIAL`` edge unions the two beliefs' groups in the observer-scope
+    join, so a link between beliefs whose scopes differ moves each
+    into the other's view: another project's belief into this one, this
+    project's into another, or this project's into every project when the
+    partner is global. Widening is the operator's act, so with
+    ``project_key`` set (the binding of a project-bound surface) such a link is
+    refused and left to ``particles links add``. Before the store is rescoped
+    no lens engages and the link is written as before. Does not commit.
+    """
+    rtype = RelationType(relation_type)
+    if (
+        project_key is not None
+        and rtype is RelationType.CO_EVIDENTIAL
+        and await lens_may_engage(session)
+    ):
+        a = await get_particle(session, particle_a)
+        b = await get_particle(session, particle_b)
+        if a is not None and b is not None and a.id != b.id:
+            scopes = await load_scopes(session, [a, b])
+            if not same_scope(scopes[a.id], scopes[b.id]):
+                raise ValueError(
+                    f"Refusing to link {a.id} ({describe_scope(scopes[a.id])}) with "
+                    f"{b.id} ({describe_scope(scopes[b.id])}): a CO_EVIDENTIAL link "
+                    "between beliefs with different observer scopes would change which "
+                    f"projects see them, and an agent bound to project {project_key!r} "
+                    "may not change a belief's scope. An operator can link them with "
+                    "`particles links add`."
+                )
+    return await create_relation(
+        session, particle_a, particle_b, rtype, RelationCreatedBy.MANUAL_CLI, confidence=confidence
     )

@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.conflict_review import (
+    CLOSED_RECORD,
     FurtherMembers,
     TrustJudgment,
     conflict_pair_ids,
@@ -238,9 +239,7 @@ async def resolve(
         # Close the wrapper BEFORE the cascade runs: the cascade
         # scans open INCONSISTENCY particles in the domain, and must not
         # re-process — possibly contradicting — the resolution just made.
-        await update_particle_status(
-            session, inconsistency_particle_id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
-        )
+        await update_particle_status(session, inconsistency_particle_id, *CLOSED_RECORD)
         if trust_stmt is not None:
             cascade_count = await run_trust_cascade(session, trust_stmt)
     else:

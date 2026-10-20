@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.conflict_review import is_quarantined, is_retired_value
+from particles.core.conflict_review import CLOSED_RECORD, is_quarantined, is_retired_value
 from particles.core.contradiction_disclosure import (
     DISCLOSURE_ACTOR,
     READING_KEY,
@@ -99,6 +99,7 @@ from particles.store.event_store import (
 from particles.store.observer_scope_join import SourceRef, attests, lens_may_engage, load_scopes
 from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
+    get_cascade_closed_record_ids,
     get_census_records,
     get_inconsistency_particles,
     get_particle,
@@ -172,9 +173,11 @@ async def _record_states(
 
     The close cause is read from what each close path leaves: an
     ``INCONSISTENCY_CLOSED`` event for a lapse or regroup, a ``REVIEW_RESOLVED``
-    event for a review, and the ``PROVENANCE_STALE`` status the trust cascade
-    leaves without an event. A closed record with none of these marks is read
-    as a judgment, which errs toward not raising the disagreement again.
+    event for a review, and the REVIEW particle the trust cascade writes in
+    place of an event. Every path leaves the record ``RETRACTED``, so status
+    tells none of them apart (a cascade close read ``PROVENANCE_STALE`` until
+    1.192.15). A closed record with none of these marks is read as a judgment,
+    which errs toward not raising the disagreement again.
     """
     records = await get_census_records(session)
     if not records:
@@ -182,6 +185,7 @@ async def _record_states(
     reviewed = {
         pid for pid, _, _ in await list_particle_events(session, OperatorEventType.REVIEW_RESOLVED)
     }
+    cascaded = await get_cascade_closed_record_ids(session)
     swept: dict[str, CloseCause] = {}
     for pid, _, payload in await list_particle_events(
         session, OperatorEventType.INCONSISTENCY_CLOSED
@@ -209,7 +213,7 @@ async def _record_states(
             cause = swept[record.id]
         elif record.id in reviewed:
             cause = CloseCause.REVIEW
-        elif record.status is Status.PROVENANCE_STALE:
+        elif record.id in cascaded or record.status is Status.PROVENANCE_STALE:
             cause = CloseCause.CASCADE
         else:
             cause = CloseCause.REVIEW
@@ -447,9 +451,7 @@ async def _close(
     ``withdrawn`` names the pairs a re-reading no longer confirms, each with
     the new reading's reason.
     """
-    await update_particle_status(
-        session, record.id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
-    )
+    await update_particle_status(session, record.id, *CLOSED_RECORD)
     detail: list[dict[str, Any]] = []
     for pid in dropped:
         p = view.particles.get(pid)
@@ -677,9 +679,7 @@ async def _apply_extract_reading(
     if r.confirmed:
         await set_particle_property(session, record.id, READING_KEY, r.reading)
         return None
-    await update_particle_status(
-        session, record.id, Status.RETRACTED, StatusReason.CONFLICT_RESOLVED
-    )
+    await update_particle_status(session, record.id, *CLOSED_RECORD)
     newcomer = await get_particle(session, r.b.id)
     restored: dict[str, Any] = {}
     refs: list[str] = [r.a.id, r.b.id]

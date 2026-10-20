@@ -274,6 +274,9 @@ async def link_add(
     """Link two particles with a typed relation (CO_EVIDENTIAL today).
 
     A thin mirror of ``particles links add``; particles are addressed by full id.
+    On a project-bound server the two beliefs must already have the same
+    observer scope: a link between different scopes would change which projects
+    see them, which is the operator's act (``particles links add``).
 
     Args:
         particle_a: Full id of the first particle.
@@ -286,7 +289,7 @@ async def link_add(
     handle = _resolve_store(store)
     rt = _parse_relation(relation_type)
     rel = await get_backend().links_add(
-        particle_a, particle_b, relation_type=rt.value, confidence=1.0
+        particle_a, particle_b, relation_type=rt.value, confidence=1.0, project_key=bound_project()
     )
     return {
         "store": handle,

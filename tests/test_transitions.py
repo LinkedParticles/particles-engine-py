@@ -33,9 +33,6 @@ class TestValidTransitions:
     def test_active_to_provenance_stale(self) -> None:
         validate_transition(Status.ACTIVE, Status.PROVENANCE_STALE)
 
-    def test_inconsistency_to_provenance_stale(self) -> None:
-        validate_transition(Status.INCONSISTENCY, Status.PROVENANCE_STALE)
-
     def test_inconsistency_to_retracted(self) -> None:
         validate_transition(Status.INCONSISTENCY, Status.RETRACTED)
 
@@ -79,6 +76,12 @@ class TestInvalidTransitions:
         # don't transition to it
         with pytest.raises(ValueError):
             validate_transition(Status.ACTIVE, Status.INCONSISTENCY)
+
+    def test_inconsistency_to_provenance_stale(self) -> None:
+        # Every non-DEFER resolution retracts the record (§6.6 wrapper-terminal
+        # rule); the trust cascade used this edge until 1.192.15 (migration 053).
+        with pytest.raises(ValueError, match="Invalid status transition"):
+            validate_transition(Status.INCONSISTENCY, Status.PROVENANCE_STALE)
 
     def test_none_to_superseded(self) -> None:
         with pytest.raises(ValueError):

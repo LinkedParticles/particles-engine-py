@@ -15,13 +15,17 @@ import pytest
 
 from particles.config import ProviderSelection, get_config
 from particles.llm import CompletionRequest
+from particles.operations.audit import ExtractionCall, output_density
 from particles.operations.spend_estimate import (
     PassEstimate,
+    chars_per_token,
     context_call_estimate,
     estimate_batch_chunk,
     extraction_estimate,
+    planned_extraction_estimate,
     probe_estimate,
     requests_estimate,
+    rides_batches,
 )
 
 #: claude-haiku-4-5 lists at $1 / $5 per MTok.
@@ -108,3 +112,101 @@ def test_requests_are_priced_from_their_own_size_at_list_price(haiku_everywhere:
 
 def test_no_requests_cost_nothing() -> None:
     assert requests_estimate("semantic_lint", [], 400) == PassEstimate(calls=0, usd=0.0)
+
+
+# --- consolidation pricing: batches, transcripts, the cached prefix ---------
+
+_SONNET = "claude-sonnet-5-5"
+
+
+@pytest.fixture
+def sonnet_extraction() -> None:
+    get_config().llm.extraction = ProviderSelection(provider="anthropic", model=_SONNET)
+
+
+def _calls(n: int, *, chars: int = 6_000, density: float = 1.0) -> list[ExtractionCall]:
+    return [ExtractionCall(chars=chars, density=density) for _ in range(n)]
+
+
+def test_a_batched_extraction_is_priced_at_the_batch_discount(sonnet_extraction: None) -> None:
+    calls = _calls(10)
+    batched = planned_extraction_estimate(calls, entries=10, batched=True)
+    get_config().llm.batch.enabled = False
+    sequential = planned_extraction_estimate(calls, entries=10, batched=True)
+    assert batched.usd is not None and sequential.usd is not None
+    assert batched.usd < sequential.usd
+    assert "llm.batch_discount" in batched.basis
+    assert "llm.batch_discount" not in sequential.basis
+
+
+def test_only_the_native_adapter_with_enough_requests_rides_a_batch(
+    sonnet_extraction: None,
+) -> None:
+    llm = get_config().llm
+    assert rides_batches("extraction", llm.batch.min_requests)
+    assert not rides_batches("extraction", llm.batch.min_requests - 1)
+    llm.extraction = ProviderSelection(provider="local", model="qwen3:14b")
+    assert not rides_batches("extraction", 100)
+
+
+def test_a_transcript_writes_less_per_character(sonnet_extraction: None) -> None:
+    scale = get_config().audit.estimate_output_scale_by_source_type["CONVERSATION"]
+    prose = planned_extraction_estimate(_calls(4), entries=4, batched=False)
+    transcript = planned_extraction_estimate(
+        _calls(4, density=output_density("CONVERSATION")), entries=4, batched=False
+    )
+    assert output_density("CONVERSATION") == scale < 1.0
+    assert output_density("LOCAL_MARKDOWN") == 1.0
+    assert transcript.usd is not None and prose.usd is not None
+    assert transcript.usd < prose.usd
+    assert "audit.estimate_output_scale_by_source_type" in transcript.basis
+
+
+def test_delta_context_is_billed_as_input(sonnet_extraction: None) -> None:
+    bare = planned_extraction_estimate([ExtractionCall(chars=6_000)], entries=1, batched=False)
+    with_context = planned_extraction_estimate(
+        [ExtractionCall(chars=6_000, context_chars=4_000)], entries=1, batched=False
+    )
+    price = get_config().llm.price_for(get_config().llm.for_purpose("extraction"))
+    assert price is not None and bare.usd is not None and with_context.usd is not None
+    context_tokens = 4_000 / chars_per_token(get_config().llm.for_purpose("extraction"))
+    # The context is input on the call and on its share of the expected retries.
+    assert with_context.usd - bare.usd == pytest.approx(context_tokens * price.input / 1e6, rel=0.1)
+    assert with_context.usd > bare.usd
+
+
+def test_the_cached_prefix_is_read_at_the_models_multiplier(sonnet_extraction: None) -> None:
+    llm = get_config().llm
+    calls = _calls(10)
+    cached = planned_extraction_estimate(calls, entries=10, batched=False)
+    llm.cache_read_price_multiplier_by_model = {_SONNET: 0.5}
+    dearer = planned_extraction_estimate(calls, entries=10, batched=False)
+    llm.prompt_cache.enabled = False
+    uncached = planned_extraction_estimate(calls, entries=10, batched=False)
+    assert cached.usd is not None and dearer.usd is not None and uncached.usd is not None
+    prefix = get_config().extraction.estimate_cached_prefix_tokens
+    price = llm.price_for(llm.for_purpose("extraction"))
+    assert price is not None
+    # Every call after the first reads the prefix (retries included), at 0.05x
+    # and then at 0.5x.
+    reads = cached.calls - 1
+    assert dearer.usd - cached.usd == pytest.approx(reads * prefix * price.input * 0.45 / 1e6)
+    assert uncached.usd > dearer.usd
+
+
+def test_input_is_counted_at_the_models_chars_per_token() -> None:
+    assert chars_per_token(ProviderSelection(provider="anthropic", model=_SONNET)) == 2.98
+    assert chars_per_token(ProviderSelection(provider="anthropic", model=_HAIKU)) == 4.0
+
+
+def test_the_judge_is_priced_at_its_own_chars_per_token() -> None:
+    get_config().llm.use_judge = ProviderSelection(provider="anthropic", model=_SONNET)
+    requests = [CompletionRequest(prompt="x" * 9_000)] * 10
+    judge = requests_estimate("use_judge", requests, 1024)
+    figure = get_config().utility.mining.estimate_chars_per_token
+    output = get_config().audit.estimate_probe_output_tokens
+    assert judge.usd == pytest.approx((10 * 9_000 / figure * 2 + 10 * output * 10) / 1e6)
+    assert "utility.mining.estimate_chars_per_token" in judge.basis
+    batched = requests_estimate("use_judge", requests, 1024, batched=True)
+    discount = get_config().llm.batch_discount
+    assert batched.usd == pytest.approx((judge.usd or 0) * (1 - discount))

@@ -152,3 +152,21 @@ class TestDepositSuccess:
         assert entry.mutability == Mutability.MUTABLE
         assert entry.fetch_policy == FetchPolicy.LAZY
         assert entry.tags == ["people"]
+
+
+class TestRefetch:
+    @pytest.mark.asyncio
+    async def test_refetch_reads_the_rest_endpoint_not_the_entity_page(self) -> None:
+        """``corpus refresh`` must store the API JSON again, never the HTML page
+        the URI-R names."""
+        client = MagicMock()
+        set_capped_responses(client, return_value=_response())
+        with patch("particles.http.particles_client") as ctx:
+            ctx.return_value.__aenter__.return_value = client
+            ctx.return_value.__aexit__.return_value = False
+            body = await WikidataImporter().refetch("https://www.wikidata.org/entity/Q42")
+
+        assert body == _ENTITY_BODY
+        assert client.stream.call_args.args[1] == (
+            "https://www.wikidata.org/w/rest.php/wikibase/v1/entities/items/Q42"
+        )

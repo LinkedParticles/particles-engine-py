@@ -211,13 +211,13 @@ from particles.llm.breaker import (
     record_unusable_reply,
 )
 from particles.llm.registry import PurposeRefused, purpose_allowed, purpose_endpoint
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import record_event
 from particles.store.extractor_store import get_calibration
 from particles.store.particle_store import (
     append_provenance_ref,
     compute_context_fingerprint,
     get_active_particles_for_entry,
-    get_active_particles_with_embeddings,
     get_particles_by_ids,
     insert_particle,
     update_particle_status,
@@ -931,7 +931,12 @@ async def _extract_claimed(
     update_cfg = get_config().reconciliation.update_supersession
     all_with_embs: list[tuple[Particle, Any]] = []
     if existing or update_cfg.enabled:
-        all_with_embs = await get_active_particles_with_embeddings(session, min_confidence=0.0)
+        # Read through the per-process candidate cache: a long-lived process
+        # (the MCP server, a reindex or consolidation run) otherwise decodes
+        # every ACTIVE row once per snapshot. Its particles are shared: this
+        # pass only reads them, and none leaves it (a conflict's result is the
+        # new claim or its record, never the existing one; ``conflict_plan``).
+        all_with_embs = await load_active_candidates(session, min_confidence=0.0)
     if existing:
         existing_emb_map = {p.id: emb for p, emb in all_with_embs}
         existing_embs = [existing_emb_map.get(p.id) for p in existing]  # type: ignore[misc]
@@ -1876,10 +1881,15 @@ async def load_active_conflict_candidates(session: AsyncSession) -> list[Embeddi
     that function's ``candidate_cache`` for a whole batch (e.g. an interchange
     import): the function maintains it in place as particles are written, so a
     batch of N imports runs **one** full-store scan instead of N (F4.3).
+
+    The list is the caller's, but its particles are the candidate cache's
+    (:mod:`particles.store.candidate_cache`), shared with every other reader
+    in the process. The ladder only reads them and never returns one: a
+    conflict's result is the new claim or its record (``conflict_plan``).
     """
     return [
         pair
-        for pair in await get_active_particles_with_embeddings(session, min_confidence=0.0)
+        for pair in await load_active_candidates(session, min_confidence=0.0)
         if not _skips_conflict_resolution(pair[0].properties)
     ]
 

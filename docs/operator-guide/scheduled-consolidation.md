@@ -505,12 +505,14 @@ particles memory consolidate
   --output FILE           # also write the run report as Markdown
   --format markdown|json  # terminal format (default markdown)
   --history               # print each past run's closure measure; runs nothing
+  --dry-run               # price each pass from its gather; writes nothing, no LLM call
   --verbose / --debug
 ```
 
 There is no confirmation prompt and no `--yes`: an autonomous verb cannot
 prompt, so cost is bounded *by construction* (the existing caps plus delta
-scope) and confirmation is replaced with disclosure.
+scope, and `consolidation.budget_usd` when set) and confirmation is replaced
+with disclosure.
 
 ## The closure measure
 
@@ -535,19 +537,43 @@ numbers so that drift is visible:
   Gestures include an agent's own supersede and retract writes, and the run
   record's `gesture_by_actor` keeps them apart from the operator's.
 
-The report prints both after the headline counts:
+The autonomous INCONSISTENCY closures are also counted by cause, along with
+the **held claims returned to the store without review** among them. Most
+closes release nothing: a lapsed or regrouped census record never held a
+claim. Two do. When the second reading no longer confirms a record that
+extraction opened, it withdraws the record and restores the newer claim the
+record was holding. When an autonomous pass has retired the stored side of a
+record and nothing ACTIVE still contradicts the held claim, the release pass
+returns that claim. Neither asks a person, so this is the number to watch to
+see what the nightly cycle decided on its own.
+
+The report prints these after the headline counts. The closures line appears
+only on a run in which a pass closed something:
 
 ```
   contested        37 of 1204 active beliefs (3.1%) [inconsistency 35, stance 2]; previous run 3.0%
   transitions      12 since the previous run: 12 autonomous, 0 by gesture (100.0% autonomous)
+  closures         3 INCONSISTENCY record(s) closed by the nightly passes [lapsed 1, withdrawn 2]; 2 held claim(s) returned to the store without review [withdrawn 2]
 ```
 
 Each run's window opens where the previous run's closed, so consecutive runs
 tile the event log. The run record carries the counts behind both numbers
 under its `closure` key, including the autonomous retirements by status
-reason. `particles memory consolidate --history` prints the series, one row
-per run, oldest first, and `--format json` gives the full records. The
-measure changes nothing in the store and moves no closure default.
+reason and the closures by cause. `particles memory consolidate --history`
+prints the series, one row per run, oldest first, with a `released` column
+(`n/a` for a run recorded before the count existed). Below the table it
+prints the closures since the store began, read from the event log rather
+than the run records, so the runs that predate the measure count too, beside
+the number of records a review resolved:
+
+```
+  Since the store began: 203 INCONSISTENCY record(s) closed by the nightly passes [lapsed 2, regrouped 2, withdrawn 199]; 194 held claim(s) returned to the store without review [withdrawn 194]; 14 resolved by review.
+```
+
+`--format json` gives the full records, with the store-wide counts under
+`since_start`. The measure changes nothing in the store and moves no closure
+default. The rate depends on what the store holds, so it describes this
+store and says nothing general about how often a claim is released.
 
 ## Delta scope
 
@@ -798,6 +824,41 @@ expiry at `max_wait_seconds` does: its snapshots return to PENDING and its
 probes go unanswered this night. Such a night is not marked degraded. The
 budget covers waiting only; sequential work and the zero-LLM passes are not
 charged to it.
+
+### A dollar budget per run, and a dry run first
+
+`consolidation.budget_usd` (default `null`, unbounded) caps one run's spend in
+US dollars at list price. Before each pass that calls a model, the cycle adds
+the pass's estimate to what the run has spent so far; a pass that would cross
+the budget is skipped and disclosed as `spent US$X of US$Y; pass N skipped`.
+The census degrades to its structural finders and utility mining to its
+literal tier instead of skipping, and passes that call no model always run.
+Between Message Batches chunks, a chunk that would cross the budget is not
+sent, and its requests come back unavailable. A run the budget limited does
+not advance the delta watermark, so the next run probes what it skipped. The
+run record carries a `budget` block naming the budget, the spend, and what was
+skipped.
+
+`particles memory consolidate --dry-run` runs each pass's gather only and
+prices it: the snapshots pass 1 would extract, the pairs the sweeps and the
+census would probe, and the utility work. It writes nothing, takes no lock and
+calls no model. Pass 1 is planned as the extractor will read each snapshot: an
+append-only transcript as the tail it added since its last extraction, with the
+context shown before it, a chunk whose claims the store already holds as
+carried forward, and nothing past `extraction.max_llm_calls_per_source`. Its
+line says how many characters that is out of the whole. The figure is list
+price over estimated tokens. `llm.batch_discount` applies to the calls that
+would ride a batch (pass 1 and the use judge, when `llm.batch` would submit
+them), the extraction prompt's cached prefix is priced at the model's cache-read
+rate (`llm.cache_read_price_multiplier_by_model`), and a transcript's expected
+output is scaled by `audit.estimate_output_scale_by_source_type`. Output still
+leans high, so the figure is an upper bound: on one store it projected about
+US$4.88 for a night whose comparable predecessors billed US$2.56 to US$3.81
+(about US$17 before the dry run planned each read and priced batches).
+`consolidation.budget_usd` decides with the same estimate of each pass. Compare
+the dry run with the `LLM usage: … ≈ $X at list price.` line a metered run
+prints. Without an API key the dry run treats every model pass as skipped and
+prices nothing. What runs have actually cost is on the [cost page](../benchmarks/cost.md).
 
 ### When the backlog outgrows the cap
 

@@ -99,6 +99,8 @@ def _render_particle_header(particle: Particle) -> None:
     """Render the transport-agnostic header block (works local + remote)."""
     typer.echo(f"ID:           {particle.id}")
     typer.echo(f"Status:       {particle.status}")
+    if particle.status_reason is not None:
+        typer.echo(f"Reason:       {particle.status_reason.value}")
     typer.echo(f"Type:         {particle.particle_type}")
     typer.echo(f"Modality:     {particle.assertion_modality}")
     calib = particle.confidence.calibration_source.value

@@ -496,3 +496,55 @@ async def test_write_transaction_rolls_back_a_failure_before_releasing_the_lock(
             raise RuntimeError("boom")
     assert store_accepts_a_writer()
     assert p.id not in await get_particles_by_ids(file_db_session, [p.id])
+
+
+class TestSchemaState:
+    """``schema_state`` compares the store's revision with this install's head, both ways."""
+
+    def _store_at(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rev: str | None) -> None:
+        import sqlite3
+
+        path = tmp_path / "schema.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE alembic_version (version_num TEXT)")
+            if rev is not None:
+                conn.execute("INSERT INTO alembic_version VALUES (?)", (rev,))
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+        reset_config()
+
+    def _chain(self) -> list[str]:
+        from alembic.script import ScriptDirectory
+
+        script = ScriptDirectory(str(db.alembic_paths()[1]))
+        return list(reversed([s.revision for s in script.walk_revisions()]))
+
+    def test_behind_lists_the_pending_migrations_oldest_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chain = self._chain()
+        self._store_at(tmp_path, monkeypatch, chain[-3])
+        state = asyncio.run(db.schema_state())
+        assert state == db.SchemaState(stored=(chain[-3],), unknown=(), pending=tuple(chain[-2:]))
+
+    def test_at_head_nothing_is_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        head = self._chain()[-1]
+        self._store_at(tmp_path, monkeypatch, head)
+        assert asyncio.run(db.schema_state()) == db.SchemaState(
+            stored=(head,), unknown=(), pending=()
+        )
+
+    def test_ahead_names_the_unknown_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._store_at(tmp_path, monkeypatch, "f00dfeedbeef")
+        assert asyncio.run(db.schema_state()) == db.SchemaState(
+            stored=("f00dfeedbeef",), unknown=("f00dfeedbeef",), pending=()
+        )
+
+    def test_an_unstamped_store_has_nothing_to_compare(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._store_at(tmp_path, monkeypatch, None)
+        assert asyncio.run(db.schema_state()) is None

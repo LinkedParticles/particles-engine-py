@@ -671,19 +671,24 @@ class LocalBackend:
             )
 
     async def links_add(
-        self, particle_a: str, particle_b: str, *, relation_type: str, confidence: float
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        confidence: float,
+        project_key: str | None = None,
     ) -> ParticleRelation:
-        from particles.core.schema import RelationCreatedBy, RelationType
-        from particles.store.relation_store import create_relation
+        from particles.operations.agent_write import link_particles
 
         async with session_scope(write=True) as session:  # writer lock
-            rel = await create_relation(
+            rel = await link_particles(
                 session,
                 particle_a,
                 particle_b,
-                RelationType(relation_type),
-                RelationCreatedBy.MANUAL_CLI,
+                relation_type=relation_type,
                 confidence=confidence,
+                project_key=project_key,
             )
             await session.commit()
             return rel

@@ -94,6 +94,8 @@ development-key skip never applies to them, not even from loopback:
 | `POST /curation/affirm`, `POST /curation/snooze` | the curation queue's "still true", snooze, and dismiss |
 | `POST /corpus/{id}/retract` | whole-source retract (a `dry_run` plan is still served) |
 | `POST /subjects/relink-gated` | batch relink (a `dry_run` plan is still served) |
+| `POST /trust/rules` | add or change a source-trust rule (`particles trust set` against an engine) |
+| `POST /trust/statements` | write a trust statement and run its cascade, which can resolve held conflicts (`particles trust statement-set` against an engine) |
 
 The skip treats a loopback caller as the operator, and an agent with a shell on
 the engine host is a loopback caller too. With `PARTICLES_API_KEY` unset or

@@ -168,7 +168,7 @@ class TestDepositFollowIntegration:
 
         with (
             patch(
-                "particles.ingest.importers.reddit._fetch_with_curl",
+                "particles.ingest.importers.reddit._fetch_thread",
                 AsyncMock(return_value=reddit_blob),
             ),
             patch("particles.corpus.deposit.particles_client") as mock_client_ctx,
@@ -222,7 +222,7 @@ class TestDepositFollowIntegration:
 
         with (
             patch(
-                "particles.ingest.importers.reddit._fetch_with_curl",
+                "particles.ingest.importers.reddit._fetch_thread",
                 AsyncMock(return_value=reddit_blob),
             ),
             patch("particles.corpus.deposit.particles_client") as mock_client_ctx,
@@ -271,7 +271,7 @@ class TestDepositFollowIntegration:
         ).encode("utf-8")
 
         with patch(
-            "particles.ingest.importers.reddit._fetch_with_curl",
+            "particles.ingest.importers.reddit._fetch_thread",
             AsyncMock(return_value=self_post_blob),
         ):
             primary_entry_id, _ = await deposit_url(
@@ -299,7 +299,7 @@ class TestDepositFollowIntegration:
 
         with (
             patch(
-                "particles.ingest.importers.reddit._fetch_with_curl",
+                "particles.ingest.importers.reddit._fetch_thread",
                 AsyncMock(return_value=reddit_blob),
             ),
             patch("particles.corpus.deposit.particles_client") as mock_client_ctx,
@@ -345,7 +345,7 @@ class TestDepositFollowIntegration:
 
         with (
             patch(
-                "particles.ingest.importers.reddit._fetch_with_curl",
+                "particles.ingest.importers.reddit._fetch_thread",
                 AsyncMock(return_value=reddit_blob),
             ),
             patch("particles.corpus.deposit.particles_client") as mock_client_ctx,

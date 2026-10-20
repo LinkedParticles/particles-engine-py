@@ -9,6 +9,9 @@ The three-tier change-detection protocol:
   Tier 2: SHA-256 of fetched body → match → REVISIT, mismatch → RESPONSE
   Tier 3: force=True bypasses everything
 
+An entry whose URI-R an importer accepts is fetched by that importer's
+``refetch`` instead; TestImporterOwnedEntries covers that route.
+
 The local tier (``file://`` URI-R) is covered by TestLocalTier at the
 bottom: stat mtime as tier 1, SHA-256 as tier 2, and no network at all.
 
@@ -39,6 +42,7 @@ from particles.core.schema import (
 from particles.core.status import Status
 from particles.corpus.deposit import sha256
 from particles.corpus.fetch import (
+    RefetchUnsupported,
     _floor_seconds,
     _parse_last_modified,
     maybe_refetch,
@@ -311,6 +315,127 @@ class TestTier2ContentHash:
         assert new_snap.warc_record_type == WarcRecordType.RESPONSE
         assert new_snap.etag == '"v2"'
         assert new_snap.extraction_status == ExtractionStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Importer-owned entries — the owning importer re-fetches
+# ---------------------------------------------------------------------------
+
+_THREAD_URI = "https://threads.example/item/7"
+
+
+class _FakeImporter:
+    """Accepts ``_THREAD_URI``'s host; ``refetch`` returns ``body`` and records calls."""
+
+    def __init__(self, body: bytes = b'{"thread": 1}') -> None:
+        self.body = body
+        self.calls: list[str] = []
+
+    def accepts_url(self, url: str) -> bool:
+        return url.startswith("https://threads.example/")
+
+    async def refetch(self, uri_r: str) -> bytes:
+        self.calls.append(uri_r)
+        return self.body
+
+
+class _NoRefetchImporter:
+    """An importer that owns the URL but predates ``refetch``."""
+
+    def accepts_url(self, url: str) -> bool:
+        return url.startswith("https://threads.example/")
+
+
+class TestImporterOwnedEntries:
+    async def _stale_entry(self, session: Any, content_hash: str) -> tuple[CorpusEntry, Snapshot]:
+        entry = await _add_entry(session, source_type="THREAD", uri_r=_THREAD_URI)
+        prior = await _add_snapshot(
+            session,
+            entry,
+            captured_at=datetime.now(UTC) - timedelta(hours=2),
+            content_hash=content_hash,
+        )
+        await session.commit()
+        return entry, prior
+
+    @pytest.mark.asyncio
+    async def test_unchanged_importer_bytes_write_revisit_without_a_get(
+        self, db_session: Any
+    ) -> None:
+        importer = _FakeImporter()
+        entry, prior = await self._stale_entry(db_session, sha256(importer.body))
+
+        with _patch_client(_make_resp(content=b"<html>the permalink page</html>")) as p:
+            snap = await maybe_refetch(db_session, entry.entry_id, importers=[importer])
+
+        assert importer.calls == [_THREAD_URI]
+        assert p.captured_headers is None  # the URI-R was never fetched directly
+        assert snap is not None
+        assert snap.warc_record_type == WarcRecordType.REVISIT
+        assert snap.refers_to == prior.snapshot_id
+
+    @pytest.mark.asyncio
+    async def test_changed_importer_bytes_write_a_pending_response(self, db_session: Any) -> None:
+        importer = _FakeImporter(body=b'{"thread": 2}')
+        entry, _prior = await self._stale_entry(db_session, sha256(b'{"thread": 1}'))
+
+        snap = await maybe_refetch(db_session, entry.entry_id, importers=[importer])
+
+        assert snap is not None
+        assert snap.warc_record_type == WarcRecordType.RESPONSE
+        assert snap.content_hash == sha256(importer.body)
+        assert snap.extraction_status == ExtractionStatus.PENDING
+        assert snap.etag is None  # an importer body carries no HTTP validators
+
+    @pytest.mark.asyncio
+    async def test_first_capture_goes_through_the_importer(self, db_session: Any) -> None:
+        importer = _FakeImporter()
+        entry = await _add_entry(db_session, source_type="THREAD", uri_r=_THREAD_URI)
+        await db_session.commit()
+
+        snap = await maybe_refetch(db_session, entry.entry_id, importers=[importer])
+
+        assert importer.calls == [_THREAD_URI]
+        assert snap is not None and snap.warc_record_type == WarcRecordType.RESPONSE
+
+    @pytest.mark.asyncio
+    async def test_owner_without_refetch_refuses_rather_than_get(self, db_session: Any) -> None:
+        entry, _prior = await self._stale_entry(db_session, "old")
+
+        with (
+            _patch_client(_make_resp()) as p,
+            pytest.raises(RefetchUnsupported, match="_NoRefetchImporter.*Deposit the URL again"),
+        ):
+            await maybe_refetch(db_session, entry.entry_id, importers=[_NoRefetchImporter()])
+
+        assert p.captured_headers is None
+        assert len(await list_snapshots_for_entry(db_session, entry.entry_id)) == 1
+
+    @pytest.mark.asyncio
+    async def test_owner_without_refetch_inside_the_floor_is_not_an_error(
+        self, db_session: Any
+    ) -> None:
+        entry = await _add_entry(db_session, source_type="THREAD", uri_r=_THREAD_URI)
+        snap = await _add_snapshot(db_session, entry, captured_at=datetime.now(UTC))
+        await db_session.commit()
+
+        result = await maybe_refetch(db_session, entry.entry_id, importers=[_NoRefetchImporter()])
+
+        assert result is not None and result.snapshot_id == snap.snapshot_id
+
+    @pytest.mark.asyncio
+    async def test_url_no_importer_accepts_still_takes_the_get(self, db_session: Any) -> None:
+        importer = _FakeImporter()
+        entry = await _add_entry(db_session)  # https://example.com/x
+        await _add_snapshot(db_session, entry, captured_at=datetime.now(UTC) - timedelta(hours=2))
+        await db_session.commit()
+
+        with _patch_client(_make_resp(content=b"<html>new</html>")) as p:
+            snap = await maybe_refetch(db_session, entry.entry_id, importers=[importer])
+
+        assert importer.calls == []
+        assert p.captured_headers is not None
+        assert snap is not None and snap.warc_record_type == WarcRecordType.RESPONSE
 
 
 # ---------------------------------------------------------------------------

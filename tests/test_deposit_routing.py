@@ -523,3 +523,20 @@ class TestRedditShareLinkRouting:
         accepting = [imp for imp in get_importers() if imp.accepts_url(url)]
         assert len(accepting) == 1
         assert isinstance(accepting[0], RedditImporter)
+
+
+class TestImporterRefetch:
+    """``corpus refresh`` refuses an importer-owned entry whose importer
+    has no ``refetch``, so every built-in importer defines one."""
+
+    def test_every_builtin_importer_defines_refetch(self) -> None:
+        import inspect
+
+        from particles.ingest.importers.registry import get_importers
+
+        missing = [
+            type(imp).__name__
+            for imp in get_importers()
+            if not inspect.iscoroutinefunction(getattr(imp, "refetch", None))
+        ]
+        assert missing == []

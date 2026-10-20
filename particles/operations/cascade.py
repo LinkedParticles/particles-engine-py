@@ -24,7 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.cascade_gate import apply_cascade_cap, cascade_gate_passes
-from particles.core.conflict_review import cascade_pair, conflict_pair_ids, decide_cascade
+from particles.core.conflict_review import (
+    CASCADE_ACTOR,
+    CLOSED_RECORD,
+    cascade_pair,
+    cascade_review_content,
+    conflict_pair_ids,
+    decide_cascade,
+)
 from particles.core.schema import (
     SCHEMA_VERSION,
     Confidence,
@@ -36,7 +43,7 @@ from particles.core.schema import (
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
-from particles.core.status import Status, StatusReason, validate_transition
+from particles.core.status import Status, validate_transition
 from particles.operations._quarantine import apply_demotion, promote_quarantined
 from particles.store.particle_store import (
     get_inconsistency_particles_by_domain,
@@ -178,10 +185,10 @@ async def _try_resolve_inconsistency(
     # PREFER_B review would.
     if verdict.promote_winner:
         await promote_quarantined(session, verdict.winner)
-    # Mark INCONSISTENCY resolved
-    await update_particle_status(
-        session, inconsistency.id, Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED
-    )
+    # Close the record as review does: RETRACTED / CONFLICT_RESOLVED, the §6.6
+    # wrapper-terminal rule. Before 1.192.15 the cascade left it
+    # PROVENANCE_STALE, an edge §6.6 does not list for a record.
+    await update_particle_status(session, inconsistency.id, *CLOSED_RECORD)
     # Write system REVIEW particle
     await _write_cascade_review(
         session,
@@ -247,11 +254,7 @@ async def _write_cascade_review(
     statement_id: str,
 ) -> None:
     """Write a system-generated REVIEW particle recording the cascade auto-resolution."""
-    content = (
-        f"CASCADE REVIEW: auto-resolved INCONSISTENCY {inconsistency_id}. "
-        f"Winner: {winner_id}. Loser: {loser_id}. "
-        f"Triggered by trust statement {statement_id}."
-    )
+    content = cascade_review_content(inconsistency_id, winner_id, loser_id, statement_id)
     review_particle = Particle(
         id=str(uuid.uuid4()),
         content=content,
@@ -259,7 +262,7 @@ async def _write_cascade_review(
         confidence=Confidence(value=1.0, calibration_source=CalibrationSource.HUMAN_REVIEW),
         uncertainty_nature=UncertaintyNature.EPISTEMIC,
         provenance=[],
-        asserted_by="trust-cascade",
+        asserted_by=CASCADE_ACTOR,
         asserted_at=datetime.now(UTC),
         status=Status.ACTIVE,
         schema_version=SCHEMA_VERSION,

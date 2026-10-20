@@ -16,6 +16,12 @@ is the one exception to append-only provenance (D1):
   derived claim whose premise is deleted is picked up by the revalidation
   ladder on the next cycle.
 
+A deleted particle may be a judgment-retired row, which is the rejected-value
+tombstone itself. The delete forgets that judgment with the claim
+text, so a later deposit of the same claim mints it ACTIVE again. The plan
+counts these rows so the CLI preview can say so before the confirm prompt. A
+content-free tombstone that would keep the judgment is not built yet.
+
 Shaped gather / decide / apply (D2): :func:`decide_entry_deletion` is
 a pure function over plain values, :func:`plan_entry_deletion` loads its
 inputs, and :func:`delete_entry` writes and records one
@@ -35,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import ProvenanceRef, ProvenanceRefType
 from particles.corpus.store import CorpusEntryRow, SnapshotRow
+from particles.ingest.duplicate_suppression import is_judgment_retired
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
     ParticleRow,
@@ -115,6 +122,9 @@ class EntryDeletionPlan(BaseModel):
     entry_id: str
     snapshots: int
     decision: EntryDeletionDecision
+    # The deleted particles that are judgment-retired rows. Each is
+    # the tombstone for its claim, so the judgment goes with it.
+    judgments_deleted: list[str] = []
 
 
 class EntryDeletionResult(BaseModel):
@@ -124,6 +134,7 @@ class EntryDeletionResult(BaseModel):
     particles_deleted: int
     particles_stripped: int
     anchors_moved: int
+    judgments_deleted: int
     snapshots_deleted: int
     subjects_orphaned: int
     synthesis_rows_deleted: int
@@ -141,7 +152,11 @@ async def plan_entry_deletion(session: AsyncSession, entry_id: str) -> EntryDele
         )
     ).scalar_one()
     decision = decide_entry_deletion(entry_id, ((p.id, p.provenance) for p in particles))
-    return EntryDeletionPlan(entry_id=entry_id, snapshots=snapshots, decision=decision)
+    doomed = set(decision.to_delete)
+    judgments = [p.id for p in particles if p.id in doomed and is_judgment_retired(p)]
+    return EntryDeletionPlan(
+        entry_id=entry_id, snapshots=snapshots, decision=decision, judgments_deleted=judgments
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +207,7 @@ async def delete_entry(
         particles_deleted=len(delete_ids),
         particles_stripped=len(plan.decision.to_strip),
         anchors_moved=sum(1 for s in plan.decision.to_strip if s.anchor_moved),
+        judgments_deleted=len(plan.judgments_deleted),
         snapshots_deleted=plan.snapshots,
         subjects_orphaned=subjects_orphaned,
         synthesis_rows_deleted=synth_removed,

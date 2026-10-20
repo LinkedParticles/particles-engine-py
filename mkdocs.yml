@@ -224,10 +224,12 @@ nav:
       - Operations: api/operations.md
       - Export: api/export.md
   - Benchmarks:
+      - What a run costs (measured spend, the nightly floor, the levers): benchmarks/cost.md
       - Agent memory (LongMemEval): benchmarks.md
       - Memory rot (currency, supersession, trust): benchmarks/rot.md
       - Trip versus move (a value that changes, and one that does not): benchmarks/trip-vs-move.md
       - Relevance floor (the query gate, real questions): benchmarks/relevance-floor.md
+      - Query latency (by stage, 10k to 1M beliefs): benchmarks/query-latency.md
       - Model-prior leakage (unsupported answer sentences): benchmarks/leakage.md
       - Subject resolution (2026-09-30): benchmarks/subject-resolution-2026-09-30.md
       - Subject resolution (2026-10-01): benchmarks/subject-resolution-2026-10-01.md

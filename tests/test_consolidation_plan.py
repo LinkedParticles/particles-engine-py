@@ -161,6 +161,33 @@ async def test_the_dry_run_makes_no_call_and_writes_nothing(
 
 
 @pytest.mark.asyncio
+async def test_pass_1_is_priced_as_the_runs_budget_prices_it(
+    db_session: AsyncSession, refusing_client: MagicMock
+) -> None:
+    """The dry run and ``consolidation.budget_usd`` share one estimate of pass 1."""
+    from particles.corpus.store import list_pending_snapshots_for_catchup
+    from particles.operations.consolidation import _extract_selection, extraction_plan_estimate
+
+    await _seed(db_session)
+    plan = await plan_consolidation(db_session)
+
+    batching = get_config().consolidation.extract_batching
+    chosen = _extract_selection(
+        await list_pending_snapshots_for_catchup(db_session), batching=batching
+    )
+    estimate, reads = await extraction_plan_estimate(db_session, chosen, batching=batching)
+    extract = _by_name(plan)["extract"]
+    assert (extract.calls, extract.estimate_usd) == (estimate.calls, estimate.usd)
+    assert f"would read {reads.read_chars:,} of {reads.whole_chars:,} characters" in (
+        extract.detail
+    )
+    # Two calls are under llm.batch.min_requests: the registry sends them one
+    # at a time at full price, so no batch discount is applied.
+    assert extract.calls < get_config().llm.batch.min_requests
+    assert "llm.batch_discount" not in extract.basis
+
+
+@pytest.mark.asyncio
 async def test_the_report_says_how_to_read_the_estimate(
     db_session: AsyncSession, refusing_client: MagicMock
 ) -> None:

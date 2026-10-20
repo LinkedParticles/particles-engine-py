@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 
 from particles.config import get_config
@@ -221,6 +223,110 @@ class TestBoundMcpWrites:
                 await _call("particle_assert", {**args, "corpus_entry_id": foreign})
 
 
+class TestBoundMcpLinks:
+    """A bound agent may link beliefs only within one observer scope.
+
+    A ``CO_EVIDENTIAL`` edge unions the two groups' sources in the scope join,
+    so a link across scopes would move a belief into another project's view.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _writes_enabled(self) -> None:
+        get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+
+    async def _link(self, a: str, b: str) -> Any:
+        return await _call("link_add", {"particle_a": a, "particle_b": b})
+
+    async def test_a_link_within_the_bound_project_is_written(
+        self, db_session: Any, bound_to_a: None
+    ) -> None:
+        w = await _world(db_session)
+        also_mine = await belief(
+            db_session,
+            "Project A deploys weekly.",
+            await source(db_session, "a2", project_source_tags(A)),
+        )
+        await db_session.commit()
+        out = await self._link(w["mine"], also_mine.id)
+        assert out["verdict"] == "LINKED"
+
+    @pytest.mark.parametrize("partner", ["theirs", "world", "unattributed"])
+    async def test_a_link_across_scopes_is_refused(
+        self, db_session: Any, bound_to_a: None, partner: str
+    ) -> None:
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        from particles.store.relation_store import get_relations_for_particle
+
+        w = await _world(db_session)
+        keyless = await belief(
+            db_session, "A harvested note.", await source(db_session, "u", ["claude-code"])
+        )
+        await db_session.commit()
+        other = keyless.id if partner == "unattributed" else w[partner]
+        with pytest.raises(ToolError, match="particles links add"):
+            await self._link(w["mine"], other)
+        assert await get_relations_for_particle(db_session, w["mine"]) == []
+
+    async def test_an_unbound_server_links_across_scopes(self, db_session: Any) -> None:
+        w = await _world(db_session)
+        assert (await self._link(w["mine"], w["theirs"]))["verdict"] == "LINKED"
+
+    async def test_a_store_never_rescoped_is_not_checked(
+        self, db_session: Any, bound_to_a: None
+    ) -> None:
+        w = await _world(db_session, rescope=False)
+        assert (await self._link(w["mine"], w["world"]))["verdict"] == "LINKED"
+
+
+def test_the_link_rule_holds_over_the_http_transport(
+    cli_db: Any, monkeypatch: pytest.MonkeyPatch, bound_to_a: None
+) -> None:
+    """``HttpBackend`` carries the binding and ``POST /links`` enforces it."""
+    import asyncio
+
+    import httpx
+
+    from particles.config import reset_config
+    from particles.db import session_scope
+
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
+    reset_config()
+    get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+
+    from particles.api.app import app as fastapi_app
+
+    recorded: list[str] = []
+
+    async def _recorder(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            recorded.append(scope["path"])
+        await fastapi_app(scope, receive, send)
+
+    real_async_client = httpx.AsyncClient
+
+    def _asgi_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(
+            transport=httpx.ASGITransport(app=_recorder),
+            base_url=kwargs["base_url"],
+            headers=kwargs["headers"],
+        )
+
+    monkeypatch.setattr("particles.api.client.http.egress_client", _asgi_client)
+
+    async def _seed() -> dict[str, str]:
+        async with session_scope() as session:
+            return await _world(session)
+
+    w = asyncio.run(_seed())
+
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="particles links add"):
+        asyncio.run(_call("link_add", {"particle_a": w["mine"], "particle_b": w["theirs"]}))
+    assert "/links" in recorded
+
+
 class TestGraphView:
     async def test_a_subjects_neighbourhood_is_read_through_the_observer(
         self, db_session: Any
@@ -246,3 +352,90 @@ class TestGraphView:
 
         assert particle_ids(scoped) == {mine.id}
         assert particle_ids(whole) == {mine.id, theirs.id}
+
+
+class TestWidenedMcpReads:
+    """Every filtered MCP read, unwidened and widened, on a project-bound server.
+
+    Pins today's behaviour: ``all_projects=False`` sees global beliefs plus the
+    bound project's and never another project's; ``all_projects=True`` also
+    returns the other project's belief and discloses the widening in
+    ``observer``. Widening is the caller's to lift, one call at a time.
+
+    That the caller may lift it at all is an open question: the Atlas report
+    lists caller-liftable widening under "Avoid", and removing it would mean
+    amending the per-call widening rule. If that changes, change
+    this test with it.
+    """
+
+    FINGERPRINT = "ab" * 32
+
+    @pytest.fixture(autouse=True)
+    def _no_model(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        """The embedding model and the NL answer are the only seams replaced."""
+        import particles.operations.query.main as qmain
+        from particles import embeddings as ep
+
+        model = MagicMock()
+        model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
+        original = ep._embedding_model
+        ep.set_embedding_model(model)
+        monkeypatch.setattr(qmain, "_generate_response", AsyncMock(return_value="answer"))
+        try:
+            yield
+        finally:
+            ep.set_embedding_model(original)
+
+    async def _world(self, session: Any) -> dict[str, str]:
+        """One subject and one fingerprint shared by all three beliefs, so each
+        tool's selector reaches every one of them and only the observer decides."""
+        from particles.core.schema import Subject
+        from particles.store.subject_store import insert_subject
+
+        subject = Subject(canonical_name="deploys", asserted_by="t")
+        await insert_subject(session, subject)
+        shared = {"subject_ids": [subject.id], "context_fingerprint": self.FINGERPRINT}
+        in_a = await source(session, "a", project_source_tags(A))
+        in_b = await source(session, "b", project_source_tags(B))
+        mine = await belief(session, "Project A deploys on Fridays.", in_a, **shared)
+        theirs = await belief(session, "Project B deploys on Mondays.", in_b, **shared)
+        world = await belief(
+            session, "Pluto has five known moons.", await source(session, "p", ["web"]), **shared
+        )
+        await rescoped(session)
+        await session.commit()
+        return {"mine": mine.id, "theirs": theirs.id, "world": world.id, "subject": subject.id}
+
+    @staticmethod
+    def _args(tool: str, w: dict[str, str]) -> dict[str, Any]:
+        match tool:
+            case "query":
+                return {"question": "When does each project deploy?"}
+            case "particles_list":
+                return {"status": "ACTIVE"}
+            case "particle_search":
+                return {"fingerprint": TestWidenedMcpReads.FINGERPRINT}
+            case "graph_view":
+                return {"subject_id": w["subject"]}
+        raise AssertionError(tool)
+
+    @staticmethod
+    def _ids(tool: str, out: dict[str, Any]) -> set[str]:
+        if tool == "graph_view":
+            return set(out["particles"])
+        return {p["id"] for p in out["particles"]}
+
+    @pytest.mark.parametrize("tool", ["query", "particles_list", "particle_search", "graph_view"])
+    async def test_widening_crosses_projects_and_says_so(
+        self, db_session: Any, bound_to_a: None, tool: str
+    ) -> None:
+        w = await self._world(db_session)
+        args = self._args(tool, w)
+
+        unwidened = await _call(tool, args)
+        widened = await _call(tool, {**args, "all_projects": True})
+
+        assert self._ids(tool, unwidened) == {w["mine"], w["world"]}
+        assert unwidened["observer"] == {"project": A, "all_projects": False}
+        assert self._ids(tool, widened) == {w["mine"], w["world"], w["theirs"]}
+        assert widened["observer"] == {"project": A, "all_projects": True}

@@ -485,3 +485,27 @@ def test_prefer_a_on_a_census_record_demotes_the_whole_other_side() -> None:
     assert plan.also_demote == ((b2, Demotion.TRANSITION),)
     # A two-claim plan is unchanged: no further demotion.
     assert decide_resolution(ResolutionAction.PREFER_A, record, a, b).also_demote == ()
+
+
+class TestCascadeReviewContent:
+    def test_round_trip(self) -> None:
+        from particles.core.conflict_review import (
+            cascade_review_content,
+            cascade_reviewed_record_id,
+        )
+
+        content = cascade_review_content("rec-1", "win-1", "lose-1", "stmt-1")
+        assert cascade_reviewed_record_id(content) == "rec-1"
+
+    def test_other_content_names_no_record(self) -> None:
+        from particles.core.conflict_review import cascade_reviewed_record_id
+
+        assert cascade_reviewed_record_id("REVIEW: PREFER_A on INCONSISTENCY rec-1.") is None
+        assert cascade_reviewed_record_id("CASCADE REVIEW: auto-resolved INCONSISTENCY ") is None
+
+    def test_closed_record_is_the_review_state(self) -> None:
+        from particles.core.conflict_review import CLOSED_RECORD
+        from particles.core.status import Status, StatusReason, validate_transition
+
+        assert CLOSED_RECORD == (Status.RETRACTED, StatusReason.CONFLICT_RESOLVED)
+        validate_transition(Status.INCONSISTENCY, CLOSED_RECORD[0])

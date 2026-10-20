@@ -379,6 +379,16 @@ _OPERATOR_ROUTES: list[tuple[str, dict[str, object]]] = [
     ("/review/p-missing", {"action": "DEFER", "reviewer_id": "operator"}),
     ("/corpus/e-missing/retract", {"reason": "r", "dry_run": False}),
     ("/subjects/relink-gated", {"dry_run": False}),
+    ("/trust/rules", {"scope": "domain", "pattern": "example.org", "score": 0.5}),
+    (
+        "/trust/statements",
+        {
+            "domain": "general",
+            "source_ref_type": "SOURCE_TYPE",
+            "source_ref_value": "WEB_PAGE",
+            "trust_rank": 0.5,
+        },
+    ),
 ]
 
 
@@ -474,6 +484,8 @@ class TestOperatorRoutesRefuseDevKey:
             "/curation/affirm",
             "/curation/snooze",
             "/review/{particle_id}",
+            "/trust/rules",
+            "/trust/statements",
         }
 
 

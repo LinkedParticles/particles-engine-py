@@ -334,7 +334,11 @@ view contains. Three switches, deliberately in three places:
   `particles memory rescope` has run on; until then the surfaces stay
   store-wide and say so, and `particles hook doctor` reports "NOT in effect".
 - `particles mcp serve --project-observer cwd`: binds one MCP server process to
-  the project of its working directory, for reads and writes. A **launch flag,
+  the project of its working directory, for reads and writes. On a rescoped
+  store its `link_add` refuses a `CO_EVIDENTIAL` link between beliefs whose
+  observer scopes differ, since the link would change both scopes; cross-scope
+  links stay an operator act (`particles links add`, `POST /links` without a
+  `project_key`, a curate merge). A **launch flag,
   not config**, because `config.yaml` is shared by every MCP client on the
   machine and a client started from your home directory should not be bound to
   it.

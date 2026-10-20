@@ -975,24 +975,58 @@ class TestSchemaCheck:
             conn.execute("DELETE FROM alembic_version")
             conn.execute("INSERT INTO alembic_version VALUES (?)", (revision,))
 
+    def _head_and_parent(self) -> tuple[str, str]:
+        from alembic.script import ScriptDirectory
+
+        from particles.db import alembic_paths
+
+        script = ScriptDirectory(str(alembic_paths()[1]))
+        head = script.get_revision("head")
+        assert head is not None and isinstance(head.down_revision, str)
+        return head.revision, head.down_revision
+
     def test_a_migration_this_install_does_not_know(self, cli_db: Path) -> None:
         from particles.api.cli.hook import _check_schema
 
         self._stamp(cli_db, "f00dfeedbeef")
-        lines = _check_schema("default")
+        ok, lines = _check_schema("default")
+        assert ok  # ahead is advisory
         assert "⚠ the store is at migration f00dfeedbeef" in lines[0]
 
-    def test_a_known_migration_and_an_unstamped_store_say_nothing(self, cli_db: Path) -> None:
-        from alembic.script import ScriptDirectory
-
+    def test_an_unstamped_store_says_nothing_and_the_head_says_so(self, cli_db: Path) -> None:
         from particles.api.cli.hook import _check_schema
-        from particles.db import alembic_paths
 
-        assert _check_schema("default") == []  # create_all leaves no alembic_version
-        head = ScriptDirectory(str(alembic_paths()[1])).get_current_head()
-        assert head is not None
+        assert _check_schema("default") == (True, [])  # create_all leaves no alembic_version
+        head, _ = self._head_and_parent()
         self._stamp(cli_db, head)
-        assert _check_schema("default") == []
+        assert _check_schema("default") == (
+            True,
+            [f"schema:         migration {head}, this install's head"],
+        )
+
+    def test_a_store_behind_this_install_fails_with_the_migrate_command(self, cli_db: Path) -> None:
+        from particles.api.cli.hook import _check_schema
+
+        head, parent = self._head_and_parent()
+        self._stamp(cli_db, parent)
+        ok, lines = _check_schema("default")
+        assert not ok
+        assert f"✗ the store is at migration {parent}, 1 migration behind" in lines[0]
+        assert f"head {head}" in lines[0]
+        assert "Scheduled consolidation, the hooks and the MCP server fail" in lines[1]
+        command = lines[-1].strip()
+        assert command.startswith(f"env DATABASE_URL=sqlite+aiosqlite:///{cli_db} ")
+        assert command.endswith(" db init")
+
+    def test_the_doctor_exits_1_on_a_store_behind_this_install(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path
+    ) -> None:
+        _, parent = self._head_and_parent()
+        self._stamp(cli_db, parent)
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert result.exit_code == 1, result.output
+        assert "behind this install's migrations" in result.stdout
+        assert "✓ Store resolves" not in result.stdout
 
 
 def test_doctor_reports_the_install(runner: CliRunner, cli_db: Path, hook_home: Path) -> None:

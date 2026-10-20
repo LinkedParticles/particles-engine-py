@@ -19,6 +19,12 @@ one ladder — the policy gate, the per-source-type floor, the force override an
 the RESPONSE/REVISIT distinction have a single home, and the future
 backoff and decay have one cadence to tune rather than two.
 
+An HTTP entry whose URI-R an importer claims (a Reddit permalink, a Hacker News
+item page) is fetched by that importer's ``refetch``, not by a GET of the URI-R,
+because the importer stored bytes from an API rather than the page the URI-R
+names. That route has no tier 1: the importer returns a body and
+tier 2 decides.
+
 The local tier has **no network**: no DNS, no redirects, no ``particles_client``
 and no SSRF guard, because that entire surface is absent rather than bypassed.
 """
@@ -26,8 +32,10 @@ and no SSRF guard, because that entire surface is absent rather than bypassed.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import unquote, urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +56,29 @@ from particles.corpus.store import (
 from particles.http import get_capped, particles_client
 
 log = logging.getLogger(__name__)
+
+
+class SourceImporter(Protocol):
+    """The part of an importer the refetch ladder reads.
+
+    Every ``ImporterPlugin`` satisfies it. The ladder takes importers as an
+    argument rather than importing the registry, so ``corpus`` gains no edge
+    into ``ingest``; the refresh operation passes ``get_importers()``.
+    An importer that can re-fetch also defines ``refetch(uri_r) -> bytes``,
+    found with ``getattr`` the way ``primary_url`` is.
+    """
+
+    def accepts_url(self, url: str) -> bool:
+        """Return True if this importer handles the given URL."""
+        ...
+
+
+class RefetchUnsupported(RuntimeError):
+    """An importer owns the entry's URI-R but cannot re-fetch it.
+
+    Raised instead of a plain GET of the URI-R, which would store a page the
+    importer's extractor cannot read.
+    """
 
 
 def _floor_seconds(source_type: str) -> int:
@@ -79,6 +110,8 @@ async def maybe_refetch(
     session: AsyncSession,
     entry_id: str,
     force: bool = False,
+    *,
+    importers: Sequence[SourceImporter] = (),
 ) -> Snapshot | None:
     """Check whether entry needs re-fetching; create a new snapshot if content changed.
 
@@ -88,7 +121,13 @@ async def maybe_refetch(
 
     Dispatches on the URI-R scheme: a ``file://`` entry takes the
     local tier (``stat`` then hash, no network) and everything else takes the
-    HTTP ladder.
+    HTTP ladder. Within the HTTP ladder, the first of ``importers`` that accepts
+    the URI-R fetches it with its ``refetch``; a URI-R no importer accepts is
+    fetched with a GET.
+
+    Raises:
+        RefetchUnsupported: an importer accepts the URI-R but defines no
+            ``refetch``.
     """
     entry_row = await session.get(CorpusEntryRow, entry_id)
     if entry_row is None:
@@ -106,7 +145,7 @@ async def maybe_refetch(
         # No prior snapshot — capture a fresh one.
         if is_local:
             return await _do_local_refresh(session, entry_row, prior=None)
-        return await _do_fetch(session, entry_row, prior=None)
+        return await _do_remote_refresh(session, entry_row, importers, prior=None)
 
     latest = max(snapshots, key=lambda s: s.captured_at)
 
@@ -129,7 +168,34 @@ async def maybe_refetch(
 
     if is_local:
         return await _do_local_refresh(session, entry_row, prior=latest)
-    return await _do_fetch(session, entry_row, prior=latest)
+    return await _do_remote_refresh(session, entry_row, importers, prior=latest)
+
+
+async def _do_remote_refresh(
+    session: AsyncSession,
+    entry_row: CorpusEntryRow,
+    importers: Sequence[SourceImporter],
+    prior: Snapshot | None,
+) -> Snapshot:
+    """Fetch a non-file entry through its owning importer, or by GET when none owns it."""
+    uri_r = entry_row.uri_r
+    assert uri_r is not None
+    owner = next((imp for imp in importers if imp.accepts_url(uri_r)), None)
+    if owner is None:
+        return await _do_fetch(session, entry_row, prior)
+    refetch: Callable[[str], Awaitable[bytes]] | None = getattr(owner, "refetch", None)
+    if refetch is None:
+        raise RefetchUnsupported(
+            f"{uri_r} belongs to the {type(owner).__name__}, which cannot refresh an "
+            f"entry, and fetching the URL directly would store a different document. "
+            f"Deposit the URL again to capture a new snapshot."
+        )
+
+    # The importer fetches the way its deposit does, so an unchanged source
+    # hashes to the prior snapshot's content_hash and becomes a REVISIT. Its own
+    # client carries the SSRF guard and the egress policy.
+    content = await refetch(uri_r)
+    return await _record_body(session, entry_row.entry_id, content, prior, datetime.now(UTC))
 
 
 async def _do_local_refresh(
@@ -272,15 +338,35 @@ async def _do_fetch(
         return snap
 
     resp.raise_for_status()
-    content = resp.content
+    return await _record_body(
+        session,
+        entry_row.entry_id,
+        resp.content,
+        prior,
+        now,
+        etag=resp.headers.get("etag"),
+        last_modified=_parse_last_modified(resp.headers.get("last-modified")),
+    )
+
+
+async def _record_body(
+    session: AsyncSession,
+    entry_id: str,
+    content: bytes,
+    prior: Snapshot | None,
+    now: datetime,
+    *,
+    etag: str | None = None,
+    last_modified: datetime | None = None,
+) -> Snapshot:
+    """Tier 2 for a fetched body: REVISIT on a hash match, else a RESPONSE snapshot."""
     content_hash = sha256(content)
 
-    # Tier 2: compare content hashes
     if prior and content_hash == prior.content_hash:
-        snap = await _write_revisit(session, entry_row.entry_id, prior, now)
+        snap = await _write_revisit(session, entry_id, prior, now)
         log.info(
             "Entry %s: content unchanged (hash match) → REVISIT %s",
-            entry_row.entry_id,
+            entry_id,
             snap.snapshot_id,
         )
         return snap
@@ -290,13 +376,13 @@ async def _do_fetch(
     snap = Snapshot(
         captured_at=now,
         content_hash=content_hash,
-        etag=resp.headers.get("etag"),
-        last_modified=_parse_last_modified(resp.headers.get("last-modified")),
+        etag=etag,
+        last_modified=last_modified,
         warc_record_type=WarcRecordType.RESPONSE,
         archive_path=archive_path,
         extraction_status=ExtractionStatus.PENDING,
     )
-    snap_row = SnapshotRow.from_model(snap, entry_id=entry_row.entry_id)
+    snap_row = SnapshotRow.from_model(snap, entry_id=entry_id)
     session.add(snap_row)
     await session.flush()
 
@@ -308,7 +394,7 @@ async def _do_fetch(
     # changed. The bug was latent only because this module had no caller.
     log.info(
         "Entry %s: content changed → RESPONSE snapshot %s",
-        entry_row.entry_id,
+        entry_id,
         snap.snapshot_id,
     )
     return snap

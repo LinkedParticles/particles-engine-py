@@ -474,8 +474,21 @@ class Backend(Protocol):
     ) -> SplitOutcome: ...
 
     async def links_add(
-        self, particle_a: str, particle_b: str, *, relation_type: str, confidence: float
-    ) -> ParticleRelation: ...
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        confidence: float,
+        project_key: str | None = None,
+    ) -> ParticleRelation:
+        """Write a typed relation between two particles.
+
+        ``project_key`` is the project a bound agent surface links as.
+        With it, a ``CO_EVIDENTIAL`` link between beliefs whose observer
+        scopes differ is refused, since the link would change those scopes.
+        """
+        ...
 
     async def links_remove(
         self, particle_a: str, particle_b: str, *, relation_type: str

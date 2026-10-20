@@ -417,6 +417,7 @@ class TestHttpBackendOperatorVerbs:
         assert {rel.particle_a, rel.particle_b} == {a, b}
         assert asyncio.run(http_backend.links_remove(a, b, relation_type="CO_EVIDENTIAL")) is True
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_trust_set_and_statement_set(self, http_backend: HttpBackend) -> None:
         from particles.core.schema import (
             PolicyProvenance,

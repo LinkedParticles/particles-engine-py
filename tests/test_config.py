@@ -417,6 +417,29 @@ class TestSharedEstimateKeys:
         cfg = ParticlesConfig.model_validate(raw)
         assert cfg.extraction.estimate_prompt_overhead_tokens == 1234
 
+    def test_per_type_output_scale_and_cache_reads_merge_over_the_shipped_entries(self) -> None:
+        from pydantic import ValidationError
+
+        from particles.config import AuditConfig, LLMConfig, ProviderSelection
+
+        audit = AuditConfig(estimate_output_scale_by_source_type={"WEB_PAGE": 0.8})
+        assert audit.estimate_output_scale_by_source_type == {
+            "CONVERSATION": 0.4,
+            "WEB_PAGE": 0.8,
+        }
+        with pytest.raises(ValidationError):
+            AuditConfig(estimate_output_scale_by_source_type={"CONVERSATION": -0.1})
+
+        llm = LLMConfig(cache_read_price_multiplier_by_model={"claude-haiku-5-5": 0.2})
+        read = llm.cache_read_multiplier_for
+        assert read(ProviderSelection(model="claude-sonnet-5-5")) == 0.05
+        assert read(ProviderSelection(model="claude-opus-5-5")) == 0.05
+        assert read(ProviderSelection(model="claude-fable-5-1")) == 0.025
+        assert read(ProviderSelection(model="claude-haiku-5-5")) == 0.2
+        assert read(ProviderSelection(model="claude-sonnet-5")) == 0.1
+        with pytest.raises(ValidationError):
+            LLMConfig(cache_read_price_multiplier_by_model={"claude-sonnet-5-5": -1})
+
     def test_audit_per_model_output_scale_must_be_non_negative(self) -> None:
         from pydantic import ValidationError
 

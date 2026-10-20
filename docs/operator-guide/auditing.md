@@ -47,6 +47,22 @@ the event log is the *only* durable record of it. The
 and the winning particle id. An empty event list for a record otherwise
 honestly means *no operator action touched it*.
 
+**Automated retirements are recorded on the belief, not in the log.**
+`particles lint --fix` retires a belief whose `valid_until` has passed
+(`VALIDITY_EXPIRED`), whose provenance cites a retracted belief
+(`RETRACTED_DEPENDENCY`), or whose snapshot is gone (`CORPUS_ENTRY_MISSING`),
+and a reindex supersedes the beliefs it re-extracts. None of these writes an
+event. Each is recomputed from stored state, and the belief keeps its own
+dated record: the status and reason (`particles particle show`), the instant
+it left `ACTIVE` (stamped once, and read back by `particles query --as-of`,
+whose notes give a retired hit's retirement instant and basis), and for an
+expiry the `valid_until` that caused it. The decision upstream of a dependency
+or source retirement, a retraction or a corpus delete, is logged where it was
+made. One limit: the reason is the belief's current one, so if a retired
+belief later moves again (an operator retracts an expired claim), the first
+reason is replaced, while the retirement instant and the later, logged step
+remain.
+
 State-attached rationale is **kept on its record, not relocated**:
 `trust.basis` stays on the trust statement (its standing justification) and the
 event snapshots it, so the change history survives the next overwrite.
@@ -119,6 +135,17 @@ other still makes. The `CORPUS_ENTRY_DELETED` event records that a delete
 happened (the entry id, the affected particle ids, and counts) but not the
 entry's URI or any claim text, because keeping either would defeat the
 delete's purpose.
+
+An erasure also forgets the judgments made about the claims it removes. A
+claim you retracted, superseded, or resolved against in review keeps its row,
+and that row is what holds a later restatement of the claim for review instead
+of letting it back in as ACTIVE. When the deleted entry was that row's only
+source, the delete removes the row and the judgment with it, so depositing the
+same document again (or another source stating the same claim) mints the claim
+ACTIVE again. The preview counts these rows on a `Judgments:` line before the
+confirm prompt, and the event records the count as `judgments_deleted`. If you
+want the judgment kept and can keep the content, use `corpus retract` instead,
+which erases nothing.
 
 ## One belief went stale: retiring just that one
 

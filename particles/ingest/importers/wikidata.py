@@ -31,6 +31,16 @@ class WikidataImporter:
     def accepts_url(self, url: str) -> bool:
         return bool(_WIKIDATA_URL_RE.match(url))
 
+    async def refetch(self, uri_r: str) -> bytes:
+        """Fetch the entity again for ``particles corpus refresh``.
+
+        The URI-R is the entity page; the stored blob is the REST API's JSON.
+        """
+        m = _WIKIDATA_URL_RE.match(uri_r)
+        if m is None:
+            raise ValueError(f"Not a recognised Wikidata entity URL: {uri_r}")
+        return await _fetch_entity(m.group(1))
+
     async def deposit(
         self,
         session: AsyncSession,
@@ -41,17 +51,8 @@ class WikidataImporter:
         m = _WIKIDATA_URL_RE.match(url)
         assert m is not None
         qid = m.group(1)
-        api_url = f"{_WIKIDATA_REST}/entities/items/{qid}"
+        content = await _fetch_entity(qid)
 
-        from particles.http import get_capped, particles_client
-
-        async with particles_client() as client:
-            resp = await get_capped(client, api_url)
-        if resp.status_code == 404:
-            raise ValueError(f"Wikidata entity {qid} not found (404)")
-        resp.raise_for_status()
-
-        content = resp.content
         from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
         from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
 
@@ -71,3 +72,16 @@ class WikidataImporter:
             tags=tags,
             warc_record_type=WarcRecordType.RESPONSE,
         )
+
+
+async def _fetch_entity(qid: str) -> bytes:
+    """The Wikibase REST API's JSON for one item."""
+    from particles.http import get_capped, particles_client
+
+    api_url = f"{_WIKIDATA_REST}/entities/items/{qid}"
+    async with particles_client() as client:
+        resp = await get_capped(client, api_url)
+    if resp.status_code == 404:
+        raise ValueError(f"Wikidata entity {qid} not found (404)")
+    resp.raise_for_status()
+    return resp.content

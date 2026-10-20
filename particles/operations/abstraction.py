@@ -89,18 +89,18 @@ from particles.operations.entailment import (
     parse_entailment,
     parse_json_object,
 )
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
     copy_particle_embedding,
     get_active_derived_particles,
-    get_active_particles_with_embeddings,
     get_inconsistency_backrefs,
     get_particles_by_ids,
     get_superseding_particle,
     insert_particle,
     update_particle_status,
 )
-from particles.store.subject_store import list_all_subjects
+from particles.store.subject_store import list_all_subjects, list_particle_subject_pairs
 
 log = logging.getLogger(__name__)
 
@@ -608,6 +608,29 @@ def _is_time_anchored(particle: Particle) -> bool:
     return _TIME_ANCHOR_PATTERN.search(particle.content) is not None
 
 
+async def _candidates_by_subject(
+    session: AsyncSession,
+) -> dict[str, list[tuple[Particle, Any]]]:
+    """Every ACTIVE particle with an embedding, under each subject it is linked to.
+
+    One store-wide read through the candidate cache, grouped in process, in
+    place of one subject-filtered query per subject. Each group holds exactly
+    the rows ``get_active_particles_with_embeddings(subject_id=…)`` returns,
+    in the same ``(confidence_value, rowid)`` order, because the store-wide
+    list is in that order. Measured on a 56k-row synthetic store with 12,478
+    subjects: 9.0 s for the per-subject queries, 5.2 s for this read from a
+    cold cache, and less once a query or an extraction pass has built it.
+    """
+    links: dict[str, list[str]] = {}
+    for particle_id, subject_id in await list_particle_subject_pairs(session):
+        links.setdefault(particle_id, []).append(subject_id)
+    out: dict[str, list[tuple[Particle, Any]]] = {}
+    for pair in await load_active_candidates(session):
+        for subject_id in links.get(pair[0].id, ()):
+            out.setdefault(subject_id, []).append(pair)
+    return out
+
+
 async def _find_clusters(
     session: AsyncSession,
     *,
@@ -649,9 +672,9 @@ async def _find_clusters(
     clusters: list[_Cluster] = []
     seen_components: set[frozenset[str]] = set()
     subjects = sorted(await list_all_subjects(session), key=lambda s: s.id)
+    by_subject = await _candidates_by_subject(session)
     for subject in subjects:
-        with_embs = await get_active_particles_with_embeddings(session, subject_id=subject.id)
-        candidates = [(p, e) for p, e in with_embs if eligible(p)]
+        candidates = [(p, e) for p, e in by_subject.get(subject.id, ()) if eligible(p)]
         if len(candidates) < cfg.min_cluster_size:
             continue
         pairs: list[tuple[str, str]] = []
@@ -707,7 +730,7 @@ async def _duplicate_of(
         model.encode, [claim], convert_to_numpy=True, normalize_embeddings=True
     )
     claim_emb = encoded[0]
-    with_embs = await get_active_particles_with_embeddings(session, subject_id=subject_id)
+    with_embs = await load_active_candidates(session, subject_id=subject_id)
     near = [
         (p, cosine_similarity(claim_emb, emb)) for p, emb in with_embs if p.id not in exclude_ids
     ]

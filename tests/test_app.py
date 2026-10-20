@@ -708,7 +708,7 @@ class TestCorpus:
             "particles.api.app.deposit_url",
             AsyncMock(
                 side_effect=SourceFetchError(
-                    "Reddit returned HTTP 403 ... OAuth access is required.",
+                    "Reddit returned HTTP 403 ... Set reddit.fetch_backend to arctic_shift.",
                     url="https://www.reddit.com/r/x/s/abc",
                     status_code=403,
                 )
@@ -1419,6 +1419,7 @@ class TestSubjectAliasMerge:
         assert resp.status_code == 404
 
 
+@pytest.mark.usefixtures("operator_key")
 class TestTrustWrites:
     def test_set_domain_rule(self, client: TestClient) -> None:
         resp = client.post(

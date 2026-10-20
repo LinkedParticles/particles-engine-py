@@ -2199,7 +2199,7 @@ async def test_reconcile_batch_cache_maintained_intra_batch(db_session: Any) -> 
 
     session = db_session
 
-    real_scan = pipe.get_active_particles_with_embeddings
+    real_scan = pipe.load_active_candidates
     scans = {"n": 0}
 
     async def _counting_scan(*args: Any, **kwargs: Any) -> Any:
@@ -2212,7 +2212,7 @@ async def test_reconcile_batch_cache_maintained_intra_batch(db_session: Any) -> 
             # Equal trust + contradiction signal in single-store mode → INCONSISTENT.
             _has_contradiction_signal=AsyncMock(return_value=True),
             _resolve_trust_scores=AsyncMock(return_value=(0.5, 0.5)),
-            get_active_particles_with_embeddings=_counting_scan,
+            load_active_candidates=_counting_scan,
         ):
             cache = await pipe.load_active_conflict_candidates(session)  # the only scan
             first = await pipe.reconcile_and_insert(

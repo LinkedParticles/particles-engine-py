@@ -1641,3 +1641,184 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(rendered + ("" if rendered.endswith("\n") else "\n"))
         typer.echo(f"Report written to {output}", err=True)
+
+
+# ---------------------------------------------------------------------------
+# `benchmark query-latency` — the retrieval path, by stage and store size
+# ---------------------------------------------------------------------------
+
+query_latency_app = typer.Typer(
+    help="Query latency of the semantic retrieval path by stage, over seeded "
+    "synthetic stores. `run` measures (resumable), `report` renders a run.",
+    no_args_is_help=True,
+)
+benchmark_app.add_typer(query_latency_app, name="query-latency")
+
+_DEFAULT_QLAT_DIR = Path("~/.particles/benchmark/query-latency")
+
+
+def _parse_sizes(raw: str) -> tuple[int, ...]:
+    sizes: list[int] = []
+    for part in raw.split(","):
+        token = part.strip().lower().replace("_", "")
+        scale = 1
+        if token.endswith("k"):
+            scale, token = 1_000, token[:-1]
+        elif token.endswith("m"):
+            scale, token = 1_000_000, token[:-1]
+        try:
+            value = int(float(token) * scale)
+        except ValueError as exc:
+            raise typer.BadParameter(f"not a store size: {part!r}") from exc
+        if value < 10:
+            raise typer.BadParameter(f"store size too small: {part!r}")
+        sizes.append(value)
+    return tuple(sizes)
+
+
+@query_latency_app.command("run")
+def benchmark_query_latency_run_cmd(  # noqa: PLR0913 — CLI option list is the API
+    work_dir: Path = typer.Option(
+        _DEFAULT_QLAT_DIR,
+        "--work-dir",
+        help="Where the cached stores, the per-cell results and the logs live. "
+        "Re-running with the same directory skips the cells already finished.",
+    ),
+    sizes: str = typer.Option(
+        "10k,56k,100k,300k,1M",
+        "--sizes",
+        help="Comma-separated ACTIVE-row counts (k and M suffixes accepted).",
+    ),
+    seed: int | None = typer.Option(None, "--seed", help="Store and question seed."),
+    cold_runs: int = typer.Option(
+        5, "--cold-runs", min=0, help="Fresh-process single-question runs per size and variant."
+    ),
+    warm_questions: int = typer.Option(
+        50, "--warm-questions", min=1, help="Timed questions in each warm cell."
+    ),
+    warm_budget: float = typer.Option(
+        2400.0,
+        "--warm-budget",
+        min=0.0,
+        help="Seconds a warm cell may spend before it stops asking (after 5 questions); "
+        "0 for no budget.",
+    ),
+    encoder: bool = typer.Option(
+        True,
+        "--encoder/--no-encoder",
+        help="Encode each question with the real encoder, or score a fixed seeded query "
+        "vector and load no model (the hardware-reference run).",
+    ),
+    variant: list[str] | None = typer.Option(
+        None,
+        "--variant",
+        help="unfiltered and/or subject (default: both). Repeat for several.",
+    ),
+    cell_timeout: float = typer.Option(
+        7200.0, "--cell-timeout", min=1.0, help="Seconds before a cell's process is killed."
+    ),
+    swap_guard_gib: float = typer.Option(
+        8.0,
+        "--swap-guard-gib",
+        min=0.5,
+        help="Kill a cell when system swap grows by more than this many GiB.",
+    ),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Re-run cells recorded as failed, timed out or skipped."
+    ),
+) -> None:
+    """Measure query latency by stage at each store size. No LLM call, no user store.
+
+    Builds a seeded synthetic store per size (cached), then times
+    `retrieve_ranked` in cold cells (a fresh process, one question each) and warm
+    cells (one process, many questions), unfiltered and subject-filtered. Each
+    cell runs in its own process and writes its own result file, so a run
+    interrupted by a disconnect or a reboot resumes where it stopped. Timed runs
+    belong on a quiet machine; the result records the load average.
+    """
+    from particles.benchmark.query_latency.runner import GIB, RunPlan, run_plan
+    from particles.benchmark.query_latency.schema import DEFAULT_SEED, Variant
+
+    try:
+        variants = tuple(Variant(v) for v in (variant or ["unfiltered", "subject"]))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    plan = RunPlan(
+        sizes=_parse_sizes(sizes),
+        seed=DEFAULT_SEED if seed is None else seed,
+        variants=variants,
+        cold_runs=cold_runs,
+        warm_questions=warm_questions,
+        warm_budget_seconds=warm_budget,
+        encoder=encoder,
+        cell_timeout_seconds=cell_timeout,
+        swap_guard_bytes=int(swap_guard_gib * GIB),
+    )
+    root = work_dir.expanduser()
+    _progress_line(f"query-latency run in {root}: sizes {', '.join(map(str, plan.sizes))}")
+
+    async def _go() -> None:
+        results = await run_plan(plan, root, retry_failed=retry_failed, progress=_progress_line)
+        ok = sum(1 for r in results if r.status.value == "ok")
+        _progress_line(f"done: {ok} of {len(results)} cell(s) ok. Render with `report`.")
+
+    run(_go())
+
+
+@query_latency_app.command("report")
+def benchmark_query_latency_report_cmd(
+    work_dir: Path = typer.Option(
+        _DEFAULT_QLAT_DIR, "--work-dir", help="The run's work directory."
+    ),
+    output_format: str = typer.Option(
+        "markdown", "--format", help='"markdown" (default) or "json" (the summary).'
+    ),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Write the report here."),
+    export_dir: Path | None = typer.Option(
+        None,
+        "--export-dir",
+        help="Write one raw JSON per store size here as well, host paths cut to file names.",
+    ),
+    prefix: str = typer.Option(
+        "query-latency", "--prefix", help="File-name prefix of the exported JSON."
+    ),
+    raw_link: str | None = typer.Option(
+        None,
+        "--raw-link",
+        help="Link each Markdown row to its raw JSON: a template with {size} (10k, 1M, …).",
+    ),
+) -> None:
+    """Render a query-latency run: per-stage tables, counts, and the scaling slope."""
+    from particles.benchmark.query_latency.report import (
+        export_by_size,
+        load_cells,
+        render_markdown,
+        size_label,
+        summarise,
+    )
+
+    if output_format not in ("markdown", "json"):
+        typer.echo("Error: --format must be markdown or json.", err=True)
+        raise typer.Exit(2)
+    cells = load_cells(work_dir.expanduser() / "cells")
+    if not cells:
+        typer.echo(f"Error: no cell results under {work_dir}/cells.", err=True)
+        raise typer.Exit(1)
+    summary = summarise(cells)
+    if export_dir is not None:
+        for path in export_by_size(cells, export_dir, prefix):
+            _progress_line(f"wrote {path}")
+    text = (
+        summary.model_dump_json(indent=2)
+        if output_format == "json"
+        else render_markdown(
+            summary,
+            raw_link=(lambda n: raw_link.format(size=size_label(n))) if raw_link else None,
+        )
+    )
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+        typer.echo(f"Report written to {output}.")
+    else:
+        typer.echo(text)

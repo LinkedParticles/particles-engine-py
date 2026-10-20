@@ -1,0 +1,442 @@
+[
+{
+  "spec": {
+    "cell_id": "n100000-cold-unfiltered-r0",
+    "size": 100000,
+    "seed": 20261017,
+    "mode": "cold",
+    "variant": "unfiltered",
+    "store_path": "qlat-s20261017-n100000-g1.db",
+    "result_path": "n100000-cold-unfiltered-r0.json",
+    "encoder": true,
+    "question_offset": 0,
+    "questions": 1,
+    "budget_seconds": 0.0,
+    "min_questions": 5,
+    "top_k": 40
+  },
+  "status": "ok",
+  "started_at": "2026-10-18T03:52:38.584099+00:00",
+  "finished_at": "2026-10-18T03:52:59.128411+00:00",
+  "wall_seconds": 20.54407408402767,
+  "import_seconds": 0.47134100005496293,
+  "encoder_load_seconds": 3.7282624170184135,
+  "warmup_seconds": null,
+  "samples": [
+    {
+      "question_index": 0,
+      "subject_id": null,
+      "total_seconds": 16.062948749982752,
+      "stages": {
+        "setup": 0.010598834021948278,
+        "embed": 0.07000883296132088,
+        "sql_fetch": 6.634823367814533,
+        "decode": 5.3675603463780135,
+        "hydrate": 2.6846271188696846,
+        "filters": 0.7315987079637125,
+        "source_rows": 0.1351468750508502,
+        "support_discounts": 0.023291958030313253,
+        "scoring": 0.3515397079754621,
+        "sort": 0.032242916990071535,
+        "collapse": 0.012265458004549146,
+        "other": 0.009244625922292471
+      },
+      "rows_read": 100000,
+      "embedding_json_bytes": 842338045,
+      "models_hydrated": 100000,
+      "candidates_scored": 96482,
+      "snapshot_ids_looked_up": 3125,
+      "entry_ids_looked_up": 1220,
+      "results": 40
+    }
+  ],
+  "cosine_reference": {
+    "vectors": 100000,
+    "loop_seconds": 0.14961562503594905,
+    "stack_seconds": 0.038651625043712556,
+    "matmul_seconds": 0.009694332955405116
+  },
+  "peak_rss_bytes": 2049818624,
+  "sampled_peak_rss_bytes": 1896415232,
+  "environment": {
+    "git_sha": "2b5186404f1017ce3ef794fcdbe47a1c2d89a001",
+    "package_version": "1.192.22",
+    "python": "3.11.15",
+    "numpy": "2.4.6",
+    "sqlite": "3.50.4",
+    "sqlalchemy": "2.1.4",
+    "pydantic": "2.14.1",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "load_average_before": [
+      1.86572265625,
+      1.7099609375,
+      1.68310546875
+    ],
+    "load_average_after": [
+      1.89697265625,
+      1.72705078125,
+      1.68896484375
+    ],
+    "bench_lock": ".ollama.lock",
+    "config": "config.yaml"
+  },
+  "error": null,
+  "notes": []
+},
+{
+  "spec": {
+    "cell_id": "n100000-cold-unfiltered-r1",
+    "size": 100000,
+    "seed": 20261017,
+    "mode": "cold",
+    "variant": "unfiltered",
+    "store_path": "qlat-s20261017-n100000-g1.db",
+    "result_path": "n100000-cold-unfiltered-r1.json",
+    "encoder": true,
+    "question_offset": 1,
+    "questions": 1,
+    "budget_seconds": 0.0,
+    "min_questions": 5,
+    "top_k": 40
+  },
+  "status": "ok",
+  "started_at": "2026-10-18T03:53:00.445788+00:00",
+  "finished_at": "2026-10-18T03:53:15.643152+00:00",
+  "wall_seconds": 15.197174874949269,
+  "import_seconds": 0.4651700420072302,
+  "encoder_load_seconds": 3.605689583113417,
+  "warmup_seconds": null,
+  "samples": [
+    {
+      "question_index": 1,
+      "subject_id": null,
+      "total_seconds": 10.849890667013824,
+      "stages": {
+        "setup": 0.009189457981847227,
+        "embed": 0.0694850420113653,
+        "sql_fetch": 1.4519498343579471,
+        "decode": 5.359995073755272,
+        "hydrate": 2.671352341887541,
+        "filters": 0.7436552910367027,
+        "source_rows": 0.12987812492065132,
+        "support_discounts": 0.023796541965566576,
+        "scoring": 0.3400377080542967,
+        "sort": 0.031980167026631534,
+        "collapse": 0.00895674992352724,
+        "other": 0.009614334092475474
+      },
+      "rows_read": 100000,
+      "embedding_json_bytes": 842338045,
+      "models_hydrated": 100000,
+      "candidates_scored": 96482,
+      "snapshot_ids_looked_up": 3125,
+      "entry_ids_looked_up": 1220,
+      "results": 40
+    }
+  ],
+  "cosine_reference": {
+    "vectors": 100000,
+    "loop_seconds": 0.1479735419852659,
+    "stack_seconds": 0.036384499981068075,
+    "matmul_seconds": 0.0038177500246092677
+  },
+  "peak_rss_bytes": 2045558784,
+  "sampled_peak_rss_bytes": 1728200704,
+  "environment": {
+    "git_sha": "2b5186404f1017ce3ef794fcdbe47a1c2d89a001",
+    "package_version": "1.192.22",
+    "python": "3.11.15",
+    "numpy": "2.4.6",
+    "sqlite": "3.50.4",
+    "sqlalchemy": "2.1.4",
+    "pydantic": "2.14.1",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "load_average_before": [
+      1.89697265625,
+      1.72705078125,
+      1.68896484375
+    ],
+    "load_average_after": [
+      1.8388671875,
+      1.72314453125,
+      1.6875
+    ],
+    "bench_lock": ".ollama.lock",
+    "config": "config.yaml"
+  },
+  "error": null,
+  "notes": []
+},
+{
+  "spec": {
+    "cell_id": "n100000-cold-unfiltered-r2",
+    "size": 100000,
+    "seed": 20261017,
+    "mode": "cold",
+    "variant": "unfiltered",
+    "store_path": "qlat-s20261017-n100000-g1.db",
+    "result_path": "n100000-cold-unfiltered-r2.json",
+    "encoder": true,
+    "question_offset": 2,
+    "questions": 1,
+    "budget_seconds": 0.0,
+    "min_questions": 5,
+    "top_k": 40
+  },
+  "status": "ok",
+  "started_at": "2026-10-18T03:53:17.001897+00:00",
+  "finished_at": "2026-10-18T03:53:32.173593+00:00",
+  "wall_seconds": 15.17148170794826,
+  "import_seconds": 0.46749833307694644,
+  "encoder_load_seconds": 3.565417040954344,
+  "warmup_seconds": null,
+  "samples": [
+    {
+      "question_index": 2,
+      "subject_id": null,
+      "total_seconds": 10.86488337488845,
+      "stages": {
+        "setup": 0.00922879099380225,
+        "embed": 0.07079320889897645,
+        "sql_fetch": 1.4308628315338865,
+        "decode": 5.384556578705087,
+        "hydrate": 2.6895087148295715,
+        "filters": 0.7305231669452041,
+        "source_rows": 0.12750575004611164,
+        "support_discounts": 0.02302495902404189,
+        "scoring": 0.3450364579912275,
+        "sort": 0.03505537495948374,
+        "collapse": 0.009031582972966135,
+        "other": 0.009755957988090813
+      },
+      "rows_read": 100000,
+      "embedding_json_bytes": 842338045,
+      "models_hydrated": 100000,
+      "candidates_scored": 96482,
+      "snapshot_ids_looked_up": 3125,
+      "entry_ids_looked_up": 1220,
+      "results": 40
+    }
+  ],
+  "cosine_reference": {
+    "vectors": 100000,
+    "loop_seconds": 0.14582508406601846,
+    "stack_seconds": 0.03734499996062368,
+    "matmul_seconds": 0.006850374978967011
+  },
+  "peak_rss_bytes": 2049310720,
+  "sampled_peak_rss_bytes": 1731805184,
+  "environment": {
+    "git_sha": "2b5186404f1017ce3ef794fcdbe47a1c2d89a001",
+    "package_version": "1.192.22",
+    "python": "3.11.15",
+    "numpy": "2.4.6",
+    "sqlite": "3.50.4",
+    "sqlalchemy": "2.1.4",
+    "pydantic": "2.14.1",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "load_average_before": [
+      1.771484375,
+      1.7109375,
+      1.68310546875
+    ],
+    "load_average_after": [
+      1.8212890625,
+      1.72412109375,
+      1.6875
+    ],
+    "bench_lock": ".ollama.lock",
+    "config": "config.yaml"
+  },
+  "error": null,
+  "notes": []
+},
+{
+  "spec": {
+    "cell_id": "n100000-cold-unfiltered-r3",
+    "size": 100000,
+    "seed": 20261017,
+    "mode": "cold",
+    "variant": "unfiltered",
+    "store_path": "qlat-s20261017-n100000-g1.db",
+    "result_path": "n100000-cold-unfiltered-r3.json",
+    "encoder": true,
+    "question_offset": 3,
+    "questions": 1,
+    "budget_seconds": 0.0,
+    "min_questions": 5,
+    "top_k": 40
+  },
+  "status": "ok",
+  "started_at": "2026-10-18T03:53:33.508137+00:00",
+  "finished_at": "2026-10-18T03:53:48.675147+00:00",
+  "wall_seconds": 15.16680250002537,
+  "import_seconds": 0.47009279194753617,
+  "encoder_load_seconds": 3.5473655000096187,
+  "warmup_seconds": null,
+  "samples": [
+    {
+      "question_index": 3,
+      "subject_id": null,
+      "total_seconds": 10.870782416081056,
+      "stages": {
+        "setup": 0.009180875029414892,
+        "embed": 0.07127725007012486,
+        "sql_fetch": 1.4482797901146114,
+        "decode": 5.418498013517819,
+        "hydrate": 2.632573654409498,
+        "filters": 0.7445834999671206,
+        "source_rows": 0.12534879194572568,
+        "support_discounts": 0.023396207951009274,
+        "scoring": 0.3451214999658987,
+        "sort": 0.03392087505199015,
+        "collapse": 0.009534250013530254,
+        "other": 0.009067708044312894
+      },
+      "rows_read": 100000,
+      "embedding_json_bytes": 842338045,
+      "models_hydrated": 100000,
+      "candidates_scored": 96482,
+      "snapshot_ids_looked_up": 3125,
+      "entry_ids_looked_up": 1220,
+      "results": 40
+    }
+  ],
+  "cosine_reference": {
+    "vectors": 100000,
+    "loop_seconds": 0.14874970796518028,
+    "stack_seconds": 0.03733458404894918,
+    "matmul_seconds": 0.0038551249308511615
+  },
+  "peak_rss_bytes": 2049966080,
+  "sampled_peak_rss_bytes": 1731411968,
+  "environment": {
+    "git_sha": "2b5186404f1017ce3ef794fcdbe47a1c2d89a001",
+    "package_version": "1.192.22",
+    "python": "3.11.15",
+    "numpy": "2.4.6",
+    "sqlite": "3.50.4",
+    "sqlalchemy": "2.1.4",
+    "pydantic": "2.14.1",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "load_average_before": [
+      1.8212890625,
+      1.72412109375,
+      1.6875
+    ],
+    "load_average_after": [
+      1.71240234375,
+      1.7041015625,
+      1.68017578125
+    ],
+    "bench_lock": ".ollama.lock",
+    "config": "config.yaml"
+  },
+  "error": null,
+  "notes": []
+},
+{
+  "spec": {
+    "cell_id": "n100000-cold-unfiltered-r4",
+    "size": 100000,
+    "seed": 20261017,
+    "mode": "cold",
+    "variant": "unfiltered",
+    "store_path": "qlat-s20261017-n100000-g1.db",
+    "result_path": "n100000-cold-unfiltered-r4.json",
+    "encoder": true,
+    "question_offset": 4,
+    "questions": 1,
+    "budget_seconds": 0.0,
+    "min_questions": 5,
+    "top_k": 40
+  },
+  "status": "ok",
+  "started_at": "2026-10-18T03:53:50.016812+00:00",
+  "finished_at": "2026-10-18T03:54:08.052898+00:00",
+  "wall_seconds": 18.03584579192102,
+  "import_seconds": 0.47192141704726964,
+  "encoder_load_seconds": 6.435329416999593,
+  "warmup_seconds": null,
+  "samples": [
+    {
+      "question_index": 4,
+      "subject_id": null,
+      "total_seconds": 10.852986249956302,
+      "stages": {
+        "setup": 0.007677083951421082,
+        "embed": 0.06695766595657915,
+        "sql_fetch": 1.457323458045721,
+        "decode": 5.374631931190379,
+        "hydrate": 2.656292151659727,
+        "filters": 0.74704400007613,
+        "source_rows": 0.12395916692912579,
+        "support_discounts": 0.022990124998614192,
+        "scoring": 0.3455524160526693,
+        "sort": 0.03230966697447002,
+        "collapse": 0.00903741701040417,
+        "other": 0.009211167111061513
+      },
+      "rows_read": 100000,
+      "embedding_json_bytes": 842338045,
+      "models_hydrated": 100000,
+      "candidates_scored": 96482,
+      "snapshot_ids_looked_up": 3125,
+      "entry_ids_looked_up": 1220,
+      "results": 40
+    }
+  ],
+  "cosine_reference": {
+    "vectors": 100000,
+    "loop_seconds": 0.14736354199703783,
+    "stack_seconds": 0.03727562492713332,
+    "matmul_seconds": 0.007928667007945478
+  },
+  "peak_rss_bytes": 2048802816,
+  "sampled_peak_rss_bytes": 2048884736,
+  "environment": {
+    "git_sha": "2b5186404f1017ce3ef794fcdbe47a1c2d89a001",
+    "package_version": "1.192.22",
+    "python": "3.11.15",
+    "numpy": "2.4.6",
+    "sqlite": "3.50.4",
+    "sqlalchemy": "2.1.4",
+    "pydantic": "2.14.1",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184,
+    "load_average_before": [
+      1.71240234375,
+      1.7041015625,
+      1.68017578125
+    ],
+    "load_average_after": [
+      1.712890625,
+      1.70556640625,
+      1.68017578125
+    ],
+    "bench_lock": ".ollama.lock",
+    "config": "config.yaml"
+  },
+  "error": null,
+  "notes": []
+}
+]

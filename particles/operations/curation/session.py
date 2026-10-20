@@ -25,7 +25,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import CurationConfig, get_config
-from particles.core.schema import Particle, RelationCreatedBy, RelationType, ResolutionAction
+from particles.core.observer_scope import BeliefScope
+from particles.core.schema import (
+    Particle,
+    ProvenanceRefType,
+    RelationCreatedBy,
+    RelationType,
+    ResolutionAction,
+)
 from particles.core.status import Status, StatusReason
 from particles.corpus.store import get_particle_source_uris
 from particles.operations.abstraction import accept_candidate, reject_candidate
@@ -43,6 +50,8 @@ from particles.store.event_store import (
     list_events_since,
     record_event,
 )
+from particles.store.observer_scope_join import lens_may_engage, load_scopes
+from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import get_particle, update_particle_status
 from particles.store.subject_store import get_subject
 
@@ -52,7 +61,9 @@ from .cards import (
     ConflictBrief,
     CurationCard,
     ParticleBrief,
+    merge_scope_note,
     resolve_actions_for,
+    scope_brief,
 )
 from .collect import cards_from_findings, collect_cards
 from .leverage import _as_utc, contested_ids_from, score_cards
@@ -432,6 +443,11 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
     (``score_effective_confidence``), so the feed and a query cannot disagree.
     Cards with no particle (uncited_url / failed_snapshots) keep the empty
     default.
+
+    On a rescoped store each brief also carries the belief's observer scope,
+    and a duplicate pair whose sides are in view for different projects says
+    what a merge would do to that. This is display only: curation
+    stays observer-blind, so the scope filters no card and moves no leverage.
     """
     sides: dict[str, tuple[list[str], list[str]]] = {}
     for card in cards:
@@ -462,6 +478,7 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
                 subject = await get_subject(session, sid)
                 if subject is not None:
                     labels[sid] = subject.canonical_name
+    scopes, widened = await _observer_scopes(session, list(particles.values()))
 
     def brief(pid: str | None) -> ParticleBrief | None:
         p = particles.get(pid) if pid is not None else None
@@ -476,10 +493,15 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
             status_reason=p.status_reason.value if p.status_reason is not None else None,
             source_uri=sources.get(p.id),
             asserted_at=p.asserted_at,
+            observer_scope=(
+                scope_brief(scopes[p.id], widened=p.id in widened) if p.id in scopes else None
+            ),
         )
 
     for card in cards:
         card.particles = [b for pid in _brief_ids(card) if (b := brief(pid)) is not None]
+        if card.kind is CardKind.DUPLICATE_PAIR:
+            card.scope_note = _merge_note(card, particles, scopes)
         if card.inconsistency_id is None or card.inconsistency_id not in sides:
             continue
         a_side, b_side = sides[card.inconsistency_id]
@@ -498,6 +520,41 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
                 particles.get(a_id) if a_id else None,
                 particles.get(b_id) if b_id else None,
             )
+
+
+async def _observer_scopes(
+    session: AsyncSession, particles: list[Particle]
+) -> tuple[dict[str, BeliefScope], set[str]]:
+    """Each briefed belief's observer scope and the widened ids, in one batch.
+
+    Empty on a store that was never rescoped, where no project lens engages,
+    so its cards render as they did before observer scope existed.
+    """
+    if not await lens_may_engage(session):
+        return {}, set()
+    scopes = await load_scopes(session, particles)
+    widened: set[str] = set()
+    if await any_widening(session):
+        widened = await widened_ids(session, ScopeTarget.PARTICLE, [p.id for p in particles])
+    return scopes, widened
+
+
+def _merge_note(
+    card: CurationCard, particles: dict[str, Particle], scopes: dict[str, BeliefScope]
+) -> str | None:
+    """What merging a duplicate pair does to its observer scope (``merge_scope_note``)."""
+    if len(card.particle_ids) != 2:
+        return None
+    pair = [particles.get(pid) for pid in card.particle_ids]
+    if any(p is None or p.id not in scopes or _is_derived(p) for p in pair):
+        return None
+    a, b = (scopes[p.id] for p in pair if p is not None)
+    return merge_scope_note(a, b)
+
+
+def _is_derived(p: Particle) -> bool:
+    """A derived belief takes the meet of its premises, which a merge leaves alone."""
+    return any(r.type is ProvenanceRefType.PARTICLE for r in p.provenance)
 
 
 def _brief_ids(card: CurationCard) -> list[str]:

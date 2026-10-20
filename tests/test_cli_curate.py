@@ -38,6 +38,8 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.operations.curation import CardKind, CurationCard, DuplicateVerdict
 from particles.operations.curation.cards import (
     ConflictBrief,
+    ObserverScopeBrief,
+    ObserverScopeKind,
     ParticleBrief,
     gestures_for,
 )
@@ -209,6 +211,34 @@ class TestQueueListing:
         assert "key: 'duplicate_pair:p-aaa|p-bbb'" in out
         assert "Link the two as co-evidential" in out
         assert "They are different claims" in out
+
+    def test_duplicate_card_shows_each_sides_scope_and_what_a_merge_does(
+        self, cli_db: Path, queue: AsyncMock
+    ) -> None:
+        # Atlas review finding 8: a merge pools the pair's sources, so a curator
+        # sees which projects each belief is in view for before merging.
+        a, b = _brief("p-aaa", "Deploys run on Fridays."), _brief("p-bbb", "Deploys run Fridays.")
+        a.observer_scope = ObserverScopeBrief(kind=ObserverScopeKind.PROJECTS, projects=["-a"])
+        b.observer_scope = ObserverScopeBrief(kind=ObserverScopeKind.UNATTRIBUTED)
+        card = _card(
+            CardKind.DUPLICATE_PAIR,
+            particle_ids=["p-aaa", "p-bbb"],
+            diagnostic="Possible duplicate",
+            particles=[a, b],
+            scope_note="Merging puts both beliefs in view for project -a.",
+        )
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        out = runner.invoke(app, ["curate"], catch_exceptions=False).output
+        assert "in view: -a" in out
+        assert "in view: no project (unattributed)" in out
+        assert "Merging puts both beliefs in view for project -a." in out
+
+    def test_a_brief_without_scope_prints_no_scope(self, cli_db: Path, queue: AsyncMock) -> None:
+        # A store that was never rescoped renders as it did before.
+        card = _card(particles=[_brief("p-aaa", "A stale belief.")])
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        out = runner.invoke(app, ["curate"], catch_exceptions=False).output
+        assert "in view" not in out
 
     def test_conflict_card_shows_both_sides_and_its_actions(
         self, cli_db: Path, queue: AsyncMock

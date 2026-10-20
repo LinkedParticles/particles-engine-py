@@ -262,13 +262,17 @@ async def test_high_use_low_confidence_outranks_low_use_high_confidence(
     for p in (load_bearing, lesser):
         await insert_particle(db_session, p, emb)  # type: ignore[arg-type]
 
+    # Recorded at the real clock, not _NOW: the rank path evaluates utility at
+    # the present, so events pinned to a fixed past date decay
+    # with the calendar until the 24-vs-6 lead falls under the 0.01 truth gap.
+    observed_at = datetime.now(UTC)
     for pid, uses in ((load_bearing.id, 24), (lesser.id, 6)):
         for n in range(uses):
             await record_utility_events(
                 db_session,  # type: ignore[arg-type]
                 f"sess-{pid[:4]}-{n}",
                 {pid: "literal"},
-                observed_at=_NOW,
+                observed_at=observed_at,
             )
 
     # Truth axis alone ranks the marginally-more-confident belief first.

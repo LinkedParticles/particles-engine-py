@@ -1377,6 +1377,23 @@ are mostly the model's own interpretation (motives, status, conclusions)
 written in the same voice as the recorded claims. It is a separate family from
 every table above and is never merged with them.
 
+## Query latency: where the time goes as the store grows
+
+A semantic query reads every ACTIVE belief and has no vector index, so its cost
+grows with the store. That has its own measurement:
+[query latency, by stage, from 10k to 1M beliefs](benchmarks/query-latency.md).
+On an Apple M4 Mac mini, an unfiltered query takes 5.7 s at 56k beliefs (the
+size of the owner's own store) and 10.3 s at 100k, about 100 µs per belief; it
+takes 61 s at 300k, where the store no longer stays in the file cache, and it
+did not finish at 1M, which needs about 20 GiB of memory. About three quarters
+of the time is decoding embedding JSON and building Python models; the cosine
+similarity itself is about 1.4%. A GitHub-hosted runner shows the same split at
+about twice the per-belief cost. Release 1.192.23 keeps the decoded beliefs
+in memory between queries, and on the same machine a long-running process's
+query now takes 358 ms at 56k beliefs, 2.25 s at 300k and 8.9 s at 1M; a fresh
+process's first query costs what it did. It measures time, not quality, and is
+never merged with the tables above.
+
 ## Relationship to the extractor benchmarks
 
 The `particles extractor benchmark*` verbs (including the modality and

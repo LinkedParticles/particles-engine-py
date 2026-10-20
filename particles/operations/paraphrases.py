@@ -74,10 +74,10 @@ from particles.ingest.update_supersession import SpeakerKey, SubjectIndex, parti
 from particles.llm.breaker import llm_circuit_open
 from particles.operations.probe_ledger import recall, remember
 from particles.operations.reconcile import _pair_update_order
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import EventRefKind, OperatorEventType, list_events, record_event
 from particles.store.particle_store import (
     count_update_retirements_after,
-    get_active_particles_with_embeddings,
     get_embeddings_by_ids,
     get_particle,
     get_superseding_particle,
@@ -413,7 +413,7 @@ async def run_paraphrases(  # noqa: PLR0912 — one linear cursor walk
     require_attribution = config.reconciliation.store_mode != "single"
     speaker = await load_speaker_key(session)
     shared = _Gather(
-        SubjectIndex.build(await get_active_particles_with_embeddings(session), speaker=speaker),
+        SubjectIndex.build(await load_active_candidates(session), speaker=speaker),
         await ObserverGate.open(session),
         speaker,
     )

@@ -79,9 +79,9 @@ from particles.ingest.pipeline import (
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.operations._llm import _llm_call, record_unusable_reply
 from particles.operations.probe_ledger import recall, remember
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import record_event
 from particles.store.particle_store import (
-    get_active_particles_with_embeddings,
     get_inconsistency_particles,
     insert_particle,
     update_particle_status,
@@ -255,7 +255,7 @@ async def _supersession_candidates(
     """
     relevant = {eid for pair in entry_pairs for eid in pair}
     by_entry: dict[str, list[EmbeddingPair]] = {}
-    for particle, emb in await get_active_particles_with_embeddings(session):
+    for particle, emb in await load_active_candidates(session):
         eid = _source_entry_id(particle)
         if eid is not None and eid in relevant:
             by_entry.setdefault(eid, []).append((particle, emb))
@@ -546,7 +546,7 @@ async def _update_candidates(
     from particles.ingest.update_supersession import SubjectIndex
 
     index = SubjectIndex.build(
-        await get_active_particles_with_embeddings(session),
+        await load_active_candidates(session),
         speaker=await load_speaker_key(session),
     )
     out = _UpdateGather(subject_groups=len(index.by_subject))

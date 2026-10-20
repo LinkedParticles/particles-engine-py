@@ -40,6 +40,12 @@ pip install linkedparticles
 Python 3.11+. `linkedparticles-core`, the store-free Client layer, is pulled
 in automatically.
 
+Extraction and the written answers call a language model. The quickstart below
+uses Anthropic, and any OpenAI-compatible endpoint works too, hosted or local
+(Ollama, llama.cpp, vLLM): each purpose names its provider in `config.yaml`
+([named providers](https://docs.linkedparticles.org/operator-guide/configuration/#named-providers-any-openai-compatible-endpoint)).
+Deposit, the session digest and structural queries make no model call at all.
+
 ## Sixty seconds
 
 ```bash
@@ -99,6 +105,10 @@ full-context oracle and a no-memory floor run as controls in the same harness:
 | **Particles memory** (shipped default, `top_k` 40) | **0.969** | **0.804** |
 | Full-context oracle (baseline, n=148) | — | 0.878 |
 | No memory (floor) | — | 0.047 |
+
+The oracle and floor rows come from a separate control run in the same harness,
+the day before the three runs the Particles row averages; the benchmarks page
+names the report of record for each row.
 
 Method, per-question-type breakdowns, comparator memories, and the
 budget-matched arm (including the arms where Particles *loses*) are on the

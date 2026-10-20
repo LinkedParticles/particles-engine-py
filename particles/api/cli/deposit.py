@@ -261,8 +261,10 @@ def deposit_cmd(
             )
         )
     except (ValueError, SourceFetchError) as exc:
-        # SourceFetchError = an expected upstream fetch failure (e.g. Reddit's
-        # 403 bot-wall) in local mode; surface it cleanly, not as a traceback.
+        # SourceFetchError = an expected upstream fetch failure in local mode
+        # (e.g. a Reddit thread the Arctic Shift archive has not captured, or
+        # Reddit's 403 bot-wall on the direct backend); surface its message,
+        # which names the source and the remedy, not a traceback.
         # In remote mode the engine maps it to a 502 the backend already
         # surfaces as an EngineHttpError.
         typer.echo(f"Error: {exc}", err=True)

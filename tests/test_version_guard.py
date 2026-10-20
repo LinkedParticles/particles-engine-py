@@ -31,7 +31,8 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.operations.version_guard import assert_store_schema_current
-from particles.store.particle_store import insert_particle
+from particles.store.particle_store import has_active_schema_mismatch, insert_particle
+from tests._query_plan import plans_of
 
 
 def _make_particle(*, schema_version: str = SCHEMA_VERSION) -> Particle:
@@ -139,6 +140,43 @@ class TestGuard:
         assert exc_info.value.current_version == SCHEMA_VERSION
         assert exc_info.value.found_versions.get("0.3.0") == 1
         assert exc_info.value.found_versions.get(SCHEMA_VERSION) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy", ["0.3.0", "9.0.0"])
+    async def test_raises_for_a_version_on_either_side(
+        self, db_session: AsyncSession, legacy: str
+    ) -> None:
+        # The indexed check is split into a range below and a range above the
+        # current version; both halves must catch a mismatch.
+        await insert_particle(db_session, _make_particle())
+        await insert_particle(db_session, _make_particle(schema_version=legacy))
+        await db_session.commit()
+        with pytest.raises(SchemaVersionMismatchError) as exc_info:
+            await assert_store_schema_current(db_session)
+        assert exc_info.value.found_versions == {SCHEMA_VERSION: 1, legacy: 1}
+
+    @pytest.mark.asyncio
+    async def test_a_retired_legacy_row_does_not_trip_it(self, db_session: AsyncSession) -> None:
+        legacy = _make_particle(schema_version="0.3.0").model_copy(
+            update={"status": Status.SUPERSEDED}
+        )
+        await insert_particle(db_session, legacy)
+        await db_session.commit()
+        await assert_store_schema_current(db_session)
+
+    @pytest.mark.asyncio
+    async def test_the_check_reads_no_table_rows(self, db_session: AsyncSession) -> None:
+        # Two range seeks on the covering index, whatever the store's size:
+        # no SCAN, and no plan that walks every ACTIVE row of the table.
+        await insert_particle(db_session, _make_particle())
+        await db_session.commit()
+        ((_, plan),) = await plans_of(
+            db_session, lambda: has_active_schema_mismatch(db_session, SCHEMA_VERSION)
+        )
+        searches = [d for d in plan if d.startswith("SEARCH")]
+        assert len(searches) == 2
+        assert all("COVERING INDEX ix_particles_status_schema_version" in d for d in searches)
+        assert not any(d.startswith("SCAN particles") for d in plan)
 
 
 # ---------------------------------------------------------------------------

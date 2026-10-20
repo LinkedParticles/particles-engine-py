@@ -822,8 +822,10 @@ def consolidate_cmd(
         False,
         "--history",
         help=(
-            "Print the contested fraction and the autonomous share of lifecycle "
-            "transitions that each past run recorded, oldest first. Runs nothing."
+            "Print the contested fraction, the autonomous share of lifecycle "
+            "transitions, and the held claims returned without review that each "
+            "past run recorded, oldest first, then the closures since the store "
+            "began. Runs nothing."
         ),
     ),
     verbose: bool = VERBOSE_OPTION,
@@ -923,6 +925,7 @@ async def _consolidate_impl(
         run_consolidation,
     )
 
+    await _refuse_a_store_behind_this_install(store)
     projection_runner, projection_skip = build_projection_runner(store)
     try:
         async with session_scope(store) as session:
@@ -967,6 +970,31 @@ async def _consolidate_impl(
     if failed:
         typer.echo(f"consolidation: pass(es) failed: {', '.join(failed)}", err=True)
         raise typer.Exit(1)
+
+
+async def _refuse_a_store_behind_this_install(store: str) -> None:
+    """Exit 2 before any pass when the store lacks one of this install's migrations.
+
+    Passes that call a model run before the first write that touches a pending
+    migration's column, so a run against such a store spent on extraction and
+    probes it could not record (2026-10-18). A store whose state cannot be read
+    is left to the run, which reports its own failure.
+    """
+    from particles.api.cli._schema import behind_summary, migrate_command
+    from particles.db import schema_state
+
+    try:
+        state = await schema_state(store)
+    except Exception:  # noqa: BLE001 — the probe is advisory; the run reports for itself
+        return
+    if state is None or not state.pending:
+        return
+    typer.echo(
+        f"Error: consolidation could not start: {behind_summary(state)}. Migrate it with "
+        f"this install, then re-run:\n  {migrate_command(store)}",
+        err=True,
+    )
+    raise typer.Exit(2)
 
 
 async def _consolidate_plan_impl(

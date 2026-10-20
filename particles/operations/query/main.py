@@ -57,13 +57,14 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.stance import has_stance_marker
 from particles.db import DEFAULT_STORE, StoreHandle, session_scope
-from particles.embeddings import cosine_similarity
+from particles.embeddings import cosine_similarities
 from particles.extraction.polarity import is_non_asserted
 from particles.extraction.registry import CODE_SYMBOL_EXTRACTOR_IDS
 from particles.extraction.scope import is_excluded_document_meta
 from particles.observability import traced
 from particles.operations.abstraction import stale_support_discounts
 from particles.operations.version_guard import assert_store_schema_current
+from particles.store.candidate_cache import load_active_candidates
 from particles.store.extractor_store import (
     get_cached_trust_weight,
     get_trust_weight_map,
@@ -71,7 +72,6 @@ from particles.store.extractor_store import (
 )
 from particles.store.particle_store import (
     count_structured_claim_coverage,
-    get_active_particles_with_embeddings,
     get_particles_with_embeddings_as_of,
 )
 
@@ -104,6 +104,17 @@ _SCHEMA_VERSION_CURRENT = SCHEMA_VERSION
 
 #: (particle, cosine_sim, effective_confidence)
 Scored = tuple[Particle, float, float]
+
+
+def _detach(top: list[Scored]) -> list[Scored]:
+    """Copy the particles a query returns out of the shared candidate cache.
+
+    The fast path's candidates are the cache's own ``Particle`` objects
+    (:mod:`particles.store.candidate_cache`), shared with every later query.
+    What leaves the query path is a caller's to keep and change, so it gets
+    its own copies: ``top_k`` deep copies, not one per candidate.
+    """
+    return [(p.model_copy(deep=True), sim, eff) for p, sim, eff in top]
 
 
 def _combined(sim: float, eff_conf: float) -> float:
@@ -222,8 +233,11 @@ async def _gather_scored(
         )
         candidates = [(p, emb) for p, emb, _ in admitted]
     elif request.as_of is None:
-        # Fast path — byte-for-byte today's read behaviour (ACTIVE-only plan).
-        candidates = await get_active_particles_with_embeddings(
+        # Fast path — the ACTIVE-only plan, read through the per-process
+        # candidate cache, which returns exactly what the loader would. The
+        # particles in it are shared, so nothing below may mutate one; the
+        # callers copy the ones they return (``_detach``).
+        candidates = await load_active_candidates(
             session, request.min_confidence, subject_id=request.subject_id
         )
     else:
@@ -354,9 +368,18 @@ async def _gather_scored(
     # at its honest score.
     support_discounts = await stale_support_discounts(session, [p for p, _ in candidates])
 
+    # the single normative similarity primitive — cosine over
+    # L2-normalized vectors, clamped to [0, 1] — computed for every candidate
+    # in one matrix pass rather than once per pair in the loop below.
+    sims = (
+        cosine_similarities(query_emb, [emb for _, emb in candidates])
+        if query_emb is not None
+        else None
+    )
+
     scored: list[Scored] = []
     pub_at_by_id: dict[str, datetime | None] = {}
-    for p, emb in candidates:
+    for i, (p, _emb) in enumerate(candidates):
         extractor_id = p.extractor_ref.name if p.extractor_ref else "general-extractor"
         trust_weight = get_cached_trust_weight(extractor_id)
         pub_at, source_type, entry_id, uri_r, author_id = source_info.get(
@@ -387,10 +410,9 @@ async def _gather_scored(
         if eff_conf < request.min_confidence:
             continue
 
-        # the single normative similarity primitive — cosine over
-        # L2-normalized vectors, clamped to [0, 1]. §9.3 ranks by sim × eff_conf.
-        # Fall back to confidence ranking when there is no query embedding.
-        sim = cosine_similarity(query_emb, emb) if query_emb is not None else eff_conf
+        # §9.3 ranks by sim × eff_conf. Fall back to confidence ranking when
+        # there is no query embedding.
+        sim = sims[i] if sims is not None else eff_conf
 
         scored.append((p, sim, eff_conf))
         pub_at_by_id[p.id] = pub_at
@@ -751,7 +773,7 @@ async def query(
     # (§6.10) — see _collapse_co_evidential_top_k for the noisy-OR merge.
     scored.sort(key=_rank_score, reverse=True)
     top = scored[: request.top_k]
-    top = await _collapse_co_evidential_top_k(session, top)
+    top = _detach(await _collapse_co_evidential_top_k(session, top))
 
     truncation_warning = _truncation_warning(scored, top, request.top_k)
     coverage_gaps = await _find_coverage_gaps(session)
@@ -943,7 +965,7 @@ async def retrieve_ranked(
         reverse=True,
     )
     top = scored[: request.top_k]
-    return await _collapse_co_evidential_top_k(session, top)
+    return _detach(await _collapse_co_evidential_top_k(session, top))
 
 
 async def _apply_utility_to_scored(session: AsyncSession, scored: list[Scored]) -> list[Scored]:
@@ -1105,6 +1127,7 @@ async def query_federated(
     top = merged[: request.top_k]
     top = await _collapse_federated(top, store_by_id)
     top.sort(key=_rank_score, reverse=True)
+    top = _detach(top)
 
     truncation_warning = _truncation_warning(merged, top, request.top_k)
     return await _build_response(
