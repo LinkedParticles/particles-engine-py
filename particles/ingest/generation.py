@@ -36,19 +36,77 @@ retire a replaced-but-not-contradicted claim. It also means the cascade costs
 Demote, never delete: ``PROVENANCE_STALE`` keeps the particle's content,
 provenance, and confidence, surfaces it in the curation queue, and is
 reversible.
+
+**"Current" is capture order, never extraction order**. The
+snapshot just extracted is current only when no processed generation of the
+entry was captured after it. An older snapshot extracted late (a forced
+``extract --snapshot-id``, a programmatic call) is measured against the newer
+generation, so the late pass retires its own unattested output and never the
+current generation's claims.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import Mutability, ProvenanceRefType
 from particles.core.status import Status, StatusReason
+from particles.core.validity import ensure_utc
 
 log = logging.getLogger(__name__)
+
+#: The quality-note prefix for a pass that extracted an older generation late.
+LATE_GENERATION = "LATE_GENERATION"
+
+
+@dataclass(frozen=True)
+class CurrentGeneration:
+    """Which record of a ``MUTABLE`` entry a cascade measures against."""
+
+    snapshot_id: str
+    #: The record is a processed ``ABSENT``: the entry states nothing, so
+    #: snapshot-less provenance is retired too.
+    absent: bool = False
+    #: A processed generation was captured after the snapshot just extracted.
+    late: bool = False
+
+
+async def current_generation(
+    session: AsyncSession, entry_id: str, extracted_snapshot_id: str
+) -> CurrentGeneration:
+    """The newer, by capture time, of ``extracted_snapshot_id`` and the entry's current generation.
+
+    The snapshot just extracted is not yet ``COMPLETE`` when the cascade runs
+    (it is marked in the same transaction, afterwards), so
+    ``get_entry_currency`` still names its predecessor or nothing; the
+    comparison is what makes the newer of the two current. On equal capture
+    times the snapshot just extracted wins.
+    """
+    from particles.corpus.store import get_entry_currency, get_snapshot
+
+    currency = (await get_entry_currency(session, [entry_id])).get(entry_id)
+    if currency is None or currency.latest_snapshot_id in (None, extracted_snapshot_id):
+        return CurrentGeneration(extracted_snapshot_id)
+    held = await get_snapshot(session, currency.latest_snapshot_id)
+    extracted = await get_snapshot(session, extracted_snapshot_id)
+    if held is None or extracted is None:
+        return CurrentGeneration(extracted_snapshot_id)
+    if ensure_utc(held.captured_at) <= ensure_utc(extracted.captured_at):
+        return CurrentGeneration(extracted_snapshot_id)
+    return CurrentGeneration(held.snapshot_id, absent=currency.absent, late=True)
+
+
+def late_generation_note(count: int) -> str:
+    """The quality note for a pass that extracted an older generation late."""
+    return (
+        f"{LATE_GENERATION}: this snapshot was captured before the entry's current "
+        f"generation; {count} claim(s) it stated that the current one does not were "
+        f"retired, and none of the current generation's"
+    )
 
 
 async def cascade_superseded_generation(
@@ -57,6 +115,8 @@ async def cascade_superseded_generation(
     entry_id: str,
     current_snapshot_id: str,
     exclude_ids: frozenset[str] = frozenset(),
+    include_unsnapshotted: bool = False,
+    late_out: list[str] | None = None,
 ) -> list[str]:
     """Demote ACTIVE particles anchored to a superseded snapshot of ``entry_id``.
 
@@ -66,8 +126,10 @@ async def cascade_superseded_generation(
 
     Args:
         entry_id: The corpus entry whose generations are being reconciled.
-        current_snapshot_id: The snapshot that has just been extracted. Every
-            *other* snapshot of this entry is superseded by it.
+        current_snapshot_id: The snapshot that has just been extracted (or the
+            record absence processing is processing). It is current unless a
+            processed generation of the entry was captured after it; then that
+            generation is, and every other snapshot is superseded by it.
         exclude_ids: Particle ids to leave ACTIVE regardless. Callers pass the
             carry-forward ids. A carried-forward particle's
             provenance edge keeps naming the snapshot it was originally
@@ -75,6 +137,13 @@ async def cascade_superseded_generation(
             would be misread as a stale generation and demoted. A belt since
             the re-observation is now also on the particle's
             provenance, which the attestation check below reads.
+        include_unsnapshotted: Also take provenance edges with no snapshot id.
+            Absence processing passes it: an ``ABSENT`` current
+            generation states nothing, so no edge of the entry survives it.
+            Implied when the current generation turns out to be a processed
+            absence.
+        late_out: When the snapshot was extracted late, the demoted ids are
+            also appended here, so the caller can disclose the pass.
 
     A candidate some entry's *current* snapshot still attests is skipped—
     a claim a live source states is not ``PROVENANCE_STALE``
@@ -99,8 +168,12 @@ async def cascade_superseded_generation(
     if entry is None or entry.mutability != Mutability.MUTABLE:
         return []
 
+    current = await current_generation(session, entry_id, current_snapshot_id)
+    current_snapshot_id = current.snapshot_id
+    include_unsnapshotted = include_unsnapshotted or current.absent
+
     candidates = await get_active_particle_ids_from_other_snapshots(
-        session, entry_id, current_snapshot_id
+        session, entry_id, current_snapshot_id, include_unsnapshotted=include_unsnapshotted
     )
     candidates = await _unattested(
         session,
@@ -118,11 +191,14 @@ async def cascade_superseded_generation(
     if demoted:
         log.info(
             "Entry %s: demoted %d particle(s) from superseded snapshot generations "
-            "(MUTABLE; current snapshot %s)",
+            "(MUTABLE; current snapshot %s%s)",
             entry_id[:8],
             len(demoted),
             current_snapshot_id[:8],
+            ", extracted late" if current.late else "",
         )
+    if current.late and late_out is not None:
+        late_out.extend(demoted)
     return demoted
 
 
@@ -144,7 +220,10 @@ class GenerationBackfillReport:
 
 
 async def backfill_superseded_generations(
-    session: AsyncSession, *, dry_run: bool = True
+    session: AsyncSession,
+    *,
+    dry_run: bool = True,
+    entry_ids: Collection[str] | None = None,
 ) -> GenerationBackfillReport:
     """Apply the §2 cascade to entries whose snapshots moved before.
 
@@ -158,30 +237,43 @@ async def backfill_superseded_generations(
     the old generation would leave the store with neither.
     "COMPLETE" here means an extracted RESPONSE snapshot: a REVISIT is COMPLETE
     too, but it records that the content did not change and carries no beliefs
-    of its own, so it is never the current generation.
+    of its own, so it is never the current generation. The current generation
+    is read through ``get_entry_currency``, so an entry whose current
+    generation is a completed ``ABSENT`` record is processed as absence
+    processing processes it, snapshot-less edges included.
+
+    ``entry_ids`` scopes the walk; ``import vault`` passes the entries it just
+    reclassified, to preview what the backfill would retire among them.
+    ``None`` is store-wide.
 
     ``dry_run`` counts without writing (it does not write-then-roll-back), so a
     caller may safely share its session with other work. Does not commit; the
     caller owns the transaction.
     """
     from particles.corpus.store import (
-        get_latest_completed_snapshot_id,
+        get_entry_currency,
         list_mutable_entries_with_multiple_snapshots,
     )
     from particles.store.particle_store import get_active_particle_ids_from_other_snapshots
 
+    scope = set(entry_ids) if entry_ids is not None else None
     report = GenerationBackfillReport()
     for entry_id, uri_r in await list_mutable_entries_with_multiple_snapshots(session):
+        if scope is not None and entry_id not in scope:
+            continue
         report.entries_scanned += 1
-        current = await get_latest_completed_snapshot_id(session, entry_id)
-        if current is None:
+        currency = (await get_entry_currency(session, [entry_id])).get(entry_id)
+        current = currency.latest_snapshot_id if currency is not None else None
+        if currency is None or current is None:
             report.entries_unextracted += 1
             continue
         if dry_run:
             count = len(
                 await _unattested(
                     session,
-                    await get_active_particle_ids_from_other_snapshots(session, entry_id, current),
+                    await get_active_particle_ids_from_other_snapshots(
+                        session, entry_id, current, include_unsnapshotted=currency.absent
+                    ),
                     entry_id=entry_id,
                     current_snapshot_id=current,
                 )
@@ -189,7 +281,10 @@ async def backfill_superseded_generations(
         else:
             count = len(
                 await cascade_superseded_generation(
-                    session, entry_id=entry_id, current_snapshot_id=current
+                    session,
+                    entry_id=entry_id,
+                    current_snapshot_id=current,
+                    include_unsnapshotted=currency.absent,
                 )
             )
         if count:

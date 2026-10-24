@@ -23,6 +23,7 @@ the harvest-side strip so splice and strip can never disagree.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,9 +31,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from particles.api.cli._claude_code import (
     ARCHIVE_POINTER_PREFIX,
     MEMORY_REGION,
+    index_entry_target,
     load_projection_snapshots,
     memory_archive_path,
     memory_backup_path,
+    memory_file_type,
     memory_manifest_path,
     memory_snapshot_path,
     observer_project_for,
@@ -51,6 +54,7 @@ from particles.render.markdown import (
 )
 
 if TYPE_CHECKING:
+    from particles.operations.projection.memory_region import MemoryRegion
     from particles.store.session_exposure_store import ShownBelief
 
 log = logging.getLogger(__name__)
@@ -69,44 +73,201 @@ def archive_pointer_line(memory_dir: Path | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fold_authored_lines(text: str, pointer_line: str) -> tuple[str, list[str]]:
-    """Move authored lines outside every projected region out of ``text``.
+def _tidy(lines: list[str]) -> str:
+    """Join ``lines`` with runs of blank lines collapsed and the ends trimmed."""
+    out: list[str] = []
+    for line in lines:
+        if not line.strip() and (not out or not out[-1].strip()):
+            continue
+        out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out)
 
-    Returns ``(kept_text, folded_lines)``: ``kept_text`` is the projected
-    region(s) verbatim followed by the archive ``pointer_line``;
-    ``folded_lines`` is everything else non-blank (excluding any prior pointer
-    line), in file order, destined for the append-only archive. When nothing
-    is foldable, ``text`` is returned unchanged with an empty list — the
-    pointer line is only introduced by an actual fold. Pure: the caller owns
+
+def fold_authored_lines(
+    text: str,
+    pointer_line: str,
+    *,
+    foldable: Collection[str] = frozenset(),
+    reinstate: Sequence[str] = (),
+) -> tuple[str, list[str]]:
+    """Fold the represented lines out of ``text`` and bring ``reinstate`` back.
+
+    Returns ``(kept_text, folded_lines)``. A line outside every projected
+    region moves out only when it is in ``foldable`` (the test
+    decides which); every other line stays, in file order. ``reinstate``
+    (archived pointers no longer represented, §3) is appended after the
+    lines already below the last region. The archive ``pointer_line`` sits
+    right after the last region, and is introduced only by an actual fold;
+    an existing one is kept. When nothing folds and nothing is reinstated,
+    ``text`` is returned unchanged with an empty list. Pure: the caller owns
     every write, in the §7 crash-safe order.
     """
     regions = find_projected_regions(text)
     if not regions:
         return text, []
     folded: list[str] = []
+    had_pointer = False
     cursor = 0
-    outside_chunks: list[str] = []
-    for region in regions:
-        outside_chunks.append(text[cursor : region.start])
-        cursor = region.end
-    outside_chunks.append(text[cursor:])
-    for chunk in outside_chunks:
-        for line in chunk.splitlines():
-            if line.strip() and not line.startswith(ARCHIVE_POINTER_PREFIX):
+    blocks: list[list[str]] = []
+    bounds = [(r.start, r.end) for r in regions]
+    for begin, end in [*bounds, (len(text), len(text))]:
+        kept: list[str] = []
+        for line in text[cursor:begin].splitlines():
+            if line.startswith(ARCHIVE_POINTER_PREFIX):
+                had_pointer = True
+            elif line.strip() and line in foldable:
                 folded.append(line)
-    if not folded:
+            else:
+                kept.append(line)
+        blocks.append(kept)
+        cursor = end
+    if not folded and not reinstate:
         return text, []
-    kept = "\n\n".join(text[r.start : r.end] for r in regions)
-    return kept + "\n\n" + pointer_line + "\n", folded
+    blocks[-1].extend(reinstate)
+    parts = [_tidy(blocks[0])]
+    for i, region in enumerate(regions):
+        parts.append(text[region.start : region.end])
+        if i == len(regions) - 1 and (folded or had_pointer):
+            parts.append(pointer_line)
+        parts.append(_tidy(blocks[i + 1]))
+    return "\n\n".join(part for part in parts if part) + "\n", folded
 
 
-def _append_to_archive(memory_dir: Path, lines: list[str], source_name: str) -> None:
-    """Append folded lines to the state-dir archive (append-only, with a receipt)."""
+def _outside_lines(text: str) -> list[str]:
+    """The non-blank lines outside every projected region, archive pointer excluded."""
+    regions = find_projected_regions(text)
+    cursor = 0
+    lines: list[str] = []
+    for begin, end in [*((r.start, r.end) for r in regions), (len(text), len(text))]:
+        lines += [
+            line
+            for line in text[cursor:begin].splitlines()
+            if line.strip() and not line.startswith(ARCHIVE_POINTER_PREFIX)
+        ]
+        cursor = end
+    return lines
+
+
+def archived_pointers(archive_text: str) -> dict[str, str]:
+    """Target filename → the newest archived index line for it, in first-seen order."""
+    newest: dict[str, str] = {}
+    for line in archive_text.splitlines():
+        target = index_entry_target(line)
+        if target is not None:
+            newest[target] = line
+    return newest
+
+
+@dataclass(frozen=True)
+class FoldPlan:
+    """What one cycle's fold does to ``MEMORY.md`` (§2/§3)."""
+
+    #: Lines outside the region whose content the region carries: they fold.
+    foldable: frozenset[str]
+    #: Archived pointer lines that come back below the region.
+    reinstate: tuple[str, ...]
+    #: Lines kept in place, counted by reason.
+    held: dict[str, int]
+
+
+#: Why a line outside the region was not folded (``protected-type``
+#: is a pointer to a ``never_fold_types`` file).
+HoldReason = Literal["not-a-pointer", "not-extracted", "not-in-region", "protected-type"]
+
+
+@dataclass(frozen=True)
+class FoldRequest:
+    """What the fold knows before it asks the store.
+
+    Built from the ``MEMORY.md`` the harvest read, before the render, so the
+    store question rides the render call: ``asked`` maps each target whose
+    verdict the store decides to the file URI the harvest deposited it under.
+    """
+
+    outside: tuple[str, ...]
+    line_targets: dict[str, str | None]
+    returning: dict[str, str]
+    protected: frozenset[str]
+    asked: dict[str, str]
+
+
+def fold_request(memory_dir: Path, text: str) -> FoldRequest:
+    """The lines outside the region and the targets their fold depends on.
+
+    A pointer to a file whose type is in ``never_fold_types`` is decided here,
+    with no store read; every other present or archived target is
+    asked of the store.
+    """
+    protected_types = {
+        t.strip().lower() for t in get_config().agent_memory.projection.never_fold_types
+    }
+    outside = _outside_lines(text)
+    line_targets: dict[str, str | None] = {}
+    for line in outside:
+        target = index_entry_target(line)
+        line_targets[line] = target if target and (memory_dir / target).is_file() else None
+    present = {t for t in line_targets.values() if t is not None}
+    archive = memory_archive_path(memory_dir)
+    archived = archived_pointers(archive.read_text(encoding="utf-8")) if archive.is_file() else {}
+    returning = {
+        t: ln for t, ln in archived.items() if t not in present and (memory_dir / t).is_file()
+    }
+    protected = frozenset(
+        t
+        for t in present | set(returning)
+        if protected_types and memory_file_type(memory_dir / t) in protected_types
+    )
+    asked = {
+        t: (memory_dir / t).resolve().as_uri()
+        for t in sorted((present | set(returning)) - protected)
+    }
+    return FoldRequest(tuple(outside), line_targets, returning, protected, asked)
+
+
+def plan_fold(request: FoldRequest, store_verdicts: Mapping[str, HoldReason | None]) -> FoldPlan:
+    """Decide which lines fold and which archived pointers return.
+
+    ``store_verdicts`` answers ``request.asked`` by file URI, read against the
+    region just rendered and after this cycle's harvest, so a target file
+    whose current content is not yet extracted cannot be represented (§4). A
+    target with no answer is held as not extracted.
+    """
+    verdicts: dict[str, HoldReason | None] = dict.fromkeys(request.protected, "protected-type")
+    for name, uri in request.asked.items():
+        verdicts[name] = store_verdicts.get(uri, "not-extracted")
+
+    held: dict[str, int] = {}
+    foldable: set[str] = set()
+    for line in request.outside:
+        target = request.line_targets[line]
+        reason: HoldReason | None = "not-a-pointer" if target is None else verdicts[target]
+        if reason is None:
+            foldable.add(line)
+        else:
+            held[reason] = held.get(reason, 0) + 1
+    reinstate = tuple(ln for t, ln in request.returning.items() if verdicts[t] is not None)
+    return FoldPlan(foldable=frozenset(foldable), reinstate=reinstate, held=held)
+
+
+def _append_to_archive(memory_dir: Path, lines: list[str], source_name: str) -> int:
+    """Append folded lines to the state-dir archive (append-only, with a receipt).
+
+    A line already in the archive byte for byte is not appended again, so a
+    pointer that folds, returns and folds again leaves one copy.
+    Returns how many lines were appended.
+    """
     path = memory_archive_path(memory_dir)
+    existing = set(path.read_text(encoding="utf-8").splitlines()) if path.is_file() else set()
+    new = [line for line in dict.fromkeys(lines) if line not in existing]
+    if not new:
+        return 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    block = f"\n<!-- folded from {source_name} -->\n" + "\n".join(lines) + "\n"
+    block = f"\n<!-- folded from {source_name} -->\n" + "\n".join(new) + "\n"
     with path.open("a", encoding="utf-8") as f:
         f.write(block)
+    return len(new)
 
 
 # ---------------------------------------------------------------------------
@@ -114,41 +275,33 @@ def _append_to_archive(memory_dir: Path, lines: list[str], source_name: str) -> 
 # ---------------------------------------------------------------------------
 
 
-def _observer_trailer(observer_project: str, engaged: bool) -> str:
-    """The region's last line under a project observer.
+async def _render_region(
+    store: str, observer_project: str | None = None, fold_targets: Sequence[str] = ()
+) -> MemoryRegion:
+    """Render the memory-index region through the backend.
 
-    It names the observer the region was rendered through, which is both the
-    disclosure and what the SessionStart freshness check reads: a region
-    rendered through a different observer, or through none, is never "current".
+    The local backend renders in a session it opens; a thin client sends its
+    manifest to the engine. Either way the manifest and the source
+    filter are this client's, read here at render time so the SessionStart
+    freshness check renders with the same policy.
     """
-    if engaged:
-        return f"<!-- observer: project {observer_project} -->"
-    return (
-        f"<!-- observer: project {observer_project} NOT applied — this store has not been "
-        "rescoped (`particles memory rescope`); the whole store is shown -->"
+    from particles.api.client import get_backend
+    from particles.operations.projection import load_manifest
+
+    manifest_path = memory_manifest_path()
+    return await get_backend().memory_region(
+        store,
+        manifest=load_manifest(manifest_path),
+        base_dir=manifest_path.parent,
+        observer_project=observer_project,
+        exclude_source_tags=list(get_config().agent_memory.projection.exclude_source_tags),
+        fold_targets=list(fold_targets),
     )
 
 
 async def _render_region_body(store: str, observer_project: str | None = None) -> str:
     """Deterministic, budget-enforced render of the memory-index splice body."""
-    from particles.db import session_scope
-    from particles.operations.projection import load_manifest, project_splice_body
-    from particles.operations.query.observer_scope import lens_may_engage
-
-    manifest_path = memory_manifest_path()
-    manifest = load_manifest(manifest_path)
-    async with session_scope(store) as session:
-        result = await project_splice_body(
-            session,
-            manifest,
-            base_dir=manifest_path.parent,
-            synthesize=False,
-            observer_project=observer_project,
-        )
-        if observer_project is None:
-            return result.document
-        engaged = await lens_may_engage(session)
-    return result.document.rstrip("\n") + "\n" + _observer_trailer(observer_project, engaged) + "\n"
+    return (await _render_region(store, observer_project)).body
 
 
 async def run_projection_cycle(
@@ -187,7 +340,21 @@ async def run_projection_cycle(
         if refusal is not None:
             log.info("memory projection refused for %s: %s", memory_dir, refusal)
             return {"skipped": "store-not-bound", "reason": refusal}
-        body = await _render_region_body(store, observer_project_for(memory_dir.parent.name))
+        # The fold's store question rides the render. Its lines come from the
+        # harvested text, which is the file this cycle may touch: any other
+        # content refuses below before the plan is used.
+        fold = get_config().agent_memory.projection.fold_authored_lines
+        request = (
+            fold_request(memory_dir, harvested_text)
+            if fold and harvested_text is not None
+            else None
+        )
+        region = await _render_region(
+            store,
+            observer_project_for(memory_dir.parent.name),
+            tuple(request.asked.values()) if request is not None else (),
+        )
+        body = region.body
         manifest_ref = str(memory_manifest_path())
         memory_md = memory_dir / "MEMORY.md"
         current = memory_md.read_text(encoding="utf-8") if memory_md.is_file() else None
@@ -234,11 +401,21 @@ async def run_projection_cycle(
             snapshot is None or target.body.strip("\n") != snapshot.strip("\n")
         )
 
-        # Fold-and-archive (§7, default-on): compute first, write later.
+        # Fold-and-archive (§7, default-on), gated per line: a
+        # pointer folds only while the region just rendered shows a belief its
+        # file currently states, and comes back once it does not. Computed
+        # first, written later.
         folded: list[str] = []
+        plan: FoldPlan | None = None
         text_to_splice = current
-        if get_config().agent_memory.projection.fold_authored_lines:
-            text_to_splice, folded = fold_authored_lines(current, archive_pointer_line(memory_dir))
+        if request is not None:
+            plan = plan_fold(request, region.fold_verdicts)
+            text_to_splice, folded = fold_authored_lines(
+                current,
+                archive_pointer_line(memory_dir),
+                foldable=plan.foldable,
+                reinstate=plan.reinstate,
+            )
 
         try:
             spliced = splice_region(text_to_splice, MEMORY_REGION, body, manifest=manifest_ref)
@@ -259,8 +436,13 @@ async def run_projection_cycle(
             "outcome": "rendered",
             "dirty_region": dirty,
             "folded": len(folded),
+            "memory_md_lines": len(spliced.splitlines()),
+            "memory_md_bytes": len(spliced.encode("utf-8")),
             "run_id": run_id,
         }
+        if plan is not None:
+            result["fold_held"] = plan.held
+            result["reinstated"] = len(plan.reinstate)
         git = await _maybe_commit(
             memory_dir, store=store, outcome="rendered", body=body, snapshot=snapshot, run_id=run_id
         )
@@ -371,16 +553,15 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     - **match** → ``skip``: the loaded file *is* the current view;
     - **mismatch** → ``diff``: inject only the difference — the fresh bullet
       lines (new / changed / newly-contested) absent from the loaded region;
-    - **anything unparseable** (projection disabled, remote engine, no
-      MEMORY.md, no region, no trailer) → ``full``: the plain digest push.
+    - **anything unparseable** (projection disabled, no MEMORY.md, no
+      region, no trailer) → ``full``: the plain digest push.
+
+    The memory directory is always this machine's; the fresh render it is
+    compared against comes through the backend, so on a remote engine the
+    engine renders it from this client's manifest. A render the
+    engine refuses or fails raises, and the hook degrades that to ``full``.
     """
     if not projection_enabled():
-        return DigestDecision("full")
-    from particles.api.client import get_backend
-
-    if get_backend().remote:
-        # The memory directory is machine-local; a remote store can't be
-        # compared against it meaningfully — push the full digest.
         return DigestDecision("full")
 
     # The file Claude Code loaded is the repository's, which in a linked

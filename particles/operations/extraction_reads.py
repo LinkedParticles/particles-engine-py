@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.schema import WarcRecordType
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import get_entry
 from particles.extraction.append_delta import decoded_prefix_length, plan_delta_chunks
@@ -105,6 +106,9 @@ async def _plan_one(session: AsyncSession, entry_id: str, snapshot_id: str) -> S
         else None
     )
     if entry is None or snapshot is None:
+        return SnapshotRead(snapshot_id=snapshot_id)
+    if snapshot.warc_record_type is WarcRecordType.ABSENT:
+        # An absence is processed with no read and no call.
         return SnapshotRead(snapshot_id=snapshot_id)
     try:
         content = load_blob(snapshot.content_hash)

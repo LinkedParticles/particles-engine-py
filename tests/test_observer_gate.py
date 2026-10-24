@@ -319,6 +319,54 @@ class TestPrecondition:
         ).all()
         assert len(inconsistencies) == 1
 
+    @pytest.mark.parametrize("target", ["belief", "source"])
+    async def test_a_widened_claim_contested_by_its_own_project_goes_to_review(
+        self, db_session: AsyncSession, scripted_probe: None, target: str
+    ) -> None:
+        """A widening counts at the gate as it does in the lens.
+
+        Before, a widened belief met the subset test with its own keys, so an
+        update from its own project retired it through rung 2.5, while a
+        widened source was already global inside the join.
+        """
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+
+        extractor = _LineChunkExtractor()
+        await rescoped(db_session)
+        entry_id, _ = await harvest(db_session, "alpha", [branch("main")], extractor)
+        main = await row_for(db_session, branch("main"))
+        if target == "belief":
+            await widen(db_session, ScopeTarget.PARTICLE, main.id, actor="op")
+        else:
+            await widen(db_session, ScopeTarget.CORPUS_ENTRY, entry_id, actor="op")
+        await db_session.commit()
+        # The update comes from another of alpha's sources, so the candidate is
+        # alpha's alone in both cases.
+        update_entry, update_snapshot, _ = await deposit_text_versioned(
+            db_session,
+            text=branch("trunk") + "\n",
+            uri_r="file:///home/me/src/alpha/CLAUDE.md",
+            source_type="LOCAL_MARKDOWN",
+            mutability=Mutability.MUTABLE,
+            tags=["claude-code", "memory-file", "project:alpha"],
+            content_published_at=_CLOCK[0] + timedelta(days=1),
+        )
+        await db_session.commit()
+        await extract_snapshot(db_session, update_entry, update_snapshot, extractor=extractor)
+        await db_session.commit()
+
+        assert (await row_for(db_session, branch("main"))).status == "ACTIVE"
+        trunk = await row_for(db_session, branch("trunk"))
+        assert (trunk.status, trunk.status_reason) == ("PROVENANCE_STALE", "CONFLICT_PENDING")
+        inconsistencies = (
+            await db_session.execute(
+                select(ParticleRow.provenance_json).where(ParticleRow.status == "INCONSISTENCY")
+            )
+        ).all()
+        assert len(inconsistencies) == 1
+        assert main.id in inconsistencies[0][0]  # the record names the widened claim
+
     async def test_a_global_candidate_pairs_as_today(
         self, db_session: AsyncSession, scripted_probe: None
     ) -> None:

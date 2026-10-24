@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -89,6 +90,7 @@ from .respond import (
     strip_refusal_marker,
 )
 from .source_info import load_source_rows
+from .source_tags import excluded_by_source_tags
 from .source_trust import TrustPolicy, load_trust_policy
 from .structural import claim_filters_from_request, structural_query, structural_query_federated
 from .window import (
@@ -886,6 +888,7 @@ async def retrieve_ranked(
     conflict_pairs: set[frozenset[str]] | None = None,
     apply_utility: bool = False,
     apply_owner: bool = False,
+    exclude_source_tags: Collection[str] = (),
 ) -> list[Scored]:
     """Select + rank one store's candidate particles — no NL answer generated.
 
@@ -920,6 +923,10 @@ async def retrieve_ranked(
     the ``top_k`` cut so either can promote a belief **into** the rendered set.
     Both are promotion-only and orthogonal; the semantic-search ``query`` path
     passes neither.
+
+    ``exclude_source_tags`` (default empty = inert) drops, before the
+    ``top_k`` cut, every candidate held only by corpus entries carrying one of
+    those tags (:mod:`.source_tags`). Only the agent-memory region passes it.
 
     All these signals are rank-time only — stored confidence and the returned
     ``effective_confidence`` are untouched.
@@ -958,6 +965,14 @@ async def retrieve_ranked(
     # utility: separate addend, separate coefficient, neither reads the other.
     if apply_owner:
         scored = await _apply_owner_to_scored(session, scored)
+
+    # before the cut, so a dropped belief frees its slot.
+    if exclude_source_tags:
+        dropped = await excluded_by_source_tags(
+            session, [p for p, _, _ in scored], exclude_source_tags
+        )
+        if dropped:
+            scored = [s for s in scored if s[0].id not in dropped]
 
     demoted = await _precedence_demotions(session, scored, pub_at_by_id, conflict_pairs)
     scored.sort(

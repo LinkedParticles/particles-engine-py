@@ -60,7 +60,6 @@ from particles.core.contradiction_disclosure import (
 from particles.core.equivalence import co_evidential_components
 from particles.core.ladders import ClaimPair, NormalizedForms, contradiction_ladder
 from particles.core.observer_scope import (
-    GLOBAL_SCOPE,
     UNATTRIBUTED_SCOPE,
     BeliefScope,
     PairPrecondition,
@@ -117,6 +116,7 @@ from particles.ingest.second_reading import (
     source_kind,
 )
 from particles.llm.breaker import PROBE_MAX_TOKENS
+from particles.llm.usage import SamplingObservation, observe_sampling
 from particles.operations._llm import (
     _llm_call,
     _llm_call_many,
@@ -130,7 +130,6 @@ from particles.operations.candidate_pairs import (
 from particles.operations.probe_ledger import recall, remember, remember_rungs
 from particles.store.candidate_cache import load_active_candidates
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
-from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
     get_particles_by_ids,
 )
@@ -611,7 +610,6 @@ async def _observer_ordered(
     reserved = round(cap * share)
     out.observer_ordered = True
     out.cross_scope_reserved = reserved
-    widening = await any_widening(session)
     scopes: dict[str, BeliefScope] = {}
     inside: list[CandidatePair] = []
     cross: list[CandidatePair] = []
@@ -623,15 +621,8 @@ async def _observer_ordered(
         missing = list({p.id: p for c in chunk for p in (c.a, c.b) if p.id not in scopes}.values())
         if missing:
             loaded = await load_scopes(session, missing)
-            widened = (
-                await widened_ids(session, ScopeTarget.PARTICLE, [p.id for p in missing])
-                if widening
-                else set()
-            )
             for p in missing:
-                scopes[p.id] = (
-                    GLOBAL_SCOPE if p.id in widened else loaded.get(p.id, UNATTRIBUTED_SCOPE)
-                )
+                scopes[p.id] = loaded.get(p.id, UNATTRIBUTED_SCOPE)
         for c in chunk:
             newer, older = (c.a, c.b) if _asserted_at(c.a) >= _asserted_at(c.b) else (c.b, c.a)
             verdict = pair_precondition(scopes[newer.id], scopes[older.id])
@@ -644,9 +635,16 @@ async def _observer_ordered(
 
 
 async def _record_answers(
-    session: AsyncSession, pairs: Sequence[CandidatePair], answers: Sequence[ProbeAnswer]
+    session: AsyncSession,
+    pairs: Sequence[CandidatePair],
+    answers: Sequence[ProbeAnswer],
+    sampling: SamplingObservation,
 ) -> None:
-    """Record each answered probe in the ledger, YES and NO alike."""
+    """Record each answered probe in the ledger, YES and NO alike.
+
+    ``sampling`` observed the calls that answered, so each row says what they
+    sent.
+    """
     fresh = {
         _pair_key(c): isinstance(answer, str)
         for c, answer in zip(pairs, answers, strict=True)
@@ -659,6 +657,7 @@ async def _record_answers(
         fresh,
         purpose="semantic_lint",
         rung=_probe_stamp(),
+        temperature=sampling.value(),
     )
 
 
@@ -806,16 +805,18 @@ async def _check_contradictions(
     # batchable without changing a single verdict.
     probe_pairs = planned_pairs
     verdicts: list[ProbeAnswer] = []
+    sampling = SamplingObservation()
     if control.latency_tolerant:
-        verdicts = await _batch_check_contradictions(
-            [(c.a.content, c.b.content) for c in probe_pairs]
-        )
+        with observe_sampling(sampling):
+            verdicts = await _batch_check_contradictions(
+                [(c.a.content, c.b.content) for c in probe_pairs]
+            )
         control.probes_run = len(probe_pairs)
         if control.on_progress is not None and probe_pairs:
             # One report for the whole batch: under batching there is no
             # per-pair completion moment to report.
             control.on_progress(len(probe_pairs), planned)
-        await _record_answers(session, probe_pairs, verdicts)
+        await _record_answers(session, probe_pairs, verdicts, sampling)
     else:
         recorded_through = 0
         for done, c in enumerate(probe_pairs, start=1):
@@ -830,7 +831,8 @@ async def _check_contradictions(
                     planned,
                 )
                 break
-            verdicts.append(await _llm_check_contradiction(c.a.content, c.b.content))
+            with observe_sampling(sampling):
+                verdicts.append(await _llm_check_contradiction(c.a.content, c.b.content))
             control.probes_run = done
             if control.on_progress is not None:
                 control.on_progress(done, planned)
@@ -838,11 +840,17 @@ async def _check_contradictions(
                 # Recorded as the loop goes, so a run that stops part-way keeps
                 # what it paid for.
                 await _record_answers(
-                    session, probe_pairs[recorded_through:done], verdicts[recorded_through:done]
+                    session,
+                    probe_pairs[recorded_through:done],
+                    verdicts[recorded_through:done],
+                    sampling,
                 )
                 recorded_through = done
         await _record_answers(
-            session, probe_pairs[recorded_through : len(verdicts)], verdicts[recorded_through:]
+            session,
+            probe_pairs[recorded_through : len(verdicts)],
+            verdicts[recorded_through:],
+            sampling,
         )
 
     _tally_probes(probe_pairs, verdicts, cross_flags, control, forms)
@@ -934,6 +942,7 @@ async def _verify_flagged(
     planned = flagged[:budget]
     read = 0
     readings: dict[VerdictKey, bool] = {}
+    sampling = SamplingObservation()
     for c, _first_reason in planned:
         if llm_circuit_open():
             break
@@ -942,7 +951,8 @@ async def _verify_flagged(
                 sources[p.id] = await _claim_source(session, p)
         ctx_a = _claim_context_for(c.a, sources[c.a.id], c.b)
         ctx_b = _claim_context_for(c.b, sources[c.b.id], c.a)
-        verdict = await _llm_verify_contradiction(ctx_a, ctx_b)
+        with observe_sampling(sampling):
+            verdict = await _llm_verify_contradiction(ctx_a, ctx_b)
         read += 1
         control.verifications_run = read
         if control.on_verify_progress is not None:
@@ -987,6 +997,7 @@ async def _verify_flagged(
         readings,
         purpose="verification",
         rung=_reading_stamp(),
+        temperature=sampling.value(),
     )
     return confirmed
 

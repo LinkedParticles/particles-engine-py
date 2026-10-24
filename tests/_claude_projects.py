@@ -58,6 +58,20 @@ def bind_hooks_to_store(home: Path, dsn: str, *, store: str = "default") -> Path
     return path
 
 
+def bind_hooks_to_engine(home: Path, config_path: Path, *, store: str = "default") -> Path:
+    """Install fake thin-client hooks in ``<home>/.claude/settings.json``.
+
+    The commands pin ``config_path``, whose ``engine.base_url`` is the binding a
+    remote render checks. The installer has no remote mode yet.
+    """
+    command = f"env PARTICLES_CONFIG={config_path} particles hook session-end --store {store}"
+    settings = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": command}]}]}}
+    path = home / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n")
+    return path
+
+
 def isolate_claude_code(mp: pytest.MonkeyPatch, work: Path, extra_config: str = "") -> Path:
     """Run the Claude Code harness paths inside ``work``, never the real account.
 

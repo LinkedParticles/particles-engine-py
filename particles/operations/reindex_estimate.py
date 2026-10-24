@@ -359,6 +359,7 @@ async def plan_reindex_estimate(
     extractor_id: str | None = None,
     include_failed: bool = True,
     provider_model: str | None = None,
+    include_schema_stale: bool = False,
     sample_size: int | None = None,
     seed: int | None = None,
 ) -> EstimatePlan:
@@ -381,6 +382,7 @@ async def plan_reindex_estimate(
         extractor_id=extractor_id,
         include_failed=include_failed,
         provider_model=provider_model,
+        include_schema_stale=include_schema_stale,
         dry_run=True,
     )
     population = sample_population(resolved.plan)

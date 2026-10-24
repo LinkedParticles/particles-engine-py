@@ -77,6 +77,7 @@ from particles.ingest.pipeline import (
     update_prompt_hash,
 )
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
+from particles.llm.usage import observe_sampling
 from particles.operations._llm import _llm_call, record_unusable_reply
 from particles.operations.probe_ledger import recall, remember
 from particles.store.candidate_cache import load_active_candidates
@@ -880,7 +881,8 @@ async def _sweep_contradiction(
     session: AsyncSession, newer: Particle, older: Particle
 ) -> bool | None:
     """The sweep's contradiction probe on one pair, kept in the ledger when a model answered."""
-    probe = await _has_contradiction_signal(newer.content, older.content)
+    with observe_sampling() as sampling:
+        probe = await _has_contradiction_signal(newer.content, older.content)
     if probe is not None and not _is_attribution_paraphrase(newer.content, older.content):
         # The attribution pre-filter answers without a call; only a model's
         # answer is a verdict worth keeping.
@@ -891,6 +893,7 @@ async def _sweep_contradiction(
             {_contradiction_key(newer, older): probe},
             purpose="semantic_lint",
             rung=reconcile_probe_stamp(),
+            temperature=sampling.value(),
         )
     return probe
 
@@ -899,7 +902,8 @@ async def _sweep_slot(
     session: AsyncSession, older: Particle, newer: Particle
 ) -> SlotVerdict | None:
     """The sweep's update probe on one pair; the ledger keeps whether it may retire."""
-    reading = await _read_update_slot(older.content, newer.content)
+    with observe_sampling() as sampling:
+        reading = await _read_update_slot(older.content, newer.content)
     slot = reading.verdict
     if slot is not None:
         await remember(
@@ -909,6 +913,7 @@ async def _sweep_slot(
             {_slot_key(older, newer): admits_update(slot)},
             purpose=reading.purpose,
             rung=reading.decided_by,
+            temperature=sampling.value(),
         )
     return slot
 

@@ -354,6 +354,8 @@ def plan_update_extras(
     entries: Mapping[str, CorpusEntry | None],
     precondition: Mapping[str, PairPrecondition],
     updatable: Container[str],
+    *,
+    revision: Container[str] = (),
 ) -> list[tuple[str, str]]:
     """The ``(retired id, winner id)`` pairs rung 2.5 settles among the extras.
 
@@ -379,6 +381,11 @@ def plan_update_extras(
     retires nothing. Calling the one function keeps the two routes from
     drifting apart.
 
+    ``revision`` holds the extras stated only by an earlier generation of the
+    winner's own MUTABLE entry. The generation fixes such a
+    pair's direction: the winner is the newer claim whatever the content dates
+    say, so only the extra can be retired.
+
     Each pair names the claim that retired the loser, which the caller records
     (the winner's ``supersedes`` holds only one id).
     """
@@ -401,6 +408,8 @@ def plan_update_extras(
             entries.get(ref.corpus_entry_id),
             ref.snapshot_id,
         )
+        if order is not None and other.id in revision:
+            order = 1
         if order is None or not newer_is_settled(other, winner, order):
             continue
         if order > 0:

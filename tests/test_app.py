@@ -308,11 +308,16 @@ async def _particle_status(particle_id: str) -> Status:
         return p.status
 
 
-async def _add_inconsistency() -> str:
-    """Seed two ACTIVE particles + an INCONSISTENCY wrapper; return the wrapper id."""
+async def _add_inconsistency(*, demote_a: bool = False) -> str:
+    """Seed two ACTIVE particles + an INCONSISTENCY wrapper; return the wrapper id.
+
+    ``demote_a`` then retires claim A as the generation cascade does, so the
+    record's A has left ACTIVE.
+    """
     from particles.core.schema import ProvenanceRef, ProvenanceRefType
+    from particles.core.status import StatusReason
     from particles.db import session_scope
-    from particles.store.particle_store import insert_particle
+    from particles.store.particle_store import insert_particle, update_particle_status
 
     a = await _add_active_particle(content="claim A")
     b = await _add_active_particle(content="claim B")
@@ -331,6 +336,10 @@ async def _add_inconsistency() -> str:
     )
     async with session_scope() as session:
         await insert_particle(session, inc)
+        if demote_a:
+            await update_particle_status(
+                session, a, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
+            )
         await session.commit()
     return inc.id
 
@@ -563,6 +572,12 @@ class TestCuration:
         assert body["cards"] == []
         assert body["count"] == 0
 
+    def test_card_lookup_is_404_for_a_key_no_open_card_has(self, client: TestClient) -> None:
+        # the one-card read; a key with a colon rides the path.
+        resp = client.get("/curation/cards/subjectless_source:nope")
+        assert resp.status_code == 404
+        assert "No open card" in resp.json()["detail"]
+
     def test_cold_store_is_served_live_and_says_so(self, client: TestClient) -> None:
         # No collection has been built, so the read collects live rather than
         # writing a cache from a GET. Slow but correct, and honestly labelled.
@@ -766,6 +781,24 @@ class TestCorpus:
         resp = client.get(f"/corpus/blob/{snap_id}")
         assert resp.status_code == 404
         assert "missing" in resp.json()["detail"].lower()
+
+    def test_deposit_file_twice_reports_unchanged(self, client: TestClient) -> None:
+        """The second upload of the same bytes writes nothing and says so."""
+        upload = {"file": ("note.md", b"# Same bytes\n", "text/markdown")}
+        first = client.post("/corpus/deposit/file", files=upload)
+        assert first.status_code == 200, first.text
+        assert first.json()["unchanged"] is False
+
+        second = client.post("/corpus/deposit/file", files=upload)
+        assert second.status_code == 200, second.text
+        assert second.json() == {**first.json(), "unchanged": True}
+
+    def test_deposit_text_twice_reports_unchanged(self, client: TestClient) -> None:
+        body = {"text": "One fact, sent twice."}
+        first = client.post("/corpus/deposit/text", json=body).json()
+        second = client.post("/corpus/deposit/text", json=body).json()
+        assert first["unchanged"] is False
+        assert second == {**first, "unchanged": True}
 
     def test_deposit_file_does_not_leak_temp_on_crash(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -1048,6 +1081,19 @@ class TestReview:
         assert len(events) == 1
         assert any(r["ref_id"] == inc_id for r in events[0]["refs"])
 
+    def test_review_refused_action_is_409_and_writes_nothing(self, client: TestClient) -> None:
+        # PREFER_A on a record whose claim A has left ACTIVE would
+        # keep neither claim, so it is refused, distinct from an unknown id.
+        inc_id = _run_async(_add_inconsistency(demote_a=True))
+        resp = client.post(
+            f"/review/{inc_id}",
+            json={"action": "PREFER_A", "reviewer_id": "tester"},
+        )
+        assert resp.status_code == 409
+        assert "RETRACTED_DEPENDENCY" in resp.json()["detail"]
+        assert client.get("/events", params={"type": "REVIEW_RESOLVED"}).json() == []
+        assert [p["id"] for p in client.get("/review").json()] == [inc_id]
+
     def test_review_discard_over_http(self, client: TestClient) -> None:
         # DISCARD is accepted by POST /review/{id}, retracts both
         # claims, and writes no trust statement.
@@ -1077,6 +1123,32 @@ class TestReindex:
         assert body["scope"] == 0
         assert body["succeeded"] == 0
         assert body["failed"] == 0
+        assert body["skipped_newer_schema"] == 0
+
+    @pytest.mark.parametrize(
+        ("sent", "expected"), [({}, False), ({"include_schema_stale": True}, True)]
+    )
+    def test_include_schema_stale_is_opt_in(
+        self, client: TestClient, sent: dict[str, bool], expected: bool
+    ) -> None:
+        """D5: the request field defaults off and reaches the operation."""
+        from unittest.mock import AsyncMock, patch
+
+        op = AsyncMock(
+            return_value={
+                "dry_run": True,
+                "scope": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "skipped_newer_schema": 3,
+            }
+        )
+        with patch("particles.api.app.reindex", new=op):
+            resp = client.post("/reindex", json={"dry_run": True, **sent})
+        assert resp.status_code == 200
+        assert resp.json()["skipped_newer_schema"] == 3
+        assert op.await_args is not None
+        assert op.await_args.kwargs["include_schema_stale"] is expected
 
 
 # ---------------------------------------------------------------------------
@@ -1417,6 +1489,44 @@ class TestSubjectAliasMerge:
         tgt = _run_async(_add_subject(name="Target"))
         resp = client.post("/subjects/nope/merge", json={"target_id": tgt})
         assert resp.status_code == 404
+
+    def test_merge_many(self, client: TestClient) -> None:
+        a = _run_async(_add_subject(name="BTC"))
+        b = _run_async(_add_subject(name="XBT"))
+        tgt = _run_async(_add_subject(name="Bitcoin"))
+        resp = client.post("/subjects/merge", json={"source_ids": [a, b], "target_id": tgt})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["subject"]["id"] == tgt
+        assert [s["subject_id"] for s in body["sources"]] == [a, b]
+        assert set(body["aliases_added"]) == {"BTC", "XBT"}
+        assert body["dry_run"] is False
+        assert client.get(f"/subjects/{a}").status_code == 404
+
+    def test_merge_many_dry_run_writes_nothing(self, client: TestClient) -> None:
+        a = _run_async(_add_subject(name="BTC"))
+        tgt = _run_async(_add_subject(name="Bitcoin"))
+        resp = client.post(
+            "/subjects/merge", json={"source_ids": [a], "target_id": tgt, "dry_run": True}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["dry_run"] is True
+        assert resp.json()["aliases_added"] == ["BTC"]
+        assert client.get(f"/subjects/{a}").status_code == 200
+
+    def test_merge_many_source_is_target_400(self, client: TestClient) -> None:
+        a = _run_async(_add_subject(name="BTC"))
+        tgt = _run_async(_add_subject(name="Bitcoin"))
+        resp = client.post("/subjects/merge", json={"source_ids": [a, tgt], "target_id": tgt})
+        assert resp.status_code == 400
+        assert client.get(f"/subjects/{a}").status_code == 200
+
+    def test_merge_many_missing_source_404(self, client: TestClient) -> None:
+        a = _run_async(_add_subject(name="BTC"))
+        tgt = _run_async(_add_subject(name="Bitcoin"))
+        resp = client.post("/subjects/merge", json={"source_ids": [a, "nope"], "target_id": tgt})
+        assert resp.status_code == 404
+        assert client.get(f"/subjects/{a}").status_code == 200
 
 
 @pytest.mark.usefixtures("operator_key")
@@ -1912,6 +2022,23 @@ class TestOperatorCurationWrites:
         assert resp.status_code == 200
         assert resp.json()["snoozed_until"] is None
 
+    def test_dismissing_a_source_card_rules_on_the_beliefs_it_names(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        # member-scoped; the event names each belief sent.
+        key = "subjectless_source:e-1"
+        resp = client.post("/curation/snooze", json={"card_key": key, "particle_ids": ["a", "b"]})
+        assert resp.status_code == 200
+        assert resp.json()["card_key"] == key
+        event = client.get(f"/events/{resp.json()['event_id']}").json()
+        assert sorted(r["ref_id"] for r in event["refs"]) == ["a", "b"]
+
+    def test_dismissing_a_source_card_with_no_open_belief_is_400(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        resp = client.post("/curation/snooze", json={"card_key": "subjectless_source:gone"})
+        assert resp.status_code == 400
+
     def test_snooze_disabled_403(self, client: TestClient) -> None:
         resp = client.post("/curation/snooze", json={"card_key": "k"})
         assert resp.status_code == 403
@@ -2384,3 +2511,178 @@ class TestReadAuthForReads:
         reset_config()
         assert client.get("/particles").status_code == 200
         assert client.get("/events").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# the writes a thin client routes name their store.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def other_store(api_db: Path, tmp_path: Path) -> Generator[str, None, None]:
+    """A second configured store, ``other``, with its tables created."""
+    from particles.config import get_config
+
+    get_config().storage.stores = {"other": f"sqlite+aiosqlite:///{tmp_path / 'other.db'}"}
+
+    async def _create() -> None:
+        from particles.db import Base, get_engine
+
+        async with get_engine("other").begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_create())
+    yield "other"
+
+    async def _dispose() -> None:
+        from particles.db import get_engine
+
+        await get_engine("other").dispose()
+
+    asyncio.run(_dispose())
+
+
+def _entry_count(store: str) -> int:
+    async def _run() -> int:
+        from sqlalchemy import func, select
+
+        from particles.corpus.store import CorpusEntryRow
+        from particles.db import session_scope
+
+        async with session_scope(store) as session:
+            return int(
+                (await session.execute(select(func.count(CorpusEntryRow.entry_id)))).scalar_one()
+            )
+
+    return int(_run_async(_run()))
+
+
+class TestStoreRoutedWrites:
+    def test_a_text_deposit_lands_in_the_named_store(
+        self, client: TestClient, other_store: str
+    ) -> None:
+        resp = client.post(
+            "/corpus/deposit/text",
+            params={"store": other_store},
+            json={"text": "Hello.", "deposited_by": "t", "source_type": "CONVERSATION"},
+        )
+        assert resp.status_code == 200
+        assert (_entry_count(other_store), _entry_count("default")) == (1, 0)
+
+    def test_no_handle_still_writes_the_default_store(
+        self, client: TestClient, other_store: str
+    ) -> None:
+        resp = client.post(
+            "/corpus/deposit/text",
+            json={"text": "Hello.", "deposited_by": "t", "source_type": "CONVERSATION"},
+        )
+        assert resp.status_code == 200
+        assert (_entry_count(other_store), _entry_count("default")) == (0, 1)
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("/corpus/deposit/text", {"text": "x", "deposited_by": "t"}),
+            ("/session-exposures", {"session_id": "s", "action": "full", "beliefs": []}),
+            ("/particles/retract", {"particle_id": "p", "reason": "r"}),
+        ],
+    )
+    def test_an_unknown_store_is_404(
+        self, client: TestClient, path: str, body: dict[str, Any]
+    ) -> None:
+        resp = client.post(path, params={"store": "nope"}, json=body)
+        assert resp.status_code == 404
+        assert "Unknown store" in resp.json()["detail"]
+
+    def test_a_belief_write_is_gated_on_the_named_store(
+        self, client: TestClient, other_store: str, belief_writes_enabled: None
+    ) -> None:
+        body = {
+            "content": "The deploy key rotates monthly.",
+            "subject_names": ["deploy key"],
+            "confidence": 0.9,
+            "source_excerpt": "it rotates monthly",
+        }
+        # Only the default store is write-enabled.
+        refused = client.post("/particles/assert", params={"store": other_store}, json=body)
+        assert refused.status_code == 403
+        assert repr(other_store) in refused.json()["detail"]
+
+        from particles.config import get_config
+
+        get_config().mcp.write.enabled_stores = [other_store]
+        resp = client.post("/particles/assert", params={"store": other_store}, json=body)
+        assert resp.status_code == 200, resp.text
+        assert _entry_count(other_store) == 1 and _entry_count("default") == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /memory/projection/{store}
+# ---------------------------------------------------------------------------
+
+_MEMORY_MANIFEST = {
+    "name": "memory-index",
+    "sections": [{"title": "Memory index", "render": "bullets", "top_k": 60}],
+}
+
+
+async def _add_embedded_particle(content: str) -> None:
+    """An ACTIVE particle with an embedding, which the projection selects from."""
+    import numpy as np
+
+    from particles.db import session_scope
+    from particles.store.particle_store import insert_particle
+
+    p = Particle(
+        id=str(uuid.uuid4()),
+        content=content,
+        confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        asserted_by="test",
+        asserted_at=datetime.now(UTC),
+        status=Status.ACTIVE,
+    )
+    emb = (np.ones(4, dtype=np.float32) / 2.0).tolist()
+    async with session_scope() as session:
+        await insert_particle(session, p, emb)
+        await session.commit()
+
+
+class TestMemoryProjectionEndpoint:
+    def test_renders_the_region_with_its_hash(self, client: TestClient) -> None:
+        import hashlib
+
+        _run_async(_add_embedded_particle("The deploy runs nightly."))
+        resp = client.post("/memory/projection/default", json={"manifest": _MEMORY_MANIFEST})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "- The deploy runs nightly." in body["body"]
+        assert body["content_hash"] == hashlib.sha256(body["body"].encode("utf-8")).hexdigest()
+        assert body["fold_verdicts"] == {}
+
+    def test_an_observer_project_adds_the_trailer(self, client: TestClient) -> None:
+        resp = client.post(
+            "/memory/projection/default",
+            json={"manifest": _MEMORY_MANIFEST, "observer_project": "-proj"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["body"].rstrip().endswith("-->")
+        assert "<!-- observer: project -proj" in resp.json()["body"]
+
+    def test_an_unknown_fold_target_is_not_extracted(self, client: TestClient) -> None:
+        uri = "file:///home/u/.claude/projects/-p/memory/topic.md"
+        resp = client.post(
+            "/memory/projection/default",
+            json={"manifest": _MEMORY_MANIFEST, "fold_targets": [uri]},
+        )
+        assert resp.json()["fold_verdicts"] == {uri: "not-extracted"}
+
+    def test_a_file_section_is_422(self, client: TestClient) -> None:
+        manifest = {**_MEMORY_MANIFEST, "sections": [{"block": "intro.md"}]}
+        resp = client.post("/memory/projection/default", json={"manifest": manifest})
+        assert resp.status_code == 422
+        assert "file section" in resp.json()["detail"]
+
+    def test_an_unknown_store_is_404(self, client: TestClient) -> None:
+        resp = client.post("/memory/projection/nope", json={"manifest": _MEMORY_MANIFEST})
+        assert resp.status_code == 404

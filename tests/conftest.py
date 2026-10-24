@@ -75,24 +75,6 @@ def clear_subject_cache(reset_client_state: None) -> None:  # noqa: F811
 
 
 @pytest.fixture(autouse=True)
-def no_real_shadow_candidates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep shadow-mode candidates out of the real ``~/.particles`` state dir.
-
-    A shadow submission appends its claims to a file that defaults under the
-    operator's own state directory. Point the default at the test's
-    tmp_path without reading config, so a test that sets its own environment
-    still loads config fresh.
-    """
-    from particles.ingest import agent_extraction
-
-    monkeypatch.setattr(
-        agent_extraction,
-        "_default_shadow_candidates_path",
-        lambda: tmp_path / "agent-extraction-shadow.jsonl",
-    )
-
-
-@pytest.fixture(autouse=True)
 def second_reading_confirms(monkeypatch: pytest.MonkeyPatch) -> None:
     """Extraction's second reading of a contradiction confirms by default.
 
@@ -271,6 +253,27 @@ def _claude_projects_audit_hook(event: str, args: tuple[object, ...]) -> None:
 
 
 sys.addaudithook(_claude_projects_audit_hook)
+
+
+@pytest.fixture(autouse=True)
+def no_real_claude_cli(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """No test runs the real ``claude`` CLI.
+
+    ``init claude-code`` registers the MCP server through ``claude mcp``,
+    which edits the account's real ``~/.claude.json``. Every call goes to
+    this recorder instead, which reports success; a test that needs the
+    CLI missing patches ``particles.api.cli.init._claude_mcp`` itself.
+    """
+    import particles.api.cli.init as init_mod
+
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str]) -> bool:
+        calls.append(list(argv))
+        return True
+
+    monkeypatch.setattr(init_mod, "_claude_mcp", _record)
+    return calls
 
 
 @pytest.fixture(autouse=True)

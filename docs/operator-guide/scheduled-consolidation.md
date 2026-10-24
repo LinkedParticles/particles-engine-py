@@ -141,12 +141,17 @@ The pass list, in order:
    Code hooks name the store being consolidated. A run against any other
    store (a scratch database, a test) harvests and renders none of them, and
    the run record says why.
-7. **Closure measure** *(zero-LLM, read-only)*: the share of ACTIVE
+7. **Rank-lift monitor** *(zero-LLM, read-only)*: whether the configured
+   `utility.default.rank_lift` still puts the beliefs the agent applies
+   outside the head into it, in every view a session reads. It
+   reports and never changes the value. See
+   [The rank-lift monitor](#the-rank-lift-monitor).
+8. **Closure measure** *(zero-LLM, read-only)*: the share of ACTIVE
    beliefs that carry the contested badge, counted over the whole
    store on every run, and the lifecycle transitions since the previous run
    split into autonomous and gesture. See
    [The closure measure](#the-closure-measure).
-8. **Record + report**: one `CONSOLIDATION_RUN` operator event per run,
+9. **Record + report**: one `CONSOLIDATION_RUN` operator event per run,
    readable afterwards through [Auditing](auditing.md).
 
 Each pass has a page of its own if you want to run it by hand first, or to
@@ -514,6 +519,51 @@ prompt, so cost is bounded *by construction* (the existing caps plus delta
 scope, and `consolidation.budget_usd` when set) and confirmation is replaced
 with disclosure.
 
+## The rank-lift monitor
+
+The usefulness rank-lift lets a belief the agent keeps applying climb the
+`MEMORY.md` projection and the digest. Whether it still does that depends on
+how much use the store records, which changes as sessions come and go. The
+monitor checks it on every run, in the store-wide view and in each project
+view a session read through within the utility half-life.
+
+- **The cohort** is the beliefs a session applied without having been shown
+  them at session start (the session's recorded start context), in at least
+  `utility.monitor.min_sessions` sessions (2). Use earned through the
+  projection itself only shows the projection kept what it showed, so it does
+  not count. A session with no start-context record counts for no one.
+- **The floor**: the head holds at least `utility.monitor.capture` (0.75) of
+  the cohort.
+- **The ceiling**: at least `utility.monitor.entry_share` (0.25) of the head
+  holds beliefs with no use yet. A belief earns use only by being shown, so a
+  head without such slots would never admit a new one.
+
+Each view and head size gets one verdict: `in_band`, `below_floor`,
+`above_ceiling`, `no_band` (the floor lies above the ceiling), or `cold` (fewer
+than `utility.monitor.min_cohort` cohort beliefs, so nothing to judge). The run
+record carries the verdicts, both bands, the cohort, the share of use events
+from sessions with a start-context record, and the share of recent use credit
+still on ACTIVE beliefs. The report prints one line, and when a reading is out
+of band, the command that reproduces it:
+
+```
+  rank-lift        λ 0.015 below the use-capture floor 0.044 (0 of 4 off-head-used beliefs in the 60-head; store-wide, -Users-me-src-app)
+                   reproduce: particles memory sweep-rank-lift --off-head-cohort --head 60 --head 120 --head 200 --min-sessions 2 --capture 0.75 --entry-share 0.25
+```
+
+When a reading moves to an out-of-band verdict it did not have on the previous
+run, the curation queue shows one `rank_lift` card until the readings return to
+band; snoozing it covers that alert only. A verdict that was already out of
+band on the first monitored run raises no card. Choosing a new `rank_lift` is
+yours, with `particles memory sweep-rank-lift`; see
+[Tuning → Calibrating `rank_lift`](tuning.md#calibrating-rank_lift).
+
+`utility.monitor.max_views` (4) caps the views one run evaluates, largest
+first; the rest rotate into later runs and their last reading is carried.
+`utility.monitor.targets` lists beliefs whose rank is reported and whose
+entering or leaving a head is disclosed; they never decide a verdict.
+`utility.monitor.enabled: false` skips the pass.
+
 ## The closure measure
 
 A store nobody curates still works: ingest runs the trust ladder, query
@@ -544,7 +594,13 @@ claim. Two do. When the second reading no longer confirms a record that
 extraction opened, it withdraws the record and restores the newer claim the
 record was holding. When an autonomous pass has retired the stored side of a
 record and nothing ACTIVE still contradicts the held claim, the release pass
-returns that claim. Neither asks a person, so this is the number to watch to
+returns that claim. The same holds when the stored side was retired because a
+newer version of the held claim's own note no longer stated it: a record left
+that way by a version before 1.195 is examined and released like the others,
+provided the note has not changed again since. A note that has moved on keeps
+its record for review, because the store cannot tell whether the newer text
+still states the held claim.
+Neither asks a person, so this is the number to watch to
 see what the nightly cycle decided on its own.
 
 The report prints these after the headline counts. The closures line appears

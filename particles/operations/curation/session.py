@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import CurationConfig, get_config
+from particles.core.conflict_review import is_retired_value
 from particles.core.observer_scope import BeliefScope
 from particles.core.schema import (
     Particle,
@@ -45,14 +46,17 @@ from particles.operations.review import resolve
 from particles.store.curation_snapshot_store import get_snapshot, latest_snapshot
 from particles.store.event_store import (
     EventRefKind,
+    OperatorEvent,
     OperatorEventType,
-    list_events,
     list_events_since,
     record_event,
 )
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
-from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
-from particles.store.particle_store import get_particle, update_particle_status
+from particles.store.particle_store import (
+    get_particle,
+    get_particles_by_ids,
+    update_particle_status,
+)
 from particles.store.subject_store import get_subject
 
 from .cards import (
@@ -77,6 +81,7 @@ from .snapshot import (
     read_prior,
     stamp_from,
 )
+from .suppression import dismissed_members, suppressed_keys
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +133,7 @@ _KIND_PRIORITY: dict[CardKind, int] = {
     CardKind.BROKEN_PROVENANCE: 3,
     CardKind.NO_SUBJECT: 4,
     CardKind.GATED_SUBJECTS: 4,
+    CardKind.SUBJECTLESS_SOURCE: 4,
     CardKind.STALE: 5,
     CardKind.CONFIDENCE_DECAY: 6,
     CardKind.RECENCY_DECAY: 7,
@@ -138,6 +144,10 @@ _KIND_PRIORITY: dict[CardKind, int] = {
     # while it waits, so it sits with the housekeeping tail.
     CardKind.DEMOTION: 9,
     CardKind.FAILED_SNAPSHOTS: 9,
+    # The housekeeping tail, beside failed snapshots. Stakes
+    # read a belief's reliance and do not apply to a store-wide setting.
+    CardKind.RANK_LIFT: 9,
+    CardKind.REFUSED_SNAPSHOTS: 9,
     CardKind.DUPLICATE_PAIR: 10,
     CardKind.UNCITED_URL: 11,
 }
@@ -152,6 +162,8 @@ _SURFACED: dict[str, str] = {
     "edit": "an edit is a supersession — run `particles curate apply supersede KEY "
     "--content TEXT --reason TEXT --confidence F`",
     "reindex": "run `particles reindex` to re-extract the failed snapshots",
+    "retry-refused": "run `particles extract --all-pending --retry-refused` to send the "
+    "held sources again",
 }
 
 
@@ -229,15 +241,9 @@ async def build_curation_queue(
     # --- live on every request ------------------------------
     # Level 1: snooze / affirm / dismiss. Free, and never stale.
     suppressed = await _suppressed_keys(session)
-    # Level 3: gesture resolutions that are not status transitions — a merged
-    # duplicate, an assigned subject, a deposited URL. Every such gesture
-    # records an operator event, so anything touched after the collection was
-    # built is treated as resolved. Skipped on a live build (nothing predates
-    # it).
-    resolved = Resolved()
-    if stamp.built_at is not None:
-        resolved = await _resolved_since(session, stamp.built_at)
-    collection = [c for c in collection if c.key not in suppressed and not resolved.covers(c)]
+    collection = [
+        c for c in await _unresolved(session, collection, stamp) if c.key not in suppressed
+    ]
 
     collection.sort(key=lambda c: (-c.leverage, _KIND_PRIORITY.get(c.kind, 99), c.key))
     stamp.open_count = len(collection)
@@ -251,6 +257,73 @@ async def build_curation_queue(
     stamp.cards = result
     stamp.count = len(result)
     return stamp
+
+
+async def _unresolved(
+    session: AsyncSession, collection: list[CurationCard], stamp: CurationQueueResult
+) -> list[CurationCard]:
+    """Drop what was resolved after the build; prune a source card's members.
+
+    Level 3 of the staleness ladder: gesture resolutions that are
+    not status transitions, such as a merged duplicate, an assigned subject or a
+    deposited URL. Every such gesture records an operator event, so anything
+    touched after the collection was built is treated as resolved. Skipped on a
+    live build (nothing predates it).
+
+    A ``subjectless_source`` card is never hidden by membership: the touched
+    beliefs, and the ones a source dismissal names, leave the card, and the
+    card goes only when none is left.
+    """
+    resolved = Resolved()
+    if stamp.built_at is not None:
+        resolved = await _resolved_since(session, stamp.built_at)
+    gone: set[str] = set(resolved.particle_ids)
+    if any(c.kind is CardKind.SUBJECTLESS_SOURCE for c in collection):
+        gone |= await dismissed_members(session)
+    out: list[CurationCard] = []
+    for card in collection:
+        if resolved.covers(card):
+            continue
+        if card.kind is CardKind.SUBJECTLESS_SOURCE:
+            pruned = _without_members(card, gone)
+            if pruned is not None:
+                out.append(pruned)
+            continue
+        out.append(card)
+    return out
+
+
+def _without_members(card: CurationCard, gone: set[str]) -> CurationCard | None:
+    """A copy of a source card without ``gone``, or ``None`` when nothing is left.
+
+    Copied rather than edited, so a caller-supplied collection is never mutated.
+    """
+    kept = [pid for pid in card.particle_ids if pid not in gone]
+    if not kept:
+        return None
+    if len(kept) == len(card.particle_ids):
+        return card
+    return card.model_copy(update={"particle_ids": kept})
+
+
+async def get_curation_card(session: AsyncSession, key: str) -> CurationCard | None:
+    """One open card by its key, with every belief it names briefed.
+
+    Reads the same collection the queue serves and runs the same live checks
+    (post-build resolutions and belief status), so it reports what the queue
+    would. A snoozed card is still returned: this is a lookup, not the queue.
+    ``None`` when the collection holds no live card with that key.
+    """
+    cfg = get_config().curation
+    collection, stamp = await _collection_for(
+        session, cards=None, semantic=cfg.semantic, source=QueueSource.SNAPSHOT, cfg=cfg
+    )
+    matches = await _unresolved(session, [c for c in collection if c.key == key], stamp)
+    live = await _take_live_cards(session, matches, 1)
+    if not live:
+        return None
+    await _attach_particle_briefs(session, live, full=True)
+    return live[0]
 
 
 async def _collection_for(
@@ -401,6 +474,14 @@ async def _take_live_cards(
             if await _demotion_live(session, card):
                 out.append(card)
             continue
+        if card.kind is CardKind.SUBJECTLESS_SOURCE:
+            # a retired member leaves the card, not the card the queue.
+            members = await get_particles_by_ids(session, card.particle_ids)
+            active = {pid for pid, p in members.items() if p.status is Status.ACTIVE}
+            pruned = _without_members(card, set(card.particle_ids) - active)
+            if pruned is not None:
+                out.append(pruned)
+            continue
         if not card.particle_ids or card.kind is CardKind.GATED_SUBJECTS:
             # A batch card's gesture re-plans from the store, so a member that
             # changed since the build is skipped then, not checked one by one.
@@ -431,7 +512,9 @@ async def _demotion_live(session: AsyncSession, card: CurationCard) -> bool:
     )
 
 
-async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCard]) -> None:
+async def _attach_particle_briefs(
+    session: AsyncSession, cards: list[CurationCard], *, full: bool = False
+) -> None:
     """Populate each card's ``particles`` (and ``conflict``) with compact briefs.
 
     One pass over the union of every (already-sliced) card's ``particle_ids``
@@ -450,13 +533,16 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
     stays observer-blind, so the scope filters no card and moves no leverage.
     """
     sides: dict[str, tuple[list[str], list[str]]] = {}
+    retired_values: set[str] = set()
     for card in cards:
         if card.inconsistency_id and card.inconsistency_id not in sides:
             record = await get_particle(session, card.inconsistency_id)
             if record is not None:
                 sides[card.inconsistency_id] = record_sides(record)
+                if is_retired_value(record):
+                    retired_values.add(record.id)
 
-    ids = {pid for c in cards for pid in _brief_ids(c)}
+    ids = {pid for c in cards for pid in _brief_ids(c, full=full)}
     ids |= {pid for a, b in sides.values() for pid in a + b}
     if not ids:
         return
@@ -478,7 +564,7 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
                 subject = await get_subject(session, sid)
                 if subject is not None:
                     labels[sid] = subject.canonical_name
-    scopes, widened = await _observer_scopes(session, list(particles.values()))
+    scopes = await _observer_scopes(session, list(particles.values()))
 
     def brief(pid: str | None) -> ParticleBrief | None:
         p = particles.get(pid) if pid is not None else None
@@ -493,13 +579,11 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
             status_reason=p.status_reason.value if p.status_reason is not None else None,
             source_uri=sources.get(p.id),
             asserted_at=p.asserted_at,
-            observer_scope=(
-                scope_brief(scopes[p.id], widened=p.id in widened) if p.id in scopes else None
-            ),
+            observer_scope=(scope_brief(scopes[p.id]) if p.id in scopes else None),
         )
 
     for card in cards:
-        card.particles = [b for pid in _brief_ids(card) if (b := brief(pid)) is not None]
+        card.particles = [b for pid in _brief_ids(card, full=full) if (b := brief(pid)) is not None]
         if card.kind is CardKind.DUPLICATE_PAIR:
             card.scope_note = _merge_note(card, particles, scopes)
         if card.inconsistency_id is None or card.inconsistency_id not in sides:
@@ -519,24 +603,21 @@ async def _attach_particle_briefs(session: AsyncSession, cards: list[CurationCar
             card.resolve_actions = resolve_actions_for(
                 particles.get(a_id) if a_id else None,
                 particles.get(b_id) if b_id else None,
+                retired_value=card.inconsistency_id in retired_values,
             )
 
 
 async def _observer_scopes(
     session: AsyncSession, particles: list[Particle]
-) -> tuple[dict[str, BeliefScope], set[str]]:
-    """Each briefed belief's observer scope and the widened ids, in one batch.
+) -> dict[str, BeliefScope]:
+    """Each briefed belief's observer scope, widenings included, in one batch.
 
     Empty on a store that was never rescoped, where no project lens engages,
     so its cards render as they did before observer scope existed.
     """
     if not await lens_may_engage(session):
-        return {}, set()
-    scopes = await load_scopes(session, particles)
-    widened: set[str] = set()
-    if await any_widening(session):
-        widened = await widened_ids(session, ScopeTarget.PARTICLE, [p.id for p in particles])
-    return scopes, widened
+        return {}
+    return await load_scopes(session, particles)
 
 
 def _merge_note(
@@ -557,44 +638,20 @@ def _is_derived(p: Particle) -> bool:
     return any(r.type is ProvenanceRefType.PARTICLE for r in p.provenance)
 
 
-def _brief_ids(card: CurationCard) -> list[str]:
-    """The beliefs a card is briefed with: all of them, or a batch card's sample."""
-    if card.kind is CardKind.GATED_SUBJECTS:
+def _brief_ids(card: CurationCard, *, full: bool = False) -> list[str]:
+    """The beliefs a card is briefed with: all of them, or a batch card's sample.
+
+    ``full`` briefs every belief of a batch card too: the one-card lookup
+    (:func:`get_curation_card`) that reaches the unsampled members.
+    """
+    if not full and card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE):
         return card.particle_ids[:_BATCH_BRIEF_SAMPLE]
     return card.particle_ids
 
 
 async def _suppressed_keys(session: AsyncSession) -> set[str]:
     """The card keys hidden by an unexpired snooze or a standing affirmation."""
-    now = datetime.now(UTC)
-    suppressed: set[str] = set()
-
-    for ev in await list_events(
-        session, event_type=OperatorEventType.CURATION_CARD_SNOOZED, limit=10_000
-    ):
-        payload = ev.payload or {}
-        key = payload.get("card_key")
-        if not isinstance(key, str):
-            continue
-        until_raw = payload.get("snoozed_until")
-        if until_raw is None:  # permanent dismiss
-            suppressed.add(key)
-            continue
-        try:
-            until = datetime.fromisoformat(str(until_raw))
-        except ValueError:
-            continue
-        if _as_utc(until) > now:
-            suppressed.add(key)
-
-    for ev in await list_events(
-        session, event_type=OperatorEventType.BELIEF_AFFIRMED, limit=10_000
-    ):
-        key = (ev.payload or {}).get("card_key")
-        if isinstance(key, str):
-            suppressed.add(key)
-
-    return suppressed
+    return await suppressed_keys(session)
 
 
 def _particle_refs(card: CurationCard) -> list[tuple[EventRefKind, str]]:
@@ -749,7 +806,7 @@ async def _resolve(
     a_side, b_side = record_sides(record)
     a = await get_particle(session, a_side[0]) if a_side else None
     b = await get_particle(session, b_side[0]) if b_side else None
-    offered = resolve_actions_for(a, b)
+    offered = resolve_actions_for(a, b, retired_value=is_retired_value(record))
     if chosen is not ResolutionAction.DEFER and chosen.value not in offered:
         side, member = ("A", a) if chosen is ResolutionAction.PREFER_A else ("B", b)
         state = member.status.value if member is not None else "no longer in the store"
@@ -803,6 +860,13 @@ async def _snooze(
         )
         return f"{'Dismissed' if permanent else 'Snoozed'} {card.corpus_url}."
 
+    if card.kind is CardKind.SUBJECTLESS_SOURCE and permanent:
+        event = await dismiss_source_card(session, card, actor=actor)
+        return (
+            f"Dismissed {len(event.refs)} belief(s) on {card.key}. A later subjectless "
+            "belief from this source is asked about again."
+        )
+
     snooze_days = None if permanent else (days or get_config().curation.snooze_days)
     until = None if snooze_days is None else datetime.now(UTC) + timedelta(days=snooze_days)
     await record_event(
@@ -819,6 +883,31 @@ async def _snooze(
     if permanent:
         return f"Dismissed — {card.key} will not resurface."
     return f"Snoozed {card.key} for {snooze_days} day(s)."
+
+
+async def dismiss_source_card(
+    session: AsyncSession, card: CurationCard, *, actor: str
+) -> OperatorEvent:
+    """Rule that a source card's beliefs can stand without a subject.
+
+    Member-scoped: the event names each belief, and only those leave the queue.
+    A card rebuilt from its key alone carries no members, so they are read
+    from the card the queue currently serves. Raises ``ValueError`` when the
+    card has no open belief left. Does not commit.
+    """
+    members = list(card.particle_ids)
+    if not members:
+        served = await get_curation_card(session, card.key)
+        members = list(served.particle_ids) if served is not None else []
+    if not members:
+        raise ValueError(f"No open subjectless beliefs on {card.key}.")
+    return await record_event(
+        session,
+        actor=actor,
+        event_type=OperatorEventType.CURATION_CARD_SNOOZED,
+        refs=[(EventRefKind.PARTICLE, pid) for pid in members],
+        payload={"card_key": card.key, "snoozed_until": None, "snooze_days": None},
+    )
 
 
 async def _retract(
@@ -979,6 +1068,8 @@ async def _supersede(
             f". It conflicts with another belief: INCONSISTENCY "
             f"{result.inconsistency_id[:8]}… holds it until `particles review` resolves it"
         )
+    if result.successor_scope is not None:
+        line += f". The successor is in view as: {result.successor_scope}"
     return line + "."
 
 

@@ -127,6 +127,22 @@ class TestServerRegistration:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("module", ["particles.mcp", "particles.mcp.memory_compat.server"])
+    async def test_initialize_reports_particles_version(self, module: str) -> None:
+        # Left unset, the SDK reports the ``mcp`` library's own version in
+        # ``serverInfo``, which is what MCP clients and directories display.
+        import importlib
+
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from particles import __version__
+
+        server = importlib.import_module(module).build_server()
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.initialize()
+        assert result.serverInfo.version == __version__
+
+    @pytest.mark.asyncio
     async def test_every_tool_has_a_docstring_description(self) -> None:
         from particles.mcp import build_server
 
@@ -308,6 +324,34 @@ class TestSubjectsTools:
         assert set(result["particle_ids"]).issubset({p.id for p in linked})
 
     @pytest.mark.asyncio
+    async def test_subjects_show_resolves_a_name_or_alias(self, db_session: AsyncSession) -> None:
+        """an agent can name the subject instead of copying its ID."""
+        from particles.mcp import build_server
+        from particles.store.subject_store import insert_subject
+
+        subj = Subject(canonical_name="the user", aliases=["the speaker"], asserted_by="t")
+        await insert_subject(db_session, subj)
+        await db_session.commit()
+
+        server = build_server()
+        for ref in ("The User", "the speaker"):
+            result = await _call_tool(server, "subjects_show", {"subject_id": ref})
+            assert result["subject"]["id"] == subj.id
+
+    @pytest.mark.asyncio
+    async def test_subjects_show_ambiguous_name_raises(self, db_session: AsyncSession) -> None:
+        from particles.mcp import build_server
+        from particles.store.subject_store import insert_subject
+
+        await insert_subject(db_session, Subject(canonical_name="Prometheus", asserted_by="t"))
+        await insert_subject(db_session, Subject(canonical_name="Prometheus", asserted_by="t"))
+        await db_session.commit()
+
+        server = build_server()
+        with pytest.raises(Exception, match="ambiguous"):  # noqa: B017 — SDK wraps the error
+            await _call_tool(server, "subjects_show", {"subject_id": "Prometheus"})
+
+    @pytest.mark.asyncio
     async def test_subjects_show_missing_raises(self, db_session: AsyncSession) -> None:
         from particles.mcp import build_server
 
@@ -466,6 +510,34 @@ class TestParticlesList:
         ids = {p["id"] for p in result["particles"]}
         assert ids == {linked.id}
         assert subj_a.id in result["particles"][0]["subject_ids"]
+
+    @pytest.mark.asyncio
+    async def test_subject_filter_takes_a_name_or_prefix(self, db_session: AsyncSession) -> None:
+        """the filter resolves like ``subjects_show`` and echoes the ID."""
+        from particles.mcp import build_server
+        from particles.store.particle_store import insert_particle
+        from particles.store.subject_store import insert_subject
+
+        subj = Subject(canonical_name="the user", asserted_by="t")
+        await insert_subject(db_session, subj)
+        linked = _make_particle(content="about the user", subject_ids=[subj.id])
+        await insert_particle(db_session, linked)
+        await insert_particle(db_session, _make_particle(content="about nothing"))
+        await db_session.commit()
+
+        server = build_server()
+        for ref in ("the user", subj.id[:8]):
+            result = await _call_tool(server, "particles_list", {"subject_id": ref})
+            assert {p["id"] for p in result["particles"]} == {linked.id}
+            assert result["subject_id"] == subj.id
+
+    @pytest.mark.asyncio
+    async def test_unknown_subject_filter_raises(self, db_session: AsyncSession) -> None:
+        from particles.mcp import build_server
+
+        server = build_server()
+        with pytest.raises(Exception, match="No subject matches"):  # noqa: B017
+            await _call_tool(server, "particles_list", {"subject_id": "nobody"})
 
     @pytest.mark.asyncio
     async def test_pagination_via_limit_and_offset(self, db_session: AsyncSession) -> None:

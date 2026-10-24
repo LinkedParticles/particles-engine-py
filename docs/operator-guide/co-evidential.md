@@ -89,8 +89,10 @@ particles links dedup --apply          # merge (needs the config opt-in below)
 **The predicate is exact content equality: a SHA-256 comparison.** There is no
 similarity threshold and no LLM call, and this is permanent rather than
 conservative-for-now. The hash is taken over the *normalized* string (runs of
-whitespace collapsed and a sentence-final period trimmed, wording and case
-untouched), which is the same key extract-time suppression uses, so what the
+whitespace collapsed, a sentence-final period trimmed, and typographic variants
+read as one spelling: double quotation marks dropped, curly apostrophes, dashes
+and the ellipsis written one way; wording and case untouched), which is the
+same key extract-time suppression uses, so what the
 store refuses to mint twice is exactly what this verb can still clean up. On a
 27,008-belief store the normalization is worth 3 groups out of 206 (all
 trailing-period twins); it is here so `--apply` reporting "0 groups" means the
@@ -217,6 +219,71 @@ cleanup. Note the revert is not durable against the *next* `links dedup
 --apply`, which will re-merge the same identical-content copies. If you reverted
 because the merge was wrong for this store, turn `enabled` back off.
 
+## Reworded copies of one passage: `links dedup --reread`
+
+Before 1.166.0 a session transcript's later snapshots re-read text the store
+had already extracted, and the extractor wrote the same passage again in other
+words: "There are three commits on branch fix" beside "Branch fix has three
+commits". Each such pair is two readings of one passage, not two sources
+agreeing, so linking them would overstate the evidence. `links dedup --reread`
+keeps the first reading and supersedes the second, exactly as `links dedup`
+does for identical text.
+
+Because the wording differs, no key decides these pairs. A model does, behind
+three steps:
+
+```bash
+particles links dedup --reread                       # census and cost estimate; writes nothing
+particles links dedup --reread --judge               # paid: asks the questions, records the answers
+particles links dedup --reread --sheet pairs.csv     # every SAME verdict, for you to label
+particles links dedup --reread --labels pairs.csv    # scores your labels against the bar
+particles links dedup --reread --apply               # merges from the recorded answers; no model call
+```
+
+**Which pairs.** Two ACTIVE claims the duplicate finder proposed, whose every
+source reference names one append-only entry, read from different snapshots of
+it, with one holder and different text under the duplicate key. Pairs from one
+snapshot, pairs whose claims also cite another source, and pairs from editable
+notes are left as curation cards.
+
+**Which questions.** The pairs form groups. Each group keeps its first reading
+(the claim whose earliest snapshot was captured first) and asks the question of
+every other member against that claim directly, so no copy is ever retired
+under a claim it was not compared with. A member that shares a snapshot with
+the first reading, or carries a Subject the first reading lacks, is not asked.
+
+**When a copy merges.** The duplicate judge answered that the two are one
+claim, the update reading did not answer that the later one changes the
+earlier one's value ("three commits" against "four commits"), no contradiction
+between them is on record, a `links unmerge` has not restored the copy, and the
+pair's similarity stratum is admitted. Each answer is kept in the probe ledger,
+so `--apply` reads them and calls no model, and a second `--judge` run asks only
+what is still unanswered.
+
+**Admission.** `--apply` also needs `links_suggest.reread.admitted`, which is
+`none` until you set it. Label the sheet from the top (its order is a stable
+shuffle, so the first rows are a random sample) by writing `same` or `different`
+in the `label` column, then run `--labels`. A stratum passes when at least 100
+labelled verdicts give a 95 % Wilson lower bound of at least 0.95: 100 correct
+out of 100 passes, 99 out of 100 does not, and one mistake is allowed from 110
+labels. The two strata are `high` (similarity 0.97 and above) and `low`; set
+`admitted: high` when only the first passes, `all` when both do. The report also
+prints the precision of the whole rule, guards included, for the rows you
+labelled.
+
+**Cost.** The census prints the estimate before anything is asked: on the
+2026-10-23 measurement about 1,060 questions, roughly US$0.20 at the configured
+`claude-haiku-5-5` and under US$2.50 if every call spent its full output budget.
+`--judge` prints it again and asks before the first call (`--yes` skips the
+prompt). When it finishes it prints the `LLM usage:` line and records the run's
+measured spend as an `EXTRACT_RUN` event with route `reread-judge`, so the
+recorded-spend line in `particles quality` and the digest counts it.
+
+**Undo.** A re-read merge is a `DUPLICATES_MERGED` event with basis
+`reread_judged` and a run id, and `links unmerge --run <run-id>` restores it,
+dropping only the merge's own `REREAD_DUPLICATE` links. Unlike an identical-text
+merge, a reverted re-read pair is never merged again by the next `--apply`.
+
 ## Tuning
 
 All knobs live under `links_suggest` in `config.yaml`
@@ -229,6 +296,9 @@ All knobs live under `links_suggest` in `config.yaml`
 | `apply_confirm_threshold` | `10` | `--apply` over this many pairs needs `--yes`. |
 | `auto_merge.enabled` | `false` | Permits `links dedup --apply` to write. Off by default, permanently; a stock install never auto-mutates a store. |
 | `auto_merge.max_per_run` | `500` | Cap on **groups** merged per `links dedup --apply` run. A capped run discloses the remainder. |
+| `reread.admitted` | `none` | Similarity strata on which `links dedup --reread --apply` may merge: `none`, `high` (0.97 and above) or `all`. Set it only after your labels clear the bar. |
+| `reread.max_judged` | `2000` | Questions one `--reread --judge` run may ask. A capped run says how many remain. |
+| `reread.judge_batch` | `25` | Pairs per duplicate-judge call. |
 
 !!! note "Renamed config key"
 
@@ -240,7 +310,8 @@ All knobs live under `links_suggest` in `config.yaml`
 ## Surfaces
 
 - **CLI**: `particles links suggest` (all three modes; `--apply` here) and
-  `particles links dedup` (exact-duplicate auto-merge; local store only).
+  `particles links dedup` (exact-duplicate auto-merge, and with `--reread` the
+  judged merge of reworded re-reads; local store only).
 - **HTTP**: `POST /links/suggest` mirrors the CLI, including `--apply`
   (pass `{"mode": "APPLY", "confirmed": true}`). Returns `409` when
   `APPLY` exceeds the confirm threshold without `confirmed`.
@@ -259,9 +330,10 @@ All knobs live under `links_suggest` in `config.yaml`
   cluster IDs (§ Deferred)
   layers on top of this verb; `--apply` today is pair-wise, not
   cluster-wise.
-- **Auto-merging *near* duplicates.** `links dedup` handles exact identity
-  only. Extending it needs the LLM judge's own precision measured against a
-  hand-labelled sample, which has not happened yet
+- **Auto-merging *near* duplicates in general.** `links dedup` handles exact
+  identity, and `--reread` handles one population: two readings of one
+  append-only passage. Anything wider needs the LLM judge's own precision
+  measured against a hand-labelled sample of that population
   (§ Deferred).
 - **Ambiguous-home orphans.** When an identical-content group offers subject-less
   copies more than one candidate Subject, `links dedup` declines to guess and

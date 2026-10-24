@@ -93,7 +93,25 @@ class TestSubjectResolution:
             app, ["query", "anything?", "--subject", "nope"], catch_exceptions=False
         )
         assert result.exit_code == 1
-        assert "Subject 'nope' not found." in result.output
+        assert "No subject matches 'nope' by ID, ID prefix, or name." in result.output
+        backend.query.assert_not_awaited()
+
+    def test_subject_is_looked_up_by_name_too(self, backend: MagicMock) -> None:
+        """``--subject "the user"`` resolves without an ID."""
+        backend.subject_show.return_value = Subject(canonical_name="the user", asserted_by="test")
+        result = runner.invoke(
+            app, ["query", "anything?", "--subject", "the user"], catch_exceptions=False
+        )
+        assert result.exit_code == 0
+        backend.subject_show.assert_awaited_once_with("the user", by_name=True)
+
+    def test_ambiguous_subject_exits_one_with_the_candidates(self, backend: MagicMock) -> None:
+        backend.subject_show.side_effect = ValueError("Subject 'cafe' is ambiguous: it matches …")
+        result = runner.invoke(
+            app, ["query", "anything?", "--subject", "cafe"], catch_exceptions=False
+        )
+        assert result.exit_code == 1
+        assert "Subject 'cafe' is ambiguous" in result.output
         backend.query.assert_not_awaited()
 
     def test_resolved_subject_id_is_passed_to_the_query(self, backend: MagicMock) -> None:

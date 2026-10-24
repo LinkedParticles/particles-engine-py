@@ -21,6 +21,7 @@ from particles.api.cli._progress import confirm
 from particles.conformance.types import ConformanceReport, FieldStat, FieldTier
 from particles.db import session_scope
 from particles.extraction.registry import get_extractors, selects
+from particles.llm.usage import LLMUsage, observe_sampling, render_usage_line, track_usage
 
 extractor_app = typer.Typer(help="Manage extractor registry (Extension A).", no_args_is_help=True)
 app.add_typer(extractor_app, name="extractor")
@@ -678,56 +679,67 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
         if estimate_only:
             return
 
-    def _save(report: Any) -> None:
-        if no_save:
-            return
-        saved = _persist_benchmark_run(report)
-        if saved is not None:
-            typer.echo(f"Run report saved to {saved}", err=True)
+    # The passes are metered: one usage block per run file, and
+    # the whole series on the usage line.
+    with track_usage() as series, track_usage() as usage:
 
-    any_failed = False
-    for suite in suites:
-        if runs == 1:
-            report = await run_benchmark(
-                suite,
-                extractor,
-                fixture_dir=fixtures_dir,
-                judge=judge_enum,
-                threshold=threshold,
-                gold_subjects=gold_by_suite.get(suite.suite_id, []),
-            )
-            if output_format is _BenchmarkFormat.json:
-                typer.echo(json.dumps(_benchmark_report_to_dict(report), indent=2, default=str))
-            else:
-                _print_benchmark_table(report)
-            _save(report)
-            metrics = report.metrics
-        else:
+        def _save(report: Any) -> None:
+            # Each pass's usage rides its own run file; taken even
+            # under --no-save so the next pass starts from zero.
+            pass_usage = usage.take()
+            if no_save:
+                return
+            saved = _persist_benchmark_run(report, pass_usage)
+            if saved is not None:
+                typer.echo(f"Run report saved to {saved}", err=True)
 
-            def _on_report(index: int, report: Any, _suite_id: str = suite.suite_id) -> None:
-                typer.echo(f"  {_suite_id}: run {index + 1}/{runs} done", err=True)
+        any_failed = False
+        for suite in suites:
+            if runs == 1:
+                report = await run_benchmark(
+                    suite,
+                    extractor,
+                    fixture_dir=fixtures_dir,
+                    judge=judge_enum,
+                    threshold=threshold,
+                    gold_subjects=gold_by_suite.get(suite.suite_id, []),
+                )
+                if output_format is _BenchmarkFormat.json:
+                    typer.echo(json.dumps(_benchmark_report_to_dict(report), indent=2, default=str))
+                else:
+                    _print_benchmark_table(report)
                 _save(report)
-
-            aggregate = await run_benchmark_repeated(
-                suite,
-                extractor,
-                runs=runs,
-                fixture_dir=fixtures_dir,
-                judge=judge_enum,
-                threshold=threshold,
-                on_report=_on_report,
-                gold_subjects=gold_by_suite.get(suite.suite_id, []),
-            )
-            if output_format is _BenchmarkFormat.json:
-                typer.echo(json.dumps(_aggregate_report_to_dict(aggregate), indent=2, default=str))
+                metrics = report.metrics
             else:
-                _print_benchmark_aggregate_table(aggregate)
-            metrics = aggregate.mean_metrics
 
-        if fail_on is not _BenchmarkFailOn.none and _fail_on_metric(
-            metrics, fail_on, fail_threshold
-        ):
-            any_failed = True
+                def _on_report(index: int, report: Any, _suite_id: str = suite.suite_id) -> None:
+                    typer.echo(f"  {_suite_id}: run {index + 1}/{runs} done", err=True)
+                    _save(report)
+
+                aggregate = await run_benchmark_repeated(
+                    suite,
+                    extractor,
+                    runs=runs,
+                    fixture_dir=fixtures_dir,
+                    judge=judge_enum,
+                    threshold=threshold,
+                    on_report=_on_report,
+                    gold_subjects=gold_by_suite.get(suite.suite_id, []),
+                )
+                if output_format is _BenchmarkFormat.json:
+                    typer.echo(
+                        json.dumps(_aggregate_report_to_dict(aggregate), indent=2, default=str)
+                    )
+                else:
+                    _print_benchmark_aggregate_table(aggregate)
+                metrics = aggregate.mean_metrics
+
+            if fail_on is not _BenchmarkFailOn.none and _fail_on_metric(
+                metrics, fail_on, fail_threshold
+            ):
+                any_failed = True
+
+    typer.echo(render_usage_line(series.snapshot()), err=True)
 
     if any_failed:
         raise typer.Exit(1)
@@ -806,7 +818,23 @@ def _benchmark_report_to_dict(report: Any) -> dict[str, Any]:
 _RUN_FILE_FORMAT = 1
 
 
-def _persist_benchmark_run(report: Any) -> Path | None:
+#: The cosine floor `extractor calibrate` labels at: the harness default,
+#: conformance-pinned (L3), and named on each record it writes.
+_CALIBRATE_THRESHOLD = 0.80
+
+
+def _label_judge(judge: Any) -> str:
+    """Name the equivalence judge that labelled a fit."""
+    from particles.benchmark.equivalence import EquivalenceJudge
+    from particles.config import get_config
+
+    if judge is EquivalenceJudge.EMBEDDING:
+        return f"embedding@{_CALIBRATE_THRESHOLD:.2f}"
+    sel = get_config().llm.for_purpose("benchmark")
+    return f"llm:{sel.provider}:{sel.model}"
+
+
+def _persist_benchmark_run(report: Any, usage: LLMUsage | None = None) -> Path | None:
     """Write one run's report JSON under ``benchmark.runs_dir``.
 
     Persistence is a CLI concern (like --fail-on): the §13.3 harness stays
@@ -823,11 +851,15 @@ def _persist_benchmark_run(report: Any) -> Path | None:
     runs_dir = Path(get_config().benchmark.runs_dir).expanduser()
     stamp = report.generated_at.strftime("%Y%m%dT%H%M%SZ")
     base = f"{stamp}-benchmark-{report.extractor_id}-{report.suite_id}"
-    envelope = {
+    envelope: dict[str, Any] = {
         "format": _RUN_FILE_FORMAT,
         "extraction_provider_model": f"{sel.provider}:{sel.model}",
         "report": _benchmark_report_to_dict(report),
     }
+    if usage is not None:
+        # Additive: the pass's measured calls, including what each
+        # requested temperature became. Readers of format 1 ignore the key.
+        envelope["llm_usage"] = usage.model_dump(mode="json")
     try:
         runs_dir.mkdir(parents=True, exist_ok=True)
         path = runs_dir / f"{base}.json"
@@ -1716,6 +1748,23 @@ def _unreached_note(calibration: Any, configured: str) -> str | None:
     )
 
 
+def _label_note(calibration: Any) -> str | None:
+    """Which judge labelled a stored fit, what it sent, over how many runs.
+
+    ``None`` for a record persisted before these keys, which says nothing.
+    """
+    if calibration.label_judge is None and calibration.runs is None:
+        return None
+    parts = [f"labelled by {calibration.label_judge or 'an unrecorded judge'}"]
+    if calibration.label_temperature == "sent":
+        parts.append("fixed temperature sent")
+    elif calibration.label_temperature in ("dropped", "unset"):
+        parts.append("judge sampled at its default")
+    if calibration.runs is not None:
+        parts.append(f"{calibration.runs} pooled run(s)")
+    return ", ".join(parts)
+
+
 def _heldout_note(calibration: Any) -> str:
     """One-line account of a stored record's out-of-sample check."""
     if calibration.heldout_sample_size is None:
@@ -2029,27 +2078,36 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
     labels: list[bool] = []
     suite_ids: list[str] = []
     per_run: list[tuple[list[float], list[bool]]] = []
-    for run_index in range(runs):
-        run_raws: list[float] = []
-        run_labels: list[bool] = []
-        for suite_obj in suites:
-            report = await run_benchmark(
-                suite_obj, extractor, fixture_dir=fixtures_dir, judge=judge_enum
-            )
-            if run_index == 0:
-                suite_ids.append(suite_obj.suite_id)
-            suite_raws, suite_labels = graded_pairs(report)
-            run_raws.extend(suite_raws)
-            run_labels.extend(suite_labels)
-        per_run.append((run_raws, run_labels))
-        raw_values.extend(run_raws)
-        labels.extend(run_labels)
-        if runs > 1:
-            typer.echo(
-                f"  pass {run_index + 1}/{runs}: {len(run_raws)} pair(s), "
-                f"{sum(run_labels)} matched",
-                err=True,
-            )
+    # Metered, and the label judge's sampling observed for the record:
+    # the embedding judge makes no call, so it observes nothing.
+    with track_usage() as calibrate_usage, observe_sampling() as label_sampling:
+        for run_index in range(runs):
+            run_raws: list[float] = []
+            run_labels: list[bool] = []
+            for suite_obj in suites:
+                report = await run_benchmark(
+                    suite_obj,
+                    extractor,
+                    fixture_dir=fixtures_dir,
+                    judge=judge_enum,
+                    threshold=_CALIBRATE_THRESHOLD,
+                )
+                if run_index == 0:
+                    suite_ids.append(suite_obj.suite_id)
+                suite_raws, suite_labels = graded_pairs(report)
+                run_raws.extend(suite_raws)
+                run_labels.extend(suite_labels)
+            per_run.append((run_raws, run_labels))
+            raw_values.extend(run_raws)
+            labels.extend(run_labels)
+            if runs > 1:
+                typer.echo(
+                    f"  pass {run_index + 1}/{runs}: {len(run_raws)} pair(s), "
+                    f"{sum(run_labels)} matched",
+                    err=True,
+                )
+
+    typer.echo(render_usage_line(calibrate_usage.snapshot()), err=True)
 
     sample_size = len(raw_values)
     if sample_size < 2:
@@ -2211,6 +2269,11 @@ async def _extractor_calibrate(  # noqa: PLR0913 — CLI option list is the API
         heldout_error_before=heldout.ece_before,
         heldout_error_after=heldout.ece_after,
         extractor_version=fitted_version,
+        label_judge=_label_judge(judge_enum),
+        label_temperature=(
+            None if judge_enum is EquivalenceJudge.EMBEDDING else label_sampling.value()
+        ),
+        runs=runs,
     )
 
     # persist the calibration keyed by its provider_model in the
@@ -2314,6 +2377,8 @@ async def _extractor_calibrations(extractor_id: str, suites_dir_override: Path |
             f"under {c.extractor_version or 'unknown version'}  "
             f"suites={c.benchmark_suite_id}"
         )
+        if (labels := _label_note(c)) is not None:
+            typer.echo(f"  {'':<34} {labels}")
         # reported before staleness because it is the stronger fact —
         # a record that is never applied cannot be stale *at* anything.
         # then the version gate, which only a registered extractor

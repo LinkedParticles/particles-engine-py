@@ -8,7 +8,8 @@ Presents INCONSISTENCY particles for human review; supports five resolution acti
   PREFER_A  → loser (B) demoted — a quarantined B flips its reason to
               CONFLICT_RESOLVED in place; write SourceTrustStatement + REVIEW
               particle; wrapper RETRACTED (CONFLICT_RESOLVED); trigger trust
-              cascade if policy gate passes
+              cascade if policy gate passes. Refused when A is not ACTIVE: it
+              would keep neither claim
   PREFER_B  → loser (A) → PROVENANCE_STALE; a quarantined B is promoted to a new
               ACTIVE particle (Reindex pattern — fresh id, supersedes); trust
               statement + REVIEW particle; wrapper RETRACTED; cascade as above
@@ -46,6 +47,8 @@ from particles.core.conflict_review import (
     conflict_pair_ids,
     decide_resolution,
     further_member_ids,
+    is_retired_value,
+    refusal_reason,
 )
 from particles.core.contradiction_disclosure import census_replaces
 from particles.core.schema import (
@@ -78,6 +81,15 @@ from particles.store.particle_store import (
 from particles.store.trust_store import insert_trust_statement
 
 log = logging.getLogger(__name__)
+
+
+class ResolutionRefused(ValueError):
+    """The action cannot do what it says on this record.
+
+    Raised before anything is written. ``PREFER_A`` on a record whose claim A
+    has left ACTIVE would demote B and keep nothing, since a conflict verdict
+    never restores a claim retired for a reason of its own.
+    """
 
 
 async def list_inconsistencies(session: AsyncSession) -> list[Particle]:
@@ -177,6 +189,14 @@ async def resolve(
         further = FurtherMembers(
             a=tuple(loaded[pid] for pid in extra_a_ids if pid in loaded),
             b=tuple(loaded[pid] for pid in extra_b_ids if pid in loaded),
+        )
+
+    refusal = refusal_reason(action, particle_a, particle_b, retired_value=is_retired_value(inc))
+    if refusal is not None:
+        others = [other.value for other in ResolutionAction if other is not action]
+        raise ResolutionRefused(
+            f"{action.value} is refused on {inconsistency_particle_id}: {refusal}. "
+            f"Use {', '.join(others[:-1])} or {others[-1]}."
         )
 
     # Decide (D2): every write below is chosen here, store-free.

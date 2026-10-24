@@ -204,6 +204,49 @@ class TestInFlightContext:
         assert ctx.kind is SourceKind.NOTE and ctx.observed == "unknown"
 
 
+@pytest.mark.asyncio
+async def test_the_census_reads_the_run_the_pair_is_about(db_session: AsyncSession) -> None:
+    """a transcript that repeats a command is read at the run that bears on the pair.
+
+    The census used to show the first best-matching paragraph, so a claim
+    true of a later run was read beside the earlier run's output. It now
+    windows the claim's chunk around both claims' words.
+    """
+    from particles.core.schema import ProvenanceRef, ProvenanceRefType
+    from particles.corpus.deposit import deposit_text_versioned
+    from particles.ingest.second_reading import claim_context
+    from particles.store.particle_store import insert_particle
+
+    filler = "\n\n".join(
+        f"Lunch note {i}: the cafe served soup and bread today." for i in range(24)
+    )
+    text = (
+        "Audit re-run: probed 40 pairs and confirmed 3 of them across files.\n\n"
+        + filler
+        + "\n\nAudit re-run: probed 40 pairs and confirmed 5, two within one note."
+    )
+    entry_id, snapshot_id, _ = await deposit_text_versioned(
+        db_session,
+        text=text,
+        uri_r="claude-code://session/repeat",
+        source_type=SourceType.CONVERSATION,
+        mutability=Mutability.APPEND_ONLY,
+    )
+    claim = _p("The audit re-run probed 40 pairs.", entry_id)
+    claim.provenance = [
+        ProvenanceRef(
+            type=ProvenanceRefType.SOURCE, corpus_entry_id=entry_id, snapshot_id=snapshot_id
+        )
+    ]
+    await insert_particle(db_session, claim)
+    await db_session.commit()
+
+    ctx = await claim_context(db_session, claim, "Two confirmed pairs were within one note.")
+    assert ctx.kind is SourceKind.RECORD
+    assert "two within one note" in ctx.passage
+    assert "confirmed 3 of them" not in ctx.passage
+
+
 def test_a_rung_3_record_carries_the_instruction_only_when_given() -> None:
     from particles.core.schema import ProvenanceRefType
     from particles.ingest.conflict_plan import plan_quarantine

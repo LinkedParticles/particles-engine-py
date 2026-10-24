@@ -39,6 +39,7 @@ from particles.core.status import Status
 from particles.corpus.store import CorpusEntryRow, SnapshotRow, update_extraction_status
 from particles.extraction.components import ComponentRecord
 from particles.operations.reindex import (
+    ReindexPlan,
     _collapse_for_auto_discovery,
     _identify_scope,
     _reindex_snapshot,
@@ -47,10 +48,25 @@ from particles.operations.reindex import (
 )
 from particles.operations.reindex_scope import ONLY_CHANGED_COMPONENTS_REFUSAL
 from particles.store.particle_store import get_particle, insert_particle
+from tests._late_generation import (
+    ADDED,
+    DROPPED,
+    KEPT,
+    Scripted,
+    active_copies,
+    deposit_version,
+    extract,
+    note_uri,
+    quiet_probes,  # noqa: F401 (fixture)
+)
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+#: Stamps relative to the patched SDK version ``CURRENT`` (D1): tests
+#: that classify stamps patch ``version_guard.SCHEMA_VERSION`` to ``CURRENT``.
+CURRENT, OLDER, NEWER = "1.2.0", "1.1.0", "1.3.0"
 
 
 async def _add_entry(
@@ -370,14 +386,20 @@ class TestIdentifyScopeExplicitIntersection:
         named = await _add_entry(db_session)
         named_snap = await _add_snapshot(db_session, named)
         # Stale schema AND no matching pairing: the flag must still exclude it.
-        await _add_particle(db_session, named, named_snap, schema_version="0.2.0")
+        await _add_particle(db_session, named, named_snap, schema_version=OLDER)
         unnamed = await _add_entry(db_session)
         unnamed_snap = await _add_snapshot(db_session, unnamed)
-        await _add_particle(db_session, unnamed, unnamed_snap, schema_version="0.2.0")
+        await _add_particle(db_session, unnamed, unnamed_snap, schema_version=OLDER)
         await db_session.commit()
 
         scope = await _identify_scope(
-            db_session, [named.entry_id], None, None, True, "openai:gpt-5.6-luna"
+            db_session,
+            [named.entry_id],
+            None,
+            None,
+            True,
+            "openai:gpt-5.6-luna",
+            schema_stale_versions=[OLDER],
         )
         assert scope == []
         assert (unnamed.entry_id, unnamed_snap.snapshot_id) not in scope
@@ -566,14 +588,31 @@ class TestIdentifyScopeAuto:
         assert (entry.entry_id, snap.snapshot_id) in scope
 
     @pytest.mark.asyncio
-    async def test_stale_schema_version_picks_up_old_particles(self, db_session: Any) -> None:
+    async def test_stale_schema_selects_only_the_named_stamps(self, db_session: Any) -> None:
+        """Stale-schema discovery matches the stamps it is handed, by ``IN`` (D5)."""
         entry = await _add_entry(db_session)
         snap = await _add_snapshot(db_session, entry)
-        await _add_particle(db_session, entry, snap, schema_version="0.2.0")
+        await _add_particle(db_session, entry, snap, schema_version=OLDER)
+        other = await _add_entry(db_session)
+        other_snap = await _add_snapshot(db_session, other)
+        await _add_particle(db_session, other, other_snap, schema_version=NEWER)
+        await db_session.commit()
+
+        scope = await _identify_scope(
+            db_session, None, None, None, include_failed=False, schema_stale_versions=[OLDER]
+        )
+        assert scope == [(entry.entry_id, snap.snapshot_id)]
+
+    @pytest.mark.asyncio
+    async def test_stale_schema_is_not_gathered_without_stamps(self, db_session: Any) -> None:
+        """No stamps named, no stale-schema pairs: the default since D5."""
+        entry = await _add_entry(db_session)
+        snap = await _add_snapshot(db_session, entry)
+        await _add_particle(db_session, entry, snap, schema_version=OLDER)
         await db_session.commit()
 
         scope = await _identify_scope(db_session, None, None, None, include_failed=False)
-        assert (entry.entry_id, snap.snapshot_id) in scope
+        assert scope == []
 
     @pytest.mark.asyncio
     async def test_extractor_id_picks_up_matching_particles(self, db_session: Any) -> None:
@@ -597,11 +636,13 @@ class TestIdentifyScopeAuto:
         entry = await _add_entry(db_session)
         snap = await _add_snapshot(db_session, entry)
         await _add_particle(
-            db_session, entry, snap, schema_version="0.2.0", extractor_version="0.1.0"
+            db_session, entry, snap, schema_version=OLDER, extractor_version="0.1.0"
         )
         await db_session.commit()
 
-        scope = await _identify_scope(db_session, None, "0.1.0", None, include_failed=False)
+        scope = await _identify_scope(
+            db_session, None, "0.1.0", None, include_failed=False, schema_stale_versions=[OLDER]
+        )
         assert scope.count((entry.entry_id, snap.snapshot_id)) == 1
 
 
@@ -670,13 +711,19 @@ class TestReindexSummary:
             "failed": 0,
             "failed_entries": [],
             "lint_summary": {},
+            "skipped_newer_schema": 0,
             "plan": {
                 "entries": 0,
                 "snapshots": 0,
                 "particles": 0,
                 "missing_blobs": 0,
-                "scope_description": "auto: stale schema + failed/pending",
+                "scope_description": "auto: failed/pending",
                 "snapshot_plans": [],
+                "absent_entries": [],
+                "retargeted": 0,
+                "schema_stale_particles": 0,
+                "schema_stale_included": False,
+                "skipped_newer_schema": 0,
             },
         }
 
@@ -831,7 +878,7 @@ class TestReindexPlanAndDryRun:
         assert plan["entries"] == 1
         assert plan["snapshots"] == 1
         assert plan["particles"] == 1
-        assert plan["scope_description"] == "extractor-version 0.13.0; auto: stale schema"
+        assert plan["scope_description"] == "extractor-version 0.13.0"
         (sp,) = plan["snapshot_plans"]
         assert sp["entry_id"] == entry.entry_id
         assert sp["snapshot_id"] == snap.snapshot_id
@@ -1099,3 +1146,289 @@ class TestOnlyChangedComponents:
             await reindex(
                 db_session, extractor_id="general-extractor", only_changed_components=True
             )
+
+
+# ---------------------------------------------------------------------------
+# A provenance scope re-extracts the current generation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("quiet_probes")
+class TestRetargetToCurrent:
+    """``reindex --extractor-version`` over a note edited since that version.
+
+    The note said "kept" and "dropped", then "kept" and "added". Its claims'
+    refs name the day-1 snapshot, so the scope names it. Re-extracting the
+    day-1 text would supersede "kept" and then retire its re-extraction,
+    which the current text does not anchor; the scope is re-aimed at day 2.
+    """
+
+    @staticmethod
+    async def _edited_note(session: Any, ex: Scripted) -> tuple[str, str, str]:
+        uri = note_uri()
+        entry_id, older = await deposit_version(session, ex, uri, [KEPT, DROPPED], day=1)
+        await extract(session, ex, entry_id, older)
+        _, newer = await deposit_version(session, ex, uri, [KEPT, ADDED], day=2)
+        await extract(session, ex, entry_id, newer)
+        return entry_id, older, newer
+
+    @staticmethod
+    async def _reindex(session: Any, ex: Scripted, monkeypatch: Any, version: str) -> Any:
+        from functools import partial
+
+        from particles.ingest.pipeline import extract_snapshot
+        from particles.operations import reindex as reindex_mod
+
+        old_version = ex.EXTRACTOR_VERSION
+        ex.EXTRACTOR_VERSION = version
+        monkeypatch.setattr(
+            reindex_mod, "extract_snapshot", partial(extract_snapshot, extractor=ex)
+        )
+        return await reindex_mod.reindex(
+            session,
+            extractor_version=old_version,
+            include_failed=False,
+            rate_limit_per_minute=0,
+            run_post_lint=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_claim_the_current_text_states_keeps_one_active_copy(
+        self, db_session: Any, monkeypatch: Any
+    ) -> None:
+        ex = Scripted()
+        await self._edited_note(db_session, ex)
+
+        result = await self._reindex(db_session, ex, monkeypatch, "2")
+
+        assert result["plan"]["retargeted"] >= 1  # type: ignore[index]
+        assert await active_copies(db_session, KEPT) == 1
+        assert await active_copies(db_session, ADDED) == 1
+        assert await active_copies(db_session, DROPPED) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_claim_anchored_only_to_the_old_snapshot_converges_in_two_passes(
+        self, db_session: Any, monkeypatch: Any
+    ) -> None:
+        """An old carry-forward, written before re-observation refs: only day 1."""
+        import json
+
+        from sqlalchemy import select
+
+        from particles.store.particle_store import ParticleRow
+
+        ex = Scripted()
+        _, _, newer = await self._edited_note(db_session, ex)
+        row = (
+            await db_session.execute(select(ParticleRow).where(ParticleRow.content == KEPT))
+        ).scalar_one()
+        refs = json.loads(row.provenance_json)
+        row.provenance_json = json.dumps([r for r in refs if r.get("snapshot_id") != newer])
+        await db_session.commit()
+
+        for version in ("2", "3"):
+            await self._reindex(db_session, ex, monkeypatch, version)
+            assert await active_copies(db_session, KEPT) == 1
+            assert await active_copies(db_session, ADDED) == 1
+            assert await active_copies(db_session, DROPPED) == 0
+
+
+# ---------------------------------------------------------------------------
+# D2 / D5: same-major schema minors
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sdk_at_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run as an SDK at ``CURRENT``, so ``OLDER`` / ``NEWER`` are its minors."""
+    monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", CURRENT)
+
+
+#: Per selector: the particle fields that make it match, and the reindex kwargs.
+_SELECTORS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+    "named": ({}, {"include_failed": False}),
+    "extractor_version": (
+        {"extractor_version": "0.1.0"},
+        {"extractor_version": "0.1.0", "include_failed": False},
+    ),
+    "extractor_id": (
+        {"extractor_id": "old-extractor"},
+        {"extractor_id": "old-extractor", "include_failed": False},
+    ),
+    "provider_model": (
+        {"extraction_provider_model": "openai:luna"},
+        {"provider_model": "openai:luna", "include_failed": False},
+    ),
+    "failed_pending": ({}, {"include_failed": True}),
+    "stale_schema": ({}, {"include_failed": False, "include_schema_stale": True}),
+}
+
+
+@pytest.mark.usefixtures("sdk_at_current")
+class TestSchemaMinors:
+    @pytest.mark.asyncio
+    async def test_bare_reindex_never_selects_older_minors(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Opt-in only (D5); the plan still says what the flag would add."""
+        entry = await _add_entry(db_session)
+        snap = await _add_snapshot(db_session, entry)
+        await _add_particle(db_session, entry, snap, schema_version=OLDER)
+        await _add_particle(db_session, entry, snap, schema_version=OLDER, content="Another.")
+        await db_session.commit()
+
+        mock = _patch_extract(monkeypatch)
+        result = await reindex(db_session, include_failed=False, run_post_lint=False)
+
+        mock.assert_not_called()
+        assert result["scope"] == 0
+        plan = result["plan"]
+        assert isinstance(plan, dict)
+        assert plan["schema_stale_particles"] == 2
+        assert plan["schema_stale_included"] is False
+        assert plan["scope_description"] == "nothing selected"
+        line = ReindexPlan.model_validate(plan).format_line()
+        assert "2 particle(s) at an older schema minor not in scope" in line
+        assert "--include-schema-stale" in line
+
+    @pytest.mark.asyncio
+    async def test_flag_selects_older_minors_only(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Equal and newer minors are never discovered by schema version (D5)."""
+        snaps: dict[str, tuple[str, str]] = {}
+        for stamp in (OLDER, CURRENT, NEWER):
+            entry = await _add_entry(db_session)
+            snap = await _add_snapshot(db_session, entry)
+            await _add_particle(db_session, entry, snap, schema_version=stamp)
+            snaps[stamp] = (entry.entry_id, snap.snapshot_id)
+        await db_session.commit()
+
+        mock = _patch_extract(monkeypatch)
+        result = await reindex(
+            db_session,
+            include_failed=False,
+            include_schema_stale=True,
+            run_post_lint=False,
+            dry_run=True,
+        )
+
+        mock.assert_not_called()
+        plan = result["plan"]
+        assert isinstance(plan, dict)
+        selected = [(sp["entry_id"], sp["snapshot_id"]) for sp in plan["snapshot_plans"]]
+        assert selected == [snaps[OLDER]]
+        assert plan["scope_description"] == "auto: stale schema"
+        assert plan["schema_stale_particles"] == 1
+        assert plan["schema_stale_included"] is True
+        # The NEWER snapshot was never in scope, so nothing was skipped for it.
+        assert result["skipped_newer_schema"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("selector", sorted(_SELECTORS))
+    async def test_snapshot_holding_a_newer_minor_is_skipped_under_every_selector(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch, selector: str
+    ) -> None:
+        """An older SDK never re-mints a newer-minor particle (D2), whatever reached it."""
+        fields, kwargs = _SELECTORS[selector]
+        status = (
+            ExtractionStatus.FAILED if selector == "failed_pending" else ExtractionStatus.COMPLETE
+        )
+        stamp = OLDER if selector == "stale_schema" else CURRENT
+
+        held = await _add_entry(db_session)
+        held_snap = await _add_snapshot(db_session, held, extraction_status=status)
+        await _add_particle(db_session, held, held_snap, schema_version=stamp, **fields)
+        newer = await _add_particle(
+            db_session, held, held_snap, schema_version=NEWER, content="Newer.", **fields
+        )
+        control = await _add_entry(db_session)
+        control_snap = await _add_snapshot(db_session, control, extraction_status=status)
+        await _add_particle(db_session, control, control_snap, schema_version=stamp, **fields)
+        await db_session.commit()
+        if selector == "named":
+            kwargs = {**kwargs, "entry_ids": [held.entry_id, control.entry_id]}
+
+        mock = _patch_extract(monkeypatch)
+        result = await reindex(db_session, run_post_lint=False, rate_limit_per_minute=0, **kwargs)
+
+        assert result["skipped_newer_schema"] == 1
+        plan = result["plan"]
+        assert isinstance(plan, dict)
+        assert plan["skipped_newer_schema"] == 1
+        assert "1 snapshot(s) skipped, they hold particles a newer SDK wrote" in (
+            ReindexPlan.model_validate(plan).format_line()
+        )
+        assert result["scope"] == 1
+        extracted = [call.args[2] for call in mock.call_args_list]
+        assert extracted == [control_snap.snapshot_id]
+        after = await get_particle(db_session, newer.id)
+        assert after is not None and after.status == Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_no_particle_load_when_the_store_holds_no_newer_minor(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The normal case does no per-snapshot work: the newer-minor load never runs."""
+        from particles.operations import reindex as reindex_module
+
+        for _ in range(3):
+            entry = await _add_entry(db_session)
+            snap = await _add_snapshot(db_session, entry)
+            await _add_particle(
+                db_session, entry, snap, schema_version=CURRENT, extractor_version="0.1.0"
+            )
+        await db_session.commit()
+
+        load = AsyncMock(wraps=reindex_module.get_active_particles_at_schema_versions)
+        monkeypatch.setattr(
+            "particles.operations.reindex.get_active_particles_at_schema_versions", load
+        )
+        _patch_extract(monkeypatch)
+        result = await reindex(
+            db_session,
+            extractor_version="0.1.0",
+            include_failed=False,
+            run_post_lint=False,
+            rate_limit_per_minute=0,
+        )
+
+        assert result["succeeded"] == 3
+        load.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_newer_minor_check_is_one_load_per_run(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With newer stamps present, the check is one bulk read, not one per snapshot."""
+        from particles.operations import reindex as reindex_module
+
+        for _ in range(3):
+            entry = await _add_entry(db_session)
+            snap = await _add_snapshot(db_session, entry)
+            await _add_particle(
+                db_session, entry, snap, schema_version=CURRENT, extractor_version="0.1.0"
+            )
+        elsewhere = await _add_entry(db_session)
+        elsewhere_snap = await _add_snapshot(db_session, elsewhere)
+        await _add_particle(db_session, elsewhere, elsewhere_snap, schema_version=NEWER)
+        await db_session.commit()
+
+        load = AsyncMock(wraps=reindex_module.get_active_particles_at_schema_versions)
+        monkeypatch.setattr(
+            "particles.operations.reindex.get_active_particles_at_schema_versions", load
+        )
+        _patch_extract(monkeypatch)
+        result = await reindex(
+            db_session,
+            extractor_version="0.1.0",
+            include_failed=False,
+            run_post_lint=False,
+            rate_limit_per_minute=0,
+        )
+
+        assert result["succeeded"] == 3
+        assert result["skipped_newer_schema"] == 0
+        load.assert_awaited_once()
+        assert load.await_args is not None
+        assert list(load.await_args.args[1]) == [NEWER]

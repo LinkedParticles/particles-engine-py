@@ -30,16 +30,23 @@ async def particle_show(particle_id: str) -> dict[str, Any]:
         Dict with ``particle`` (Pydantic JSON), ``subjects`` (list of
         ``{id, canonical_name}``), and ``provenance`` (list of
         ``{type, corpus_entry_id, uri_r, source_type, snapshot_id}``).
-        Raises if the prefix matches zero or multiple particles.
+        When the source now states the claim in other words, ``restated_as``
+        holds that wording and its snapshot; the claim's
+        ``content`` keeps its first wording. Raises if the prefix matches zero
+        or multiple particles.
     """
     from particles.api.client import get_backend
 
     detail = await get_backend().particle_detail(particle_id)
-    return {
+    out: dict[str, Any] = {
         "particle": detail.particle.model_dump(mode="json"),
         "subjects": detail.subjects,
         "provenance": detail.provenance,
     }
+    restated = (detail.particle.properties or {}).get("restated_as")
+    if isinstance(restated, dict):
+        out["restated_as"] = restated
+    return out
 
 
 async def particles_list(
@@ -63,9 +70,12 @@ async def particles_list(
             ``ACTIVE``, ``SUPERSEDED``, ``RETRACTED``,
             ``PROVENANCE_STALE``, ``INCONSISTENCY``. Unset returns
             particles in any status.
-        subject_id: Optional subject UUID. When set, only
-            particles linked to this subject via the
-            ``particle_subjects`` join table are returned.
+        subject_id: Optional subject: a full ID, an ID prefix,
+            or a name or alias, resolved as ``subjects_show`` resolves it.
+            When set, only particles linked to that subject via the
+            ``particle_subjects`` join table are returned, and the result
+            echoes the resolved ``subject_id``. A reference that matches no
+            subject, or more than one, raises.
         limit: Maximum particles to return (default 50). Must be > 0.
         offset: Number of particles to skip before returning results
             (default 0). Combine with ``limit`` to page through the
@@ -105,6 +115,13 @@ async def particles_list(
     from particles.config import get_config
 
     backend = get_backend()
+    if subject_id is not None:
+        # the name or prefix a reader types, resolved once here so
+        # the listing filters on the one ID it names.
+        subject = await backend.subject_show(subject_id, by_name=True)
+        if subject is None:
+            raise ValueError(f"No subject matches {subject_id!r} by ID, ID prefix, or name.")
+        subject_id = subject.id
     particles = await backend.particles_list(
         status=status,
         subject_id=subject_id,
@@ -147,6 +164,8 @@ async def particles_list(
         "offset": offset,
         "particles": entries,
     }
+    if subject_id is not None:
+        result["subject_id"] = subject_id
     disclosure = scope_disclosure(all_projects)
     if disclosure is not None:
         result["observer"] = disclosure

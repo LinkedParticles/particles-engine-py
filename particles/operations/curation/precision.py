@@ -119,6 +119,10 @@ RIGHT_MEANS: dict[CardKind, tuple[str, str]] = {
         "the batch was relinked",
         "the batch was not worth relinking",
     ),
+    CardKind.SUBJECTLESS_SOURCE: (
+        "every belief on it was given a subject, replaced or retracted",
+        "the beliefs can stand without a subject",
+    ),
     CardKind.DUPLICATE_PAIR: (
         "the pair was merged as one claim",
         "the two are different claims, so the finder was wrong",
@@ -130,6 +134,10 @@ RIGHT_MEANS: dict[CardKind, tuple[str, str]] = {
     CardKind.FAILED_SNAPSHOTS: (
         "a reindex run re-extracted the failed snapshots",
         "the failures were not worth a reindex",
+    ),
+    CardKind.REFUSED_SNAPSHOTS: (
+        "the held sources were sent again",
+        "the refusals were left to hold",
     ),
     CardKind.PROPOSED_ABSTRACTION: (
         "the generalization was accepted",
@@ -146,6 +154,10 @@ RIGHT_MEANS: dict[CardKind, tuple[str, str]] = {
     CardKind.DEMOTION: (
         "the replacement was affirmed as right",
         "both claims hold, so the retirement was wrong",
+    ),
+    CardKind.RANK_LIFT: (
+        "the rank-lift was re-checked and changed",
+        "the alert was not worth a re-calibration",
     ),
 }
 
@@ -215,9 +227,17 @@ def _particle_refs(ev: OperatorEvent) -> list[str]:
 
 
 def _membership(cards: Iterable[CurationCard]) -> dict[str, set[str]]:
-    """Belief id to the keys of every retained card naming it."""
+    """Belief id to the keys of every retained card naming it.
+
+    A belief on a ``subjectless_source`` card is indexed under its own
+    ``no_subject`` key: resolving one belief does not act on the source's card.
+    """
     index: dict[str, set[str]] = {}
     for card in cards:
+        if card.kind is CardKind.SUBJECTLESS_SOURCE:
+            for pid in card.particle_ids:
+                index.setdefault(pid, set()).add(f"{CardKind.NO_SUBJECT.value}:{pid}")
+            continue
         ids = list(card.particle_ids)
         if card.inconsistency_id:
             ids.append(card.inconsistency_id)
@@ -236,6 +256,10 @@ def _standing_key(ev: OperatorEvent) -> str | None:
         case OperatorEventType.CURATION_CARD_SNOOZED:
             key = payload.get("card_key")
             if isinstance(key, str) and payload.get("snoozed_until") is None:
+                # A source dismissal rules on its beliefs, not the source: the
+                # card can come back with new ones.
+                if kind_of_key(key) is CardKind.SUBJECTLESS_SOURCE:
+                    return None
                 return key
             return None
         case OperatorEventType.DEPOSIT_SUGGESTION_DISMISSED:
@@ -434,6 +458,20 @@ def summarise_precision(
 
     open_keys = {c.key for c in open_cards}
     expired_keys = {c.key for c in retired_cards} - open_keys
+    # a source card that left the collection because every
+    # belief on it was resolved one by one was acted on.
+    for card in retired_cards:
+        if (
+            card.kind is CardKind.SUBJECTLESS_SOURCE
+            and card.key in expired_keys
+            and card.key not in outcomes
+            and card.particle_ids
+            and all(
+                outcomes.get(f"{CardKind.NO_SUBJECT.value}:{pid}") is Outcome.ACTED
+                for pid in card.particle_ids
+            )
+        ):
+            outcomes[card.key] = Outcome.ACTED
     touched = set(outcomes)
     untouched_open = open_keys - touched - settled_before
     untouched_expired = expired_keys - touched - settled_before

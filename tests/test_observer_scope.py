@@ -266,6 +266,17 @@ class TestWiden:
         assert await widen(db_session, ScopeTarget.PARTICLE, theirs.id, actor="op", revoke=True)
         assert (await filter_visible(db_session, [theirs], A)).visible_ids == frozenset()
 
+    async def test_the_join_marks_a_widened_belief_for_every_reader(self, db_session: Any) -> None:
+        """One answer for the lens and the write gate."""
+        theirs = await belief(
+            db_session, "theirs", await source(db_session, "b", project_source_tags(B))
+        )
+        await widen(db_session, ScopeTarget.PARTICLE, theirs.id, actor="op")
+
+        scope = (await load_scopes(db_session, [theirs]))[theirs.id]
+
+        assert scope.widened and scope.keys == {B} and not scope.is_global
+
     async def test_widening_a_source_widens_every_belief_from_it(self, db_session: Any) -> None:
         entry = await source(db_session, "b", project_source_tags(B))
         one = await belief(db_session, "one", entry)
@@ -279,6 +290,244 @@ class TestWiden:
     async def test_an_unknown_target_is_refused(self, db_session: Any) -> None:
         with pytest.raises(ValueError, match="No particle"):
             await widen(db_session, ScopeTarget.PARTICLE, "nope", actor="op")
+
+
+class TestAgentWrites:
+    """Agent material is never global by omission (decision 2)."""
+
+    async def _tags(self, session: Any, entry_id: str) -> list[str]:
+        from particles.corpus.store import get_entry
+
+        entry = await get_entry(session, entry_id)
+        assert entry is not None
+        return entry.tags
+
+    async def test_an_unbound_agent_deposit_is_marked_and_a_bound_one_keyed(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.operations.agent_write import deposit_conversation_text
+
+        get_config().observer_scope.harness_tags = ["claude-code"]  # as a sample config names it
+        unbound, snap = await deposit_conversation_text(db_session, text="unbound note")
+        bound, _ = await deposit_conversation_text(
+            db_session, text="bound note", tags=[UNATTRIBUTED_MARKER], project_key=A
+        )
+
+        assert UNATTRIBUTED_MARKER in await self._tags(db_session, unbound)
+        assert await self._tags(db_session, bound) == [f"project:{A}"]
+        claim = await belief(db_session, "an agent's claim", (unbound, snap))
+        await rescoped(db_session)
+        scope = (await load_scopes(db_session, [claim]))[claim.id]
+        assert scope.unattributed
+        assert (await filter_visible(db_session, [claim], A)).visible_ids == frozenset()
+        assert (await filter_visible(db_session, [claim], None)).visible_ids == {claim.id}
+
+    async def test_a_facade_deposit_is_marked(self, db_session: Any) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.mcp.memory_compat.ops import _deposit
+
+        entry_id = await _deposit(db_session, "create_entities", {"entities": []})
+
+        assert UNATTRIBUTED_MARKER in await self._tags(db_session, entry_id)
+
+
+class TestMarkAgentWrites:
+    async def _agent_entry(self, session: Any, text: str, who: str = "mcp:claude-code") -> str:
+        from particles.corpus.deposit import deposit_text
+
+        entry_id, _ = await deposit_text(session, text, who, "CONVERSATION", [], author_id=who)
+        return entry_id
+
+    async def test_an_existing_agent_write_changes_only_when_marked(self, db_session: Any) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import agent_identities, mark_agent_writes
+        from particles.store.event_store import OperatorEventType, list_events
+
+        old = await self._agent_entry(db_session, "an old agent note")
+        mine = await self._agent_entry(db_session, "a note of mine", who="cli-user")
+        other = await self._agent_entry(db_session, "a renamed agent's note", who="mcp:old-name")
+
+        preview = await mark_agent_writes(
+            db_session, identities=agent_identities(), dry_run=True, actor="op"
+        )
+        entry = await get_entry(db_session, old)
+        assert entry is not None and entry.tags == []
+        assert preview.marked == [(old, "mcp:claude-code")]
+        assert preview.unmatched == {"cli-user": 1, "mcp:old-name": 1}
+
+        report = await mark_agent_writes(
+            db_session, identities=agent_identities(["mcp:old-name"]), actor="op"
+        )
+        assert sorted(e for e, _ in report.marked) == sorted([old, other])
+        for entry_id in (old, other):
+            entry = await get_entry(db_session, entry_id)
+            assert entry is not None and UNATTRIBUTED_MARKER in entry.tags
+        untouched = await get_entry(db_session, mine)
+        assert untouched is not None and untouched.tags == []
+        events = await list_events(
+            db_session, event_type=OperatorEventType.OBSERVER_SCOPE_MARKED_UNATTRIBUTED
+        )
+        assert len(events) == 2
+
+    async def test_default_key_skips_a_marked_entry_and_assign_keeps_the_marker(
+        self, db_session: Any
+    ) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import agent_identities, mark_agent_writes
+
+        entry_id = await self._agent_entry(db_session, "an agent note")
+        await mark_agent_writes(db_session, identities=agent_identities(), actor="op")
+
+        report = await rescope(db_session, key_for=lambda *_: None, default_key=A)
+        assert report.added == [] and report.marked == [entry_id]
+
+        assert await assign_key(db_session, entry_id, A, actor="op")
+        entry = await get_entry(db_session, entry_id)
+        assert entry is not None
+        assert UNATTRIBUTED_MARKER in entry.tags and f"project:{A}" in entry.tags
+
+    async def test_unmark_reverses_a_recorded_mark_only(self, db_session: Any) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.corpus.store import get_entry
+        from particles.operations.agent_write import deposit_conversation_text
+        from particles.operations.observer_scope import (
+            agent_identities,
+            mark_agent_writes,
+            unmark,
+        )
+        from particles.store.event_store import OperatorEventType, list_events
+
+        marked = await self._agent_entry(db_session, "an old agent note")
+        born, _ = await deposit_conversation_text(db_session, text="a new agent note")
+        await mark_agent_writes(db_session, identities=agent_identities(), actor="op")
+
+        assert await unmark(db_session, marked, actor="op")
+        assert not await unmark(db_session, marked, actor="op")
+        entry = await get_entry(db_session, marked)
+        assert entry is not None and UNATTRIBUTED_MARKER not in entry.tags
+        assert await list_events(db_session, event_type=OperatorEventType.OBSERVER_SCOPE_UNMARKED)
+        with pytest.raises(ValueError, match="no mark to reverse"):
+            await unmark(db_session, born, actor="op")
+
+
+class TestWithdraw:
+    """A wrong key can be repaired, and no repair makes an entry global."""
+
+    async def test_a_second_key_is_withdrawn_and_recorded_and_the_claim_untouched(
+        self, db_session: Any
+    ) -> None:
+        from particles.operations.observer_scope import withdraw_key
+        from particles.store.event_store import OperatorEventType, list_events
+
+        entry = await source(db_session, "t", [*project_source_tags(A), f"project:{B}"])
+        claim = await belief(db_session, "a claim", entry)
+        before = await get_particle(db_session, claim.id)
+
+        assert await withdraw_key(db_session, entry[0], B, actor="op")
+        assert not await withdraw_key(db_session, entry[0], B, actor="op")
+
+        assert (await load_scopes(db_session, [claim]))[claim.id].keys == {A}
+        (event,) = await list_events(
+            db_session, event_type=OperatorEventType.OBSERVER_SCOPE_KEY_WITHDRAWN
+        )
+        assert event.payload == {"withdrawn": B}
+        after = await get_particle(db_session, claim.id)
+        assert before is not None and after is not None
+        assert (after.content, after.confidence, after.status, after.provenance) == (
+            before.content,
+            before.confidence,
+            before.status,
+            before.provenance,
+        )
+
+    @pytest.mark.parametrize("kind", ["harness", "rule-source"])
+    async def test_the_last_key_stays_unless_left_unattributed_and_never_goes_global(
+        self, db_session: Any, kind: str
+    ) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import withdraw_key
+
+        tags = project_source_tags(A) if kind == "harness" else ["rule-source", f"project:{A}"]
+        entry = await source(db_session, kind, tags)
+        claim = await belief(db_session, "a rule", entry)
+
+        with pytest.raises(ValueError, match="last project key"):
+            await withdraw_key(db_session, entry[0], A, actor="op")
+        assert await withdraw_key(db_session, entry[0], A, actor="op", leave_unattributed=True)
+
+        stored = await get_entry(db_session, entry[0])
+        assert stored is not None
+        assert ("claude-code" in stored.tags) is (kind == "harness")
+        assert (UNATTRIBUTED_MARKER in stored.tags) is (kind == "rule-source")
+        scope = (await load_scopes(db_session, [claim]))[claim.id]
+        assert scope.unattributed and not scope.everywhere
+
+    async def test_an_assigned_marked_entry_falls_back_to_unattributed(
+        self, db_session: Any
+    ) -> None:
+        from particles.operations.agent_write import deposit_conversation_text
+        from particles.operations.observer_scope import withdraw_key
+
+        entry = await deposit_conversation_text(db_session, text="an agent note")
+        claim = await belief(db_session, "an agent's claim", entry)
+        await assign_key(db_session, entry[0], A, actor="op")
+        assert (await load_scopes(db_session, [claim]))[claim.id].keys == {A}
+
+        await withdraw_key(db_session, entry[0], A, actor="op", leave_unattributed=True)
+
+        assert (await load_scopes(db_session, [claim]))[claim.id].unattributed
+
+
+class TestAsOfAttribution:
+    async def test_an_as_of_read_through_an_observer_names_todays_attribution(
+        self, db_session: Any
+    ) -> None:
+        mine = await belief(
+            db_session, "mine", await source(db_session, "a", project_source_tags(A))
+        )
+        await rescoped(db_session)
+        then = datetime.now(UTC) + timedelta(seconds=1)
+
+        now_note = (await filter_visible(db_session, [mine], A)).note(A)
+        as_of_note = (await filter_visible(db_session, [mine], A, as_of=then)).note(A)
+
+        assert now_note.attribution is None
+        assert as_of_note.attribution is not None
+        assert "today's attribution" in as_of_note.attribution
+
+
+class TestUnmarkKeepsTheRecordOfOrigin:
+    async def test_unmark_refuses_an_entry_that_has_since_been_keyed(self, db_session: Any) -> None:
+        """A key outranks the marker, which stays as the record of origin."""
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from particles.corpus.deposit import deposit_text
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import (
+            agent_identities,
+            mark_agent_writes,
+            unmark,
+        )
+
+        entry_id, _ = await deposit_text(
+            db_session,
+            "an agent note",
+            "mcp:claude-code",
+            "CONVERSATION",
+            [],
+            author_id="mcp:claude-code",
+        )
+        await mark_agent_writes(db_session, identities=agent_identities(), actor="op")
+        await assign_key(db_session, entry_id, A, actor="op")
+
+        with pytest.raises(ValueError, match="has a project key now"):
+            await unmark(db_session, entry_id, actor="op")
+        entry = await get_entry(db_session, entry_id)
+        assert entry is not None and UNATTRIBUTED_MARKER in entry.tags
 
 
 class TestRescope:
@@ -329,6 +578,36 @@ class TestRescope:
         report = await rescope(db_session, key_for=self._by_uri({}), default_key=A)
         assert report.unattributed == [] and report.added == [(unknown, A)]
         assert report.entries_per_key == {A: 1}
+
+    async def test_the_rescope_event_names_every_key_it_added(self, db_session: Any) -> None:
+        from particles.store.event_store import OperatorEventType, list_events
+
+        entry_id, _ = await source(db_session, "t", ["claude-code"])
+
+        await rescope(db_session, key_for=self._by_uri({"test://t": A}))
+
+        (event,) = await list_events(
+            db_session, event_type=OperatorEventType.OBSERVER_SCOPE_RESCOPED
+        )
+        assert event.payload["added"] == [[entry_id, A]]
+        assert event.payload["keys_added"] == 1
+
+    async def test_a_re_deposit_that_adds_a_key_records_it(self, db_session: Any) -> None:
+        from particles.corpus.store import get_entry
+        from particles.store.event_store import EventRefKind, OperatorEventType, list_events
+
+        entry_id, _ = await source(db_session, "t", ["claude-code"])
+        again, _ = await source(db_session, "t", project_source_tags(A))
+
+        entry = await get_entry(db_session, entry_id)
+        assert again == entry_id and entry is not None and f"project:{A}" in entry.tags
+        (event,) = await list_events(
+            db_session,
+            ref_kind=EventRefKind.CORPUS_ENTRY,
+            ref_id=entry_id,
+            event_type=OperatorEventType.OBSERVER_SCOPE_KEY_ASSIGNED,
+        )
+        assert event.actor == "deposit" and event.payload == {"assigned": A}
 
     async def test_assign_refuses_a_global_entry(self, db_session: Any) -> None:
         page, _ = await source(db_session, "page", ["web"])

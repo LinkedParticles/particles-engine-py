@@ -132,6 +132,7 @@ SANCTIONED_CYCLE_SEAMS = [
     ("particles.api.cli.memory", "particles.mcp.memory_compat.server"),
     ("particles.corpus.fetch", "particles.store.particle_store"),
     ("particles.corpus.deposit", "particles.store.url_mention_store"),
+    ("particles.corpus.deposit", "particles.store.event_store"),
     ("particles.ingest.pipeline", "particles.operations.version_guard"),
     ("particles.corpus.deposit", "particles.ingest.importers.registry"),
 ]

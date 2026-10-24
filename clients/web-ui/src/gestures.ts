@@ -96,6 +96,8 @@ export function primaryGesture(kind: string, offered: string[]): string | null {
     broken_provenance: ["supersede", "retract"],
     no_subject: ["assign-subject", "supersede", "retract"],
     gated_subjects: ["relink"],
+    // one card per source; each belief keeps its own gestures.
+    subjectless_source: ["dismiss"],
     duplicate_pair: ["merge"],
     uncited_url: ["deposit", "dismiss"],
     failed_snapshots: ["reindex"],

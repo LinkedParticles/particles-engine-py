@@ -43,10 +43,25 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.corpus.store import CorpusEntryRow, SnapshotRow
 from particles.ingest.generation import (
+    LATE_GENERATION,
+    CurrentGeneration,
     backfill_superseded_generations,
     cascade_superseded_generation,
+    current_generation,
+    late_generation_note,
 )
 from particles.store.particle_store import append_provenance_ref, get_particle, insert_particle
+from tests._late_generation import (
+    ADDED,
+    DROPPED,
+    KEPT,
+    Scripted,
+    active_copies,
+    deposit_version,
+    extract,
+    note_uri,
+    quiet_probes,  # noqa: F401 (fixture)
+)
 
 
 async def _entry(session: Any, *, mutability: Mutability = Mutability.MUTABLE) -> CorpusEntry:
@@ -477,3 +492,153 @@ class TestBackfill:
         after = await get_particle(db_session, p.id)
         assert after is not None
         assert after.status == Status.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# Out-of-order extraction
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentGeneration:
+    """The newer of the snapshot just extracted and the entry's current generation."""
+
+    @pytest.mark.asyncio
+    async def test_a_newer_extracted_generation_makes_the_pass_late(self, db_session: Any) -> None:
+        entry = await _entry(db_session)
+        older = await _snapshot(db_session, entry, age_days=4, status=ExtractionStatus.PENDING)
+        newer = await _snapshot(db_session, entry)
+
+        current = await current_generation(db_session, entry.entry_id, older.snapshot_id)
+
+        assert current == CurrentGeneration(newer.snapshot_id, late=True)
+
+    @pytest.mark.asyncio
+    async def test_the_newest_snapshot_is_its_own_current_generation(self, db_session: Any) -> None:
+        entry = await _entry(db_session)
+        await _snapshot(db_session, entry, age_days=4)
+        newest = await _snapshot(db_session, entry, status=ExtractionStatus.PENDING)
+
+        current = await current_generation(db_session, entry.entry_id, newest.snapshot_id)
+
+        assert current == CurrentGeneration(newest.snapshot_id)
+
+    @pytest.mark.asyncio
+    async def test_on_equal_capture_times_the_snapshot_just_extracted_wins(
+        self, db_session: Any
+    ) -> None:
+        entry = await _entry(db_session)
+        held = await _snapshot(db_session, entry)
+        extracted = await _snapshot(db_session, entry, status=ExtractionStatus.PENDING)
+        row = await db_session.get(SnapshotRow, extracted.snapshot_id)
+        row.captured_at = held.captured_at
+        await db_session.flush()
+
+        current = await current_generation(db_session, entry.entry_id, extracted.snapshot_id)
+
+        assert current == CurrentGeneration(extracted.snapshot_id)
+
+    @pytest.mark.asyncio
+    async def test_a_late_cascade_retires_only_the_late_generation(self, db_session: Any) -> None:
+        """Called with the older snapshot, the cascade measures against the newer one."""
+        entry = await _entry(db_session)
+        older = await _snapshot(db_session, entry, age_days=4, status=ExtractionStatus.PENDING)
+        newer = await _snapshot(db_session, entry)
+        late = await _particle(db_session, entry, older, "what the file used to say")
+        live = await _particle(db_session, entry, newer, "what the file says now")
+        await db_session.commit()
+
+        late_out: list[str] = []
+        demoted = await cascade_superseded_generation(
+            db_session,
+            entry_id=entry.entry_id,
+            current_snapshot_id=older.snapshot_id,
+            late_out=late_out,
+        )
+
+        assert demoted == [late.id] and late_out == [late.id]
+        after = await get_particle(db_session, live.id)
+        assert after is not None and after.status == Status.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_an_in_order_cascade_reports_no_late_pass(self, db_session: Any) -> None:
+        entry = await _entry(db_session)
+        old = await _snapshot(db_session, entry, age_days=4)
+        new = await _snapshot(db_session, entry, status=ExtractionStatus.PENDING)
+        stale = await _particle(db_session, entry, old, "what the file used to say")
+        await db_session.commit()
+
+        late_out: list[str] = []
+        demoted = await cascade_superseded_generation(
+            db_session,
+            entry_id=entry.entry_id,
+            current_snapshot_id=new.snapshot_id,
+            late_out=late_out,
+        )
+
+        assert demoted == [stale.id] and late_out == []
+
+
+@pytest.mark.usefixtures("quiet_probes")
+class TestOutOfOrderExtraction:
+    """Extracting an older generation after a newer one, through the pipeline.
+
+    A vault note (``MUTABLE`` since) said "kept" and "dropped" on day 1
+    and "kept" and "added" on day 2. The day-2 snapshot is extracted first and
+    the day-1 snapshot after it. The day-2 text is still the note's current
+    generation, so "added" must stay ACTIVE and "dropped" must not come back.
+    Before the cascade took the snapshot just extracted as current
+    (``!=``, not capture order) and retired "added".
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_newer_generation_survives_a_late_older_extraction(
+        self, db_session: Any
+    ) -> None:
+        ex = Scripted()
+        uri = note_uri()
+        entry_id, older = await deposit_version(db_session, ex, uri, [KEPT, DROPPED], day=1)
+        _, newer = await deposit_version(db_session, ex, uri, [KEPT, ADDED], day=2)
+
+        await extract(db_session, ex, entry_id, newer)
+        assert await active_copies(db_session, ADDED) == 1
+
+        await extract(db_session, ex, entry_id, older)
+
+        # One ACTIVE copy each: the late pass's restatement of "kept" folds into
+        # the current copy rather than standing beside it.
+        assert await active_copies(db_session, ADDED) == 1
+        assert await active_copies(db_session, KEPT) == 1
+        assert await active_copies(db_session, DROPPED) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_late_pass_is_disclosed(self, db_session: Any) -> None:
+        ex = Scripted()
+        uri = note_uri()
+        entry_id, older = await deposit_version(db_session, ex, uri, [KEPT, DROPPED], day=1)
+        _, newer = await deposit_version(db_session, ex, uri, [KEPT, ADDED], day=2)
+        await extract(db_session, ex, entry_id, newer)
+        assert not [n for n in ex.notes() if n.startswith(LATE_GENERATION)]
+
+        await extract(db_session, ex, entry_id, older)
+
+        assert [n for n in ex.notes() if n.startswith(LATE_GENERATION)] == [late_generation_note(1)]
+
+    @pytest.mark.asyncio
+    async def test_a_late_pass_behind_a_processed_absence_brings_nothing_back(
+        self, db_session: Any
+    ) -> None:
+        """A forced re-extraction of a deleted note's last version retires all of it."""
+        from particles.corpus.deposit import record_absence
+
+        ex = Scripted()
+        entry_id, last = await deposit_version(db_session, ex, note_uri(), [KEPT, DROPPED], day=1)
+        await extract(db_session, ex, entry_id, last)
+        absence = await record_absence(db_session, entry_id=entry_id, refers_to=last)
+        await db_session.commit()
+        await extract(db_session, ex, entry_id, absence)
+        assert await active_copies(db_session, KEPT) == 0
+
+        await extract(db_session, ex, entry_id, last)
+
+        assert await active_copies(db_session, KEPT) == 0
+        assert await active_copies(db_session, DROPPED) == 0

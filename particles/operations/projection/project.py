@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,6 +113,7 @@ async def _select_section_particles(
     *,
     use_embeddings: bool,
     observer_project: str | None = None,
+    exclude_source_tags: Collection[str] = (),
 ) -> list[Selected]:
     """Select a derived section's candidate particles under the current-truth filter.
 
@@ -178,6 +180,8 @@ async def _select_section_particles(
             code_symbol_rank_weight=section.code_symbol_rank_weight,
             apply_utility=True,
             apply_owner=True,
+            # only the agent-memory region passes source tags to drop.
+            exclude_source_tags=exclude_source_tags,
         )
         for particle, _sim, eff in scored:
             if particle.id not in merged:
@@ -758,12 +762,15 @@ async def project_splice_body(
     base_dir: Path,
     synthesize: bool,
     observer_project: str | None = None,
+    exclude_source_tags: Collection[str] = (),
 ) -> ProjectionResult:
     """Render a manifest's *body* for splicing into a sentinel region.
 
     ``observer_project`` selects every derived section through that
     project observer — the ``MEMORY.md`` region of one project is that
-    project's view of the store.
+    project's view of the store. ``exclude_source_tags`` drops
+    every candidate held only by sources with one of those tags; the
+    agent-memory region passes ``rule-file``, every other caller nothing.
 
     Like :func:`project_document` but tailored for the block-splice write mode:
     it omits the document banner (the host file is hand-authored) and, for a
@@ -794,6 +801,7 @@ async def project_splice_body(
             header=header,
             backrefs=backrefs,
             observer_project=observer_project,
+            exclude_source_tags=exclude_source_tags,
         )
         any_synth = any_synth or used
         parts.append(part)
@@ -814,6 +822,7 @@ async def _derived_section_part(
     header: str,
     backrefs: dict[str, str] | None,
     observer_project: str | None = None,
+    exclude_source_tags: Collection[str] = (),
 ) -> tuple[str | _BulletSectionPart, bool, dict[str, str] | None]:
     """Render one derived section for a splice body.
 
@@ -829,6 +838,7 @@ async def _derived_section_part(
         section,
         use_embeddings=synthesize and not bullets,
         observer_project=observer_project,
+        exclude_source_tags=exclude_source_tags,
     )
     if bullets:
         if backrefs is None:

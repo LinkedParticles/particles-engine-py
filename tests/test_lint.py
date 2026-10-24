@@ -1708,7 +1708,8 @@ async def test_probe_and_second_reading_prompts(
     user = second["messages"][0]["content"]
     assert "note: deploy-notes.md (dated 2026-03-01)" in user
     assert "note: ops-notes.md (dated 2026-05-09)" in user
-    assert "passage: - The nightly job runs at 04:00 UTC after the backup." in user
+    # The note fits the window whole, so the passage is the note, not one line.
+    assert "passage: # Ops\n\n- The nightly job runs at 04:00 UTC after the backup." in user
     # Everything but the instruction sits inside a nonce fence named in the system turn.
     nonce = user.split('<claim_a nonce="', 1)[1].split('"', 1)[0]
     assert f'</claim_b nonce="{nonce}">' in user
@@ -2056,12 +2057,12 @@ async def test_the_duplicate_key_rung_answers_before_the_probe(db_session: objec
     assert probe.await_count == 1
     ladder = control.ladder
     assert ladder.pairs_evaluated == 3
-    assert ladder.decided == {"duplicate_key@1": 1}
+    assert ladder.decided == {"duplicate_key@2": 1}
     assert ladder.repeated_pairs == 1
     assert (ladder.probed_distinct, ladder.probed_identical) == (1, 0)
     assert [f.decided_by for f in findings] == [f"contradiction_probe@{probe_prompt_hash()}"]
     counts = tally.payload()["contradiction"]
-    assert counts["settled"]["duplicate_key@1"] == {"no": 1}
+    assert counts["settled"]["duplicate_key@2"] == {"no": 1}
     assert counts["settled"][f"contradiction_probe@{probe_prompt_hash()}"] == {"yes": 1}
     # The probe's row is stamped with its rung; the admitted deterministic rung
     # writes no row of its own (its load is the tally above).
@@ -2164,9 +2165,6 @@ async def test_the_cap_probes_in_scope_pairs_first_and_reserves_a_share(
     async def engaged(session: object) -> bool:
         return True
 
-    async def no_widening(session: object) -> bool:
-        return False
-
     async def scopes(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
         out = {}
         for p in particles:
@@ -2175,7 +2173,6 @@ async def test_the_cap_probes_in_scope_pairs_first_and_reserves_a_share(
         return out
 
     monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
-    monkeypatch.setattr(c_mod, "any_widening", no_widening)
     monkeypatch.setattr(c_mod, "load_scopes", scopes)
     ladder = c_mod.CensusLadder()
     planned, flags = await c_mod._observer_ordered(None, pairs, 5, 0.2, ladder)  # type: ignore[arg-type]
@@ -2189,6 +2186,30 @@ async def test_the_cap_probes_in_scope_pairs_first_and_reserves_a_share(
     planned, flags = await c_mod._observer_ordered(None, pairs, 8, 0.2, ladder)  # type: ignore[arg-type]
     assert planned == pairs[6:10] + pairs[0:4]
     assert flags.count(True) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_widened_belief_is_not_a_cross_scope_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordering reads the widening from the join, as the gate does."""
+    from particles.core.observer_scope import BeliefScope
+    from particles.operations.lint import contradictions as c_mod
+
+    pairs = [_pair("x0", "y0")]
+
+    async def engaged(session: object) -> bool:
+        return True
+
+    async def scopes(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
+        # Two projects' claims, one widened by the operator.
+        return {
+            p.id: BeliefScope(keys=frozenset({p.content}), widened=p.content == "x0")
+            for p in particles
+        }
+
+    monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
+    monkeypatch.setattr(c_mod, "load_scopes", scopes)
+    planned, flags = await c_mod._observer_ordered(None, pairs, 1, 0.0, c_mod.CensusLadder())  # type: ignore[arg-type]
+    assert planned == pairs and flags == [False]
 
 
 @pytest.mark.asyncio
@@ -2220,15 +2241,11 @@ async def test_the_observer_scan_is_bounded_when_one_share_cannot_fill(
     async def engaged(session: object) -> bool:
         return True
 
-    async def no_widening(session: object) -> bool:
-        return False
-
     async def scopes(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
         calls.append(len(particles))
         return {p.id: BeliefScope(keys=frozenset({"shared"})) for p in particles}
 
     monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
-    monkeypatch.setattr(c_mod, "any_widening", no_widening)
     monkeypatch.setattr(c_mod, "load_scopes", scopes)
     monkeypatch.setattr(c_mod, "_ORDER_CHUNK", 100)
     ladder = c_mod.CensusLadder()
@@ -2255,9 +2272,6 @@ async def test_a_particle_the_scope_join_omits_reads_as_unattributed(
     async def engaged(session: object) -> bool:
         return True
 
-    async def no_widening(session: object) -> bool:
-        return False
-
     async def nothing_loaded(session: object, particles: list[Particle]) -> dict[str, BeliefScope]:
         return {}
 
@@ -2266,7 +2280,6 @@ async def test_a_particle_the_scope_join_omits_reads_as_unattributed(
         return pair_precondition(candidate, existing)
 
     monkeypatch.setattr(c_mod, "lens_may_engage", engaged)
-    monkeypatch.setattr(c_mod, "any_widening", no_widening)
     monkeypatch.setattr(c_mod, "load_scopes", nothing_loaded)
     monkeypatch.setattr(c_mod, "pair_precondition", recording)
     await c_mod._observer_ordered(None, pairs, 1, 0.2, c_mod.CensusLadder())  # type: ignore[arg-type]
@@ -2326,7 +2339,7 @@ async def test_a_rung_yes_survives_a_stale_ledger_no_and_a_repeated_pair(
     assert len(findings) == 2
     assert {f.decided_by for f in findings} == {"stub@1"}
     assert all("decided by stub@1" in f.detail for f in findings)
-    assert control.ladder.decided == {"duplicate_key@1": 1, "stub@1": 2}
+    assert control.ladder.decided == {"duplicate_key@2": 1, "stub@1": 2}
     assert (control.previously_cleared, control.ladder.repeated_pairs) == (0, 0)
 
 

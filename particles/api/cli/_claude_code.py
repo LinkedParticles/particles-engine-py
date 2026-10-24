@@ -18,7 +18,6 @@ The leading underscore marks the module as internal to the ``cli`` package
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import functools
 import json
@@ -227,6 +226,20 @@ def resolve_session_project(payload: Mapping[str, Any]) -> SessionProject:
     )
 
 
+def server_project_key(cwd: Path) -> str | None:
+    """The project a ``mcp serve --project-observer cwd`` started in ``cwd`` binds.
+
+    The key the hooks stamp for a session launched there: its repository's,
+    or outside a repository the directory's own, so a home-directory session
+    is its own observer. ``None`` at the filesystem root, which is no
+    session's project; that server runs unbound.
+    """
+    root = repository_root(cwd)
+    if root == Path(root.anchor):
+        return None
+    return claude_project_slug(root)
+
+
 def observer_project_for(project_key: str) -> str | None:
     """The observer a session in ``project_key`` reads through, or ``None`` for the whole store.
 
@@ -351,17 +364,49 @@ def _canonical_key_cached(slug: str, projects_root: str) -> str:
     return canonical_project_key(slug, Path(projects_root))
 
 
+def artifact_relative_path(namespace_key: str, path: str) -> str | None:
+    """An absolute path's form from its repository root, by this adapter's key rule.
+
+    The repository root is the shortest leading run of the path's directories
+    whose :func:`claude_project_slug` is ``namespace_key``. A remainder under
+    ``.claude/worktrees/<name>/`` is in one of that repository's worktrees, so
+    those three segments go too. A path under no such directory, a home-relative
+    ``~/`` path included, gets ``None`` and is kept as spelled.
+
+    Matching on the slug, never on a folded worktree slug, is deliberate: the
+    fold strips everything after the worktree infix, so it also matches every
+    directory below a worktree root and would turn
+    ``…/worktrees/x/particles/secrets.py`` into ``secrets.py``.
+    """
+    if not path.startswith("/"):
+        return None
+    parts = path.split("/")
+    for i in range(2, len(parts)):
+        if claude_project_slug("/".join(parts[:i])) != namespace_key:
+            continue
+        rest = parts[i:]
+        if len(rest) > 3 and rest[0] == ".claude" and rest[1] == "worktrees":
+            rest = rest[3:]
+        return "/".join(rest) or None
+    return None
+
+
 def register_artifact_namespace_hook() -> None:
     """Make this adapter's project fold the Engine's artifact namespace.
 
-    Called from the CLI's root callback, which every Surface process passes
-    through (`engine serve`, `mcp serve` and the hooks are CLI verbs). A raw
-    ``uvicorn particles.api.app:app`` launch skips it and gets the Engine's
-    fail-closed default. Idempotent.
+    Also registers its root rule, which maps an absolute path to its form from
+    the repository root. Called from the CLI's root callback,
+    which every Surface process passes through (`engine serve`, `mcp serve` and
+    the hooks are CLI verbs). A raw ``uvicorn particles.api.app:app`` launch
+    skips it and gets the Engine's fail-closed defaults. Idempotent.
     """
-    from particles.ingest.artifact_namespace import register_artifact_namespace
+    from particles.ingest.artifact_namespace import (
+        register_artifact_namespace,
+        register_artifact_relative_path,
+    )
 
     register_artifact_namespace(artifact_namespace_key)
+    register_artifact_relative_path(artifact_relative_path)
 
 
 def is_live_project_key(key: str, projects_root: Path) -> bool:
@@ -500,15 +545,8 @@ def build_hook_commands(
     command_base: str,
     store: str,
     env: Mapping[str, str] | None = None,
-    *,
-    include_stop: bool = False,
 ) -> dict[str, str]:
     """The hook command strings for a given base + store handle.
-
-    ``include_stop`` adds the Stop entry, the agent-side extraction
-    ask. It is installed only while agent extraction is on: a Stop hook runs at
-    the end of every assistant turn and the user waits for it, so an install
-    that does not use it must not pay for it.
 
     Claude Code runs the hook from the *session's* working directory, which is
     almost never the store's directory (it is routinely a git worktree). Any
@@ -522,8 +560,6 @@ def build_hook_commands(
         "SessionStart": f"{prefix}{command_base} hook session-start --store {store}",
         "SessionEnd": f"{prefix}{command_base} hook session-end --store {store}",
     }
-    if include_stop:
-        commands["Stop"] = f"{prefix}{command_base} hook stop --store {store}"
     return commands
 
 
@@ -753,8 +789,6 @@ def _turn_parts(entry_type: str, content: Any) -> list[str]:
 def distill_transcript(
     jsonl_text: str,
     session_id: str | None = None,
-    *,
-    exclude_uuids: frozenset[str] = frozenset(),
 ) -> str:
     """Distill a Claude Code transcript JSONL into speaker-turn Markdown.
 
@@ -770,11 +804,6 @@ def distill_transcript(
     auto-continue prompt, a message from another session, an expanded slash
     command), so it is not the person speaking and must not be distilled as
     a ``## User`` turn whose claims would be attributed to them.
-
-    ``exclude_uuids`` names transcript records left out entirely: an
-    agent-extraction ask and the agent's answer to it (see
-    :func:`ask_exclusions`). They always follow the snapshot the ask was made
-    on, so leaving them out keeps every snapshot a prefix of the next.
     """
     out: list[str] = []
     if session_id:
@@ -788,8 +817,6 @@ def distill_transcript(
         except (json.JSONDecodeError, ValueError):
             continue
         if not isinstance(entry, dict):
-            continue
-        if exclude_uuids and entry.get("uuid") in exclude_uuids:
             continue
         entry_type = entry.get("type")
         if entry_type not in ("user", "assistant"):
@@ -806,93 +833,6 @@ def distill_transcript(
         out.append(f"## {speaker}")
         out.append("\n\n".join(parts))
     return ("\n\n".join(out) + "\n") if out else ""
-
-
-def _record_text(entry: dict[str, Any]) -> str:
-    content = (entry.get("message") or {}).get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            str(b.get("text", ""))
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        )
-    return ""
-
-
-def _is_typed_prompt(entry: dict[str, Any], ask_marker: str) -> bool:
-    """A user record a person typed: text, not a tool result, and not an ask."""
-    if entry.get("type") != "user" or entry.get("isMeta"):
-        return False
-    text = _record_text(entry)
-    return bool(text.strip()) and ask_marker not in text
-
-
-def ask_exclusions(
-    jsonl_text: str, asks: Sequence[tuple[str, str | None]], *, ask_marker: str
-) -> frozenset[str]:
-    """The transcript records an agent-extraction ask and its answer span.
-
-    Each ask is ``(after_uuid, through_uuid)``: the last record the snapshot
-    the ask was made on held, and the last record of the agent's answering
-    turn, which the continuation Stop recorded. Everything strictly after
-    ``after_uuid`` up to and including ``through_uuid`` is excluded. When no
-    continuation was recorded (``through_uuid`` is ``None``), the span ends
-    before the next prompt a person typed, which is where the answering turn
-    must have ended. A record carrying ``ask_marker`` is the ask itself and
-    never ends a span.
-    """
-    if not asks:
-        return frozenset()
-    open_after = {after: through for after, through in asks}
-    excluded: set[str] = set()
-    active: str | None | bool = False  # False: not in a span; else its through uuid
-    for raw_line in jsonl_text.splitlines():
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        try:
-            entry = json.loads(raw_line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(entry, dict):
-            continue
-        uuid = entry.get("uuid")
-        if active is not False:
-            if active is None and _is_typed_prompt(entry, ask_marker):
-                active = False
-            elif isinstance(uuid, str):
-                excluded.add(uuid)
-                if uuid == active:
-                    active = False
-                    continue
-        if isinstance(uuid, str) and uuid in open_after:
-            active = open_after[uuid]
-    return frozenset(excluded)
-
-
-def transcript_last_record(jsonl_text: str) -> tuple[str | None, str | None]:
-    """The ``uuid`` of the transcript's last record and the model of its last assistant turn."""
-    last_uuid: str | None = None
-    model: str | None = None
-    for raw_line in jsonl_text.splitlines():
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        try:
-            entry = json.loads(raw_line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(entry, dict):
-            continue
-        if isinstance(entry.get("uuid"), str):
-            last_uuid = entry["uuid"]
-        if entry.get("type") == "assistant":
-            found = (entry.get("message") or {}).get("model")
-            if isinstance(found, str) and found:
-                model = found
-    return last_uuid, model
 
 
 def _is_particles_server(server: Any) -> bool:
@@ -912,7 +852,7 @@ def _servers_in(config: Any) -> list[Any]:
 def particles_executable(argv: str | Sequence[str]) -> str | None:
     """The ``particles`` executable a hook command or MCP server entry runs, if it names one.
 
-    ``argv`` is a hook command string (``env K=V … /path/particles hook stop``)
+    ``argv`` is a hook command string (``env K=V … /path/particles hook session-end``)
     or a server's argv. ``None`` when no word is a ``particles`` executable,
     e.g. a server launched through ``uv run --project … particles``, whose
     install depends on that project's environment.
@@ -928,6 +868,91 @@ def particles_executable(argv: str | Sequence[str]) -> str | None:
         if Path(word).name == "particles" and os.sep in word:
             return word
     return None
+
+
+#: The launch flag that binds a Particles MCP server to its session's project.
+PROJECT_OBSERVER_ARGS = ("--project-observer", "cwd")
+
+
+@dataclass(frozen=True)
+class McpRegistration:
+    """One user-scope Particles MCP server entry, as ``claude mcp add`` takes it."""
+
+    name: str
+    command: str
+    args: tuple[str, ...]
+    env: dict[str, str]
+
+    @property
+    def bound(self) -> bool:
+        """Whether it starts with ``--project-observer cwd``."""
+        words = list(self.args)
+        return any(words[i : i + 2] == list(PROJECT_OBSERVER_ARGS) for i in range(len(words) - 1))
+
+    def add_argv(self) -> list[str]:
+        """``claude mcp add`` arguments that (re)create this entry at user scope."""
+        argv = ["mcp", "add", "--scope", "user"]
+        for key, value in sorted(self.env.items()):
+            argv += ["-e", f"{key}={value}"]
+        return [*argv, self.name, "--", self.command, *self.args]
+
+
+def particles_mcp_registrations(home: Path | None = None) -> list[McpRegistration]:
+    """Every user-scope MCP server in ``~/.claude.json`` that runs ``particles mcp serve``."""
+    home = home or Path.home()
+    try:
+        user = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    servers = user.get("mcpServers") if isinstance(user, dict) else None
+    found: list[McpRegistration] = []
+    for name, server in (servers or {}).items() if isinstance(servers, dict) else ():
+        if not _is_particles_server(server):
+            continue
+        env = server.get("env") if isinstance(server.get("env"), dict) else {}
+        found.append(
+            McpRegistration(
+                name=str(name),
+                command=str(server.get("command", "")),
+                args=tuple(str(a) for a in server.get("args") or []),
+                env={str(k): str(v) for k, v in env.items()},
+            )
+        )
+    return found
+
+
+def plan_mcp_registration(
+    existing: Sequence[McpRegistration], *, executable: str, env: Mapping[str, str]
+) -> tuple[McpRegistration, McpRegistration | None] | None:
+    """What ``init claude-code`` registers, as ``(wanted, replaced)``; ``None`` if unchanged.
+
+    With no Particles server, a new ``particles`` entry runs this install's
+    executable with the hooks' env pins. An existing one keeps its name,
+    executable and env, and only gains ``--project-observer cwd``;
+    one already bound is left alone.
+    """
+    if not existing:
+        return (
+            McpRegistration(
+                name="particles",
+                command=executable,
+                args=("mcp", "serve", *PROJECT_OBSERVER_ARGS),
+                env=dict(env),
+            ),
+            None,
+        )
+    current = existing[0]
+    if current.bound:
+        return None
+    return (
+        McpRegistration(
+            name=current.name,
+            command=current.command,
+            args=(*current.args, *PROJECT_OBSERVER_ARGS),
+            env=dict(current.env),
+        ),
+        current,
+    )
 
 
 def particles_mcp_executables(home: Path | None = None) -> list[str]:
@@ -1028,34 +1053,6 @@ def install_report(
             f"{pad}pinned at {pin.tag}, the newest tag fetched (`git fetch --tags` to check)"
         )
     return lines
-
-
-def particles_mcp_registered(cwd: Path, home: Path | None = None) -> bool:
-    """Whether a Claude Code session started in ``cwd`` has the Particles MCP server.
-
-    Reads the places Claude Code takes MCP servers from: user scope and the
-    per-project entries in ``~/.claude.json``, and a ``.mcp.json`` in the
-    session directory or its repository root. A server from a plugin is not
-    seen, so the answer can be a false negative, never a false positive. The
-    Stop hook asks only when this is true: an ask in a session
-    without ``extraction_submit`` is a turn spent for nothing.
-    """
-    home = home or Path.home()
-    root = find_repository_root(cwd)
-    dirs = [d for d in dict.fromkeys([cwd, root]) if d is not None]
-    configs: list[Any] = []
-    try:
-        user = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        user = {}
-    configs.append(user)
-    projects = user.get("projects") if isinstance(user, dict) else None
-    for d in dirs:
-        if isinstance(projects, dict):
-            configs.append(projects.get(str(d)))
-        with contextlib.suppress(OSError, ValueError):
-            configs.append(json.loads((d / ".mcp.json").read_text(encoding="utf-8")))
-    return any(_is_particles_server(s) for c in configs for s in _servers_in(c))
 
 
 def session_started_at(uri_r: str | None, projects_root: Path) -> datetime | None:
@@ -1230,12 +1227,23 @@ class HookBinding:
     ``location`` is the comparable identity of the pinned database (see
     :func:`store_location`), or ``None`` when the command pins nothing that
     resolves independently of the working directory: a pre-v1.70.2 install, or
-    a pinned config whose DSN is itself relative.
+    a pinned config whose DSN is itself relative. ``engine_url`` is the
+    engine a thin-client hook names: ``PARTICLES_ENGINE_BASE_URL``
+    when the command pins it, otherwise the pinned config's ``engine.base_url``,
+    normalised by :func:`engine_location`.
     """
 
     settings_path: Path
     handle: str
     location: str | None
+    engine_url: str | None = None
+
+
+def engine_location(base_url: str | None) -> str | None:
+    """A comparable identity for an engine URL: stripped, no trailing slash."""
+    if not base_url or not base_url.strip():
+        return None
+    return base_url.strip().rstrip("/")
 
 
 def store_location(dsn: str, base_dir: Path | None = None) -> str | None:
@@ -1262,11 +1270,26 @@ def store_location(dsn: str, base_dir: Path | None = None) -> str | None:
     return dsn.strip() or None
 
 
-def _pinned_config_dsn(config_path: Path, handle: str) -> str | None:
-    """The DSN ``handle`` resolves to in the config file a hook command pins."""
+def _pinned_config_tree(config_path: Path) -> dict[str, Any] | None:
     try:
         tree = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
+        return None
+    return tree if isinstance(tree, dict) else None
+
+
+def _pinned_config_engine_url(config_path: Path) -> str | None:
+    """The ``engine.base_url`` of the config file a hook command pins."""
+    tree = _pinned_config_tree(config_path)
+    engine = tree.get("engine") if tree is not None else None
+    value = engine.get("base_url") if isinstance(engine, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _pinned_config_dsn(config_path: Path, handle: str) -> str | None:
+    """The DSN ``handle`` resolves to in the config file a hook command pins."""
+    tree = _pinned_config_tree(config_path)
+    if tree is None:
         return None
     storage = tree.get("storage") if isinstance(tree, dict) else None
     storage = storage if isinstance(storage, dict) else {}
@@ -1306,7 +1329,15 @@ def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
     elif "PARTICLES_CONFIG" in env:
         dsn = _pinned_config_dsn(Path(env["PARTICLES_CONFIG"]), handle)
     location = store_location(dsn) if dsn is not None else None
-    return HookBinding(settings_path=settings_path, handle=handle, location=location)
+    engine_url = env.get("PARTICLES_ENGINE_BASE_URL")
+    if engine_url is None and "PARTICLES_CONFIG" in env:
+        engine_url = _pinned_config_engine_url(Path(env["PARTICLES_CONFIG"]))
+    return HookBinding(
+        settings_path=settings_path,
+        handle=handle,
+        location=location,
+        engine_url=engine_location(engine_url),
+    )
 
 
 def _claude_projects_root_of(memory_dir: Path) -> Path | None:
@@ -1384,6 +1415,9 @@ def projection_refusal(
     """
     if _claude_projects_root_of(memory_dir) is None:
         return None
+    engine_url = engine_location(get_config().engine.base_url)
+    if engine_url is not None:
+        return _remote_projection_refusal(store, engine_url, memory_dir, project_roots)
     storage = get_config().storage
     dsn = storage.database_url if store == "default" else storage.stores.get(store)
     current = store_location(dsn, Path.cwd()) if dsn is not None else None
@@ -1405,6 +1439,37 @@ def projection_refusal(
     return (
         f"store {store!r} is not the store the installed Claude Code hooks name "
         f"({', '.join(sorted({str(b.settings_path) for b in bindings}))})"
+    )
+
+
+def _remote_projection_refusal(
+    store: str, engine_url: str, memory_dir: Path, project_roots: tuple[Path, ...]
+) -> str | None:
+    """:func:`projection_refusal` for a thin client.
+
+    A remote store has no local database file, so the binding is the engine and
+    the handle instead: an installed hook must name this store and pin this
+    same ``engine.base_url``, through ``PARTICLES_ENGINE_BASE_URL`` or its
+    pinned ``PARTICLES_CONFIG``. A scratch config pointed at another engine, or
+    at this engine's other store, is refused as a scratch database is locally.
+    """
+    bindings = hook_bindings_for(memory_dir, project_roots)
+    if not bindings:
+        return (
+            f"no Particles hook is installed for {memory_dir.parent.name}; "
+            "`particles init claude-code` installs one"
+        )
+    if any(b.handle == store and b.engine_url == engine_url for b in bindings):
+        return None
+    if all(b.engine_url is None for b in bindings):
+        return (
+            "the installed Particles hooks do not pin an engine; pin "
+            "PARTICLES_ENGINE_BASE_URL or a PARTICLES_CONFIG naming engine.base_url "
+            "in each hook command"
+        )
+    return (
+        f"store {store!r} on {engine_url} is not the store the installed Claude Code "
+        f"hooks name ({', '.join(sorted({str(b.settings_path) for b in bindings}))})"
     )
 
 
@@ -1477,6 +1542,75 @@ _INDEX_ENTRY_RE = re.compile(
 )
 
 
+def index_entry_target(line: str) -> str | None:
+    """The file a memory-index line links to, or ``None`` when ``line`` is not one.
+
+    The shape is Claude Code's ``- [Title](name.md) — hook`` index line, a
+    bare filename with no directory part. Whether the target exists is the
+    caller's question.
+    """
+    m = _INDEX_ENTRY_RE.match(line)
+    return m.group("target") if m is not None else None
+
+
+def memory_file_type(path: Path) -> str | None:
+    """A memory topic file's type from its frontmatter, lower-cased, or ``None``.
+
+    Claude Code writes it as ``metadata.type`` (``feedback``, ``user``,
+    ``project``, ``reference``); a top-level ``type`` is the older spelling and
+    is read when ``metadata`` carries none. An unreadable file, a missing or
+    malformed frontmatter block, or a non-string type is ``None``: no type,
+    never an error.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return None
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].rstrip() == "---")
+        header = yaml.safe_load("\n".join(lines[1:end]))
+    except (StopIteration, yaml.YAMLError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    metadata = header.get("metadata")
+    value = metadata.get("type") if isinstance(metadata, dict) else None
+    if value is None:
+        value = header.get("type")
+    return value.strip().lower() if isinstance(value, str) and value.strip() else None
+
+
+#: Claude Code loads the first 200 lines / 25 KB of ``MEMORY.md`` at session
+#: start; anything below is never in context.
+MEMORY_LOAD_MAX_LINES = 200
+MEMORY_LOAD_MAX_BYTES = 25_000
+#: The share of either limit at which ``hook doctor`` starts warning.
+MEMORY_LOAD_WARN_FRACTION = 0.9
+
+
+def memory_load_window_warning(text: str) -> str | None:
+    """A one-line warning when ``text`` nears the ``MEMORY.md`` load window, else ``None``.
+
+    The index pointers sit below the projected region, so a file that grows
+    past the window loses its tail without any error.
+    """
+    lines = len(text.splitlines())
+    size = len(text.encode("utf-8"))
+    if (
+        lines < MEMORY_LOAD_MAX_LINES * MEMORY_LOAD_WARN_FRACTION
+        and size < MEMORY_LOAD_MAX_BYTES * MEMORY_LOAD_WARN_FRACTION
+    ):
+        return None
+    return (
+        f"⚠ MEMORY.md is {lines} lines / {size:,} bytes; Claude Code loads only the "
+        f"first {MEMORY_LOAD_MAX_LINES} lines / {MEMORY_LOAD_MAX_BYTES:,} bytes, "
+        "so the end of the index may not reach a session."
+    )
+
+
 def drop_index_entries(text: str, source_dir: Path) -> str:
     """Remove memory-index lines whose target file sits beside the indexed file.
 
@@ -1491,8 +1625,8 @@ def drop_index_entries(text: str, source_dir: Path) -> str:
     kept: list[str] = []
     dropped = False
     for line in text.splitlines():
-        m = _INDEX_ENTRY_RE.match(line)
-        if m is not None and (source_dir / m.group("target")).is_file():
+        target = index_entry_target(line)
+        if target is not None and (source_dir / target).is_file():
             dropped = True
             continue
         kept.append(line)

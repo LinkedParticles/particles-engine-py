@@ -56,3 +56,24 @@ def test_openapi_snapshot_matches_live_schema() -> None:
     committed = _SNAPSHOT_PATH.read_text(encoding="utf-8")
     live = _render_live_schema()
     assert committed == live, _REGENERATE_HINT
+
+
+def test_declared_responses_carry_their_own_description() -> None:
+    """Every response a route declares names its own description.
+
+    Without one, FastAPI fills in the running Python's reason phrase, and
+    Python 3.13 renamed several (422 "Unprocessable Entity" became
+    "Unprocessable Content"). The snapshot then matches on one interpreter
+    and drifts on another: a regeneration on 3.14 failed the 1.210.1
+    engine release, whose CI runs the suite on 3.11.
+    """
+    from fastapi.routing import APIRoute
+
+    missing = [
+        f"{route.path} {status}"
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for status, spec in route.responses.items()
+        if "description" not in spec
+    ]
+    assert missing == [], f"declared responses without a description: {missing}"

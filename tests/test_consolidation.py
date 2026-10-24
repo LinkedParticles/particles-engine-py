@@ -663,6 +663,7 @@ class TestPassComposition:
             "utility",
             "abstraction",  # pass 5b — skipped (default off) but slotted
             "projection",
+            "rank_lift",  # pass 6a: zero-LLM, read-only, every night
             "measure",  # pass 6b: zero-LLM, read-only, every night
         ]
         assert report.outcome == "ran"
@@ -1722,6 +1723,7 @@ class TestRunRecord:
             "utility",
             "abstraction",
             "projection",
+            "rank_lift",
             "measure",
         ]
         for p in payload["passes"]:
@@ -3180,6 +3182,8 @@ class TestProgressEvents:
         for dumped in (a, b):
             dumped["closure"].pop("window_start")
             dumped["closure"].pop("window_end")
+            # The second run compares with the first run's monitor reading.
+            dumped["rank_lift"].pop("baseline")
         assert a == b
 
     @pytest.mark.asyncio
@@ -3517,6 +3521,26 @@ class TestPartialReadCounts:
         assert "FAILED snapshot holding a partial whole read" in caplog.text
         assert "restore the blob" in caplog.text
         assert "1 snapshot(s) wait on an earlier snapshot" in render_consolidation_report(report)
+
+
+class TestRevisionSettledCount:
+    """A revision pair settled by the generation is counted per run."""
+
+    def test_the_run_record_counts_settled_pairs(self) -> None:
+        from particles.ingest.pipeline import SnapshotOutcome
+
+        report = ConsolidationReport()
+        for settled in (2, 0, 1):
+            consolidation_mod._record_extraction(
+                report,
+                "entry-1",
+                "snap-1",
+                [object()],
+                consolidation_mod._SnapshotRun(outcome=SnapshotOutcome(revision_settled=settled)),
+            )
+        assert report.pending_revision_settled == 3
+        assert consolidation_mod._census_payload(report)["pending_revision_settled"] == 3
+        assert "3 revision pair(s) settled" in render_consolidation_report(report)
 
 
 class TestRungLines:

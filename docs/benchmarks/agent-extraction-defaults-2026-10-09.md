@@ -1,5 +1,7 @@
 # Agent-side extraction defaults: what local data says (2026-10-09)
 
+> Agent-side extraction was withdrawn and its code removed. This page is kept as the record of the measurements made while it was under evaluation; the script and settings it names no longer exist.
+
 **A dated snapshot, measured 2026-10-09.** Agent-side extraction
 asks the in-session Claude Code agent to extract its own transcript at a Stop
 hook. Its ask rule and its coverage rule each need defaults, and the record

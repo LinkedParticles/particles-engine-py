@@ -1,12 +1,40 @@
 # Schema migration
 
-`SCHEMA_VERSION` (in `particles/core/schema.py`) is the on-disk
-schema's identity. Major-version bumps are breaking.
+`SCHEMA_VERSION` (in `particles/core/schema.py`) is the version of the
+particle record format, and every particle records the version it was
+written under. It is `MAJOR.MINOR.PATCH`. Two versions with the same
+major are compatible; a different major is breaking.
 
-## Minor / patch bumps
+Two things version a store, and they move independently:
 
-The Alembic migration chain handles minor and patch bumps
-transparently:
+| | What it versions | How it moves |
+|---|---|---|
+| `SCHEMA_VERSION` | what a particle record means | an ADR that changes the record format |
+| the Alembic revision | the tables and columns that hold it | `particles db init` / `alembic upgrade head` |
+
+## Minor and patch versions
+
+A minor version only adds: new optional fields whose absence means what a
+record meant before. An SDK reads and writes a store holding any minor of
+its own major, in either direction:
+
+- **A newer SDK on an older store** reads the older particles with the
+  new fields at their defaults. `particles lint` reports them as
+  `SCHEMA_VERSION_OLDER_MINOR` (INFO). The release that added the fields
+  names the command that fills them in; `particles reindex
+  --include-schema-stale` re-extracts those particles' sources instead,
+  which is a paid run (the dry run reports its size first).
+- **An older SDK on a newer store** reads the newer particles without the
+  fields it does not know, and writes new particles at its own version.
+  `particles lint` reports the newer ones as `SCHEMA_VERSION_NEWER_MINOR`
+  (INFO). It can still retract or overrule a newer particle, but it never
+  replaces one with its own copy (a reindex re-extraction, a dated
+  restatement, a duplicate merge): those are skipped and counted, and wait
+  for a current SDK.
+
+A patch version changes nothing about the record and is ignored by every
+comparison. Moving between minors needs no rebuild. The storage half is
+the ordinary migration chain:
 
 ```bash
 uv run alembic upgrade head
@@ -14,8 +42,15 @@ uv run alembic upgrade head
 
 The migration registry centralises every ORM module's metadata via
 `particles/_orm_modules.py`. Adding a new table is one Alembic
-revision + an entry in `_orm_modules.py`; the schema_version stays
-the same.
+revision + an entry in `_orm_modules.py`. A migration shipped with a
+minor schema version is additive (nullable columns, columns with a
+server default, new tables or indexes), so an older SDK keeps writing to
+the migrated tables.
+
+SDKs released before same-major compatibility (see the changelog entry
+that introduced it) refuse a store holding any version other than
+`1.0.0`, so upgrade every installation that shares a store before
+running a release that moves `SCHEMA_VERSION`.
 
 ## Major bumps
 
@@ -47,9 +82,9 @@ rebuildable from corpus + extractor.
 
 ## Mid-migration safety
 
-If the SDK and the on-disk database disagree on `SCHEMA_VERSION`,
-the CLI fails fast with a friendly message rather than silently
-running incompatible code. See [troubleshooting](troubleshooting.md)
+If the store holds particles of another major `SCHEMA_VERSION`, the CLI
+fails fast with a message that says which way the store differs, rather
+than silently running incompatible code. See [troubleshooting](troubleshooting.md)
 for the exact error and recovery path.
 
 ## What's NOT preserved

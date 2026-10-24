@@ -335,7 +335,7 @@ class TestEstimatePricing:
         assert 80 * 60 <= est.wall_seconds <= 110 * 60
         summary = cost_summary(est)
         assert summary is not None and summary.startswith("≈ $4.93–9.07 expected")
-        assert "Time: about 1.5 h, ~58 s per file." in render_estimate(est)
+        assert "Time: about 1.5 h, ~58 s per file at most." in render_estimate(est)
 
     def test_reproduces_the_measured_2026_10_04_design_documents(self) -> None:
         """Six active ADRs, 13-22k characters each, at today's budgets.
@@ -672,6 +672,41 @@ class TestRunMemoryAudit:
         assert report.extracted_snapshots == 0
 
     @pytest.mark.asyncio
+    async def test_account_level_failure_stops_extraction(self, db_session: AsyncSession) -> None:
+        """no doomed call per remaining snapshot, and the run is incomplete."""
+        from particles.llm.errors import AccountLevelLLMError
+        from particles.operations.deposit import deposit_text_versioned
+
+        entry_ids = []
+        for name in ("a", "b", "c", "d"):
+            entry_id, _s, _ = await deposit_text_versioned(
+                db_session,
+                text=f"memory {name}",
+                uri_r=f"file:///mem/{name}.md",
+                source_type="LOCAL_MARKDOWN",
+                mutability=Mutability.MUTABLE,
+            )
+            entry_ids.append(entry_id)
+        await db_session.commit()
+        no_credit = AccountLevelLLMError(RuntimeError("Your credit balance is too low"))
+        extract = AsyncMock(side_effect=[["p1"], no_credit, ["p3"], ["p4"]])
+        with patch("particles.operations.extract.extract_snapshot", extract):
+            report = await run_memory_audit(
+                db_session, harvested_entry_ids=entry_ids, semantic=False
+            )
+
+        assert extract.call_count == 2
+        assert report.extracted_snapshots == 1
+        assert report.extraction_failures == 0
+        assert report.extraction_untried == 3
+        assert report.extraction_stopped_reason == "credit balance too low"
+        assert report.complete is False
+        rendered = render_audit_report(report)
+        assert "INCOMPLETE: extraction stopped, 3 files untried" in rendered
+        assert "credit balance too low" in rendered
+        assert "particles extract --all-pending" in rendered
+
+    @pytest.mark.asyncio
     async def test_progress_events_emitted_per_snapshot_and_census(
         self, db_session: AsyncSession
     ) -> None:
@@ -778,6 +813,36 @@ class TestRunMemoryAudit:
         assert collect.call_args.kwargs["duplicate_mode"] is SuggestMode.LLM_JUDGE
         assert report.judged is True
         assert report.duplicate_verdicts == {"PARAPHRASE": 1, "DISTINCT": 1, "UNSURE": 1}
+
+    @pytest.mark.asyncio
+    async def test_number_variant_pairs_are_set_aside(self, db_session: AsyncSession) -> None:
+        """an unjudged pair that differs only in a number is not a duplicate."""
+        from types import SimpleNamespace
+
+        contents = {
+            "a": "Iteration 3 scored 0.81 on the eval.",
+            "b": "Iteration 4 scored 0.79 on the eval.",
+            "c": "The deploy uses port 8000.",
+            "d": "The deployment uses port 8000.",
+            "e": "Run 5 passed.",
+            "f": "Run 6 passed.",
+        }
+        cards = [
+            _card(CardKind.DUPLICATE_PAIR, "a", "b"),
+            _card(CardKind.DUPLICATE_PAIR, "c", "d"),
+            # A judged pair keeps the judge's verdict, number or not.
+            _card(CardKind.DUPLICATE_PAIR, "e", "f", verdict=JudgeVerdictKind.DISTINCT),
+        ]
+        by_id = {pid: SimpleNamespace(content=text) for pid, text in contents.items()}
+        with (
+            patch("particles.operations.audit.collect_cards", AsyncMock(return_value=cards)),
+            patch("particles.operations.audit.get_particles_by_ids", AsyncMock(return_value=by_id)),
+        ):
+            report = await run_memory_audit(db_session, semantic=False)
+        assert report.duplicate_number_variants == 1
+        assert report.count(CardKind.DUPLICATE_PAIR) == 2
+        assert report.duplicate_candidate_pairs_total == 2
+        assert "1 candidate pair set aside as not duplicates" in render_audit_report(report)
 
     @pytest.mark.asyncio
     async def test_default_duplicates_stay_report_mode(self, db_session: AsyncSession) -> None:
@@ -1957,3 +2022,302 @@ class TestSingularCounts:
         assert "0 potential contradictions" in text
         assert "0 likely-duplicate belief pairs" in text
         assert "0 probably-stale facts" in text
+
+
+# ---------------------------------------------------------------------------
+# Concurrent extraction: overlapping reads, serial ordered writes
+# ---------------------------------------------------------------------------
+
+
+class _FakeExtract:
+    """Stands in for ``extract_snapshot``: a timed read, then a turn-gated apply.
+
+    ``read_seconds`` maps a snapshot id to how long its read takes, so a test can
+    make the reads finish out of harvest order. Records how many reads were in
+    flight at once, and fails if two applies ever overlap.
+    """
+
+    def __init__(
+        self,
+        read_seconds: dict[str, float] | None = None,
+        *,
+        fail: frozenset[str] = frozenset(),
+        skip: frozenset[str] = frozenset(),
+    ) -> None:
+        self.read_seconds = read_seconds or {}
+        self.fail = fail
+        self.skip = skip
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.applying = False
+        self.events: list[tuple[str, str]] = []
+
+    async def __call__(
+        self,
+        session: AsyncSession,
+        entry_id: str,
+        snapshot_id: str,
+        *,
+        before_apply: Any = None,
+        **_kwargs: Any,
+    ) -> list[str]:
+        import asyncio
+
+        self.events.append(("read", snapshot_id))
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.read_seconds.get(snapshot_id, 0.0))
+        finally:
+            self.in_flight -= 1
+        if snapshot_id in self.fail:
+            raise RuntimeError(f"boom {snapshot_id}")
+        if snapshot_id in self.skip:
+            return []  # skipped before the read: never takes a turn
+        assert before_apply is not None
+        await before_apply()
+        assert not self.applying, "two apply passes overlapped"
+        self.applying = True
+        self.events.append(("apply", snapshot_id))
+        await asyncio.sleep(0.001)
+        self.applying = False
+        return [f"p-{snapshot_id}"]
+
+
+class TestExtractConcurrently:
+    @staticmethod
+    async def _run(
+        pending: list[tuple[str, str, str]], fake: _FakeExtract, *, concurrency: int
+    ) -> tuple[list[tuple[int, str, int]], list[tuple[int, str]]]:
+        import asyncio
+
+        from particles.operations.audit import _extract_concurrently
+
+        settled: list[tuple[int, str, int]] = []
+        failed: list[tuple[int, str]] = []
+        await asyncio.wait_for(
+            _extract_concurrently(
+                pending,
+                store="default",
+                agent_id="audit",
+                concurrency=concurrency,
+                extract_snapshot=fake,
+                on_settled=lambda i, label, written, _o: settled.append((i, label, len(written))),
+                on_failed=lambda i, _e, _s, label, _exc: failed.append((i, label)),
+                on_untried=lambda label: pytest.fail(f"{label} untried without a stop"),
+            ),
+            timeout=10,
+        )
+        return settled, failed
+
+    @pytest.mark.asyncio
+    async def test_reads_overlap_and_writes_run_alone_in_harvest_order(self) -> None:
+        pending = [(f"e{i}", f"s{i}", f"f{i}.md") for i in range(6)]
+        # The first files read slowest, so the reads finish in reverse order.
+        fake = _FakeExtract({f"s{i}": 0.06 - 0.01 * i for i in range(6)})
+        settled, failed = await self._run(pending, fake, concurrency=3)
+
+        assert fake.max_in_flight == 3
+        applies = [sid for kind, sid in fake.events if kind == "apply"]
+        assert applies == [f"s{i}" for i in range(6)]
+        assert settled == [(i + 1, f"f{i}.md", 1) for i in range(6)]
+        assert failed == []
+
+    @pytest.mark.asyncio
+    async def test_a_later_snapshot_of_an_entry_waits_for_the_earlier_one(self) -> None:
+        pending = [("A", "a0", "a.md"), ("A", "a1", "a.md"), ("B", "b0", "b.md")]
+        fake = _FakeExtract({"a0": 0.03})
+        settled, _ = await self._run(pending, fake, concurrency=3)
+
+        events = fake.events
+        assert events.index(("read", "a1")) > events.index(("apply", "a0"))
+        assert [i for i, _, _ in settled] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_no_deadlock_when_slots_are_scarce(self) -> None:
+        # One slot: a0 holds it, a1 waits on a0, and b0 / c0 queue for the slot.
+        # A task that waited for its turn holding the slot would starve a1.
+        pending = [("A", "a0", "a"), ("A", "a1", "a"), ("B", "b0", "b"), ("C", "c0", "c")]
+        for concurrency in (2, 3):
+            fake = _FakeExtract({"a0": 0.02, "b0": 0.0, "c0": 0.0})
+            settled, _ = await self._run(pending, fake, concurrency=concurrency)
+            assert [i for i, _, _ in settled] == [1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_and_a_skip_keep_their_place(self) -> None:
+        pending = [(f"e{i}", f"s{i}", f"f{i}") for i in range(4)]
+        fake = _FakeExtract({"s0": 0.02}, fail=frozenset({"s1"}), skip=frozenset({"s2"}))
+        settled, failed = await self._run(pending, fake, concurrency=4)
+
+        assert failed == [(2, "f1")]
+        assert settled == [(1, "f0", 1), (3, "f2", 0), (4, "f3", 1)]
+
+
+class TestExtractConcurrentlyStop:
+    """an account-level failure stops the concurrent run too."""
+
+    @pytest.mark.asyncio
+    async def test_no_call_is_sent_after_the_stop(self) -> None:
+        import asyncio
+
+        from particles.llm.errors import AccountLevelLLMError
+        from particles.operations.audit import _extract_concurrently
+
+        class _NoCredit(_FakeExtract):
+            async def __call__(
+                self, session: AsyncSession, entry_id: str, snapshot_id: str, **kw: Any
+            ) -> list[str]:
+                if snapshot_id == "s1":
+                    self.events.append(("read", snapshot_id))
+                    raise AccountLevelLLMError(RuntimeError("credit balance is too low"))
+                return await super().__call__(session, entry_id, snapshot_id, **kw)
+
+        pending = [(f"e{i}", f"s{i}", f"f{i}") for i in range(5)]
+        fake = _NoCredit({"s0": 0.03})
+        settled: list[tuple[int, str]] = []
+        untried: list[str] = []
+        stopped = await asyncio.wait_for(
+            _extract_concurrently(
+                pending,
+                store="default",
+                agent_id="audit",
+                concurrency=2,
+                extract_snapshot=fake,
+                on_settled=lambda i, label, _w, _o: settled.append((i, label)),
+                on_failed=lambda *_a: pytest.fail("an account-level error is not a file failure"),
+                on_untried=untried.append,
+            ),
+            timeout=10,
+        )
+
+        assert isinstance(stopped, AccountLevelLLMError)
+        assert {sid for kind, sid in fake.events if kind == "read"} == {"s0", "s1"}
+        assert settled == [(1, "f0")]
+        assert untried == ["f1", "f2", "f3", "f4"]
+
+
+class TestRunMemoryAuditConcurrent:
+    """The whole path on a file-backed store: real pipeline, mocked model."""
+
+    @staticmethod
+    async def _deposit(session: AsyncSession, count: int) -> list[str]:
+        from particles.operations.deposit import deposit_text_versioned
+
+        entry_ids = []
+        for i in range(count):
+            entry_id, _snapshot_id, _ = await deposit_text_versioned(
+                session,
+                text=f"Memory note {i}: fact-{i} holds.",
+                uri_r=f"file:///mem/note-{i}.md",
+                source_type="LOCAL_MARKDOWN",
+                mutability=Mutability.MUTABLE,
+            )
+            entry_ids.append(entry_id)
+        await session.commit()
+        return entry_ids
+
+    @pytest.mark.asyncio
+    async def test_concurrent_audit_writes_every_file_once(
+        self,
+        file_db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+        no_embedding_model: None,
+    ) -> None:
+        import asyncio
+        import re
+
+        from particles.corpus.store import get_entry
+        from particles.db import session_scope
+        from particles.operations.audit import AuditProgress
+        from particles.store.particle_store import get_active_particles_for_entry
+
+        monkeypatch.setattr(get_config().audit, "extraction_concurrency", 3)
+        monkeypatch.setattr(get_config().extraction, "rate_limit_backoff_seconds", 0.0)
+        entry_ids = await self._deposit(file_db_session, 6)
+
+        class _RateLimited(Exception):
+            status_code = 429
+
+        state = {"in_flight": 0, "max": 0, "limited": False}
+
+        async def _fake_complete(purpose: str, prompt: str, **kwargs: Any) -> tuple[str, str]:
+            match = re.search(r"fact-(\d+)", prompt)
+            assert purpose == "extraction" and match is not None
+            n = int(match.group(1))
+            if n == 2 and not state["limited"]:
+                state["limited"] = True
+                raise _RateLimited("rate limited")
+            state["in_flight"] += 1
+            state["max"] = max(state["max"], state["in_flight"])
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                state["in_flight"] -= 1
+            reply = (
+                f'[{{"content": "Fact {n} holds.", "subjects": [], '
+                '"confidence_value": 0.9, "uncertainty_nature": "EPISTEMIC"}]'
+            )
+            return reply, "anthropic:test-model"
+
+        events: list[AuditProgress] = []
+        with patch("particles.llm.complete_with_provider_model", _fake_complete):
+            report = await run_memory_audit(
+                file_db_session,
+                harvested_entry_ids=entry_ids,
+                semantic=False,
+                on_progress=events.append,
+            )
+
+        assert state["limited"] is True  # the 429 happened, and was waited out
+        assert state["max"] >= 2  # the model calls overlapped
+        assert report.extracted_snapshots == 6
+        assert report.extraction_failures == 0
+        extract_events = [e for e in events if e.phase == "extract"]
+        assert [e.label for e in extract_events] == [f"note-{i}.md" for i in range(6)]
+        assert [e.done for e in extract_events] == list(range(1, 7))
+
+        async with session_scope() as s:
+            for i, entry_id in enumerate(entry_ids):
+                written = await get_active_particles_for_entry(s, entry_id)
+                assert [p.content for p in written] == [f"Fact {i} holds."]
+                entry = await get_entry(s, entry_id)
+                assert entry is not None
+                assert {snap.extraction_status for snap in entry.snapshots} == {
+                    ExtractionStatus.COMPLETE
+                }
+
+
+# ---------------------------------------------------------------------------
+# duplicate pairs that differ only in a number
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("Iteration 3 scored 0.81 on the eval.", "Iteration 4 scored 0.79 on the eval."),
+        ("The second run took 40%.", "The third run took 45%."),
+        ("Run 12 passed on 2026-09-24.", "Run #13 passed on 2026-09-25."),
+        ("Shipped in v1.2 after 3 days", "Shipped in v1.3 after 2 days"),
+    ],
+)
+def test_number_variants_are_detected(a: str, b: str) -> None:
+    from particles.operations.audit import differs_only_in_numbers
+
+    assert differs_only_in_numbers(a, b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("The cap is 200.", "The cap is 200."),
+        ("Uses Python 3", "Uses Python 3.11 with uv"),
+        ("Domain a.com is primary", "Domain b.com is primary"),
+        ("Run 3 passed", "Run 3 failed"),
+        ("Run 3 passed", "Run 4 failed"),
+    ],
+)
+def test_other_differences_are_not_number_variants(a: str, b: str) -> None:
+    from particles.operations.audit import differs_only_in_numbers
+
+    assert not differs_only_in_numbers(a, b)

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import Confidence, ExternalRef, Particle, Subject, UncertaintyNature
 from particles.core.scoring.confidence import CalibrationSource
@@ -24,6 +25,7 @@ from particles.store.subject_store import (
     insert_subject,
     list_all_subjects,
     list_particle_subject_pairs,
+    lookup_subject,
 )
 from tests._capped_http import set_capped_responses
 
@@ -302,6 +304,312 @@ class TestSubjectStore:
         session = db_session  # type: ignore[assignment]
         removed = await remove_external_ref(session, "no-such-id", "wikidata", "Q1")  # type: ignore[arg-type]
         assert removed is False
+
+
+class TestLookupSubject:
+    """``lookup_subject``: the ID, prefix, or name a reader types."""
+
+    @staticmethod
+    async def _add(session: AsyncSession, name: str, **kwargs: object) -> Subject:
+        subject = _make_subject(name, **kwargs)
+        await insert_subject(session, subject)
+        await session.commit()
+        return subject
+
+    @pytest.mark.asyncio
+    async def test_full_id_and_prefix_still_resolve(self, db_session: AsyncSession) -> None:
+        s = await self._add(db_session, "Marie Curie")
+        for ref in (s.id, s.id[:8]):
+            found = await lookup_subject(db_session, ref)
+            assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_canonical_name_resolves_case_insensitively(
+        self, db_session: AsyncSession
+    ) -> None:
+        s = await self._add(db_session, "the user")
+        found = await lookup_subject(db_session, "  The User ")
+        assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_alias_resolves_including_persona_forms(self, db_session: AsyncSession) -> None:
+        # The persona fold records "user" / "the speaker" as aliases of the
+        # persona Subject; a lookup that binds nothing reads them.
+        s = await self._add(db_session, "the user", aliases=["user", "the speaker"])
+        for form in ("user", "THE SPEAKER"):
+            found = await lookup_subject(db_session, form)
+            assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_canonical_name_outranks_another_subjects_alias(
+        self, db_session: AsyncSession
+    ) -> None:
+        canonical = await self._add(db_session, "Apple")
+        await self._add(db_session, "Apple Inc.", aliases=["Apple"])
+        found = await lookup_subject(db_session, "apple")
+        assert found is not None and found.id == canonical.id
+
+    @pytest.mark.asyncio
+    async def test_unknown_and_empty_return_none(self, db_session: AsyncSession) -> None:
+        await self._add(db_session, "Marie Curie")
+        assert await lookup_subject(db_session, "Pierre Curie") is None
+        assert await lookup_subject(db_session, "   ") is None
+
+    @pytest.mark.asyncio
+    async def test_like_wildcards_are_literal(self, db_session: AsyncSession) -> None:
+        await self._add(db_session, "AcmeXInc")
+        assert await lookup_subject(db_session, "Acme_Inc") is None
+        assert await lookup_subject(db_session, "%") is None
+
+    @pytest.mark.asyncio
+    async def test_prefix_and_name_naming_different_subjects_is_refused(
+        self, db_session: AsyncSession
+    ) -> None:
+        by_id = await self._add(db_session, "Espresso", id="cafe0000-0000-4000-8000-000000000001")
+        by_name = await self._add(db_session, "Cafe")
+        with pytest.raises(ValueError, match="ambiguous") as exc:
+            await lookup_subject(db_session, "cafe")
+        message = str(exc.value)
+        assert f"{by_id.id[:8]}… Espresso (by ID prefix)" in message
+        assert f"{by_name.id[:8]}… Cafe (by name)" in message
+        # More ID characters settle it.
+        settled = await lookup_subject(db_session, "cafe0000")
+        assert settled is not None and settled.id == by_id.id
+
+    @pytest.mark.asyncio
+    async def test_prefix_and_name_naming_one_subject_resolves(
+        self, db_session: AsyncSession
+    ) -> None:
+        s = await self._add(db_session, "Cafe", id="cafe0000-0000-4000-8000-000000000001")
+        found = await lookup_subject(db_session, "cafe")
+        assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_shared_name_is_refused_not_tie_broken(self, db_session: AsyncSession) -> None:
+        await self._add(db_session, "Prometheus")
+        await self._add(db_session, "Prometheus")
+        with pytest.raises(ValueError, match="Pass more characters of the ID"):
+            await lookup_subject(db_session, "Prometheus")
+
+    @pytest.mark.asyncio
+    async def test_shared_alias_is_refused(self, db_session: AsyncSession) -> None:
+        await self._add(db_session, "Mercury (planet)", aliases=["Mercury"])
+        await self._add(db_session, "Mercury (element)", aliases=["Mercury"])
+        with pytest.raises(ValueError, match=r"\(by alias\)"):
+            await lookup_subject(db_session, "mercury")
+
+    @pytest.mark.asyncio
+    async def test_a_wide_prefix_lists_a_bounded_set(self, db_session: AsyncSession) -> None:
+        for i in range(8):
+            await self._add(db_session, f"S{i}", id=f"ab{i:06d}-0000-4000-8000-000000000000")
+        with pytest.raises(ValueError, match="and more") as exc:
+            await lookup_subject(db_session, "ab")
+        assert str(exc.value).count("(by ID prefix)") == 5
+
+
+class TestAliasIndex:
+    """The ``subject_aliases`` index stays equal to a rebuild of it."""
+
+    @staticmethod
+    async def _add(session: AsyncSession, name: str, **kwargs: object) -> Subject:
+        subject = _make_subject(name, **kwargs)
+        await insert_subject(session, subject)
+        await session.commit()
+        return subject
+
+    @staticmethod
+    async def _assert_clean(session: AsyncSession) -> None:
+        from particles.store.subject_store import check_alias_index
+
+        drift = await check_alias_index(session)
+        assert drift.clean, drift
+
+    @pytest.mark.asyncio
+    async def test_insert_indexes_each_folded_alias_once(self, db_session: AsyncSession) -> None:
+        from sqlalchemy import select
+
+        from particles.store.subject_store import SubjectAliasRow
+
+        s = await self._add(db_session, "the user", aliases=["User", "user", "the speaker"])
+        rows = (await db_session.execute(select(SubjectAliasRow))).scalars().all()
+        assert {(r.subject_id, r.alias_key, r.alias) for r in rows} == {
+            (s.id, "user", "User"),
+            (s.id, "the speaker", "the speaker"),
+        }
+        await self._assert_clean(db_session)
+
+    @pytest.mark.asyncio
+    async def test_add_aliases_keeps_the_index_in_step(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import add_aliases
+
+        s = await self._add(db_session, "East Germany", aliases=["GDR"])
+        await add_aliases(db_session, s.id, ["DDR"])
+        await add_aliases(db_session, s.id, ["DDR", "Deutsche Demokratische Republik"])
+        await db_session.commit()
+        await self._assert_clean(db_session)
+        found = await find_by_name(db_session, "deutsche demokratische republik")
+        assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_merge_moves_names_and_drops_the_sources(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import merge_subjects_many
+
+        a = await self._add(db_session, "Mercury", aliases=["Hg"])
+        b = await self._add(db_session, "quicksilver", aliases=["hydrargyrum"])
+        target = await self._add(db_session, "Mercury (element)")
+        await merge_subjects_many(db_session, [a.id, b.id], target.id)
+        await db_session.commit()
+        await self._assert_clean(db_session)
+        for name in ("hg", "Quicksilver", "hydrargyrum"):
+            found = await find_by_name(db_session, name)
+            assert found is not None and found.id == target.id, name
+
+    @pytest.mark.asyncio
+    async def test_delete_subject_drops_its_rows(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import delete_subject
+
+        s = await self._add(db_session, "Phantom", aliases=["ghost"])
+        await delete_subject(db_session, s.id)
+        await db_session.commit()
+        await self._assert_clean(db_session)
+        assert await find_by_name(db_session, "ghost") is None
+
+    @pytest.mark.asyncio
+    async def test_orphan_purge_drops_their_rows(self, db_session: AsyncSession) -> None:
+        from particles.operations.corpus_delete import purge_orphan_subjects
+
+        s = await self._add(db_session, "Orphan", aliases=["waif"])
+        removed, _ = await purge_orphan_subjects(db_session, {s.id})
+        await db_session.commit()
+        assert removed == 1
+        await self._assert_clean(db_session)
+
+    @pytest.mark.asyncio
+    async def test_an_orphaned_row_never_answers(self, db_session: AsyncSession) -> None:
+        from sqlalchemy import delete
+
+        from particles.store.subject_store import (
+            SubjectRow,
+            check_alias_index,
+            rebuild_alias_index,
+        )
+
+        s = await self._add(db_session, "Phantom", aliases=["ghost"])
+        # A delete that forgets the index (an older install, raw SQL).
+        await db_session.execute(delete(SubjectRow).where(SubjectRow.id == s.id))
+        await db_session.commit()
+        assert await find_by_name(db_session, "ghost") is None
+        assert await lookup_subject(db_session, "ghost") is None
+        drift = await check_alias_index(db_session)
+        assert (drift.orphaned, drift.subject_ids) == (1, [s.id])
+        await rebuild_alias_index(db_session)
+        await self._assert_clean(db_session)
+
+    @pytest.mark.asyncio
+    async def test_check_reports_and_rebuild_repairs_drift(self, db_session: AsyncSession) -> None:
+        from sqlalchemy import delete
+
+        from particles.store.subject_store import (
+            SubjectAliasRow,
+            check_alias_index,
+            rebuild_alias_index,
+        )
+
+        s = await self._add(db_session, "the user", aliases=["user", "the speaker"])
+        await db_session.execute(delete(SubjectAliasRow))
+        await db_session.commit()
+        drift = await check_alias_index(db_session)
+        assert (drift.missing, drift.extra, drift.subject_ids) == (2, 0, [s.id])
+        assert await find_by_name(db_session, "user") is None  # the index answers
+        assert await rebuild_alias_index(db_session) == 2
+        await db_session.commit()
+        await self._assert_clean(db_session)
+        found = await find_by_name(db_session, "user")
+        assert found is not None and found.id == s.id
+
+    @pytest.mark.asyncio
+    async def test_shared_alias_resolves_to_the_earliest(self, db_session: AsyncSession) -> None:
+        # Inserted newest first, so storage order and creation order disagree.
+        newer = Subject(
+            canonical_name="Mercury (element)",
+            aliases=["Mercury"],
+            created_at=datetime(2021, 1, 1, tzinfo=UTC),
+            asserted_by="test",
+        )
+        older = Subject(
+            canonical_name="Mercury (planet)",
+            aliases=["Mercury"],
+            created_at=datetime(2020, 1, 1, tzinfo=UTC),
+            asserted_by="test",
+        )
+        await insert_subject(db_session, newer)
+        await insert_subject(db_session, older)
+        await db_session.commit()
+        found = await find_by_name(db_session, "mercury")
+        assert found is not None and found.id == older.id
+
+    @pytest.mark.asyncio
+    async def test_persona_guard_still_skips_the_persona_aliases(
+        self, db_session: AsyncSession
+    ) -> None:
+        await self._add(db_session, "the user", aliases=["I", "me"])
+        assert await find_by_name(db_session, "I", skip_aliases_of=["The User"]) is None
+        found = await find_by_name(db_session, "I")
+        assert found is not None
+
+
+class TestSearchSubjectsAliases:
+    """``search_subjects`` matches aliases through the index."""
+
+    @staticmethod
+    async def _add(session: AsyncSession, name: str, **kwargs: object) -> Subject:
+        subject = _make_subject(name, **kwargs)
+        await insert_subject(session, subject)
+        await session.commit()
+        return subject
+
+    @pytest.mark.asyncio
+    async def test_matches_an_alias_substring(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import search_subjects
+
+        s = await self._add(db_session, "the user", aliases=["The Speaker"])
+        await self._add(db_session, "Paris")
+        assert [x.id for x in await search_subjects(db_session, "speak")] == [s.id]
+
+    @pytest.mark.asyncio
+    async def test_json_syntax_never_matches(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import search_subjects
+
+        await self._add(db_session, "East Germany", aliases=["GDR", "DDR"])
+        for query in ('", "', "[", '"]', "%", "_"):
+            assert await search_subjects(db_session, query) == [], query
+
+    @pytest.mark.asyncio
+    async def test_a_subject_matching_twice_is_listed_once(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import search_subjects
+
+        s = await self._add(db_session, "Apple", aliases=["Apple Inc.", "AAPL apple"])
+        assert [x.id for x in await search_subjects(db_session, "apple")] == [s.id]
+
+    @pytest.mark.asyncio
+    async def test_pagination_pages_the_matches(self, db_session: AsyncSession) -> None:
+        from particles.store.subject_store import search_subjects
+
+        # Five matches: two by name, three by alias only, interleaved by name.
+        await self._add(db_session, "A speaker")
+        await self._add(db_session, "B", aliases=["speaker b"])
+        await self._add(db_session, "C speaker")
+        await self._add(db_session, "D", aliases=["speaker d"])
+        await self._add(db_session, "E", aliases=["speaker e"])
+        await self._add(db_session, "F unrelated")
+        pages = [
+            [
+                x.canonical_name
+                for x in await search_subjects(db_session, "speaker", limit=2, offset=o)
+            ]
+            for o in (0, 2, 4)
+        ]
+        assert pages == [["A speaker", "B"], ["C speaker", "D"], ["E"]]
 
 
 class TestSubjectResolver:

@@ -43,7 +43,7 @@ the retirement is dated when it is applied, and it writes no operator event
 Beyond these, lint reports coverage and quality diagnostics
 (`ORPHAN`, `PHANTOM_SUBJECT`, `LOW_COVERAGE_SUBJECT`,
 `CONFIDENCE_DECAY`, `GRANULARITY_VIOLATION_CANDIDATE`,
-`PENDING_EXTRACTION`, `SCHEMA_VERSION_MISMATCH`,
+`PENDING_EXTRACTION`, `SCHEMA_VERSION_MISMATCH`, `SCHEMA_VERSION_OLDER_MINOR`, `SCHEMA_VERSION_NEWER_MINOR`,
 `WIKIDATA_LINK_MISMATCH`, `BARE_PROPERTIES_KEY`, …), all surfaced for manual decision; use
 `--verbose --category <type>` to inspect one category in full.
 

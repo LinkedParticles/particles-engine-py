@@ -50,8 +50,10 @@ from particles.store.particle_store import insert_particle
 from particles.store.probe_verdict_store import (
     count_verdicts,
     lookup_answer,
+    lookup_stamped_verdicts,
     lookup_verdicts,
     record_answer,
+    record_stamped_verdicts,
     record_verdict,
     record_verdicts,
 )
@@ -265,6 +267,31 @@ class TestStore:
         assert len(found) == 450
         assert found[keys[0]] is True and found[keys[1]] is False
 
+    async def test_a_stamped_verdict_appends_when_only_its_rung_changes(
+        self, db_session: AsyncSession
+    ) -> None:
+        # a second reading that clears what a first reading
+        # cleared before is a different record, because it says the first
+        # reading answered CHANGES.
+        from particles.core.rung_ladder import RungStamp
+
+        kind = ProbeKind.UPDATE_SLOT
+        key = verdict_key(kind, "Earlier.", "Later.")
+        first, second = RungStamp("update_slot", "v1"), RungStamp("update_slot_second", "v1")
+        assert await record_stamped_verdicts(
+            db_session, kind, "v1", {key: (False, first)}, model="m"
+        )
+        assert not await record_stamped_verdicts(
+            db_session, kind, "v1", {key: (False, first)}, model="m"
+        )
+        assert await record_stamped_verdicts(
+            db_session, kind, "v1", {key: (False, second)}, model="m"
+        )
+        assert await lookup_stamped_verdicts(db_session, kind, "v1", [key]) == {
+            key: (False, "update_slot_second@v1")
+        }
+        assert await lookup_verdicts(db_session, kind, "v1", [key]) == {key: False}
+
 
 # ---------------------------------------------------------------------------
 # The census
@@ -434,6 +461,77 @@ class TestCensus:
             second = await _census(db_session, _client(lambda _t: NO), latency_tolerant=True)
         assert (first.probes_run, second.probes_run, second.previously_cleared) == (1, 0, 1)
         assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# What each answer was sampled under
+# ---------------------------------------------------------------------------
+
+
+def _refusing_client(answer: str) -> MagicMock:
+    """Like :func:`_client`, but 400s any request carrying ``temperature``."""
+    client = _client(lambda _text: answer)
+    reply = client.messages.create.side_effect
+
+    def create(**kwargs: Any) -> SimpleNamespace:
+        if kwargs.get("extra_body") is not None:
+            exc = RuntimeError("`temperature` is deprecated for this model.")
+            exc.status_code = 400  # type: ignore[attr-defined]
+            raise exc
+        return reply(**kwargs)  # type: ignore[no-any-return]
+
+    client.messages.create.side_effect = create
+    return client
+
+
+async def _sampling_column(session: AsyncSession) -> list[str | None]:
+    from particles.store.probe_verdict_store import ProbeVerdictRow
+
+    rows = await session.execute(select(ProbeVerdictRow.temperature).order_by(ProbeVerdictRow.id))
+    return list(rows.scalars())
+
+
+@pytest.mark.asyncio
+class TestSamplingRecorded:
+    @pytest.fixture(autouse=True)
+    def _forget_temperature_memo(self) -> Any:
+        from particles.llm.adapters import anthropic as adapter
+
+        adapter._TEMPERATURE_UNSUPPORTED.clear()
+        yield
+        adapter._TEMPERATURE_UNSUPPORTED.clear()
+
+    async def test_the_column_round_trips_and_defaults_to_null(
+        self, db_session: AsyncSession
+    ) -> None:
+        kind = ProbeKind.CONTRADICTION
+        a = verdict_key(kind, "A.", "B.")
+        b = verdict_key(kind, "C.", "D.")
+        await record_verdict(db_session, kind, "v1", a, False, model="m", temperature="dropped")
+        await record_verdict(db_session, kind, "v1", b, False, model="m")
+        assert await _sampling_column(db_session) == ["dropped", None]
+
+    async def test_a_non_model_rung_records_none(self, db_session: AsyncSession) -> None:
+        from particles.core.rung_ladder import RungStamp
+        from particles.store.probe_verdict_store import record_rung_verdicts
+
+        key = verdict_key(ProbeKind.CONTRADICTION, "A.", "B.")
+        await record_rung_verdicts(db_session, RungStamp("exact", "1"), {key: "yes"}, shadow=True)
+        assert await _sampling_column(db_session) == ["none"]
+
+    async def test_a_census_on_an_accepting_model_records_sent(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _seed(db_session, _compatible_pair())
+        await _census(db_session, _client(lambda _text: NO))
+        assert await _sampling_column(db_session) == ["sent"]
+
+    async def test_a_census_on_a_refusing_model_records_dropped(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _seed(db_session, _compatible_pair())
+        await _census(db_session, _refusing_client(NO))
+        assert await _sampling_column(db_session) == ["dropped"]
 
 
 # ---------------------------------------------------------------------------

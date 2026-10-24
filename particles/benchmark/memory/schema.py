@@ -367,6 +367,23 @@ class QaConditionMetrics(BaseModel):
         return self.excluded_budget + self.excluded_infra + self.excluded_unrecorded
 
 
+class ReplayRecord(BaseModel):
+    """What the replay cache did for one run.
+
+    Outside :class:`RunSelection` on purpose: a replayed run asks the same
+    questions of the same tuple, so it is comparable; what it is not is an
+    independent sample, since every served reply is one frozen sample.
+    """
+
+    mode: str
+    #: Completions served from the cache.
+    served: int = 0
+    #: Completions sent to the provider.
+    sent: int = 0
+    #: Replies written to the cache.
+    recorded: int = 0
+
+
 class MemoryBenchmarkReport(BaseModel):
     """Output of one memory-benchmark run.
 
@@ -390,6 +407,9 @@ class MemoryBenchmarkReport(BaseModel):
     qa_no_memory: QaConditionMetrics | None = None
     quality_notes: list[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    #: The replay cache's work, when the run opened one (``--llm-replay``);
+    #: ``None`` for a run without, and on every report written before it.
+    replay: ReplayRecord | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +526,13 @@ def render_report_table(report: MemoryBenchmarkReport) -> str:
         knobs.append("stores REUSED (no extraction this run)")
     if knobs:
         lines.append(f"ablation: {'  '.join(knobs)} — compare only against a matching run")
+    if report.replay is not None and report.replay.served:
+        lines.append(
+            f"replayed: {report.replay.served} completion(s) served from the LLM replay "
+            f"cache ({report.replay.mode}), {report.replay.sent} sent, "
+            f"{report.replay.recorded} recorded; a replayed reply is one frozen sample, "
+            "so this run is not an independent repeat"
+        )
     lines.append("")
 
     r = report.retrieval_stage

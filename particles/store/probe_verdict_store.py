@@ -70,6 +70,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from particles.core.probe_verdict import RUNG_KIND_PREFIX, ProbeKind, VerdictKey, rung_kind
 from particles.core.rung_ladder import RungStamp
 from particles.db import Base
+from particles.llm.usage import NO_SAMPLING
 
 __all__ = [
     "POSITIVE_VERDICTS",
@@ -77,10 +78,12 @@ __all__ = [
     "ShadowStanding",
     "count_verdicts",
     "lookup_answer",
+    "lookup_stamped_verdicts",
     "lookup_verdicts",
     "record_answer",
     "record_verdict",
     "record_rung_verdicts",
+    "record_stamped_verdicts",
     "record_verdicts",
     "shadow_standings",
     "verdicts_for_pair",
@@ -119,6 +122,12 @@ class ProbeVerdictRow(Base):
     shadow: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    #: What the answering call sent: ``sent``, ``dropped``,
+    #: ``unset``, or ``none`` for a rung that makes no model call. ``sent``
+    #: says a fixed temperature was received, never that the answer is
+    #: reproducible. ``NULL`` on a row recorded before the column, or when the
+    #: answering provider reported nothing (an in-process one).
+    temperature: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     __table_args__ = (
         Index("ix_probe_verdicts_key", "probe_kind", "prompt_hash", "hash_a", "hash_b"),
@@ -167,10 +176,13 @@ async def record_verdicts(
     model: str,
     now: datetime | None = None,
     rung: RungStamp | None = None,
+    temperature: str | None = None,
 ) -> int:
     """Append each verdict whose key has no record, or whose newest record differs.
 
     ``rung`` stamps the rows with the ladder rung that asked.
+    ``temperature`` is what the answering calls sent, as
+    :func:`particles.llm.observe_sampling` observed it.
     Returns the number of rows written. Flushes; the caller commits.
     """
     if not verdicts:
@@ -187,10 +199,89 @@ async def record_verdicts(
             model=model,
             recorded_at=at,
             rung=None if rung is None else str(rung),
+            temperature=temperature,
         )
         for key, verdict in verdicts.items()
         if known.get(key) is not verdict
     ]
+    session.add_all(rows)
+    await session.flush()
+    return len(rows)
+
+
+async def lookup_stamped_verdicts(
+    session: AsyncSession,
+    kind: ProbeKind,
+    prompt_hash: str,
+    keys: Iterable[VerdictKey],
+) -> dict[VerdictKey, tuple[bool, str | None]]:
+    """The newest recorded verdict for each key under ``prompt_hash``, with its rung.
+
+    As :func:`lookup_verdicts`, plus the ``name@version`` stamp of the rung that
+    answered (``None`` on a row written without one). A caller that reads more
+    than yes or no from a ladder, such as which rung settled an update reading,
+    reads it here.
+    """
+    wanted = list(dict.fromkeys(keys))
+    found: dict[VerdictKey, tuple[int, bool, str | None]] = {}
+    for start in range(0, len(wanted), _CHUNK):
+        chunk = wanted[start : start + _CHUNK]
+        rows = await session.execute(
+            select(
+                ProbeVerdictRow.id,
+                ProbeVerdictRow.hash_a,
+                ProbeVerdictRow.hash_b,
+                ProbeVerdictRow.verdict,
+                ProbeVerdictRow.rung,
+            ).where(
+                ProbeVerdictRow.probe_kind == kind.value,
+                ProbeVerdictRow.prompt_hash == prompt_hash,
+                tuple_(ProbeVerdictRow.hash_a, ProbeVerdictRow.hash_b).in_(chunk),
+            )
+        )
+        for row_id, hash_a, hash_b, verdict, rung in rows:
+            key = (hash_a, hash_b)
+            if key not in found or row_id > found[key][0]:
+                found[key] = (row_id, verdict, rung)
+    return {key: (verdict, rung) for key, (_, verdict, rung) in found.items()}
+
+
+async def record_stamped_verdicts(
+    session: AsyncSession,
+    kind: ProbeKind,
+    prompt_hash: str,
+    verdicts: Mapping[VerdictKey, tuple[bool, RungStamp | None]],
+    *,
+    model: str,
+    now: datetime | None = None,
+) -> int:
+    """Append each verdict whose newest record differs in its value **or its rung**.
+
+    :func:`record_verdicts` skips a key whose newest verdict is unchanged, which
+    loses the rung that answered when a second reading now settles what a first
+    reading settled before. Returns the rows written. Flushes; the caller commits.
+    """
+    if not verdicts:
+        return 0
+    known = await lookup_stamped_verdicts(session, kind, prompt_hash, verdicts)
+    at = now or datetime.now(UTC)
+    rows = []
+    for key, (verdict, rung) in verdicts.items():
+        stamp = None if rung is None else str(rung)
+        if known.get(key) == (verdict, stamp):
+            continue
+        rows.append(
+            ProbeVerdictRow(
+                probe_kind=kind.value,
+                prompt_hash=prompt_hash,
+                hash_a=key[0],
+                hash_b=key[1],
+                verdict=verdict,
+                model=model,
+                recorded_at=at,
+                rung=stamp,
+            )
+        )
     session.add_all(rows)
     await session.flush()
     return len(rows)
@@ -205,10 +296,19 @@ async def record_verdict(
     *,
     model: str,
     now: datetime | None = None,
+    temperature: str | None = None,
 ) -> bool:
     """Record one verdict; True when a row was written."""
     return bool(
-        await record_verdicts(session, kind, prompt_hash, {key: verdict}, model=model, now=now)
+        await record_verdicts(
+            session,
+            kind,
+            prompt_hash,
+            {key: verdict},
+            model=model,
+            now=now,
+            temperature=temperature,
+        )
     )
 
 
@@ -253,10 +353,12 @@ async def record_answer(
     answer: str,
     model: str,
     now: datetime | None = None,
+    temperature: str | None = None,
 ) -> bool:
     """Append ``answer`` unless it is already the newest one recorded; True when written.
 
-    Flushes; the caller commits.
+    ``temperature`` is what the answering call sent. Flushes;
+    the caller commits.
     """
     if await lookup_answer(session, kind, prompt_hash, key, model=model) == answer:
         return False
@@ -270,6 +372,7 @@ async def record_answer(
             answer=answer,
             model=model,
             recorded_at=now or datetime.now(UTC),
+            temperature=temperature,
         )
     )
     await session.flush()
@@ -368,6 +471,7 @@ async def record_rung_verdicts(
             rung=str(stamp),
             rung_verdict=value,
             shadow=shadow,
+            temperature=NO_SAMPLING,
         )
         for key, value in verdicts.items()
         if known.get(key) != value

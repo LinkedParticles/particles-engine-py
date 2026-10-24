@@ -570,42 +570,39 @@ class TestEndToEnd:
             n == "score" or n.endswith("_score") for n in _field_names(RotBenchmarkReport)
         )
 
-    async def test_oracle_arm_is_deterministic(self, bow_encoder: None, tmp_path: Path) -> None:
-        kw: dict[str, Any] = {"arm": "oracle", "seeds": [43], "days": 30, "checkpoints": [30]}
-        a = await run_rot_benchmark(work_dir=tmp_path / "a", **kw)
-        b = await run_rot_benchmark(work_dir=tmp_path / "b", **kw)
-        assert a.metrics == b.metrics
-        assert [p.first_hit for p in a.worlds[0].probes] == [
-            p.first_hit for p in b.worlds[0].probes
-        ]
-
-    async def test_keep_stores_leaves_the_store_for_inspection(
-        self, bow_encoder: None, tmp_path: Path
+    async def test_oracle_arm_is_deterministic(
+        self, bow_encoder: None, tmp_path: Path, subtests: pytest.Subtests
     ) -> None:
-        await run_rot_benchmark(
-            arm="oracle",
-            seeds=[42],
-            days=30,
-            checkpoints=[30],
-            work_dir=tmp_path,
-            keep_stores=True,
-        )
-        assert (tmp_path / "rot-seed42.db").exists()
-        assert any((tmp_path / "blobs").rglob("*"))
+        """Two runs of one world agree, whatever they keep or record.
+
+        The two runs also carry the keep-stores and no-claim-text checks, which
+        were tests of their own with a run each: a 30-day world is about 8 s on
+        the CI runner, and neither knob may change what is measured, so the
+        comparison covers them too. Each check reports as its own subtest.
+        """
+        kw: dict[str, Any] = {"arm": "oracle", "seeds": [42], "days": 30, "checkpoints": [30]}
+        kept = await run_rot_benchmark(work_dir=tmp_path / "kept", keep_stores=True, **kw)
+        get_config().benchmark.record_claim_text = False
+        textless = await run_rot_benchmark(work_dir=tmp_path / "textless", **kw)
+
+        with subtests.test("two runs of one world measure the same"):
+            assert kept.metrics == textless.metrics
+            assert [p.first_hit for p in kept.worlds[0].probes] == [
+                p.first_hit for p in textless.worlds[0].probes
+            ]
+
+        with subtests.test("keep_stores leaves the store for inspection"):
+            assert (tmp_path / "kept" / "rot-seed42.db").exists()
+            assert any((tmp_path / "kept" / "blobs").rglob("*"))
+
+        with subtests.test("record_claim_text off drops the texts"):
+            hits = [h for p in textless.worlds[0].probes for h in p.hits]
+            assert hits and all(h.text is None for h in hits)
+            assert all(h.text for p in kept.worlds[0].probes for h in p.hits)
 
     async def test_no_encoder_is_refused(self, no_embedding_model: None) -> None:
         with pytest.raises(RotArmError, match="embedding"):
             await run_rot_benchmark(arm="oracle", seeds=[42], days=30, checkpoints=[30])
-
-    async def test_record_claim_text_off_drops_texts(
-        self, bow_encoder: None, tmp_path: Path
-    ) -> None:
-        get_config().benchmark.record_claim_text = False
-        report = await run_rot_benchmark(
-            arm="oracle", seeds=[42], days=30, checkpoints=[30], work_dir=tmp_path
-        )
-        hits = [h for p in report.worlds[0].probes for h in p.hits]
-        assert hits and all(h.text is None for h in hits)
 
 
 # ---------------------------------------------------------------------------

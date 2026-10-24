@@ -27,7 +27,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -49,6 +49,7 @@ from particles.core.conflict_resolution import (
     needs_rung_inputs,
     update_order_source,
 )
+from particles.core.duplicate_key import normalize_content
 from particles.core.generics import is_generic_claim
 from particles.core.ladders import TextPair, update_ladder
 from particles.core.observer_scope import BeliefScope, PairPrecondition
@@ -61,12 +62,14 @@ from particles.core.schema import (
     CorpusEntry,
     ExtractionStatus,
     ExtractorRef,
+    Mutability,
     Particle,
     ProvenanceRef,
     ProvenanceRefType,
     RelationCreatedBy,
     RelationType,
     Snapshot,
+    WarcRecordType,
     is_truth_apt,
 )
 from particles.core.stance import (
@@ -77,6 +80,7 @@ from particles.core.stance import (
 )
 from particles.core.status import Status, StatusReason, validate_transition
 from particles.corpus.deposit import load_blob
+from particles.corpus.refusals import RefusalKey, clear_refusals, record_refusals
 from particles.corpus.store import (
     claim_snapshot_for_extraction,
     get_entry,
@@ -101,6 +105,7 @@ from particles.extraction.general import (
     CandidateParticle,
     ExtractionResult,
     PageStat,
+    ReplyTally,
     candidate_to_particle,
     general_component_table,
     source_text_flags,
@@ -112,6 +117,7 @@ from particles.extraction.scope import (
     is_scope_exempt_source,
 )
 from particles.extraction.subject_gate import GATE_COMPONENT, gate_candidate_subjects, gate_digest
+from particles.ingest.absence import process_absence
 from particles.ingest.append_base import (
     AUTO_BASE,
     earlier_all_complete,
@@ -137,7 +143,7 @@ from particles.ingest.duplicate_suppression import (
     retired_value_note,
     suppression_note,
 )
-from particles.ingest.generation import cascade_superseded_generation
+from particles.ingest.generation import cascade_superseded_generation, late_generation_note
 from particles.ingest.ladder_shell import drive
 from particles.ingest.narrative_merge import (
     _merge_label,
@@ -167,6 +173,22 @@ from particles.ingest.partial_read import (
     chunking_change_note,
     decide_partial_keep,
     own_chunk_claims,
+)
+from particles.ingest.refusal_hold import current_refusal_pairings
+from particles.ingest.restatement import (
+    RESTATED_AS_KEY,
+    RestatementCandidate,
+    UpdateGuard,
+    match_restatements,
+    restated_annotation,
+    restatement_notes,
+)
+from particles.ingest.revision_pair import (
+    generation_order,
+    load_generation_claims,
+    revision_from,
+    revision_settled_note,
+    settle_by_generation,
 )
 from particles.ingest.routing import Route, route_particle
 from particles.ingest.routing import skips_conflict_resolution as _skips_conflict_resolution
@@ -220,6 +242,8 @@ from particles.store.particle_store import (
     get_active_particles_for_entry,
     get_particles_by_ids,
     insert_particle,
+    set_particle_property,
+    set_supersedes_if_unset,
     update_particle_status,
 )
 from particles.store.relation_store import create_relation
@@ -279,6 +303,14 @@ class SnapshotOutcome:
     claims after the cut were lost."""
     retried_replies: int = 0
     """Replies re-issued once at ``extraction.retry_max_tokens``."""
+    refused_calls: int = 0
+    """…of the failed calls, those the model declined."""
+    refusal_category: str | None = None
+    """The provider's category for the first declined call, when it reports one."""
+    refusal_recorded: bool = False
+    """Every call of the pass was refused, so the refusal was recorded and the
+    bulk paths hold the snapshot until the model, the content or the retry
+    window changes."""
     conflicts_read: int = 0
     """Probe-confirmed contradictions read a second time before the write loop."""
     conflicts_cleared: int = 0
@@ -287,6 +319,21 @@ class SnapshotOutcome:
     conflict_unread: int = 0
     """…of those, the pairs whose reading failed. A pair from the snapshot's own
     entry kept the probe's signal; a cross-entry one lost it."""
+    revision_settled: int = 0
+    """Confirmed contradictions between this snapshot and an earlier generation
+    of its own MUTABLE entry, settled by the generation rather than quarantined:
+    the new claim was written ACTIVE and the cascade retired the
+    old one, with no INCONSISTENCY record."""
+    restated: int = 0
+    """Candidates that restated an earlier generation's claim of their own
+    MUTABLE entry and were folded into it rather than minted."""
+    restatement_lineage: int = 0
+    """Earlier claims a reworded candidate retired by update, with the new
+    claim's ``supersedes`` naming them."""
+    restatement_shadow: int = 0
+    """Judged restatements that would have carried had the judge been admitted."""
+    restatement_unasked: int = 0
+    """Restatement pairs over ``generation.restatement.max_judged``, not asked."""
     append_fallback: int = 0
     """1 when an APPEND_ONLY snapshot the delta read covers was read whole
     instead; ``append_fallback_reason`` says why."""
@@ -304,6 +351,10 @@ class SnapshotOutcome:
     waiting_on_failed: bool = False
     """…and that snapshot is FAILED (its blob is missing): only restoring the
     blob or `particles reindex <entry>` releases the wait."""
+    absence_retired: list[str] | None = None
+    """Set when the snapshot was an ``ABSENT`` record: the ids
+    its processing retired, with no model call. ``None`` for every other
+    record."""
 
     @property
     def extracted(self) -> Literal["full", "partial", "none"]:
@@ -317,14 +368,15 @@ class SnapshotOutcome:
         return "partial" if self.truncated_replies else "full"
 
 
-#: The provider prefix agent-side extraction stamps a session's model with.
-_CLAUDE_CODE_PREFIX = "claude-code:"
-
-
 def _current_extraction_provider_model() -> str:
     """``"<provider>:<model>"`` the extraction purpose resolves to right now."""
     sel = get_config().llm.for_purpose("extraction")
     return f"{sel.provider}:{sel.model}"
+
+
+def refusal_only(reply_tally: ReplyTally, failed_calls: int) -> bool:
+    """Every call of the pass was refused: no call answered, none failed otherwise (§3)."""
+    return failed_calls > 0 and reply_tally.refused == failed_calls and reply_tally.answered == 0
 
 
 async def extract_snapshot(
@@ -345,6 +397,7 @@ async def extract_snapshot(
     ignore_partial: bool = False,
     provider_model: str | None = None,
     fail_closed_probes: bool = False,
+    before_apply: Callable[[], Awaitable[None]] | None = None,
 ) -> list[Particle]:
     """Run extraction for a single corpus snapshot.
 
@@ -386,11 +439,19 @@ async def extract_snapshot(
     from a failed read, since the reindex is about to retire those claims.
     ``provider_model`` names the pairing that produced the candidates when it
     is not the configured ``extraction`` purpose's, which selects the
-    calibration; agent-side extraction passes the session's model.
-    ``fail_closed_probes`` makes an unverifiable contradiction
-    probe on a candidate's primary pair quarantine instead of read as no
-    contradiction, the rule; agent-side extraction passes it on an
-    install that cannot serve the ``semantic_lint`` purpose.
+    calibration. ``fail_closed_probes`` makes an unverifiable
+    contradiction probe on a candidate's primary pair quarantine instead of
+    read as no contradiction, the rule, for a caller that cannot
+    serve the ``semantic_lint`` purpose. No caller passes either today: both
+    were added for agent-side extraction (deprecated) and are kept
+    as generic pipeline options.
+    ``before_apply`` is awaited once the extractor's read has
+    returned, before the pass reads the store again or writes anything, and
+    before an ABSENT record is processed. A caller running several snapshots'
+    reads at once passes it to wait for its turn at the store, so each
+    reconcile-and-write pass runs alone and sees the writes of the passes
+    before it. The turn is the caller's to release, after its own commit. The
+    first-run audit is the one caller; ``None`` changes nothing.
 
     Span-wrapped: the work runs under an ``extract.snapshot`` span so a
     request's time localizes across the embed / LLM / DB child spans, and the
@@ -417,6 +478,7 @@ async def extract_snapshot(
             ignore_partial=ignore_partial,
             provider_model=provider_model,
             fail_closed_probes=fail_closed_probes,
+            before_apply=before_apply,
         )
         span.set_attribute("particles.extracted_count", len(written))
         _extracted_counter.add(len(written))
@@ -441,6 +503,7 @@ async def _extract_snapshot_impl(
     ignore_partial: bool = False,
     provider_model: str | None = None,
     fail_closed_probes: bool = False,
+    before_apply: Callable[[], Awaitable[None]] | None = None,
 ) -> list[Particle]:
     """Body of :func:`extract_snapshot` (span-wrapped by the public function)."""
     # refuse to extract into a store with mismatched-schema
@@ -453,6 +516,33 @@ async def _extract_snapshot_impl(
     entry = await get_entry(session, entry_id)
     if entry is None:
         raise ValueError(f"Corpus entry {entry_id} not found")
+
+    # an ABSENT record is never read as content. It is
+    # dispatched to absence processing before the extractor is chosen, since
+    # it makes no extraction call and so is not gated by the egress posture.
+    absent = next(
+        (
+            s
+            for s in entry.snapshots
+            if s.snapshot_id == snapshot_id and s.warc_record_type is WarcRecordType.ABSENT
+        ),
+        None,
+    )
+    if absent is not None:
+        if skip_if_superseded and await get_snapshot_superseded_by(session, snapshot_id):
+            if outcome_out is not None:
+                outcome_out.skipped = "superseded"
+            return []
+        if absent.extraction_status is ExtractionStatus.COMPLETE:
+            if outcome_out is not None:
+                outcome_out.absence_retired = []
+            return []
+        if before_apply is not None:
+            await before_apply()
+        retired = await process_absence(session, entry_id=entry_id, snapshot_id=snapshot_id)
+        if outcome_out is not None:
+            outcome_out.absence_retired = retired
+        return []
 
     # Select extractor by registry priority — the routing every
     # other consumer reads back through select_extractor.
@@ -549,8 +639,13 @@ async def _extract_snapshot_impl(
     # extraction wait on its batch without pinning one.
     run_fingerprint = await compute_context_fingerprint(session)
 
-    await claim_snapshot_for_extraction(session, snapshot_id, started_at=datetime.now(UTC))
-    await session.commit()
+    # Under the writer lock, like every other write here: a caller
+    # running several snapshots at once claims while another's write pass
+    # holds the store, and the lock queues the claim instead of leaving it to
+    # race ``busy_timeout``.
+    async with write_lock():
+        await claim_snapshot_for_extraction(session, snapshot_id, started_at=datetime.now(UTC))
+        await session.commit()
 
     # On Ctrl+C, programming error, a DB error, or any other failure after the
     # claim, release it so the next run picks the snapshot up. Without this, a
@@ -579,6 +674,7 @@ async def _extract_snapshot_impl(
             partial_policy=partial_policy,
             provider_model=provider_model,
             fail_closed_probes=fail_closed_probes,
+            before_apply=before_apply,
         )
     except BaseException:
         await _release_claim(session, snapshot_id)
@@ -657,6 +753,7 @@ async def _extract_claimed(
     partial_policy: _PartialPolicy | None = None,
     provider_model: str | None = None,
     fail_closed_probes: bool = False,
+    before_apply: Callable[[], Awaitable[None]] | None = None,
 ) -> list[Particle]:
     """Everything :func:`_extract_snapshot_impl` does once it holds the claim."""
     entry_id = entry.entry_id
@@ -733,6 +830,15 @@ async def _extract_claimed(
             **delta_kwargs,
         )
 
+    # the read is done, and everything below reads the store again or
+    # writes it. A caller reading several snapshots at once waits here for its
+    # turn. The commit ends any read transaction the extractor opened (the
+    # carry-forward lookup) before the passes ahead of this one wrote, so the
+    # reads below see their writes; it has nothing to write.
+    if before_apply is not None:
+        await before_apply()
+        await session.commit()
+
     # a delta that could not be used is never silent. The reason
     # is the pipeline's (no base, the raw prefix, another extractor, the knob)
     # or the extractor's (the decoded prefix, a binary source).
@@ -807,6 +913,9 @@ async def _extract_claimed(
             outcome_out.rebilled_calls = keep.resent_calls
         outcome_out.truncated_replies = reply_tally.truncated
         outcome_out.retried_replies = reply_tally.retried
+        outcome_out.refused_calls = reply_tally.refused
+        if reply_tally.refusals:
+            outcome_out.refusal_category = reply_tally.refusals[0].category
     if keep is not None:
         discarded = sum(1 for c in result.candidates if c.chunk_hash not in keep.kept_hashes)
         result.candidates = [c for c in result.candidates if c.chunk_hash in keep.kept_hashes]
@@ -830,6 +939,25 @@ async def _extract_claimed(
         )
     elif result.transient_error_count:
         await update_extraction_status(session, snapshot_id, ExtractionStatus.PENDING)
+        # a pass whose every call was refused is recorded, so the
+        # bulk paths stop re-sending it. Never for an APPEND_ONLY entry, whose
+        # snapshots are read oldest first as deltas.
+        if (
+            refusal_only(reply_tally, result.transient_error_count)
+            and entry.mutability is not Mutability.APPEND_ONLY
+        ):
+            await record_refusals(
+                session,
+                content_hash=snapshot.content_hash,
+                snapshot_id=snapshot_id,
+                entry_id=entry_id,
+                keys=[
+                    RefusalKey(r.purpose, r.provider_model, r.category)
+                    for r in reply_tally.refusals
+                ],
+            )
+            if outcome_out is not None:
+                outcome_out.refusal_recorded = True
         # Commit the PENDING reset eagerly so concurrent writers see the
         # released-back state. Same rationale as the IN_PROGRESS commit
         # above — paired writes that must be visible without holding the
@@ -976,14 +1104,6 @@ async def _extract_claimed(
     # calibration without re-benchmarking.
     current_model = provider_model or _current_extraction_provider_model()
     calibration = await get_calibration(session, ext_agent, current_model)
-    # a session's model is stamped ``claude-code:<model>``, and its
-    # calibration is fitted by running the same model through the API, where
-    # the pairing is ``anthropic:<model>``. Same model, same prompt: read the
-    # API fit when the session pairing has none of its own.
-    if calibration is None and current_model.startswith(_CLAUDE_CODE_PREFIX):
-        calibration = await get_calibration(
-            session, ext_agent, "anthropic:" + current_model.removeprefix(_CLAUDE_CODE_PREFIX)
-        )
     # a record this SDK will not apply is dropped here rather than
     # inside candidate_to_particle, so the operator gets one warning per run
     # instead of one per particle, and everything downstream sees the single
@@ -1182,6 +1302,53 @@ async def _extract_claimed(
         updates_only=updates_only,
         entries=entries,
     )
+    # the existing claims stated only by an earlier generation of
+    # this MUTABLE entry, and not restated by this one. A pair with such a
+    # claim is settled by the generation, not quarantined. Every fact it rests
+    # on is known here, so it is decided once, before any probe or write: one
+    # batched currency read on every store, the capture order from the loaded
+    # entry, and the restated set from the extraction result.
+    pool: dict[str, Particle] = {p.id: p for p in existing}
+    for pairs in candidate_pairs:
+        for other in pairs.pairable():
+            pool.setdefault(other.id, other)
+    generation = await load_generation_claims(
+        session,
+        list(pool.values()),
+        entry=entry,
+        snapshot=snapshot,
+        carry_forward_ids=result.carry_forward_ids,
+    )
+    # before the cascade may retire an earlier claim this pass
+    # restates in other words, ask whether the two are one claim. A carried
+    # candidate is folded into its earlier claim in the write loop and takes
+    # no part in the probes below; the carried claims join the restated set
+    # (§3), so they form no revision pair.
+    await session.commit()
+    restatement = await match_restatements(
+        session,
+        [
+            RestatementCandidate(
+                content=c.content,
+                holder=holder_from_properties(c.properties),
+                embedding=embeddings[i] if i < len(embeddings) else None,
+                skip=_skips_conflict_resolution(c.properties),
+            )
+            for i, c in enumerate(result.candidates)
+        ],
+        [(p, emb) for p, emb in zip(existing, existing_embs, strict=False) if p.id in generation],
+        judge_call=_restatement_judge_call,
+        read_slot=_restatement_slot,
+        probe_contradiction=_has_contradiction_signal,
+    )
+    for i in restatement.carried:
+        candidate_pairs[i] = CandidatePairs()
+    revision = revision_from(
+        generation,
+        pool.values(),
+        candidate_contents=[c.content for c in result.candidates],
+        carried=restatement.carried_ids,
+    )
     # The probes below are LLM round-trips. End the gather's read transaction
     # first so no pooled connection is held across them (a pooled
     # run resumes many of these tasks at once).
@@ -1208,6 +1375,8 @@ async def _extract_claimed(
                 entries,
                 require_attribution=updates_only,
                 admitted_out=admitted,
+                revision=revision,
+                known=restatement.slot_verdicts,
             )
             if same_slot_admits
             else {}
@@ -1229,6 +1398,8 @@ async def _extract_claimed(
                 plan_update_probes(pairs, probes, asked=admitted),
                 entries,
                 require_attribution=updates_only,
+                revision=revision,
+                known=restatement.slot_verdicts,
             )
         )
         selections.append(select_pairs(pairs, probes, slots, admitted))
@@ -1272,6 +1443,8 @@ async def _extract_claimed(
         else DuplicateIndex()
     )
     suppressed_into: list[str] = []
+    # the earlier claims this pass folded a restatement into.
+    restated_into: list[str] = []
     # the retired-value index for this pass — judgment-retired twins
     # and open holds of some candidate, one probe, consulted after the ACTIVE
     # index above. ``supersede_ids`` are ACTIVE and so never in it; passed for
@@ -1287,6 +1460,9 @@ async def _extract_claimed(
     )
     retired_held: list[str] = []
     retired_absorbed: list[str] = []
+    # the existing claims of the revision pairs this pass settled
+    # by the generation, one per pair, disclosed below.
+    revision_settled: list[str] = []
 
     # hold the cross-process writer lock around the write phase
     # only. The LLM extraction and the §6.6 contradiction probes above ran
@@ -1373,6 +1549,19 @@ async def _extract_claimed(
                 retired_ids=retired,
             )
 
+            earlier = restatement.carried.get(i)
+            if earlier is not None and route is not Route.SUPPRESS:
+                # this candidate restates an earlier generation's
+                # claim that suppression does not reach (another
+                # wording, or other subjects). Record this snapshot on that
+                # claim as a suppression would, and keep the newer wording
+                # beside it; the attestation check then keeps it out of the
+                # cascade. An exact twin is left to the suppression below.
+                await _fold_restatement(session, particle, earlier, snapshot_id)
+                index_to_id[i] = earlier.id
+                restated_into.append(earlier.id)
+                continue
+
             if route is Route.UNCHECKED:
                 # DOCUMENT_META and non-asserted candidates
                 # skip §6.6 entirely — they would only manufacture spurious
@@ -1455,6 +1644,8 @@ async def _extract_claimed(
                     observer=gate,
                     candidate_scope=candidate_scope,
                     reading=selection.reading,
+                    revision_pair=target.id in revision,
+                    settled_out=revision_settled,
                 )
                 if resolved is not None:
                     written.append(resolved)
@@ -1471,6 +1662,7 @@ async def _extract_claimed(
                             entries=entries,
                             precondition=candidate_pairs[i].precondition,
                             updatable=selection.updatable,
+                            revision=revision,
                         )
 
         # record every declined, probe-confirmed pair once the claim
@@ -1519,15 +1711,47 @@ async def _extract_claimed(
         # stale generation and demote the very particle the suppression kept.
         # The cascade also leaves alone anything another entry's current
         # snapshot still attests; these exclusions are the belt.
+        # An older snapshot extracted late is measured against the newer
+        # generation, so it retires only its own output.
+        retired_late: list[str] = []
+        # a reworded candidate whose two update readings said its
+        # earlier claim's value changed retires that claim by update, with the
+        # new claim naming it, before the cascade would retire it unnamed.
+        lineage_written = 0
+        for i, earlier in restatement.lineage.items():
+            new_id = index_to_id.get(i)
+            if new_id is not None and await _apply_restatement_lineage(session, earlier.id, new_id):
+                lineage_written += 1
         await cascade_superseded_generation(
             session,
             entry_id=entry_id,
             current_snapshot_id=snapshot_id,
             exclude_ids=(
-                frozenset(result.carry_forward_ids) | supersede_ids | frozenset(suppressed_into)
+                frozenset(result.carry_forward_ids)
+                | supersede_ids
+                | frozenset(suppressed_into)
+                | restatement.carried_ids
             ),
+            late_out=retired_late,
         )
+        # carries, lineage, would-be carries and unasked pairs are
+        # disclosed as a suppression is.
+        for note in restatement_notes(
+            restatement, carried=len(restated_into), lineage_written=lineage_written
+        ):
+            result.quality_notes.append(note)
+            log.info("Snapshot %s: %s", snapshot_id, note)
+        if outcome_out is not None:
+            outcome_out.restated += len(restated_into)
+            outcome_out.restatement_lineage += lineage_written
+            outcome_out.restatement_shadow += restatement.shadow
+            outcome_out.restatement_unasked += restatement.unasked
 
+        # a late pass is never silent either.
+        if retired_late:
+            note = late_generation_note(len(retired_late))
+            result.quality_notes.append(note)
+            log.info("Snapshot %s: %s", snapshot_id, note)
         # suppression is never silent. The count reaches the
         # operator through the extraction quality notes and, via
         # ``suppressed_ids_out``, the `particles extract` summary line.
@@ -1542,6 +1766,14 @@ async def _extract_claimed(
             log.info("Snapshot %s: %s", snapshot_id, note)
         if suppressed_ids_out is not None:
             suppressed_ids_out.extend(suppressed_into)
+        # a revision pair settled by the generation leaves no
+        # record, so it is counted, as a suppression is.
+        if revision_settled:
+            note = revision_settled_note(len(revision_settled))
+            result.quality_notes.append(note)
+            log.info("Snapshot %s: %s", snapshot_id, note)
+        if outcome_out is not None:
+            outcome_out.revision_settled += len(revision_settled)
         # a left-standing divergence is never silent either.
         if divergences:
             note = divergence_note(divergences)
@@ -1582,6 +1814,8 @@ async def _extract_claimed(
                 extracted_through=_extracted_through(content, result, entry.source_type),
                 components=components,
             )
+            # the current model answered this content.
+            await clear_refusals(session, snapshot.content_hash, current_refusal_pairings())
         log.info(
             "Extracted %d particles from snapshot %s (entry %s; %d duplicate(s) suppressed)",
             len(written),
@@ -2790,6 +3024,97 @@ async def _hold_retired_reassertion(
     return held
 
 
+async def _restatement_judge_call(prompt: str, *, max_tokens: int) -> str | None:
+    """The duplicate judge's model call for the restatement match.
+
+    Deferred import: a test seam. Tests patch ``particles.llm.breaker._llm_call``,
+    and a module-top binding would freeze the reference (tests/AGENTS.md
+    § Mocking strategy).
+    """
+    from particles.llm.breaker import _llm_call
+
+    return await _llm_call(prompt, max_tokens=max_tokens)
+
+
+async def _restatement_slot(earlier: str, later: str) -> UpdateGuard:
+    """The update ladder's readings of a restatement pair (§2).
+
+    ``any_changes`` is whether the first reading said ``CHANGES``: the second
+    reading runs only then, so a settled verdict from the second rung means
+    the first said it.
+    """
+    reading = await read_update_slot(earlier, later)
+    first_changed = reading.decided_by is not None and reading.decided_by.name == UPDATE_SECOND_RUNG
+    return UpdateGuard(
+        verdict=reading.verdict,
+        any_changes=first_changed or reading.verdict is SlotVerdict.CHANGES,
+    )
+
+
+async def _fold_restatement(
+    session: AsyncSession, particle: Particle, earlier: Particle, snapshot_id: str
+) -> None:
+    """Fold a carried candidate into the earlier claim it restates.
+
+    The candidate's provenance refs are appended to the earlier claim, as an
+    exact-duplicate suppression appends them, and a reworded restatement leaves its
+    wording as the ``restated_as`` annotation. ``content`` is never rewritten.
+    """
+    for prov_ref in particle.provenance:
+        await append_provenance_ref(session, earlier.id, prov_ref)
+    if normalize_content(particle.content) != normalize_content(earlier.content):
+        await set_particle_property(
+            session,
+            earlier.id,
+            RESTATED_AS_KEY,
+            dict(restated_annotation(snapshot_id, particle.content)),
+        )
+    log.info(
+        "Restatement carried: candidate folded into %s",
+        earlier.id[:8],
+    )
+
+
+async def _apply_restatement_lineage(session: AsyncSession, earlier_id: str, new_id: str) -> bool:
+    """Retire ``earlier_id`` by update in favour of ``new_id``.
+
+    Only when both are still ``ACTIVE`` and the new claim names no
+    predecessor yet: a pair rung 2.5 already settled in the write loop, a
+    candidate folded or suppressed into another claim, or a quarantined
+    candidate leaves nothing to do. Returns whether the retirement was written.
+    """
+    if new_id == earlier_id:
+        return False
+    found = await get_particles_by_ids(session, [earlier_id, new_id])
+    earlier, new = found.get(earlier_id), found.get(new_id)
+    if earlier is None or new is None:
+        return False
+    if earlier.status is not Status.ACTIVE or new.status is not Status.ACTIVE:
+        return False
+    if new.supersedes is not None:
+        return False
+    await update_particle_status(
+        session, earlier_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
+    )
+    await set_supersedes_if_unset(session, new_id, earlier_id)
+    await _record_planned(
+        session,
+        plan_update_event(
+            earlier_id, new_id, route=RESTATEMENT_ROUTE, decided_by=update_decided_by()
+        ),
+    )
+    log.info(
+        "Restatement lineage: %s superseded by %s",
+        earlier_id[:8],
+        new_id[:8],
+    )
+    return True
+
+
+#: The ``route`` of an ``UPDATE_SUPERSESSION`` event the restatement lineage writes.
+RESTATEMENT_ROUTE = "generation"
+
+
 async def _record_planned(session: AsyncSession, event: PlannedEvent) -> None:
     """Record one :class:`~particles.ingest.conflict_plan.PlannedEvent`."""
     await record_event(
@@ -2872,6 +3197,8 @@ async def _resolve_conflict(
     observer: ObserverGate | None = None,
     candidate_scope: BeliefScope | None = None,
     reading: str | None = None,
+    revision_pair: bool = False,
+    settled_out: list[str] | None = None,
 ) -> Particle | None:
     """Apply the §6.6 conflict-resolution ladder for one (existing, new) pair.
 
@@ -2930,6 +3257,13 @@ async def _resolve_conflict(
     ``reading`` is the instruction a second reading confirmed ``probe`` under
     (extraction only); a rung-3 record carries it as
     ``conflict:reading``.
+    ``revision_pair`` says ``existing`` is stated only by an earlier
+    generation of the candidate's own MUTABLE entry, which the candidate's
+    generation does not restate (extraction only). Rung 3 then
+    does not apply: an ``INCONSISTENT`` verdict is written as ``CORROBORATES``,
+    the candidate ``ACTIVE``, and the cascade retires ``existing``; rung 2.5
+    takes the candidate as the newer claim. ``settled_out`` (when given)
+    collects ``existing``'s id for each pair settled that way.
 
     Returns:
       - The winning Particle (inserted as ACTIVE) if trust resolution prefers
@@ -2992,6 +3326,7 @@ async def _resolve_conflict(
                 slot=slot,
             ),
             effective_single=effective_single,
+            revision_pair=revision_pair,
         )
 
     outcome = decide_ladder(
@@ -3005,6 +3340,17 @@ async def _resolve_conflict(
         trust_differential_threshold=get_config().trust.differential_threshold,
         same_slot_update=same_slot_update,
     )
+    if revision_pair and (settled := settle_by_generation(outcome)) is not None:
+        # the generation, not the ladder, says which version is
+        # operative (techspec §7.4). No record, quarantine or dropped event.
+        outcome = settled
+        if settled_out is not None:
+            settled_out.append(existing.id)
+        log.info(
+            "Revision pair: %s is stated only by an earlier generation of this "
+            "entry; the new claim is written ACTIVE and the cascade retires it",
+            existing.id[:8],
+        )
     plan = plan_conflict_writes(
         outcome,
         new_particle,
@@ -3041,12 +3387,14 @@ async def _gather_rung_inputs(
     *,
     order_source: UpdateOrderSource | None,
     effective_single: bool,
+    revision_pair: bool = False,
 ) -> tuple[RungInputs, str | None]:
     """Read the §6.4 rung inputs for a signalled pair, and the candidate's domain.
 
     A staged gather: the supersession prior only when enabled, the trust
     scores from the Extension B layered lookup (the URL baseline as
-    fallback), and the rung 2.5 order from whichever source applies.
+    fallback), and the rung 2.5 order from whichever source applies. On a
+    revision pair the order's direction is the generation's.
     """
     existing_source_ref = next(
         (ref for ref in existing.provenance if ref.type == ProvenanceRefType.SOURCE),
@@ -3119,6 +3467,8 @@ async def _gather_rung_inputs(
             require_attribution=not effective_single,
             existing_date=existing_latest,
         )
+        if revision_pair:
+            order = generation_order(order)
     elif order_source is UpdateOrderSource.OWN_ASSERTION:
         # the assertion pathway's one carve-out — an agent
         # revising its own earlier assertion.
@@ -3301,6 +3651,8 @@ async def _probe_update_slots(
     *,
     require_attribution: bool,
     admitted_out: set[str] | None = None,
+    revision: Collection[str] = frozenset(),
+    known: Mapping[tuple[str, str], SlotVerdict | None] | None = None,
 ) -> dict[str, SlotVerdict]:
     """Gather 3 of the §6.6 pair selection: the update probe on each datable pair.
 
@@ -3315,7 +3667,11 @@ async def _probe_update_slots(
     would be pure spend). The rest are asked with the earlier claim first, so
     the probe reads the direction the rung would retire in. Runs outside the
     write lock, like the contradiction probe (F4.3). A pair whose probe did not
-    complete gets no verdict, which keeps rung 2.5 off it.
+    complete gets no verdict, which keeps rung 2.5 off it. A pair whose
+    existing claim is in ``revision`` is asked with the candidate as the later
+    claim, the direction rung 2.5 will take on it. ``known``
+    holds the readings the restatement match already took, by ``(earlier,
+    later)`` text, so a pair it asked is not asked again.
     """
     slots: dict[str, SlotVerdict] = {}
     for other in confirmed:
@@ -3334,6 +3690,8 @@ async def _probe_update_slots(
         await session.commit()
         if order is None:
             continue
+        if other.id in revision:
+            order = 1
         earlier, later = (
             (other.content, candidate.content) if order > 0 else (candidate.content, other.content)
         )
@@ -3341,7 +3699,10 @@ async def _probe_update_slots(
             if not admits_update_first(earlier):
                 continue
             admitted_out.add(other.id)
-        verdict = await _has_update_signal(earlier, later)
+        if known is not None and (earlier, later) in known:
+            verdict = known[(earlier, later)]
+        else:
+            verdict = await _has_update_signal(earlier, later)
         if verdict is None:
             continue
         slots[other.id] = verdict
@@ -3495,6 +3856,7 @@ async def _apply_update_extras(
     entries: Mapping[str, CorpusEntry | None],
     precondition: Mapping[str, PairPrecondition],
     updatable: frozenset[str],
+    revision: Collection[str] = frozenset(),
 ) -> None:
     """Resolve further confirmed same-subject pairs by rung 2.5 alone.
 
@@ -3505,7 +3867,14 @@ async def _apply_update_extras(
     converges here; a pair that does not qualify is left as it was.
     """
     for loser_id, by_id in plan_update_extras(
-        winner, winner_entry, winner_snapshot_id, others, entries, precondition, updatable
+        winner,
+        winner_entry,
+        winner_snapshot_id,
+        others,
+        entries,
+        precondition,
+        updatable,
+        revision=revision,
     ):
         await update_particle_status(
             session, loser_id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE

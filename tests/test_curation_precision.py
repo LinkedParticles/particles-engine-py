@@ -30,6 +30,7 @@ from particles.operations.curation.precision import (
     PRECISION_EVENTS,
     RIGHT_MEANS,
     Outcome,
+    _membership,
     classify_event,
     curation_precision,
     kind_of_key,
@@ -459,6 +460,54 @@ class TestSummarise:
         ]
         report = summarise_precision(events, since=SINCE, until=UNTIL, open_cards=current)
         assert [r.kind for r in report.kinds] == ["stale", "no_subject"]
+
+
+class TestSubjectlessSource:
+    """a source card is ruled on by key, its beliefs by their own keys."""
+
+    def test_resolving_a_member_records_its_own_key_not_the_sources(self) -> None:
+        source = _card(CardKind.SUBJECTLESS_SOURCE, "a", "b", corpus_entry_id="E")
+        retract = _event(OperatorEventType.PARTICLE_RETRACTED, refs=["a"])
+        pairs = classify_event(retract, membership=_membership([source]), deposited_urls=())
+        assert pairs == [("no_subject:a", Outcome.ACTED)]
+
+    def test_card_is_acted_when_every_member_was_resolved_one_by_one(self) -> None:
+        source = _card(CardKind.SUBJECTLESS_SOURCE, "a", "b", corpus_entry_id="E")
+        events = [
+            _event(OperatorEventType.SUBJECTS_RELINKED, refs=["a"], payload={"batch": False}),
+            _event(OperatorEventType.PARTICLE_RETRACTED, refs=["b"]),
+        ]
+        report = summarise_precision(events, since=SINCE, until=UNTIL, retired_cards=[source])
+        assert _row(report, CardKind.SUBJECTLESS_SOURCE).acted == 1
+        assert _row(report, CardKind.NO_SUBJECT).acted == 2
+
+    def test_a_card_left_with_unresolved_members_expired(self) -> None:
+        source = _card(CardKind.SUBJECTLESS_SOURCE, "a", "b", corpus_entry_id="E")
+        events = [_event(OperatorEventType.PARTICLE_RETRACTED, refs=["a"])]
+        report = summarise_precision(events, since=SINCE, until=UNTIL, retired_cards=[source])
+        assert _row(report, CardKind.SUBJECTLESS_SOURCE).expired == 1
+
+    def test_a_dismissal_is_dismissed_and_does_not_settle_the_source(self) -> None:
+        key = "subjectless_source:E"
+        dismissal = _event(
+            OperatorEventType.CURATION_CARD_SNOOZED,
+            refs=["a", "b"],
+            payload={"card_key": key, "snoozed_until": None},
+        )
+        pairs = classify_event(dismissal, membership={}, deposited_urls=())
+        assert pairs == [(key, Outcome.DISMISSED)]
+        # A dismissal before the window leaves a re-raised card open (§3).
+        before = _event(
+            OperatorEventType.CURATION_CARD_SNOOZED,
+            at=SINCE - timedelta(days=3),
+            refs=["a"],
+            payload={"card_key": key, "snoozed_until": None},
+        )
+        fresh = _card(CardKind.SUBJECTLESS_SOURCE, "c", "d", corpus_entry_id="E")
+        report = summarise_precision(
+            [], since=SINCE, until=UNTIL, open_cards=[fresh], standing_before=[before]
+        )
+        assert _row(report, CardKind.SUBJECTLESS_SOURCE).open == 1
 
 
 class TestRender:

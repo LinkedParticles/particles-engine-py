@@ -72,6 +72,7 @@ from particles.ingest.pipeline import (
 from particles.ingest.subject_resolver import load_speaker_key
 from particles.ingest.update_supersession import SpeakerKey, SubjectIndex, particle_subject_ids
 from particles.llm.breaker import llm_circuit_open
+from particles.llm.usage import observe_sampling
 from particles.operations.probe_ledger import recall, remember
 from particles.operations.reconcile import _pair_update_order
 from particles.store.candidate_cache import load_active_candidates
@@ -326,7 +327,8 @@ async def _ask(
     the cursor.
     """
     for score, paraphrase in chosen:
-        reading = await _read_update_slot(paraphrase.content, winner.content)
+        with observe_sampling() as sampling:
+            reading = await _read_update_slot(paraphrase.content, winner.content)
         report.probes += 1
         if reading.purpose == "verification":
             report.readings += 1
@@ -342,6 +344,7 @@ async def _ask(
             {_slot_key(paraphrase, winner): admits_update(reading.verdict)},
             purpose=reading.purpose,
             rung=reading.decided_by,
+            temperature=sampling.value(),
         )
         if reading.verdict is not SlotVerdict.CHANGES:
             report.kept.append(

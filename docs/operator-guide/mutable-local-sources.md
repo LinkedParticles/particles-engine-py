@@ -252,6 +252,63 @@ Two properties of that demotion are worth knowing:
 confidence are intact, the particles drop out of query results and the
 projection, and they surface in `particles curate` if you want to look at them.
 
+### A reworded sentence keeps its belief
+
+A short file is read whole on every change, and the model does not repeat
+itself word for word: a sentence you never touched can come back as a
+paraphrase. Without a check, the demotion above would retire the old belief and
+the new version would mint a reworded copy, and the old belief's review, trust
+and history would stay behind on the retired copy.
+
+Before the demotion runs, each new claim is paired with the nearest belief the
+previous version alone stated, and the pass asks whether the two are one claim.
+Two readings answer:
+
+- **The same sentence**, ignoring quotation marks, dashes and other typography:
+  the old belief is kept at once.
+- **A model judgement** for a paraphrase. The old belief is kept only when the
+  judge says it is the same claim, a separate reading finds that its value did
+  not change, and the contradiction check finds no conflict.
+
+A kept belief gains the new version as a source and keeps its first wording.
+`particles particle show` prints the file's current wording under it as
+"Restated as". The `extract` summary counts these as restated claims carried
+forward.
+
+When the judge reads a pair as two different claims and two update readings
+find that the new one gives the old one's value a new value, the old belief is
+retired as an update instead, and the new belief records which one it replaced.
+
+The model judgement is in an admission period at first: its answers are
+recorded and counted (`RESTATEMENT_SHADOW` in the quality notes), and nothing is
+kept on its word until you turn it on. The settings live under
+`generation.restatement` in `config.yaml`:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | The whole check. `false` restores the old behaviour. |
+| `judge_admitted` | `false` | Whether the judge's verdict keeps a belief. Turn it on once its labelled answers meet the bar below. |
+| `floor` | `0.70` | How close (cosine) a pair must be to be asked. |
+| `max_judged` | `64` | Pairs put to the judge per extraction; the rest are reported as `RESTATEMENT_UNASKED`. |
+| `lineage` | `true` | Whether a changed value is recorded as an update of the old belief. |
+
+To decide when to turn the judge on, print its recorded verdicts with both
+texts and label each row `same`, `changed` or `different`:
+
+```bash
+python -m particles.operations.restatement_sheet > restatements.tsv
+python -m particles.operations.restatement_sheet --summary restatements.tsv
+```
+
+The summary prints the lower bound of a 95 % confidence interval on the judge's
+precision. Turn `judge_admitted` on when at least 100 labelled rows give a bound
+of 0.95 or more. The sheet holds text from your files, so keep it outside any
+repository.
+
+Each judged pair costs one short model call plus one update reading. The
+judge's verdict is remembered, so the same pair is not judged again on the next
+extraction.
+
 ### Only the newest pending version is extracted
 
 Deposits are free and extraction runs when you choose, so a file edited five
@@ -282,8 +339,9 @@ What to know about it:
   [Reindex → Append-only sources](lint-and-review.md#append-only-sources)).
 - **A skipped snapshot is marked, not deleted.** It is recorded as `COMPLETE`
   with the id of the snapshot that replaced it, and its content stays in the
-  corpus. To extract an intermediate version on purpose, name it: `particles
-  extract <entry> --snapshot-id <id>`.
+  corpus. To extract an intermediate version on purpose, name it and confirm:
+  `particles extract <entry> --snapshot-id <id> --force` (see the next
+  section for what that does).
 - **A newer snapshot only counts if it can be extracted.** One that failed, or
   whose blob is missing from disk, never causes an older one to be skipped.
 - **To extract every version**, set `extraction.collapse_superseded_pending:
@@ -298,6 +356,31 @@ uv run python scripts/measure_pending_backlog.py
 ```
 
 It makes no LLM calls and writes nothing.
+
+### Extracting an older version never replaces the current one
+
+Which version of a file is current is decided by when each version was
+captured, never by the order the versions are extracted in. Extracting an
+older version after a newer one leaves the newer version's beliefs ACTIVE: the
+older version's beliefs that the current one does not state are retired again
+in the same pass (`PROVENANCE_STALE`), and a belief both versions state keeps
+its single ACTIVE copy. The `extract` summary carries a `LATE_GENERATION`
+quality note with the count when this happens.
+
+Two commands steer you away from it:
+
+- `particles extract <entry> --snapshot-id <id>` refuses a snapshot older than
+  the file's current version unless you pass `--force`. Extracting it pays the
+  model for beliefs that are then retired.
+- `particles reindex` with `--extractor-version`, `--extractor-id`,
+  `--provider-model` or the stale-schema scope selects snapshots through the
+  beliefs that match, and a belief carried forward from an earlier version
+  still names the snapshot it was first extracted from. For a mutable file,
+  `reindex` re-extracts the current version instead of that older snapshot.
+  The plan line counts them (`N older snapshot(s) replaced by their entry's
+  current version`). A belief that names only the older snapshot is picked up
+  again by the next `reindex` over the same version, so a second run finishes
+  moving it to the new extractor.
 
 ## Running it unattended
 

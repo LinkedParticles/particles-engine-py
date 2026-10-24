@@ -831,3 +831,120 @@ class TestSpecTierSync:
 
 if TYPE_CHECKING:
     from particles.conformance.types import ConformanceReport, FieldStat
+
+
+# ---------------------------------------------------------------------------
+# Judging a record against the contract this SDK knows (D7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sdk_at_1_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the validators (and the codec) read ``SCHEMA_VERSION`` as 1.2.0.
+
+    Both read the attribute on ``particles.core.schema`` at call time.
+    """
+    import particles.core.schema as core_schema
+
+    monkeypatch.setattr(core_schema, "SCHEMA_VERSION", "1.2.0")
+
+
+def _record_at(version: str, **extra: object) -> dict[str, object]:
+    import json
+
+    doc: dict[str, object] = json.loads(_make_valid_particle().model_dump_json())
+    doc["schema_version"] = version
+    doc.update(extra)
+    return doc
+
+
+@pytest.mark.usefixtures("sdk_at_1_2")
+class TestRecordJudgement:
+    def test_newer_minor_record_with_an_unknown_key_passes_with_a_note(self) -> None:
+        from particles.conformance.jsonschema import judge_particle_dict
+        from particles.core.schema_version import SchemaCompatibility
+
+        verdict = judge_particle_dict(_record_at("1.3.0", future_field={"a": 1}))
+        assert verdict.passed, verdict.errors
+        assert verdict.compatibility is SchemaCompatibility.NEWER_MINOR
+        assert verdict.unchecked_keys == ["future_field"]
+        [note] = verdict.notes
+        assert "were not checked" in note and "future_field" in note
+
+    def test_newer_minor_record_still_fails_on_a_declared_field(self) -> None:
+        from particles.conformance.jsonschema import judge_particle_dict
+
+        verdict = judge_particle_dict(_record_at("1.3.0", status="NOT_A_STATUS"))
+        assert verdict.judgeable
+        assert not verdict.passed
+        assert verdict.errors
+
+    @pytest.mark.parametrize("version", ["1.2.0", "1.1.0", "1.2.4"])
+    def test_same_or_older_minor_is_judged_as_it_stands(self, version: str) -> None:
+        from particles.conformance.jsonschema import judge_particle_dict
+
+        verdict = judge_particle_dict(_record_at(version))
+        assert verdict.passed, verdict.errors
+        assert verdict.notes == []
+        assert verdict.unchecked_keys == []
+
+    @pytest.mark.parametrize("version", ["2.0.0", "0.3.0", "1.x"])
+    def test_incompatible_record_is_not_judgeable_and_fails(self, version: str) -> None:
+        from particles.conformance.jsonschema import judge_particle_dict, validate_particle_dict
+
+        verdict = judge_particle_dict(_record_at(version))
+        assert not verdict.judgeable
+        assert not verdict.passed
+        assert "not judgeable" in verdict.errors[0]
+        assert validate_particle_dict(_record_at(version)) == verdict.errors
+
+    def test_interchange_unit_of_a_newer_minor_strips_undeclared_keys(self) -> None:
+        from particles.conformance.jsonschema import judge_interchange_unit
+        from particles.interchange import to_unit
+
+        unit = to_unit(_make_valid_particle(), {})
+        unit["schemaVersion"] = "1.3.0"
+        unit["futureField"] = 1
+        unit["provenance"][0]["futureRef"] = "x"
+        verdict = judge_interchange_unit(unit)
+        assert verdict.passed, verdict.errors
+        assert verdict.unchecked_keys == ["futureField", "provenance[].futureRef"]
+        assert verdict.notes
+        # The caller's unit is left as it was.
+        assert "futureField" in unit and "futureRef" in unit["provenance"][0]
+
+    def test_interchange_unit_stays_closed_at_the_sdks_own_minor(self) -> None:
+        """``ParticleUnit`` keeps catching a producer's misspelled key."""
+        from particles.conformance.jsonschema import judge_interchange_unit
+        from particles.interchange import to_unit
+
+        unit = to_unit(_make_valid_particle(), {})
+        assert judge_interchange_unit(unit).passed
+        unit["contnet"] = "typo"
+        verdict = judge_interchange_unit(unit)
+        assert verdict.judgeable
+        assert not verdict.passed
+
+    def test_incompatible_interchange_unit_fails(self) -> None:
+        from particles.conformance.jsonschema import judge_interchange_unit
+        from particles.interchange import to_unit
+
+        unit = to_unit(_make_valid_particle(), {})
+        unit["schemaVersion"] = "2.0.0"
+        verdict = judge_interchange_unit(unit)
+        assert not verdict.judgeable and not verdict.passed
+
+    def test_shacl_newer_minor_notes_and_incompatible_does_not_conform(self) -> None:
+        pytest.importorskip("pyshacl")
+        from particles.conformance.shacl import particle_to_jsonld, validate_particle
+
+        doc = particle_to_jsonld(_make_valid_particle())
+        doc["particles:schemaVersion"] = "1.3.0"
+        newer = validate_particle(doc)
+        assert newer.conforms, newer.violations
+        assert newer.notes and "were not checked" in newer.notes[0]
+
+        doc["particles:schemaVersion"] = "2.0.0"
+        incompatible = validate_particle(doc)
+        assert not incompatible.conforms
+        assert "not judgeable" in incompatible.violations[0]

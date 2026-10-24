@@ -54,6 +54,11 @@ class OperatorEventType(StrEnum):
     # counts only, never deleted content (no claim text, URI or chunk hash),
     # which would defeat the delete's privacy purpose.
     CORPUS_ENTRY_DELETED = "CORPUS_ENTRY_DELETED"
+    # `import vault` reclassified an existing STABLE note's entry
+    # MUTABLE (actor ``import``; CORPUS_ENTRY ref; payload ``from`` / ``to``).
+    # An entry's mutability is the operator's policy about the source, so it is
+    # reconciled in place; this event is its durable history. Retires nothing.
+    CORPUS_ENTRY_RECLASSIFIED = "CORPUS_ENTRY_RECLASSIFIED"
     # system-emitted (not operator-initiated) — the §6.6
     # SUPERSEDED_BY_EXISTING verdict drops the candidate without persisting
     # it, and the drop must be auditable: the event carries the candidate
@@ -198,7 +203,8 @@ class OperatorEventType(StrEnum):
     # observer scope. RESCOPED is also the store's "the lens may
     # engage" marker — a project observer is honoured only once a rescope has
     # run, so an upgrade never silently empties a digest. Its payload carries
-    # the counts (keys added, entries left unattributed). WIDENED / REVOKED are
+    # the counts (keys added, entries left unattributed) and, since
+    # §3, every ``[entry_id, key]`` pair it added (``added``). WIDENED / REVOKED are
     # the operator's standing judgement that a belief (PARTICLE ref) or a whole
     # source (CORPUS_ENTRY ref) applies in every project; distinct types because
     # they are opposite outcomes.
@@ -206,9 +212,20 @@ class OperatorEventType(StrEnum):
     # One entry given a key by hand (`rescope --assign`). Its own type because
     # RESCOPED is the engage marker: attributing one source must not, by
     # itself, turn the lens on for a store whose other sources are still stale.
+    # The deposit key reconcile records one too, actor ``deposit``.
     OBSERVER_SCOPE_KEY_ASSIGNED = "OBSERVER_SCOPE_KEY_ASSIGNED"
     OBSERVER_SCOPE_WIDENED = "OBSERVER_SCOPE_WIDENED"
     OBSERVER_SCOPE_WIDEN_REVOKED = "OBSERVER_SCOPE_WIDEN_REVOKED"
+    # one existing agent write marked ``scope:unattributed`` by
+    # `rescope --mark-agent-writes` (CORPUS_ENTRY ref; payload ``identity``,
+    # the depositor that matched), and a recorded mark reversed by
+    # `rescope --unmark`. A marker is not a key, hence types of their own.
+    OBSERVER_SCOPE_MARKED_UNATTRIBUTED = "OBSERVER_SCOPE_MARKED_UNATTRIBUTED"
+    OBSERVER_SCOPE_UNMARKED = "OBSERVER_SCOPE_UNMARKED"
+    # one wrong key removed from one entry by `rescope --withdraw`
+    # (CORPUS_ENTRY ref; payload ``withdrawn``, and ``marked`` when the entry's
+    # last key went and it gained the ``scope:unattributed`` marker).
+    OBSERVER_SCOPE_KEY_WITHDRAWN = "OBSERVER_SCOPE_KEY_WITHDRAWN"
 
     # the vocabulary document (the profile carrier).
     # CHANGED is the TRUST_CHANGED analogue: a version materialised, or an
@@ -249,15 +266,10 @@ class OperatorEventType(StrEnum):
     # start as the reference date and re-anchored their ``session``-basis
     # claims to it. One event per run, the counts in the payload.
     SESSION_DATES_REPAIRED = "SESSION_DATES_REPAIRED"
-    # agent-side extraction. A Stop hook asked the session's agent to
-    # extract a span of its deposited transcript (ASKED; the CORPUS_ENTRY ref
-    # names the transcript entry and the payload fixes the snapshot, the span,
-    # the model and the expiry, so no trust-bearing field is a tool argument).
-    # The continuation Stop recorded where the agent's answering turn ended
-    # (CONTINUED), which is what keeps the ask and the answer out of later
-    # snapshots. The agent's submission was verified and, unless in shadow
-    # mode, applied (SUBMITTED; counts only, never claim text). The ask's
-    # event id is the ask id the agent submits with.
+    # Retired with agent-side extraction (deprecated): nothing writes
+    # these any more. They stay so the events already stored remain readable;
+    # never reuse the names. ASKED recorded a Stop hook's ask, CONTINUED where
+    # the answering turn ended, SUBMITTED the verified submission's counts.
     AGENT_EXTRACTION_ASKED = "AGENT_EXTRACTION_ASKED"
     AGENT_EXTRACTION_CONTINUED = "AGENT_EXTRACTION_CONTINUED"
     AGENT_EXTRACTION_SUBMITTED = "AGENT_EXTRACTION_SUBMITTED"

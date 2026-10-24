@@ -65,12 +65,14 @@ from particles.core.held_release import (
     blocking_from_payload,
     decide_release,
     is_due,
+    is_generation_hold,
     qualifies,
 )
 from particles.core.observer_scope import PairPrecondition
-from particles.core.schema import Particle
+from particles.core.schema import Particle, ProvenanceRefType
 from particles.core.stance import stance_holder
-from particles.core.status import Status
+from particles.core.status import Status, StatusReason
+from particles.corpus.store import get_entry, get_entry_currency
 from particles.db import write_transaction
 from particles.embeddings import get_embedding_model
 from particles.ingest.duplicate_suppression import build_duplicate_index
@@ -182,18 +184,67 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+async def _generation_rows(
+    session: AsyncSession, claims: Sequence[Particle]
+) -> tuple[dict[str, str], dict[str, datetime]]:
+    """Each cited ``MUTABLE`` entry's current generation, and snapshot capture times.
+
+    The current generation is :func:`get_entry_currency`'s, the one definition
+    of it; an entry whose current record is an absence has none.
+    """
+    entry_ids = sorted(
+        {
+            r.corpus_entry_id
+            for p in claims
+            for r in p.provenance
+            if r.type is ProvenanceRefType.SOURCE and r.corpus_entry_id
+        }
+    )
+    current = {
+        entry_id: c.latest_snapshot_id
+        for entry_id, c in (await get_entry_currency(session, entry_ids)).items()
+        if c.mutable and c.latest_snapshot_id is not None and not c.absent
+    }
+    captured: dict[str, datetime] = {}
+    for entry_id in sorted(current):
+        entry = await get_entry(session, entry_id)
+        if entry is not None:
+            captured.update((s.snapshot_id, s.captured_at) for s in entry.snapshots)
+    return current, captured
+
+
 async def qualifying_records(session: AsyncSession) -> list[_Held]:
-    """Every open record §1 admits, oldest partner retirement first (zero-LLM)."""
+    """Every open record §1 admits, oldest partner retirement first (zero-LLM).
+
+    A record whose partner the generation cascade retired is admitted only
+    when the pair is a generation hold, read from the entry and
+    snapshot rows of those records alone.
+    """
     records = await get_inconsistency_particles(session)
     pairs = {r.id: conflict_pair_ids(r) for r in records}
     ids = sorted({pid for a, b in pairs.values() for pid in (a, b) if pid})
     members = await get_particles_by_ids(session, ids)
+    cascade_pairs = [
+        (members[a_id], members[b_id])
+        for a_id, b_id in pairs.values()
+        if a_id in members
+        and b_id in members
+        and members[a_id].status_reason is StatusReason.RETRACTED_DEPENDENCY
+    ]
+    current, captured = await _generation_rows(
+        session, [claim for pair in cascade_pairs for claim in pair]
+    )
     out: list[_Held] = []
     for record in records:
         a_id, b_id = pairs[record.id]
         a = members.get(a_id) if a_id else None
         b = members.get(b_id) if b_id else None
-        if not qualifies(record, a, b):
+        generation = (
+            a is not None
+            and b is not None
+            and is_generation_hold(a, b, current=current, captured=captured)
+        )
+        if not qualifies(record, a, b, generation=generation):
             continue
         assert a is not None and b is not None  # qualifies() checked both
         retired_at = await get_retired_at(session, a.id) or record.asserted_at
