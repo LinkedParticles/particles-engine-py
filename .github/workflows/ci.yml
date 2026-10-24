@@ -74,13 +74,16 @@ jobs:
       # tree cut along an architectural line, so a version skew is a broken
       # install, not a compatibility question), and that pin is unresolvable
       # during one window — the Pages/CI push happens when the export PR merges,
-      # while the distributions publish later, from an approval-gated GitHub
-      # Release. So the exact pin is tried first and an unpinned `--override`
-      # is the fallback, which is the same release-ordering seam the `docs` job
-      # handles, resolved the same way: build against the newest core there is,
-      # at most one release of drift, and say so in the log rather than going
-      # red. Contributor PRs — every run that is not the release push itself —
-      # take the exact-match path.
+      # while the distributions publish later, from a GitHub Release, core
+      # before engine. So the exact pin is tried first, and on a miss
+      # `.github/core_requirement.py` names the `--override`: this release's
+      # core from the core repository (its `main`, or its `release/<version>`
+      # branch while that PR is open), at a commit the log names, so the
+      # checks test the exact core the release will publish. Only when neither
+      # declares this version does it fall back to the newest core on the
+      # index, and its notice says so. The `docs` job handles the same seam the
+      # same way. Contributor PRs, every run that is not a release, take the
+      # exact-match path.
       - name: Install the engine and its Client layer from the index
         run: |
           set -euo pipefail
@@ -90,10 +93,7 @@ jobs:
           if uv pip install --group dev .; then
             echo "Client layer: exact match, linkedparticles-core==$v"
           else
-            echo "::notice::linkedparticles-core==$v is not on the index yet \
-          (the release publishes from a GitHub Release, after this push); \
-          installing the newest available core."
-            printf 'linkedparticles-core\n' >"$RUNNER_TEMP/core-override.txt"
+            python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-override.txt"
             uv pip install --group dev --override "$RUNNER_TEMP/core-override.txt" .
           fi
           # Fail here, loudly, rather than inside a test collection error.
@@ -119,13 +119,16 @@ jobs:
       # tree cut along an architectural line, so a version skew is a broken
       # install, not a compatibility question), and that pin is unresolvable
       # during one window — the Pages/CI push happens when the export PR merges,
-      # while the distributions publish later, from an approval-gated GitHub
-      # Release. So the exact pin is tried first and an unpinned `--override`
-      # is the fallback, which is the same release-ordering seam the `docs` job
-      # handles, resolved the same way: build against the newest core there is,
-      # at most one release of drift, and say so in the log rather than going
-      # red. Contributor PRs — every run that is not the release push itself —
-      # take the exact-match path.
+      # while the distributions publish later, from a GitHub Release, core
+      # before engine. So the exact pin is tried first, and on a miss
+      # `.github/core_requirement.py` names the `--override`: this release's
+      # core from the core repository (its `main`, or its `release/<version>`
+      # branch while that PR is open), at a commit the log names, so the
+      # checks test the exact core the release will publish. Only when neither
+      # declares this version does it fall back to the newest core on the
+      # index, and its notice says so. The `docs` job handles the same seam the
+      # same way. Contributor PRs, every run that is not a release, take the
+      # exact-match path.
       - name: Install the engine and its Client layer from the index
         run: |
           set -euo pipefail
@@ -135,10 +138,7 @@ jobs:
           if uv pip install --group dev .; then
             echo "Client layer: exact match, linkedparticles-core==$v"
           else
-            echo "::notice::linkedparticles-core==$v is not on the index yet \
-          (the release publishes from a GitHub Release, after this push); \
-          installing the newest available core."
-            printf 'linkedparticles-core\n' >"$RUNNER_TEMP/core-override.txt"
+            python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-override.txt"
             uv pip install --group dev --override "$RUNNER_TEMP/core-override.txt" .
           fi
           # Fail here, loudly, rather than inside a test collection error.
@@ -195,14 +195,15 @@ jobs:
       # release export — one source of truth, never duplicated into
       # docs-requirements.txt where it would go stale every release.
       #
-      # The fallback is the release-ordering seam: this workflow runs on push to
-      # main, but the distributions are published later, from a GitHub Release
-      # that waits on a manual environment approval. So on the push that lands a
-      # release, the exactly-matching core does not exist on the index yet. The
-      # docs then build against the newest core there is — at most one release
-      # of drift, in the most stable half of the API — and say so in the log
-      # rather than going red. The Publish workflow re-triggers this one when it
-      # succeeds, which rebuilds against the exact match.
+      # The fallback is the release-ordering seam: this workflow runs before the
+      # distributions are published, from a GitHub Release once every release
+      # PR has merged. So on a release, the exactly-matching core does not
+      # exist on the index yet, and `.github/core_requirement.py` names this
+      # release's core from the core repository at a logged commit instead.
+      # Only when the core repository does not declare this version either
+      # does the build fall back to the newest core on the index, and say so.
+      # The Publish workflow re-triggers this one when it succeeds, which
+      # rebuilds against the exact match from the index.
       - name: Materialise the Client layer for the API reference
         run: |
           set -euo pipefail
@@ -211,10 +212,8 @@ jobs:
           if pip install --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
             echo "API reference: exact match, linkedparticles-core==$v"
           else
-            echo "::notice::linkedparticles-core==$v is not on the index yet \
-          (the release publishes from a GitHub Release, after this push); \
-          building the API reference against the newest available core."
-            pip install --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core"
+            python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-req.txt"
+            pip install --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
           fi
           cp -R "$RUNNER_TEMP/core-dist/particles/." particles/
           # Fail here, loudly, rather than 40 lines later inside mkdocs.
@@ -241,9 +240,9 @@ jobs:
       # published, so a different version can fail on a no-op diff. Needs no
       # project install.
       - name: ruff check
-        run: uvx --from 'ruff==0.17.0' ruff check .
+        run: uvx --from 'ruff==0.17.1' ruff check .
       - name: ruff format --check
-        run: uvx --from 'ruff==0.17.0' ruff format --check .
+        run: uvx --from 'ruff==0.17.1' ruff format --check .
 
   reuse:
     name: REUSE licensing

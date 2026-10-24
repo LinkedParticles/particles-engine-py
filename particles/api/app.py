@@ -80,6 +80,8 @@ from particles.operations.curation import (
     CurationCard,
     QueueSource,
     build_curation_queue,
+    dismiss_source_card,
+    get_curation_card,
     rebuild_curation_snapshot,
     record_demotion_ruling,
 )
@@ -96,11 +98,12 @@ from particles.operations.extract import extract_snapshot
 from particles.operations.graph_view import build_graph_data
 from particles.operations.lint import run_lint
 from particles.operations.llm_spend import MeteredExtractRun, reindexed_snapshots
+from particles.operations.projection import DocManifest
 from particles.operations.quality import get_quality_report
 from particles.operations.query import query
 from particles.operations.reconcile import reconcile_supersession
 from particles.operations.reindex import ReindexPlan, reindex
-from particles.operations.review import list_inconsistencies, resolve
+from particles.operations.review import ResolutionRefused, list_inconsistencies, resolve
 from particles.operations.source_passage import SourcePassage, hydrate_source_passage
 from particles.operations.subject_relink import (
     RelinkReport,
@@ -251,6 +254,37 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 WriteSessionDep = Annotated[AsyncSession, Depends(get_write_session)]
 
 
+def _store_handle(store: Annotated[str, Query(min_length=1)] = DEFAULT_STORE) -> str:
+    """The store a routed write names: ``default`` unless the caller names one.
+
+    The thin client sends the handle its verb was given, so a hook installed on
+    a named store writes where its digest reads. 404 on
+    a handle this engine does not configure, as ``GET /digest/{store}`` does.
+    """
+    if store != DEFAULT_STORE and store not in get_config().storage.stores:
+        raise HTTPException(status_code=404, detail=f"Unknown store {store!r}")
+    return store
+
+
+StoreDep = Annotated[str, Depends(_store_handle)]
+
+
+async def _store_session(store: StoreDep) -> AsyncIterator[AsyncSession]:
+    async with session_scope(store) as session:
+        yield session
+
+
+async def _store_write_session(store: StoreDep) -> AsyncIterator[AsyncSession]:
+    async with session_scope(store, write=True) as session:
+        yield session
+
+
+#: ``SessionDep`` / ``WriteSessionDep`` bound to the store the ``store`` query
+#: parameter names, for the writes the thin client routes by handle.
+StoreSessionDep = Annotated[AsyncSession, Depends(_store_session)]
+StoreWriteSessionDep = Annotated[AsyncSession, Depends(_store_write_session)]
+
+
 def _bounded_limit(limit: int | None, *, default: int | None = None) -> int:
     """Resolve a caller-supplied ``limit`` query param to a safe page size (F5).
 
@@ -319,7 +353,9 @@ class ReindexResponse(BaseModel):
     because ``scope`` was 0). ``plan`` is the upfront work plan computed
     before extraction, per-snapshot detail included (dry and live runs
     alike: the missing-blob list must survive into the envelope because
-    the CLI's human rendering caps it)."""
+    the CLI's human rendering caps it). ``skipped_newer_schema`` counts the
+    snapshots left alone because they hold a particle a newer schema minor
+    wrote, which this SDK does not re-extract (D2)."""
 
     scope: int
     succeeded: int
@@ -327,6 +363,7 @@ class ReindexResponse(BaseModel):
     failed_entries: list[str] = []
     lint_summary: dict[str, int] = {}
     dry_run: bool = False
+    skipped_newer_schema: int = 0
     plan: ReindexPlan | None = None
 
 
@@ -551,6 +588,20 @@ async def get_curation_queue(
     )
 
 
+@app.get("/curation/cards/{key:path}", response_model=CurationCard, responses=_ERR404)
+async def get_curation_card_endpoint(key: str, session: SessionDep, _auth: AuthDep) -> CurationCard:
+    """Return one open curation card by its key, with every belief it names briefed.
+
+    The queue previews five beliefs of a ``subjectless_source`` card;
+    this read lists them all, each resolvable on its own ``no_subject`` key. It
+    runs the same live checks as ``GET /curation``. 404 when no open card has
+    the key."""
+    card = await get_curation_card(session, key)
+    if card is None:
+        raise HTTPException(status_code=404, detail=f"No open card with key {key!r}.")
+    return card
+
+
 class CurationRebuildResponse(BaseModel):
     """Outcome of an explicit curation-collection rebuild."""
 
@@ -738,6 +789,16 @@ async def curation_snooze_endpoint(
 
     _require_belief_writes_enabled()
     snooze_days = req.snooze_days
+    if snooze_days is None and req.card_key.startswith(f"{CardKind.SUBJECTLESS_SOURCE.value}:"):
+        # dismissing a source card rules on the beliefs it names.
+        card = CurationCard.from_key(req.card_key)
+        card.particle_ids = list(req.particle_ids)
+        try:
+            dismissal = await dismiss_source_card(session, card, actor="http:/curation/snooze")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
+        return CurationEventResponse(event_id=dismissal.event_id, card_key=req.card_key)
     until = None if snooze_days is None else datetime.now(UTC) + timedelta(days=snooze_days)
     event = await record_event(
         session,
@@ -817,9 +878,11 @@ class DepositTextRequest(BaseModel):
 class DepositResponse(BaseModel):
     """Identifiers for the corpus entry + initial snapshot created by a deposit.
 
-    ``unchanged`` is set only by the versioned text-deposit path:
-    the entry's latest snapshot already carried the deposited content hash, so
-    nothing was written and the existing IDs are echoed."""
+    ``unchanged``: the entry's latest snapshot already
+    carried the deposited content hash, so nothing was written and the existing
+    IDs are echoed. Every deposit route sets it, except a URL deposit handled by
+    a domain importer, which is deduplicated the same way but always reports
+    ``false``."""
 
     entry_id: str
     snapshot_id: str
@@ -835,6 +898,7 @@ async def corpus_deposit_url(
     req: DepositUrlRequest, session: WriteSessionDep, _auth: AuthDep
 ) -> DepositResponse:
     """Deposit a URL into the corpus. Returns the entry + snapshot IDs."""
+    unchanged: list[bool] = []
     try:
         entry_id, snapshot_id = await deposit_url(
             session,
@@ -845,6 +909,7 @@ async def corpus_deposit_url(
             tags=req.tags,
             follow_post_links=req.follow_post_links,
             follow_comment_links=req.follow_comment_links,
+            out_unchanged=unchanged,
         )
         await session.commit()
     except SourceFetchError as exc:
@@ -861,14 +926,16 @@ async def corpus_deposit_url(
     except Exception as exc:
         log.warning("deposit_url failed for %r: %s", req.url, exc, exc_info=True)
         raise HTTPException(status_code=400, detail="Could not deposit the provided URL") from exc
-    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id)
+    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(unchanged))
 
 
 @app.post("/corpus/deposit/text", response_model=DepositResponse, responses={**_ERR400})
 async def corpus_deposit_text(
-    req: DepositTextRequest, session: WriteSessionDep, _auth: AuthDep
+    req: DepositTextRequest, session: StoreWriteSessionDep, _auth: AuthDep
 ) -> DepositResponse:
-    """Deposit raw text into the corpus (no fetch)."""
+    """Deposit raw text into the corpus (no fetch).
+
+    ``store`` selects the target store (404 on an unknown handle)."""
     if req.uri_r is not None:
         # Versioned path: stable per-source entry identity,
         # caller-chosen mutability, unchanged re-deposit skipped.
@@ -898,11 +965,20 @@ async def corpus_deposit_text(
         await session.commit()
         return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=unchanged)
 
+    text_unchanged: list[bool] = []
     entry_id, snapshot_id = await deposit_text(
-        session, req.text, req.deposited_by, req.source_type, req.tags, author_id=req.author_id
+        session,
+        req.text,
+        req.deposited_by,
+        req.source_type,
+        req.tags,
+        author_id=req.author_id,
+        out_unchanged=text_unchanged,
     )
     await session.commit()
-    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id)
+    return DepositResponse(
+        entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(text_unchanged)
+    )
 
 
 @app.post("/corpus/deposit/file", response_model=DepositResponse)
@@ -929,6 +1005,7 @@ async def corpus_deposit_file(
     # still covered by the finally unlink — a ``delete=False`` temp that leaked
     # before the try would accrete under repeated failed uploads (F20).
     tmp_path: Path | None = None
+    file_unchanged: list[bool] = []
     try:
         with tempfile.NamedTemporaryFile(
             delete=False, suffix=Path(file.filename or "upload").suffix
@@ -942,12 +1019,15 @@ async def corpus_deposit_file(
             source_type=source_type,
             tags=tags or [],
             content_date=content_date,
+            out_unchanged=file_unchanged,
         )
         await session.commit()
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
-    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id)
+    return DepositResponse(
+        entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(file_unchanged)
+    )
 
 
 @app.get("/corpus", response_model=list[CorpusEntry])
@@ -1574,7 +1654,10 @@ class ReviewRequest(BaseModel):
 @app.post(
     "/review/{particle_id}",
     response_model=ReviewParticle,
-    responses=_ERR404,
+    responses={
+        **_ERR404,
+        409: {"model": ErrorResponse, "description": "Action refused on this record"},
+    },
 )
 async def review_particle(
     particle_id: str, req: ReviewRequest, session: SessionDep, _auth: OperatorAuthDep
@@ -1584,7 +1667,9 @@ async def review_particle(
     Every action except DEFER closes the record. PREFER_A and PREFER_B demote
     the other claim and may write a SourceTrustStatement. BOTH_VALID keeps
     both claims as ALEATORY. DISCARD retracts both claims and writes no trust
-    statement.
+    statement. An action that would keep a claim it cannot
+    restore, such as PREFER_A on a record whose claim A has left ACTIVE, is
+    refused with 409 and nothing is written.
     Refused (503) under the dev-key skip, even from loopback: it needs a real
     bearer."""
     try:
@@ -1596,6 +1681,8 @@ async def review_particle(
             req.domain,
             req.note,
         )
+    except ResolutionRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         log.info("review: particle %r not resolvable: %s", particle_id, exc)
         raise HTTPException(
@@ -1615,7 +1702,10 @@ class ReindexRequest(BaseModel):
     extractor upgrade). The particle-selecting fields
     (``extractor_version`` / ``extractor_id`` / ``provider_model``) union
     with each other and intersect with ``entry_ids`` when both are sent,
-    so naming entries can only narrow the scope."""
+    so naming entries can only narrow the scope.
+    ``include_schema_stale`` also re-extracts the snapshots whose particles
+    carry an older minor of the schema; it is off by default because after a
+    minor bump the whole store qualifies (D5)."""
 
     entry_ids: list[str] | None = None
     extractor_version: str | None = None
@@ -1623,6 +1713,10 @@ class ReindexRequest(BaseModel):
     include_failed: bool = True
     # re-extract what one "<provider>:<model>" pairing produced.
     provider_model: str | None = None
+    # D5: also re-extract snapshots whose particles carry an older
+    # minor of the SDK's schema major. Opt-in, like the CLI flag; auto-discovery
+    # only, like ``include_failed``.
+    include_schema_stale: bool = False
     rate_limit_per_minute: int = 100
     # Compute and return the work plan without extracting (zero LLM calls,
     # zero writes); the response carries per-snapshot detail in ``plan``.
@@ -1652,6 +1746,7 @@ async def run_reindex(
             provider_model=req.provider_model,
             rate_limit_per_minute=req.rate_limit_per_minute,
             dry_run=req.dry_run,
+            include_schema_stale=req.include_schema_stale,
         )
 
     if req.dry_run:
@@ -2146,6 +2241,81 @@ async def get_digest_endpoint(
     return DigestResponse(markdown=rendered.markdown, lines=rendered.lines)
 
 
+class MemoryProjectionRequest(BaseModel):
+    """The client's projection policy for one ``MEMORY.md`` render."""
+
+    manifest: DocManifest = Field(
+        description=(
+            "The client's parsed memory manifest. A section that includes a file is refused."
+        )
+    )
+    observer_project: str | None = Field(
+        default=None, min_length=1, description="Render through this project observer."
+    )
+    exclude_source_tags: list[str] = Field(
+        default_factory=list,
+        description="Drop candidates held only by sources with one of these tags.",
+    )
+    fold_targets: list[str] = Field(
+        default_factory=list,
+        description="File URIs whose fold verdicts the client needs.",
+    )
+
+
+class MemoryProjectionResponse(BaseModel):
+    """A rendered region body, its hash, and the fold verdicts asked of it."""
+
+    body: str
+    content_hash: str = Field(description="SHA-256 of `body`'s UTF-8 bytes.")
+    fold_verdicts: dict[str, Literal["not-extracted", "not-in-region"] | None] = Field(
+        default_factory=dict,
+        description="Per fold target: null when the region represents the file, else why not.",
+    )
+
+
+@app.post(
+    "/memory/projection/{store}",
+    response_model=MemoryProjectionResponse,
+    responses={**_ERR404, 422: {"model": ErrorResponse}},
+)
+async def memory_projection_endpoint(
+    store: str, req: MemoryProjectionRequest, _auth: AuthDep
+) -> MemoryProjectionResponse:
+    """Render the ``MEMORY.md`` region body for a thin client.
+
+    The client sends its own manifest, so its projection policy governs, and
+    splices the returned body into its memory directory itself; this route
+    writes nothing. Deterministic, with no model call. ``fold_targets`` are
+    answered against the body just rendered. 404 if the store handle is not
+    configured on this engine; 422 for a manifest with a file section, which
+    names a client path this engine cannot read.
+
+    Bearer-gated regardless of ``api.require_auth_for_reads``, like
+    ``GET /digest/{store}``: the region is the same confidential roll-up."""
+    from particles.operations.projection.memory_region import (
+        ClientFileSectionError,
+        render_memory_region,
+    )
+
+    try:
+        async with session_scope(store) as session:
+            region = await render_memory_region(
+                session,
+                req.manifest,
+                base_dir=None,
+                observer_project=req.observer_project,
+                exclude_source_tags=req.exclude_source_tags,
+                fold_targets=req.fold_targets,
+            )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
+    except ClientFileSectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MemoryProjectionResponse(
+        body=region.body, content_hash=region.content_hash, fold_verdicts=region.fold_verdicts
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session-start exposure: the SessionStart hook records what each
 # session was shown. Write-only here: no route reads the rows back (§5).
@@ -2160,13 +2330,14 @@ class SessionExposureResponse(BaseModel):
 
 @app.post("/session-exposures", response_model=SessionExposureResponse)
 async def record_session_exposure_endpoint(
-    req: SessionExposure, session: WriteSessionDep, _auth: AuthDep
+    req: SessionExposure, session: StoreWriteSessionDep, _auth: AuthDep
 ) -> SessionExposureResponse:
     """Append the beliefs one session was shown at session start.
 
     The SessionStart hook calls this after it has cut what it injects to its
     byte budget. Short ``p-`` ids are resolved to full ids here. Rows are only
-    appended, and no route reads them back.
+    appended, and no route reads them back. ``store`` selects the store the
+    digest was read from (404 on an unknown handle).
     """
     from particles.store.session_exposure_store import record_session_exposure
 
@@ -2336,13 +2507,94 @@ class SubjectMergeRequest(BaseModel):
     target_id: str
 
 
+class SubjectMergeManyRequest(BaseModel):
+    """An N→1 merge: every source folds into ``target_id`` in one pass."""
+
+    source_ids: list[str]
+    target_id: str
+    dry_run: bool = False
+
+
+class SubjectMergeSource(BaseModel):
+    """One merged source: its id and name (it is deleted), the links it moved, and
+    its ``artifact`` refs: carried to the target, or withheld as another project's."""
+
+    subject_id: str
+    canonical_name: str
+    particles_relinked: int
+    refs_carried: list[str] = []
+    refs_withheld: list[str] = []
+
+
 class SubjectMergeResponse(BaseModel):
     """Outcome of a merge: the surviving target, the aliases it absorbed, and how
-    many particle links were re-pointed. The source subject is deleted."""
+    many particle links were re-pointed. The sources are deleted, unless
+    ``dry_run`` is set, when nothing was written."""
 
     subject: Subject
     aliases_added: list[str]
     particles_relinked: int
+    sources: list[SubjectMergeSource] = []
+    dry_run: bool = False
+
+
+async def _merge_subjects_response(
+    session: AsyncSession, source_ids: list[str], target_id: str, *, dry_run: bool
+) -> SubjectMergeResponse:
+    from particles.store.subject_store import (
+        SubjectNotFoundError,
+        merge_subjects_many,
+        plan_subject_merge,
+    )
+
+    try:
+        if dry_run:
+            plan = await plan_subject_merge(session, source_ids, target_id)
+            target = plan.target
+        else:
+            target, plan = await merge_subjects_many(session, source_ids, target_id)
+    except SubjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not dry_run:
+        await session.commit()
+    return SubjectMergeResponse(
+        subject=target,
+        aliases_added=list(plan.aliases_added),
+        particles_relinked=plan.particles_relinked,
+        sources=[
+            SubjectMergeSource(
+                subject_id=s.subject_id,
+                canonical_name=s.canonical_name,
+                particles_relinked=len(s.particle_ids),
+                refs_carried=[f"{r.namespace}:{r.id}" for r in s.refs_carried],
+                refs_withheld=[f"{r.namespace}:{r.id}" for r in s.refs_withheld],
+            )
+            for s in plan.sources
+        ],
+        dry_run=dry_run,
+    )
+
+
+@app.post(
+    "/subjects/merge",
+    response_model=SubjectMergeResponse,
+    responses={**_ERR404, **_ERR400},
+)
+async def merge_subjects_many_endpoint(
+    req: SubjectMergeManyRequest, session: WriteSessionDep, _auth: AuthDep
+) -> SubjectMergeResponse:
+    """Merge several source subjects into one target (HTTP mirror of `subjects merge`).
+
+    Irreversible unless `dry_run` is set: every source is deleted and its
+    particles and aliases fold into the target, recorded as one operator event.
+    Every source is checked before anything is written, so one bad source
+    refuses the whole merge. 404 if a subject is absent or was already merged;
+    400 if a source is the target or is listed twice."""
+    return await _merge_subjects_response(
+        session, req.source_ids, req.target_id, dry_run=req.dry_run
+    )
 
 
 @app.post(
@@ -2353,24 +2605,11 @@ class SubjectMergeResponse(BaseModel):
 async def merge_subjects_endpoint(
     source_id: str, req: SubjectMergeRequest, session: WriteSessionDep, _auth: AuthDep
 ) -> SubjectMergeResponse:
-    """Merge a source subject into a target (HTTP mirror of `subjects merge`).
+    """Merge one source subject into a target (the one-source form of `POST /subjects/merge`).
 
     Irreversible: the source is deleted and its particles + aliases fold into the
     target. 404 if either subject is absent; 400 on an invalid merge."""
-    from particles.store.subject_store import get_subject, merge_subjects
-
-    if await get_subject(session, source_id) is None:
-        raise HTTPException(status_code=404, detail="Source subject not found")
-    if await get_subject(session, req.target_id) is None:
-        raise HTTPException(status_code=404, detail="Target subject not found")
-    try:
-        target, aliases_added, relinked = await merge_subjects(session, source_id, req.target_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
-    return SubjectMergeResponse(
-        subject=target, aliases_added=aliases_added, particles_relinked=relinked
-    )
+    return await _merge_subjects_response(session, [source_id], req.target_id, dry_run=False)
 
 
 class TrustRuleRequest(BaseModel):
@@ -2480,21 +2719,21 @@ async def set_trust_statement_endpoint(
 # ---------------------------------------------------------------------------
 
 
-def _require_belief_writes_enabled() -> str:
-    """Engine-side write-enablement gate; returns the canonical store handle.
+def _require_belief_writes_enabled(store: str = DEFAULT_STORE) -> str:
+    """Engine-side write-enablement gate; returns the store handle it cleared.
 
-    The belief-write endpoints operate on the engine's default store (the MVP
-    canonical archive; multi-store routing is deferred). 403 if that
-    store is not in the engine's ``mcp.write.enabled_stores``."""
-    if DEFAULT_STORE not in get_config().mcp.write.enabled_stores:
+    The agent belief writes name their store; the operator routes
+    still operate on the engine's default store. 403 if the store is
+    not in the engine's ``mcp.write.enabled_stores``."""
+    if store not in get_config().mcp.write.enabled_stores:
         raise HTTPException(
             status_code=403,
             detail=(
-                "Belief writes are disabled on this engine: the default store is not "
+                f"Belief writes are disabled on this engine: store {store!r} is not "
                 "in mcp.write.enabled_stores (default-deny)."
             ),
         )
-    return DEFAULT_STORE
+    return store
 
 
 class ParticleAssertRequest(BaseModel):
@@ -2542,7 +2781,7 @@ class ParticleRetractEndpointResponse(BaseModel):
 
 @app.post("/particles/assert", response_model=AgentWriteResult, responses=_ERR400)
 async def particle_assert_endpoint(
-    req: ParticleAssertRequest, session: SessionDep, _auth: AuthDep
+    req: ParticleAssertRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
 ) -> AgentWriteResult:
     """Assert a belief through the §6.6 ladder (HTTP mirror of MCP ``particle_assert``).
 
@@ -2550,8 +2789,9 @@ async def particle_assert_endpoint(
     mode), a first-class result, not an error; so does re-asserting a claim an
     operator or reviewer retired (it is held for review), and
     ``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a
-    granularity / provenance violation; 403 when belief writes are disabled."""
-    store = _require_belief_writes_enabled()
+    granularity / provenance violation; 403 when belief writes are disabled for
+    the store; 404 on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
     try:
         result = await assert_belief(
             session,
@@ -2573,12 +2813,13 @@ async def particle_assert_endpoint(
 
 @app.post("/particles/supersede", response_model=AgentWriteResult, responses=_ERR400)
 async def particle_supersede_endpoint(
-    req: ParticleSupersedeRequest, session: SessionDep, _auth: AuthDep
+    req: ParticleSupersedeRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
 ) -> AgentWriteResult:
     """Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;
     operator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or
-    granularity violation; 403 when belief writes are disabled."""
-    store = _require_belief_writes_enabled()
+    granularity violation; 403 when belief writes are disabled for
+    the store; 404 on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
     try:
         result = await supersede_belief(
             session,
@@ -2602,12 +2843,13 @@ async def particle_supersede_endpoint(
 
 @app.post("/particles/retract", response_model=ParticleRetractEndpointResponse, responses=_ERR400)
 async def particle_retract_endpoint(
-    req: ParticleRetractRequest, session: SessionDep, _auth: AuthDep
+    req: ParticleRetractRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
 ) -> ParticleRetractEndpointResponse:
     """Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;
     operator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard
-    violation or empty reason; 403 when belief writes are disabled."""
-    store = _require_belief_writes_enabled()
+    violation or empty reason; 403 when belief writes are disabled for
+    the store; 404 on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
     try:
         await retract_belief(session, store=store, particle_id=req.particle_id, reason=req.reason)
     except ValueError as exc:

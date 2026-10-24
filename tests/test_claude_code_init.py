@@ -781,3 +781,200 @@ class TestProjectInstallNarrowsItsSideEffects:
 
         assert [p.name for p in _resolved_rule_sources(repo)] == ["AGENTS.md"]
         assert {p.name for p in _resolved_rule_sources()} == {"AGENTS.md", "CLAUDE.md"}
+
+
+def _write_user_config(home: Path, servers: dict[str, Any]) -> None:
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+class TestMcpRegistration:
+    """`init claude-code` binds the MCP server to each session's project."""
+
+    def test_a_fresh_install_registers_the_bound_server(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit"])
+        assert result.exit_code == 0, result.output
+
+        (add,) = no_real_claude_cli
+        assert add[:4] == ["mcp", "add", "--scope", "user"]
+        tail = add[add.index("--") + 1 :]
+        assert Path(tail[0]).name == "particles"
+        assert tail[1:] == ["mcp", "serve", "--project-observer", "cwd"]
+        assert f"PARTICLES_CONFIG={init_env['config'].resolve()}" in add
+
+    def test_an_existing_registration_keeps_its_executable_and_env(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "type": "stdio",
+                    "command": "/opt/pinned/.venv/bin/particles",
+                    "args": ["mcp", "serve"],
+                    "env": {"DATABASE_URL": "sqlite+aiosqlite:////data/p.db"},
+                }
+            },
+        )
+
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit"])
+        assert result.exit_code == 0, result.output
+
+        remove, add = no_real_claude_cli
+        assert remove == ["mcp", "remove", "--scope", "user", "particles"]
+        assert add == [
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "-e",
+            "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
+            "particles",
+            "--",
+            "/opt/pinned/.venv/bin/particles",
+            "mcp",
+            "serve",
+            "--project-observer",
+            "cwd",
+        ]
+
+        # --remove restores the registration as it was, and nothing more.
+        no_real_claude_cli.clear()
+        removed = runner.invoke(app, ["init", "claude-code", "--remove"])
+        assert removed.exit_code == 0, removed.output
+        restore_remove, restore_add = no_real_claude_cli
+        assert restore_remove == ["mcp", "remove", "--scope", "user", "particles"]
+        assert restore_add[-3:] == ["/opt/pinned/.venv/bin/particles", "mcp", "serve"]
+
+    def test_a_bound_registration_is_left_alone(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": "/opt/p/bin/particles",
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                }
+            },
+        )
+
+        assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
+        assert no_real_claude_cli == []
+
+    def test_dry_run_registers_nothing_and_remove_takes_back_what_it_added(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        dry = runner.invoke(app, ["init", "claude-code", "--no-audit", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "would register the MCP server" in dry.output
+        assert no_real_claude_cli == []
+
+        assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
+        no_real_claude_cli.clear()
+        assert runner.invoke(app, ["init", "claude-code", "--remove"]).exit_code == 0
+        assert no_real_claude_cli == [["mcp", "remove", "--scope", "user", "particles"]]
+
+    def test_without_the_claude_cli_the_command_is_a_next_step(
+        self, runner: CliRunner, init_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.api.cli.init as init_mod
+
+        monkeypatch.setattr(init_mod, "_claude_mcp", lambda argv: False)
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["mcp_server"]["action"] == "manual"
+        assert any("--project-observer cwd" in step for step in payload["next_steps"])
+
+
+class TestUpgradeReport:
+    """`init` says what a project observer would not show, and assigns nothing."""
+
+    def test_unattributed_and_agent_writes_become_next_steps(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import asyncio
+
+        from particles.config import reset_config
+
+        # A migrated store, as an upgrading install has, rather than create_all's.
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'upgrade.db'}")
+        reset_config()
+        assert runner.invoke(app, ["db", "init"]).exit_code == 0
+
+        async def _seed() -> tuple[str, str]:
+            from particles.core.schema import Mutability
+            from particles.corpus.deposit import deposit_text, deposit_text_versioned
+            from particles.db import session_scope
+
+            async with session_scope(write=True) as session:
+                harvested, _, _ = await deposit_text_versioned(
+                    session,
+                    text="a transcript",
+                    uri_r="claude-code://session/gone",
+                    source_type="CONVERSATION",
+                    mutability=Mutability.APPEND_ONLY,
+                    tags=["claude-code"],
+                )
+                agent, _ = await deposit_text(
+                    session,
+                    "an agent note",
+                    "mcp:claude-code",
+                    "CONVERSATION",
+                    [],
+                    author_id="mcp:claude-code",
+                )
+                await session.commit()
+            return harvested, agent
+
+        harvested, agent = asyncio.run(_seed())
+
+        result = runner.invoke(
+            app, ["init", "claude-code", "--store", "default", "--no-audit", "--json"]
+        )
+        assert result.exit_code == 0, result.output
+        steps = json.loads(result.stdout)["next_steps"]
+        assert any("--default-key KEY" in s for s in steps)
+        assert any("--mark-agent-writes --dry-run" in s for s in steps)
+
+        async def _tags(entry_id: str) -> list[str]:
+            from particles.corpus.store import get_entry
+            from particles.db import session_scope
+
+            async with session_scope() as session:
+                entry = await get_entry(session, entry_id)
+            assert entry is not None
+            return entry.tags
+
+        # Nothing was assigned or marked on the operator's behalf.
+        assert asyncio.run(_tags(harvested)) == ["claude-code"]
+        assert asyncio.run(_tags(agent)) == []
+
+
+class TestObserverScopeDefault:
+    """The default is `project`; an explicit `store` is kept and named."""
+
+    def test_the_compiled_default_is_the_project_view(self) -> None:
+        from particles.config import ClaudeCodeConfig
+
+        assert ClaudeCodeConfig().observer_scope == "project"
+
+    @pytest.mark.parametrize(("configured", "named"), [("store", True), ("project", False)])
+    def test_an_explicit_store_is_kept_and_named(
+        self, runner: CliRunner, init_env: dict[str, Path], configured: str, named: bool
+    ) -> None:
+        init_env["config"].write_text(f"claude_code:\n  observer_scope: {configured}\n")
+        from particles.config import reset_config
+
+        reset_config()
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit", "--json"])
+        assert result.exit_code == 0, result.output
+        steps = json.loads(result.stdout)["next_steps"]
+        assert any("observer_scope: store" in s for s in steps) is named
+        assert f"observer_scope: {configured}" in init_env["config"].read_text()

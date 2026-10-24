@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from particles.core.artifact_fold import ARTIFACT_REF_NAMESPACE, is_absolute_path
 from particles.core.schema import ApplicabilityClause, ExternalRef
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from particles.ingest.authorities.registry import AuthorityResolution, RecognizeContext
 
 #: The ``ExternalRef.namespace`` every artifact identity carries.
-ARTIFACT_NAMESPACE = "artifact"
+ARTIFACT_NAMESPACE = ARTIFACT_REF_NAMESPACE
 
 #: Gate class → the ``subject_class`` a qualified Subject carries.
 ARTIFACT_SUBJECT_CLASSES: dict[str, str] = {
@@ -49,9 +50,10 @@ def normalize_artifact_name(name: str, token_class: str) -> str:
     A reference code folds case and separators, so ``RFC 2119``, ``RFC-2119``
     and ``rfc 2119`` are one record. A CLI command collapses whitespace. A
     filename drops a leading ``./`` and is otherwise kept as spelled: a bare
-    filename and a path are different Subjects by design, and an
-    absolute path keeps its prefix, since the Engine cannot map a project key
-    back to a directory. A snake_case identifier is kept as spelled.
+    filename and a path are different Subjects by design. An
+    absolute path keeps its prefix here; :meth:`ArtifactAuthority.recognize_in`
+    asks the Surface for its root-relative form. A snake_case
+    identifier is kept as spelled.
     """
     stripped = name.strip().strip("`").strip()
     match token_class:
@@ -88,6 +90,13 @@ class ArtifactAuthority:
         normalized = normalize_artifact_name(name, context.token_class)
         if not normalized:
             return None
+        if context.token_class == "filename" and is_absolute_path(normalized):
+            # a path under this project's root (or one of its
+            # worktrees) is the same file as its root-relative spelling.
+            # Deferred: artifact_namespace imports this package (cycle break).
+            from particles.ingest.artifact_namespace import artifact_relative_path
+
+            normalized = artifact_relative_path(context.namespace_key, normalized) or normalized
         return ExternalRef(
             namespace=ARTIFACT_NAMESPACE,
             id=f"{context.namespace_key}/{normalized}",

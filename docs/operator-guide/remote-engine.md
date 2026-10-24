@@ -185,15 +185,26 @@ Other deliberately-local surfaces (§ Deferred):
 ## Claude Code hooks against a remote engine
 
 The hooks installed by `particles init claude-code` follow `engine.base_url` as
-well, with three surfaces that still need the store on the same machine:
+well. Each hook write names the store its hook was installed for (`--store`),
+and the engine writes that store; a handle the engine does not configure is
+refused with a 404, recorded in the hook log. The hook steps behave as follows:
 
 | Hook step | With an engine configured |
 |---|---|
-| SessionStart digest | Served by the engine (`GET /digest/{store}`). The freshness check is skipped, so every session receives the full digest |
+| SessionStart digest | Served by the engine (`GET /digest/{store}`). The freshness check runs as it does locally: the engine renders the region from this machine's manifest, and the hook compares it with the `MEMORY.md` here. A current region means no digest, a stale one means only the new lines, and an engine that fails or answers too slowly means the full digest |
 | SessionEnd harvest | Refused unless `claude_code.harvest.allow_remote: true`, because transcripts are the most sensitive material the SDK handles. With it, the distilled, redacted transcript and the memory files are deposited on the engine, and the engine's own consolidation extracts them |
-| SessionEnd MEMORY.md re-render | Skipped. The projected region keeps its last local render |
+| SessionEnd MEMORY.md re-render | Rendered by the engine from this machine's own manifest (`POST /memory/projection/{store}`) and spliced into `MEMORY.md` here, with the same fold, backup and atomic write as a local render. It runs only when an installed hook names this store and pins this engine. A manifest section that includes a file is refused, with the reason in the hook log |
 | SessionEnd utility mining | Skipped |
-| Stop hook (agent-side extraction ask) | Skipped, and the MCP `extraction_submit` tool refuses a remote engine |
+
+The re-render reads the engine a hook pins from the hook command in Claude
+Code's settings: `PARTICLES_ENGINE_BASE_URL`, or the `engine.base_url` of the
+`PARTICLES_CONFIG` the command pins. A wrapper script that sets
+`PARTICLES_CONFIG` inside itself hides that from the check, and the memory
+directory is then left alone. Pin the config in the command as well:
+
+```bash
+env PARTICLES_CONFIG=/path/to/client.yaml /path/to/particles-client hook session-end --store default
+```
 
 Every hook still fails open: an unreachable engine, a refused token or a slow
 link ends the hook with exit 0 and no output, inside the

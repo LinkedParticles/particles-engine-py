@@ -36,6 +36,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from opentelemetry import trace
 
+from particles import __version__
 from particles.config import get_config
 from particles.egress import ensure_backstop
 from particles.mcp.resources import register_digest_resources
@@ -51,7 +52,6 @@ from particles.mcp.tools.subjects import subjects_list, subjects_search, subject
 from particles.mcp.tools.taxonomy import list_taxonomies
 from particles.mcp.tools.write import (
     deposit_text,
-    extraction_submit,
     link_add,
     link_remove,
     particle_assert,
@@ -157,16 +157,16 @@ def build_server() -> FastMCP:
     handlers without spawning the stdio transport.
     """
     server: FastMCP = FastMCP(name=SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+    # FastMCP takes no version, so the wrapped low-level server would report
+    # the ``mcp`` library's own version in ``serverInfo``. Its ``version``
+    # attribute is public; only the handle FastMCP keeps on it is not. The
+    # memory-compat server passes the same value to ``Server`` directly.
+    server._mcp_server.version = __version__
     for fn in _TOOL_REGISTRATION_ORDER:
         server.tool()(_traced_tool(fn))
     if get_config().mcp.write.enabled_stores:
         for fn in _WRITE_TOOL_REGISTRATION_ORDER:
             server.tool()(_traced_tool(fn))
-        # the agent-side extraction submit tool joins the write
-        # surface only while agent extraction is on, so the write surface an
-        # install already has is unchanged until it opts in.
-        if get_config().claude_code.agent_extraction.mode != "off":
-            server.tool()(_traced_tool(extraction_submit))
     # session-start recall: the digest resource template is always
     # available (a read-only view of any store); concrete per-store digests are
     # listed for the write-enabled / opted-in memory stores (§2).

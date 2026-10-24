@@ -49,6 +49,7 @@ const KINDS = [
   "broken_provenance",
   "no_subject",
   "gated_subjects",
+  "subjectless_source",
   "duplicate_pair",
   "uncited_url",
   "failed_snapshots",
@@ -304,7 +305,7 @@ export class CurationFeed {
 
     const refs = document.createElement("div");
     refs.className = "refs";
-    refs.append(...this.renderRefs(card));
+    refs.append(...this.renderRefs(card, el));
     el.appendChild(refs);
 
     el.appendChild(this.renderGestures(card, el));
@@ -312,7 +313,7 @@ export class CurationFeed {
     return el;
   }
 
-  private renderRefs(card: CurationCard): Node[] {
+  private renderRefs(card: CurationCard, cardEl: HTMLElement): Node[] {
     const nodes: Node[] = [];
     const briefs = card.particles ?? [];
     if (card.conflict && (card.conflict.a || card.conflict.b)) {
@@ -327,7 +328,15 @@ export class CurationFeed {
       // effective confidence + status) so the gesture — e.g. which of a
       // duplicate pair to keep — can be judged from the card alone.
       for (const b of briefs) {
-        nodes.push(renderBrief(b));
+        nodes.push(
+          card.kind === "subjectless_source"
+            ? this.renderMemberBrief(card, b, cardEl)
+            : renderBrief(b),
+        );
+      }
+      const more = (card.particle_ids ?? []).length - briefs.length;
+      if (card.kind === "subjectless_source" && more > 0) {
+        nodes.push(this.renderShowAll(card, cardEl, more));
       }
     } else {
       const ids = card.particle_ids ?? [];
@@ -360,6 +369,71 @@ export class CurationFeed {
       nodes.push(a);
     }
     return nodes;
+  }
+
+  /**
+   * A belief on a source card, with the gestures of its own
+   * `no_subject` key. Resolving one removes it from the card; the card leaves
+   * the stack when none is left.
+   */
+  private renderMemberBrief(
+    card: CurationCard,
+    b: ParticleBrief,
+    cardEl: HTMLElement,
+  ): HTMLElement {
+    const item = renderBrief(b);
+    if (this.readOnly) return item;
+    const member: CurationCard = {
+      ...card,
+      kind: "no_subject",
+      key: `no_subject:${b.particle_id}`,
+      particle_ids: [b.particle_id],
+      particles: [b],
+      corpus_entry_id: null,
+    };
+    const row = document.createElement("div");
+    row.className = "gestures";
+    for (const g of ["assign-subject", "supersede", "retract"]) {
+      const btn = document.createElement("button");
+      btn.className = "gesture";
+      if (isDangerGesture(g)) btn.classList.add("danger");
+      btn.textContent = gestureLabel(g, "no_subject");
+      btn.onclick = async () => {
+        try {
+          if (!(await this.runGesture(g, member))) return;
+        } catch (e) {
+          this.root.prepend(banner("error", apiErrorMessage(e)));
+          return;
+        }
+        item.remove();
+        card.particle_ids = (card.particle_ids ?? []).filter((id) => id !== b.particle_id);
+        card.particles = (card.particles ?? []).filter((p) => p.particle_id !== b.particle_id);
+        if (card.particle_ids.length === 0) this.advance(cardEl, true);
+      };
+      row.appendChild(btn);
+    }
+    item.appendChild(row);
+    return item;
+  }
+
+  /** "Show all N": load the source card with every belief briefed. */
+  private renderShowAll(card: CurationCard, cardEl: HTMLElement, more: number): HTMLElement {
+    const btn = document.createElement("button");
+    btn.className = "gesture";
+    btn.textContent = `Show all ${(card.particle_ids ?? []).length} (${more} more)`;
+    btn.onclick = async () => {
+      try {
+        const full = await this.deps.client.curationCard(card.key ?? "");
+        card.particle_ids = full.particle_ids;
+        card.particles = full.particles;
+      } catch (e) {
+        this.root.prepend(banner("error", apiErrorMessage(e)));
+        return;
+      }
+      const refs = cardEl.querySelector(".refs");
+      if (refs) refs.replaceChildren(...this.renderRefs(card, cardEl));
+    };
+    return btn;
   }
 
   private renderGestures(card: CurationCard, cardEl: HTMLElement): HTMLElement {

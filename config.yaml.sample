@@ -306,15 +306,16 @@ claude_code:  # [engine]
   # hook timeout. On expiry the hook logs and exits 0 with no output.
   hook_deadline_seconds: 10.0
   # What a session's digest and MEMORY.md region see.
-  #   store   — the whole store (the default; every project sees everything).
-  #   project — global beliefs plus those observed in THIS project. A belief is
+  #   store   — the whole store: every project sees everything.
+  #   project — the default: global beliefs plus those observed in
+  #             THIS project. A belief is
   #             "observed in" a project when one of its sources was harvested
   #             there; nothing is stored on the belief itself, so this is a
   #             reading lens, not a partition, and one line switches it back.
   # Takes effect only after `particles memory rescope` has run on the store
   # (`init claude-code` runs it); until then the surfaces stay store-wide and
   # say so. It is a relevance scope, not access control.
-  observer_scope: store
+  observer_scope: project
   harvest:
     # Harvest distilled session transcripts (speaker turns verbatim, tool calls
     # one-line, tool results dropped, secrets redacted). false ⇒ memory-file
@@ -335,43 +336,6 @@ claude_code:  # [engine]
     # current session (covers SIGKILL / crashes / an unreachable store at a
     # prior session end). 0 disables the sweep.
     catchup_limit: 5
-  # Agent-side extraction: a Stop hook asks the session's own agent
-  # to extract a span of its deposited transcript, through the
-  # `extraction_submit` MCP tool. The user's plan pays; no API key is needed
-  # for extraction. Defaults come from the 2026-10-09 offline replay and store
-  # query (docs/benchmarks/agent-extraction-defaults-2026-10-09.md).
-  agent_extraction:
-    # off | shadow | on. shadow asks and verifies but writes and marks
-    # nothing, logging what would have happened.
-    mode: "off"
-    # Ask when the distilled transcript has grown this much past what was
-    # extracted (replay: about 1.7 asks per active hour).
-    min_new_chars: 8000
-    # Seconds between asks in one session.
-    min_interval_seconds: 600
-    # Waive the interval while more than one span is owed and the last ask
-    # was answered with progress (its span is not owed again).
-    catch_up: true
-    # Asks per session where a background extractor can take the rest. A
-    # keyless install is never capped.
-    max_asks_per_session: 6
-    # Largest span one ask carries; its text rides in the ask.
-    max_span_chars: 40000
-    # An ask unanswered after this many seconds expires.
-    ask_ttl_seconds: 900
-    # A submission covers its span with at least this many accepted claims per
-    # 1000 characters (10th percentile of the general extractor's transcript
-    # deltas, 262 reads measured 2026-10-16).
-    min_claims_per_kchar: 1.27
-    # ...and at most this share of candidates dropped for missing evidence.
-    # Placeholder until the shadow week measures it.
-    max_evidence_drop_ratio: 0.5
-    # In shadow mode, keep each submission's accepted candidates (claim text,
-    # stated confidence, evidence) in a local JSONL file for later labelling
-    # and calibration. The event log keeps counts only.
-    keep_shadow_candidates: true
-    # null ⇒ <state_dir>/agent-extraction-shadow.jsonl.
-    shadow_candidates_path: null
 
 # Agent-memory product surface — the MEMORY.md projection.
 # Namespace shared with the claude_code hook integration above:
@@ -393,11 +357,30 @@ agent_memory:  # [engine]
     # wins where both speak — edit memory.yaml to retune an existing install).
     max_lines: 120
     min_confidence: 0.30
-    # Fold-and-archive (default-on): after MEMORY.md's harvest succeeded,
-    # agent-authored lines outside the projected region are MOVED — never
-    # destroyed — to <state_dir>/MEMORY.archive.md (append-only, itself
-    # harvested next cycle). false keeps authored lines in place.
+    # Fold-and-archive (default-on): a memory-index pointer below
+    # the projected region is MOVED (never destroyed) to the project's
+    # append-only MEMORY.archive.md while the region shows a belief its file
+    # currently states, once that file is extracted, and comes back when the
+    # region stops showing one. Other lines are never moved. false turns both
+    # halves off and keeps every line in place.
     fold_authored_lines: true
+    # Memory types whose pointers never fold: a pointer whose
+    # target file's frontmatter `metadata.type` is listed stays in MEMORY.md
+    # whatever the region shows, and one already archived comes back. These
+    # are the standing rules and facts about you, which a confidence-ranked
+    # region does not reliably keep in view. A target with no type follows
+    # the rule above. [] lets every typed pointer fold.
+    never_fold_types: [feedback, user]
+    # Source tags the region never selects from. A belief whose
+    # current sources all carry one of these tags is dropped before the region's
+    # cut; one that no source states any more is judged by the sources that
+    # ever stated it, and one with no source at all is kept. The default keeps
+    # rule files (AGENTS.md / CLAUDE.md, tagged rule-file by `particles rules
+    # sync`) out: they are operating documentation the harness serves from the
+    # files themselves, and on a real store they filled most of the region.
+    # Read at render time, so it applies without editing memory.yaml.
+    # [] restores the unfiltered region.
+    exclude_source_tags: [rule-file]
     # Optional git-versioned history of the projected view. When
     # enabled AND the memory directory is inside a git repo, each render that
     # changes files under it is committed with a structured message (run id +
@@ -601,6 +584,13 @@ extraction:  # [client]
   # whole html_chunk_size chunk at the worst measured rate, and is
   # claude-haiku-4-5's output limit.
   retry_max_tokens: 64000
+  # An extraction call answered with HTTP 429 (rate limited) is retried up to
+  # this many times before it counts as failed and its snapshot stays PENDING.
+  # The wait is the reply's retry-after, else the backoff doubled per attempt,
+  # capped at the max wait. 0 restores the single attempt.
+  rate_limit_retries: 4
+  rate_limit_backoff_seconds: 10.0
+  rate_limit_max_wait_seconds: 120.0
   # NOTE: `extraction.query_max_tokens` moved to `query.answer_max_tokens`. It
   # never drove extraction — it is the §9.3 answer call's budget — and its 1024
   # default left an extended-thinking model no tokens for the answer. The old
@@ -639,6 +629,13 @@ extraction:  # [client]
   # next run picks it up. Set above the longest expected single-snapshot
   # extraction runtime so a still-running job is never reclaimed.
   stale_in_progress_minutes: 30.0
+  # A source whose every extraction call the model refused (stop_reason
+  # refusal) is recorded and skipped by ``extract --all-pending``, the
+  # nightly catch-up and the audit until the extraction model or the
+  # content changes, or this many days pass. Naming the entry
+  # (``particles extract <entry>``) or ``--retry-refused`` sends it at once.
+  # 0 turns the hold off.
+  refusal_retry_days: 30.0
   # Cost-estimate assumption, not a runtime knob: input tokens the general
   # extractor's fixed system prompt (~8k chars) adds to every call. Read by the
   # `particles audit` estimate and the memory-rot benchmark. (Formerly
@@ -662,6 +659,17 @@ extraction:  # [client]
   # intermediate one is kept as PROVENANCE_STALE history, at one LLM call per
   # generation).
   collapse_superseded_pending: true
+  # `extract --all-pending` prints its estimate before it spends, and asks
+  # first when the estimate exceeds this many LLM calls. A run with
+  # no terminal (a script, an agent) stops there with exit 2 unless it passes
+  # --yes or --budget-usd. 0 asks before any call.
+  confirm_call_threshold: 50
+  # The model the estimate also prices, as "provider:model", offered through
+  # `extract --extraction-model` for a cheaper first pass over a large backlog
+  # such as a vault. claude-haiku-5-5 passed the same extraction and
+  # subject-resolution bars as claude-sonnet-5-5 on 2026-10-22, at about a
+  # thirteenth of the cost a note. null prints the configured model only.
+  alternative_model: anthropic:claude-haiku-5-5
   # Extract only what an append-only snapshot adds. A session
   # transcript or an append-only archive is deposited again at every harvest,
   # each snapshot a longer copy of the last. With this on, a snapshot of an
@@ -680,10 +688,6 @@ extraction:  # [client]
   # The largest delta chunk sent in one call (minimum 1000). Each chunk after
   # the first takes the end of the chunk before it as its context.
   append_chunk_chars: 7500
-  # claims per 1000 characters the agent extractor's prompt names as
-  # a thoroughness guide, never a quota (median of the general extractor's
-  # transcript deltas, 262 reads measured 2026-10-16).
-  agent_expected_claims_per_kchar: 1.9
   # Extract-time exact-duplicate suppression. When a candidate's
   # claim is already held verbatim by an ACTIVE particle with the same
   # subjects and the same stance:holder, don't mint a second particle —
@@ -744,8 +748,12 @@ extraction:  # [client]
   # momentary working state: a claim naming a concrete .claude/worktrees/<name>
   # path, or opening "The session now operates on …", "The working directory
   # is …", "The current branch is …", is dropped, and a worktree name is never
-  # minted as a Subject. Each drop is disclosed as a quality note. Empty
-  # disables the filter.
+  # minted as a Subject. The same source types also get the session-artifact
+  # rewrite: a claim opening "The pull request was created at
+  # <URL>" is rewritten to name the pull request the URL gives
+  # (owner/repo#N), and a bare description ("the commit", "the user") is
+  # never kept as a Subject. Each drop and rewrite is disclosed as a quality
+  # note. Empty disables both.
   session_state_source_types: [CONVERSATION]
 
 # Document-scope meta-claim labelling. The general extractor
@@ -1046,6 +1054,24 @@ import_project:  # [engine]
     - ".pytest_cache"
     - ".ruff_cache"
 
+import_vault:  # [engine]
+  # `particles import vault <dir>` deposits each note MUTABLE, so an
+  # edit retires what the note no longer says at the next extraction, and a
+  # completed walk that no longer finds a previously imported note records an
+  # absence, which retires the note's claims. An unmounted volume or an
+  # unfinished sync looks exactly like deleting every note, so these two guards
+  # decide whether a walk may record the absences it found. When either
+  # refuses, the walk records none, lists the missing notes and exits 1;
+  # `--confirm-absent` records them, `--keep-missing` records none.
+  # "first": ask before the first absence ever recorded under a root.
+  # "always": ask whenever a walk finds absences.
+  confirm_absent: first
+  # After that, ask when a walk would record absence for more than this
+  # fraction of the notes previously imported under its root (and for at least
+  # five notes, a fixed floor). A judgement, not a measurement: every import
+  # that records absences logs the count and fraction so it can be tuned.
+  max_absent_fraction: 0.25
+
 web_clipper:  # [engine]
   # `particles import web-clipper <dir>` walks a folder of
   # frontmatter-Markdown captures (the Obsidian Web Clipper is the first profile),
@@ -1114,6 +1140,30 @@ trust:  # [client]
   # trust statement in that domain.
   source_type_domains:
     CONVERSATION: agent-memory
+
+# How a new generation of a MUTABLE source (a memory file, a vault note)
+# replaces the old one.
+generation:  # [engine]
+  restatement:
+    # Before an edited note's earlier claims are retired, pair each new claim
+    # with the nearest earlier one and ask whether they are one claim. A SAME
+    # keeps the earlier claim (its review, trust and history) instead of
+    # minting a reworded copy. false restores the old behaviour.
+    enabled: true
+    # Content cosine below which a pair is not asked.
+    floor: 0.70
+    # Pairs per pass put to the model judge, highest cosine first; the rest
+    # keep the old behaviour and are reported as unasked.
+    max_judged: 64
+    # Pairs per judge call.
+    judge_batch: 25
+    # Whether the judge's SAME carries a claim. Off during its admission
+    # period: verdicts are recorded and would-be carries counted, nothing
+    # else changes. Exact restatements under the duplicate key carry anyway.
+    judge_admitted: false
+    # Record "replaced by" lineage when a reworded claim's two update
+    # readings say the value changed.
+    lineage: true
 
 # Cross-entry §6.6 reconciliation policy.
 reconciliation:  # [engine]
@@ -1304,6 +1354,31 @@ utility:  # [engine]
   # Re-calibrate against your own store with `particles memory sweep-rank-lift`
   # — a store whose beliefs accumulate mined events faster needs a higher value.
   explicit_weight: 25.0
+
+  # The nightly rank-lift monitor: a read-only consolidation pass
+  # that checks whether rank_lift above still does its job, in every view a
+  # session renders, and reports. It never changes rank_lift.
+  monitor:
+    enabled: true
+    # The cohort: beliefs applied, outside the session's recorded start
+    # context, in at least this many distinct sessions within the half-life.
+    min_sessions: 2
+    # The floor: the head must hold at least this share of the cohort.
+    capture: 0.75
+    # A view with a smaller cohort reports "cold" and gets no verdict.
+    min_cohort: 3
+    # The ceiling: at least this share of head slots keep beliefs with no use
+    # yet, so a belief that has never been shown can still be.
+    entry_share: 0.25
+    # Views evaluated per run (store-wide plus project keys, largest first);
+    # the rest rotate into later runs.
+    max_views: 4
+    # Head sizes to check. Empty = the projection manifest's default top_k
+    # (60), agent_memory.projection.max_lines and mcp.recall.digest_max_beliefs.
+    head_sizes: []
+    # Belief ids whose rank is reported and whose entering or leaving a head
+    # is disclosed. They never decide the verdict.
+    targets: []
 
 # Read-time owner-relevance lens — the ABOUTNESS axis.
 #
@@ -1939,6 +2014,20 @@ links_suggest:  # [engine]
     # event). A capped run discloses the remainder rather than reading as a
     # complete cleanup; re-run to continue.
     max_per_run: 500
+  # `links dedup --reread` merges two readings of one passage of an
+  # APPEND_ONLY entry (a transcript re-read before 1.166.0) once the duplicate
+  # judge says they are one claim and no update reading says the value
+  # changed.
+  reread:
+    # Cosine strata the judge is admitted on: none | high (0.97 and above) |
+    # all. Set only after your labels on the `--sheet` clear the bar (100 of
+    # 100 SAME verdicts correct, or 109 of 110). `--apply` also needs
+    # auto_merge.enabled.
+    admitted: none
+    # Questions one `--judge` run may ask; a capped run says how many remain.
+    max_judged: 2000
+    # Pairs per judge call.
+    judge_batch: 25
 
 # Citation-signal deposit suggestions. Track URLs mentioned across
 # the corpus — including undeposited ones — and rank the undeposited ones as
@@ -2090,6 +2179,12 @@ audit:  # [engine]
   # exhaustive). Within each tier, pairs from two different notes are probed
   # before pairs from one note.
   max_contradiction_probes: 50
+  # How many harvested snapshots' extraction calls run at once. Only the model
+  # calls overlap: each snapshot's reconcile-and-write pass still runs alone,
+  # in harvest order, so results do not depend on it. The account's rate limit
+  # bounds the gain (a 429 backs off, see extraction.rate_limit_retries). 1 is
+  # the serial loop; an in-memory store always runs serially.
+  extraction_concurrency: 4
   # Share of that cap reserved for cross-scope pairs, two projects' claims the
   # observer precondition declines. Pairs some
   # single reader sees are probed first; a cross-scope contradiction is still

@@ -14,6 +14,12 @@ treats whatever key it returns as an opaque string.
 The default, with nothing registered, is the entry's project key when it has
 exactly one, and ``None`` otherwise. ``None`` means the gate suppresses the
 name, which is behaviour (the fail-closed rule).
+
+A second registration point maps an absolute path to its path from the
+repository root. The Engine cannot turn a project key back into
+a directory, so only the Surface can say that
+``/…/worktrees/x/particles/config.py`` is ``particles/config.py``. With
+nothing registered, every path is kept as spelled.
 """
 
 from __future__ import annotations
@@ -30,13 +36,34 @@ if TYPE_CHECKING:
 #: ``(entry_tags, entry_uri) -> namespace key | None``.
 NamespaceHook = Callable[[Sequence[str], str | None], str | None]
 
+#: ``(namespace_key, absolute_path) -> root-relative path | None``.
+RelativePathHook = Callable[[str, str], str | None]
+
 _HOOK: NamespaceHook | None = None
+_RELATIVE_HOOK: RelativePathHook | None = None
 
 
 def register_artifact_namespace(hook: NamespaceHook | None) -> None:
     """Install the Surface adapter's key rule; ``None`` restores the default."""
     global _HOOK
     _HOOK = hook
+
+
+def register_artifact_relative_path(hook: RelativePathHook | None) -> None:
+    """Install the Surface adapter's root rule; ``None`` restores the default."""
+    global _RELATIVE_HOOK
+    _RELATIVE_HOOK = hook
+
+
+def artifact_relative_path(namespace_key: str, path: str) -> str | None:
+    """The root-relative form of an absolute ``path`` in this project, or ``None``.
+
+    ``None`` keeps the path as spelled: nothing is registered, or the Surface
+    found no directory of this project the path lies under.
+    """
+    if _RELATIVE_HOOK is None:
+        return None
+    return _RELATIVE_HOOK(namespace_key, path)
 
 
 def default_namespace_key(tags: Sequence[str], uri: str | None = None) -> str | None:

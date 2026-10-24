@@ -86,14 +86,15 @@ jobs:
       # release export — one source of truth, never duplicated into
       # docs-requirements.txt where it would go stale every release.
       #
-      # The fallback is the release-ordering seam: this workflow runs on push to
-      # main, but the distributions are published later, from a GitHub Release
-      # that waits on a manual environment approval. So on the push that lands a
-      # release, the exactly-matching core does not exist on the index yet. The
-      # docs then build against the newest core there is — at most one release
-      # of drift, in the most stable half of the API — and say so in the log
-      # rather than going red. The Publish workflow re-triggers this one when it
-      # succeeds, which rebuilds against the exact match.
+      # The fallback is the release-ordering seam: this workflow runs before the
+      # distributions are published, from a GitHub Release once every release
+      # PR has merged. So on a release, the exactly-matching core does not
+      # exist on the index yet, and `.github/core_requirement.py` names this
+      # release's core from the core repository at a logged commit instead.
+      # Only when the core repository does not declare this version either
+      # does the build fall back to the newest core on the index, and say so.
+      # The Publish workflow re-triggers this one when it succeeds, which
+      # rebuilds against the exact match from the index.
       - name: Materialise the Client layer for the API reference
         run: |
           set -euo pipefail
@@ -102,10 +103,8 @@ jobs:
           if pip install --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
             echo "API reference: exact match, linkedparticles-core==$v"
           else
-            echo "::notice::linkedparticles-core==$v is not on the index yet \
-          (the release publishes from a GitHub Release, after this push); \
-          building the API reference against the newest available core."
-            pip install --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core"
+            python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-req.txt"
+            pip install --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
           fi
           cp -R "$RUNNER_TEMP/core-dist/particles/." particles/
           # Fail here, loudly, rather than 40 lines later inside mkdocs.

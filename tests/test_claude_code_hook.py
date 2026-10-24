@@ -689,6 +689,33 @@ class TestHookDoctor:
         assert result.exit_code == 0, result.output
         assert "nothing deposited yet" in result.stdout
 
+    def test_warns_when_memory_md_nears_the_load_window(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """the index sits below the region, so its tail is lost first."""
+        from particles.api.cli._claude_code import claude_project_slug
+        from tests._claude_projects import make_repo
+
+        repo = make_repo(tmp_path / "src" / "repo")
+        memory_dir = tmp_path / ".claude" / "projects" / claude_project_slug(repo) / "memory"
+        memory_dir.mkdir(parents=True)
+        memory_md = memory_dir / "MEMORY.md"
+        monkeypatch.chdir(repo)
+
+        memory_md.write_text("".join(f"- line {i}\n" for i in range(179)))
+        quiet = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert "memory size:" not in quiet.stdout
+
+        memory_md.write_text("".join(f"- line {i}\n" for i in range(180)))
+        loud = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+        assert loud.exit_code == 0, loud.output  # reported, never fatal
+        assert "memory size:    ⚠ MEMORY.md is 180 lines" in loud.stdout
+
     def test_reports_the_memory_directory_and_strays(
         self,
         runner: CliRunner,
@@ -725,9 +752,10 @@ class TestHookDoctor:
         """The one silent state: `project` set, store never rescoped."""
         from particles.config import get_config
 
+        get_config().claude_code.observer_scope = "store"
         assert "observer scope: store" in runner.invoke(app, ["hook", "doctor"]).stdout
 
-        get_config().claude_code.observer_scope = "project"
+        get_config().claude_code.observer_scope = "project"  # the default
         before = runner.invoke(app, ["hook", "doctor"])
         assert before.exit_code == 0 and "NOT in effect" in before.stdout
 
@@ -835,7 +863,7 @@ def _add_snapshot_with_blob() -> None:
 
 _HOOK = (
     "env PARTICLES_CONFIG=/cfg.yaml DATABASE_URL=sqlite+aiosqlite:////s.db "
-    "/pin/.venv/bin/particles hook stop --store default"
+    "/pin/.venv/bin/particles hook session-end --store default"
 )
 
 
@@ -1033,3 +1061,58 @@ def test_doctor_reports_the_install(runner: CliRunner, cli_db: Path, hook_home: 
     result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
     assert result.exit_code == 0, result.output
     assert "install:        Particles " in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# The retired Stop hook (deprecated)
+# ---------------------------------------------------------------------------
+
+
+class TestRetiredStopHook:
+    _STALE = "env DATABASE_URL=x /pin/.venv/bin/particles hook stop --store default"
+
+    def test_the_installer_writes_no_stop_entry(self) -> None:
+        from particles.api.cli._claude_code import build_hook_commands
+
+        assert set(build_hook_commands("particles", "memory")) == {"SessionStart", "SessionEnd"}
+
+    def test_a_reinstall_drops_a_stale_stop_entry_and_keeps_a_foreign_one(self) -> None:
+        from particles.api.cli._claude_code import (
+            build_hook_commands,
+            merge_particles_hook_entries,
+        )
+
+        foreign = {"type": "command", "command": "say done"}
+        settings = {
+            "hooks": {
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": self._STALE}]},
+                    {"hooks": [foreign]},
+                ]
+            }
+        }
+        merged = merge_particles_hook_entries(settings, build_hook_commands("particles", "m"))
+        stop_commands = [h["command"] for g in merged["hooks"]["Stop"] for h in g["hooks"]]
+        assert stop_commands == ["say done"]
+
+    def test_the_verb_is_a_silent_no_op(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            app, ["hook", "stop", "--store", "default"], input='{"session_id": "s"}'
+        )
+        assert result.exit_code == 0
+        assert result.output == ""
+
+    def test_doctor_warns_while_the_entry_remains(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from particles.api.cli import hook
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(
+            json.dumps({"hooks": {"Stop": [{"hooks": [{"command": self._STALE}]}]}})
+        )
+        assert any("retired" in line for line in hook._check_retired_stop_hook())
+        settings.write_text(json.dumps({"hooks": {}}))
+        assert hook._check_retired_stop_hook() == []

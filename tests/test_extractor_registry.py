@@ -165,9 +165,7 @@ class TestSelectExtractor:
             expected = next(
                 p
                 for p in get_extractors()
-                if getattr(p, "ROUTED", True) is not False
-                and not is_must_not(p, source_type)
-                and p.accepts(source_type)
+                if not is_must_not(p, source_type) and p.accepts(source_type)
             )
             assert select_extractor(source_type).EXTRACTOR_ID == expected.EXTRACTOR_ID
 

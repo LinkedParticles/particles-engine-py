@@ -309,6 +309,40 @@ class TestLoadRulings:
         assert rulings[0].recorded_at == datetime(2026, 10, 2, tzinfo=UTC)
         assert len(notes) == 2
 
+    def test_a_ruling_keyed_before_the_typographic_fold_is_still_replaced(
+        self, tmp_path: Path
+    ) -> None:
+        """the pair is identified by its text, not the stored hashes."""
+
+        def line(ruling: str, at: str, retired_hash: str) -> str:
+            return json.dumps(
+                {
+                    "format": "particles.demotion-ruling/1",
+                    "ruling": ruling,
+                    "reason": "SUPERSEDED_BY_UPDATE",
+                    "retired": {
+                        "particle_id": "r",
+                        "content_hash": retired_hash,
+                        "content": f'"{_OLD}"',
+                    },
+                    "replacement": {"particle_id": "n", "content_hash": "h2", "content": _NEW},
+                    "actor": "curate",
+                    "store": "default",
+                    "recorded_at": at,
+                    "card_key": "demotion:n|r",
+                }
+            )
+
+        path = tmp_path / "rulings.jsonl"
+        path.write_text(
+            line("coexist", "2026-10-01T00:00:00+00:00", "old-key")
+            + "\n"
+            + line("replacement", "2026-10-02T00:00:00+00:00", "new-key")
+            + "\n"
+        )
+        rulings, _ = load_rulings(path)
+        assert [r.ruling for r in rulings] == ["replacement"]
+
     def test_a_missing_file_is_no_rulings(self, tmp_path: Path) -> None:
         assert load_rulings(tmp_path / "absent.jsonl") == ([], [])
 

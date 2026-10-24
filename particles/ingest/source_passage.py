@@ -46,7 +46,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import Particle, ProvenanceRef, ProvenanceRefType
+from particles.core.schema import (
+    Mutability,
+    Particle,
+    ProvenanceRef,
+    ProvenanceRefType,
+    SourceType,
+)
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import get_entry, get_snapshot, resolve_snapshot_for_blob
 from particles.extraction.general import (
@@ -135,12 +141,20 @@ def find_chunk(text: str, chunk_hash: str) -> str | None:
     return None
 
 
-def locate_passage(text: str, content: str) -> tuple[str, float] | None:
+def is_record(source_type: str | None, mutability: str | None) -> bool:
+    """True for a record: an ``APPEND_ONLY`` entry, or any ``CONVERSATION`` (pure)."""
+    return mutability == Mutability.APPEND_ONLY or source_type == SourceType.CONVERSATION
+
+
+def locate_passage(text: str, content: str, *, latest: bool = False) -> tuple[str, float] | None:
     """Best-overlap paragraph (or line within it) for ``content``, or ``None``.
 
     Scores each blank-line-separated paragraph by the share of ``content``'s
     distinct terms it contains; earliest wins a tie, so the result is
-    deterministic. When the winning paragraph is a multi-line block (a bullet
+    deterministic. With ``latest`` the last best paragraph wins instead: a
+    record that repeats a command (an audit re-run, a lint pass run twice)
+    holds near-identical paragraphs, and its newest run is its latest
+    observation. When the winning paragraph is a multi-line block (a bullet
     list, a transcript) and one of its lines alone carries every term the
     paragraph matched, that line is returned instead — the tighter quote.
     Tightening never trades matched terms for brevity: a claim assembled from
@@ -154,7 +168,7 @@ def locate_passage(text: str, content: str) -> tuple[str, float] | None:
 
     def best(units: list[str]) -> tuple[str, float]:
         scored = [(len(wanted & _terms(u)) / len(wanted), u) for u in units]
-        score, unit = max(scored, key=lambda su: su[0])
+        score, unit = max(reversed(scored) if latest else scored, key=lambda su: su[0])
         return unit, score
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -221,14 +235,18 @@ def focus_window(text: str, content: str, limit: int, *, also: str | None = None
 
 
 def derive_passage(
-    text: str, *, content: str, chunk_hash: str | None
+    text: str, *, content: str, chunk_hash: str | None, record: bool = False
 ) -> tuple[PassageMatch, str, float | None]:
-    """Pick the passage for ``content`` out of ``text`` — pure, no I/O."""
+    """Pick the passage for ``content`` out of ``text`` — pure, no I/O.
+
+    ``record`` makes the newest best-matching paragraph win a tie
+    (:func:`locate_passage`'s ``latest``).
+    """
     if chunk_hash:
         chunk = find_chunk(text, chunk_hash)
         if chunk is not None:
             return PassageMatch.EXACT, chunk, None
-    located = locate_passage(text, content)
+    located = locate_passage(text, content, latest=record)
     if located is not None:
         return PassageMatch.LOCATED, located[0], located[1]
     return PassageMatch.WHOLE, text.strip(), None
@@ -300,7 +318,10 @@ async def hydrate_source_passage(session: AsyncSession, particle_id: str) -> Sou
         return passage.model_copy(update={"note": "The source rendered to no text."})
 
     match, found, overlap = derive_passage(
-        text, content=particle.content, chunk_hash=ref.chunk_hash
+        text,
+        content=particle.content,
+        chunk_hash=ref.chunk_hash,
+        record=entry is not None and is_record(entry.source_type, entry.mutability),
     )
     if ref.chunk_hash and match is not PassageMatch.EXACT:
         notes.append(

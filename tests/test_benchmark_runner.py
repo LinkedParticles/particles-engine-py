@@ -1115,6 +1115,35 @@ class TestBenchmarkCLI:
         # The save notice goes to stderr, keeping stdout clean for --format json
         assert "Run report saved to" in (result.stderr or "")
 
+    def test_run_file_carries_the_pass_usage_and_the_held_out_reader_reads_it(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The verb is metered and the envelope stays format 1."""
+        import json as _json
+
+        from particles.api.cli.extractor import _heldout_pairs_from_envelope
+
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setenv("BENCHMARK_RUNS_DIR", str(runs_dir))
+        result = runner.invoke(
+            app, ["extractor", "benchmark", "numista-coin-extractor"], catch_exceptions=False
+        )
+        assert result.exit_code == 0, result.output
+        # Numista makes no model call; the usage line still says so.
+        assert "LLM usage: no LLM calls." in (result.stderr or "")
+        envelope = _json.loads(next(runs_dir.glob("*.json")).read_text())
+        assert envelope["format"] == 1
+        assert envelope["llm_usage"]["rows"] == []
+        report = envelope["report"]
+        read = _heldout_pairs_from_envelope(
+            envelope,
+            extractor_id=report["extractor_id"],
+            extractor_version=report["extractor_version"],
+            provider_model=envelope["extraction_provider_model"],
+            exclude_suite_ids=set(),
+        )
+        assert read is not None and read[0] == "numismatic-seed-001"
+
     def test_no_save_skips_persistence(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

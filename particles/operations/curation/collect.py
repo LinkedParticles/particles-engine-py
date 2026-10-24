@@ -13,21 +13,28 @@ lint finding emits per-particle, so it becomes a single batch card.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import LintFinding, SuggestMode
+from particles.core.schema import LintFinding, Particle, ProvenanceRefType, SuggestMode
+from particles.corpus.store import get_entry_uri_map
 from particles.operations.abstraction import pending_candidate_events
 from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.deposit_suggest import suggest_deposits
 from particles.operations.links_suggest import suggest_co_evidential
 from particles.operations.lint import ContradictionProbeControl, run_lint
 from particles.operations.quality import get_quality_report
+from particles.operations.rank_lift_monitor import (
+    RankLiftMonitorReport,
+    latest_monitor_block,
+    render_rank_lift_lines,
+)
 from particles.operations.reanchor import pending_unrestated_events
 from particles.operations.subject_relink import plan_gated_relink
-from particles.store.particle_store import get_recorded_demotions
+from particles.store.particle_store import get_particles_by_ids, get_recorded_demotions
 
 from .cards import (
     CardKind,
@@ -35,6 +42,7 @@ from .cards import (
     DuplicateVerdict,
     gestures_for,
 )
+from .suppression import dismissed_members, suppressed_keys
 
 # Lint finding_type → the card kind it produces. Only per-record findings (those
 # carrying a particle_id) become cards; the rest of lint's INFO/aggregate
@@ -157,6 +165,91 @@ async def _fold_recoverable_orphans(
     return kept
 
 
+#: The fewest subjectless beliefs one source needs for a card of its own.
+#: A lone orphan keeps its one-gesture ``no_subject`` card.
+_SOURCE_GROUP_MIN = 2
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _first_source_entry(p: Particle) -> str | None:
+    """The corpus entry of the belief's first SOURCE ref, the one its brief names."""
+    ref = next((r for r in p.provenance if r.type == ProvenanceRefType.SOURCE), None)
+    return ref.corpus_entry_id if ref is not None and ref.corpus_entry_id else None
+
+
+def group_orphans_by_source(
+    cards: list[CurationCard],
+    *,
+    sources: Mapping[str, str],
+    asserted_at: Mapping[str, datetime],
+    uris: Mapping[str, str],
+    suppressed: set[str],
+    dismissed: set[str],
+) -> list[CurationCard]:
+    """Fold the per-belief NO_SUBJECT cards into one card per source (pure).
+
+    ``sources`` maps a belief to its first SOURCE corpus entry. A source with
+    at least :data:`_SOURCE_GROUP_MIN` orphans becomes one ``subjectless_source``
+    card naming them in assertion order; every other orphan keeps its own card.
+    A belief a source dismissal named (``dismissed``) has been ruled on and
+    leaves the collection. A belief whose own ``no_subject`` key is snoozed or
+    dismissed (``suppressed``) is not grouped: it keeps its card, which the
+    live half hides by key as before (§4).
+    """
+    groups: dict[str, list[str]] = {}
+    for card in cards:
+        if card.kind is not CardKind.NO_SUBJECT:
+            continue
+        pid = card.particle_ids[0]
+        entry = sources.get(pid)
+        if pid in dismissed or card.key in suppressed or entry is None:
+            continue
+        groups.setdefault(entry, []).append(pid)
+    grouped = {e: ids for e, ids in groups.items() if len(ids) >= _SOURCE_GROUP_MIN}
+    gone = dismissed | {pid for ids in grouped.values() for pid in ids}
+    out = [c for c in cards if c.kind is not CardKind.NO_SUBJECT or c.particle_ids[0] not in gone]
+    for entry, ids in sorted(grouped.items()):
+        ids.sort(key=lambda pid: (asserted_at.get(pid, _EPOCH), pid))
+        out.append(
+            CurationCard(
+                kind=CardKind.SUBJECTLESS_SOURCE,
+                particle_ids=ids,
+                corpus_entry_id=entry,
+                diagnostic=f"{len(ids)} belief(s) with no subject from {uris.get(entry, entry)}",
+                suggested_gestures=gestures_for(CardKind.SUBJECTLESS_SOURCE),
+            )
+        )
+    return out
+
+
+async def _group_orphans(session: AsyncSession, cards: list[CurationCard]) -> list[CurationCard]:
+    """Gather what :func:`group_orphans_by_source` decides over."""
+    orphan_ids = [c.particle_ids[0] for c in cards if c.kind is CardKind.NO_SUBJECT]
+    if not orphan_ids:
+        return cards
+    particles = await get_particles_by_ids(session, orphan_ids)
+    sources = {
+        pid: entry for pid, p in particles.items() if (entry := _first_source_entry(p)) is not None
+    }
+    asserted_at = {
+        pid: (p.asserted_at if p.asserted_at.tzinfo else p.asserted_at.replace(tzinfo=UTC))
+        for pid, p in particles.items()
+    }
+    return group_orphans_by_source(
+        cards,
+        sources=sources,
+        asserted_at=asserted_at,
+        uris={
+            e: uri
+            for e, uri in (await get_entry_uri_map(session, set(sources.values()))).items()
+            if uri
+        },
+        suppressed=await suppressed_keys(session),
+        dismissed=await dismissed_members(session),
+    )
+
+
 async def collect_cards(
     session: AsyncSession,
     *,
@@ -214,7 +307,8 @@ async def collect_cards(
         contradiction_probe=contradiction_probe,
         granularity_probe=False,
     )
-    cards.extend(await _fold_recoverable_orphans(session, cards_from_findings(report.findings)))
+    orphans_folded = await _fold_recoverable_orphans(session, cards_from_findings(report.findings))
+    cards.extend(await _group_orphans(session, orphans_folded))
 
     # --- duplicate pairs: co-evidential candidates within a Subject ---
     # with semantic finders on, run the duplicate finder in LLM_JUDGE
@@ -347,4 +441,72 @@ async def collect_cards(
             )
         )
 
+    # --- the rank-lift monitor's alert, from the run record ---
+    card = await rank_lift_card(session)
+    if card is not None:
+        cards.append(card)
+    # --- refused sources: held because the extraction model declined them ---
+    refused = await refused_snapshots_card(session)
+    if refused is not None:
+        cards.append(refused)
+
     return cards
+
+
+async def rank_lift_card(session: AsyncSession) -> CurationCard | None:
+    """One card while the latest monitor reading carries an alert.
+
+    The alert is raised only on a transition into an out-of-band verdict, so a
+    standing verdict known at activation never becomes a card. The card names
+    the reading and the sweep that reproduces it; choosing a new ``λ`` is the
+    operator's act, outside the queue.
+    """
+    block = await latest_monitor_block(session)
+    if not block or not block.get("alert"):
+        return None
+    report = RankLiftMonitorReport.model_validate(block)
+    lines = render_rank_lift_lines(report)
+    diagnostic = " ".join(line.strip() for line in lines).removeprefix("rank-lift").strip()
+    return CurationCard(
+        kind=CardKind.RANK_LIFT,
+        rank_lift_alert=report.alert,
+        diagnostic=f"Usefulness rank-lift: {diagnostic}",
+        suggested_gestures=gestures_for(CardKind.RANK_LIFT),
+    )
+
+
+#: How many held sources the refused-sources card names before "and N more".
+_NAMED_REFUSED = 3
+
+
+async def refused_snapshots_card(session: AsyncSession) -> CurationCard | None:
+    """The one batch card naming the sources a current refusal holds.
+
+    Each named source carries the projects it is in view for, read from its
+    entry's ``project:`` tags: like every card it displays observer scope and
+    is never filtered by it.
+    """
+    from particles.core.observer_scope import project_keys
+    from particles.ingest.refusal_hold import held_snapshots
+
+    held = await held_snapshots(session)
+    if not held:
+        return None
+    named = []
+    for item in held[:_NAMED_REFUSED]:
+        label = item.uri_r.rstrip("/").rsplit("/", 1)[-1] if item.uri_r else item.entry_id[:8]
+        details = [item.category] if item.category else []
+        projects = sorted(project_keys(item.tags))
+        if projects:
+            details.append("in view for " + ", ".join(projects))
+        named.append(f"{label} ({'; '.join(details)})" if details else label)
+    rest = len(held) - len(named)
+    names = ", ".join(named) + (f" and {rest} more" if rest > 0 else "")
+    return CurationCard(
+        kind=CardKind.REFUSED_SNAPSHOTS,
+        diagnostic=(
+            f"{len(held)} source(s) were declined by the extraction model "
+            f"({held[0].provider_model}) and are not in memory: {names}"
+        ),
+        suggested_gestures=gestures_for(CardKind.REFUSED_SNAPSHOTS),
+    )

@@ -53,10 +53,13 @@ async def remember(
     *,
     purpose: str,
     rung: RungStamp | None = None,
+    temperature: str | None = None,
 ) -> int:
     """Record fresh verdicts and commit them under the writer lock.
 
     ``rung`` stamps the rows with the ladder rung that asked.
+    ``temperature`` is what the answering calls sent, as the caller's
+    :func:`particles.llm.observe_sampling` block saw it.
 
     Committed at once, so a pass that stops part-way (the breaker opened, the
     process died) keeps what it paid for. Anything the session holds
@@ -66,7 +69,13 @@ async def remember(
         return 0
     async with write_transaction(session):
         return await record_verdicts(
-            session, kind, prompt_hash, verdicts, model=model_label(purpose), rung=rung
+            session,
+            kind,
+            prompt_hash,
+            verdicts,
+            model=model_label(purpose),
+            rung=rung,
+            temperature=temperature,
         )
 
 

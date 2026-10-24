@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.schema import CalibrationBucket, QualityReport
 from particles.core.status import Status
 from particles.corpus.store import count_entries, count_snapshots_by_extraction_status
+from particles.ingest.refusal_hold import held_snapshots
 from particles.observability import traced
 from particles.operations.curation.precision import curation_precision
 from particles.operations.llm_spend import store_llm_spend
@@ -75,6 +76,8 @@ async def get_quality_report(session: AsyncSession) -> QualityReport:
     # queue precision over the default window, read from the gesture
     # log and the retained collections; ``None`` when there is nothing to measure.
     precision = await curation_precision(session)
+    # PENDING snapshots a current refusal holds.
+    held = await held_snapshots(session)
 
     return QualityReport(
         active_particles=active_particles,
@@ -86,6 +89,7 @@ async def get_quality_report(session: AsyncSession) -> QualityReport:
         snapshots_in_progress=snap_counts.get("IN_PROGRESS", 0),
         snapshots_complete=snap_counts.get("COMPLETE", 0),
         snapshots_failed=snap_counts.get("FAILED", 0),
+        snapshots_held_refused=len(held),
         total_subjects=total_subjects,
         subjects_without_particles=subjects_without_particles,
         structured_claims=int(coverage["annotated"]),

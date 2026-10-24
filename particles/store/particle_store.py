@@ -60,6 +60,7 @@ from particles.core.schema import (
     UncertaintyNature,
     ValidKind,
 )
+from particles.core.schema_version import major_prefix_range
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.db import Base
@@ -731,7 +732,11 @@ async def get_active_particles_for_entry(
 
 
 async def get_active_particle_ids_from_other_snapshots(
-    session: AsyncSession, corpus_entry_id: str, current_snapshot_id: str
+    session: AsyncSession,
+    corpus_entry_id: str,
+    current_snapshot_id: str,
+    *,
+    include_unsnapshotted: bool = False,
 ) -> list[str]:
     """ACTIVE particle ids anchored to a *superseded* snapshot of one entry.
 
@@ -741,15 +746,49 @@ async def get_active_particle_ids_from_other_snapshots(
     JSON scan.
 
     Edges with a NULL ``snapshot_id`` are excluded — snapshot-less provenance
-    carries no generation, so there is nothing to supersede it.
+    carries no generation, so there is nothing to supersede it — unless
+    ``include_unsnapshotted``: an ``ABSENT`` current generation states nothing,
+    so absence processing takes those edges too.
+    """
+    edge_filter = (
+        or_(
+            ProvenanceEdgeRow.snapshot_id.is_(None),
+            ProvenanceEdgeRow.snapshot_id != current_snapshot_id,
+        )
+        if include_unsnapshotted
+        else and_(
+            ProvenanceEdgeRow.snapshot_id.is_not(None),
+            ProvenanceEdgeRow.snapshot_id != current_snapshot_id,
+        )
+    )
+    result = await session.execute(
+        select(ParticleRow.id)
+        .join(ProvenanceEdgeRow, ProvenanceEdgeRow.particle_id == ParticleRow.id)
+        .where(
+            ProvenanceEdgeRow.corpus_entry_id == corpus_entry_id,
+            edge_filter,
+            ParticleRow.status == Status.ACTIVE.value,
+        )
+        .distinct()
+    )
+    return [str(pid) for pid in result.scalars()]
+
+
+async def get_active_particle_ids_for_snapshot(
+    session: AsyncSession, corpus_entry_id: str, snapshot_id: str
+) -> list[str]:
+    """ACTIVE particle ids whose provenance edge to one entry names ``snapshot_id``.
+
+    The beliefs a ``MUTABLE`` entry currently states when ``snapshot_id`` is
+    its latest extracted snapshot. The fold test reads it to ask
+    whether the region shows any of them.
     """
     result = await session.execute(
         select(ParticleRow.id)
         .join(ProvenanceEdgeRow, ProvenanceEdgeRow.particle_id == ParticleRow.id)
         .where(
             ProvenanceEdgeRow.corpus_entry_id == corpus_entry_id,
-            ProvenanceEdgeRow.snapshot_id.is_not(None),
-            ProvenanceEdgeRow.snapshot_id != current_snapshot_id,
+            ProvenanceEdgeRow.snapshot_id == snapshot_id,
             ParticleRow.status == Status.ACTIVE.value,
         )
         .distinct()
@@ -1092,6 +1131,22 @@ async def set_particle_property(
     properties = json.loads(row.properties_json) if row.properties_json else {}
     properties[key] = value
     row.properties_json = json.dumps(properties)
+    return True
+
+
+async def set_supersedes_if_unset(
+    session: AsyncSession, particle_id: str, predecessor_id: str
+) -> bool:
+    """Name ``predecessor_id`` as the claim ``particle_id`` replaced, unless one is named.
+
+    The lineage pointer of a claim written before its predecessor's
+    retirement was decided, as the reconcile sweep sets it.
+    Returns whether the pointer was written. Flushes nothing; the caller commits.
+    """
+    row = await session.get(ParticleRow, particle_id)
+    if row is None or row.supersedes is not None:
+        return False
+    row.supersedes = predecessor_id
     return True
 
 
@@ -1554,7 +1609,7 @@ async def get_active_particles_with_stale_embedding_model(
 ) -> list[Particle]:
     """Return ACTIVE particles whose embedding model id != the current one.
 
-    Mirrors :func:`get_active_particles_with_stale_schema_version`:
+    The embedding counterpart of :func:`get_active_particles_at_schema_versions`:
     the read-side surface a future re-embed operation consumes to find vectors
     that need recomputing after an embedding-model swap. A NULL
     ``embedding_model_id`` is a legacy row, grandfathered as
@@ -1850,14 +1905,22 @@ _SOURCE_MOVED_ON = frozenset({StatusReason.RETRACTED_DEPENDENCY, StatusReason.SU
 register_carry_forward_lookup(get_active_particles_for_chunk_hash)
 
 
-async def get_active_particles_with_stale_schema_version(
-    session: AsyncSession, current_schema_version: str
+async def get_active_particles_at_schema_versions(
+    session: AsyncSession, schema_versions: Sequence[str]
 ) -> list[Particle]:
-    """Return ACTIVE particles whose schema_version does not match the current value."""
+    """Return ACTIVE particles stamped with any of ``schema_versions``.
+
+    The caller names the stamps (D5: the older minors of the SDK's
+    major, read from :func:`count_active_particles_by_schema_version`), so the
+    selection is an ``IN`` over the indexed column rather than a ``!=`` that
+    would also sweep in newer and incompatible stamps.
+    """
+    if not schema_versions:
+        return []
     result = await session.execute(
         select(ParticleRow).where(
             ParticleRow.status == Status.ACTIVE.value,
-            ParticleRow.schema_version != current_schema_version,
+            ParticleRow.schema_version.in_(list(schema_versions)),
         )
     )
     return [row.to_model() for row in result.scalars()]
@@ -2575,17 +2638,24 @@ async def count_structured_claim_coverage(session: AsyncSession) -> dict[str, An
 
 
 async def has_active_schema_mismatch(session: AsyncSession, schema_version: str) -> bool:
-    """True when any ACTIVE particle carries a ``schema_version`` other than this one.
+    """True when any ACTIVE particle is stamped outside ``schema_version``'s major.
 
-    Two range seeks on ``ix_particles_status_schema_version`` (below and above
-    the version), so the cost does not grow with the store. ``!=`` would scan
-    every ACTIVE index entry, which is why the comparison is split.
+    The probe behind the compatibility guard (D3). It asks whether any
+    ACTIVE row lies outside the half-open range ``["1.", "1/")`` that holds
+    exactly the stamps beginning with the major, as two range seeks on
+    ``ix_particles_status_schema_version``, so the cost does not grow with the
+    store and no full version is ever ordered as text (``"1.10.0"`` sorts
+    before ``"1.9.0"`` lexicographically). A stamp of the right major that does
+    not parse (``"1.x"``) passes this probe; the guard catches it when it
+    counts. ``!=`` would scan every ACTIVE index entry, which is why the
+    comparison is split.
     """
+    lower, upper = major_prefix_range(schema_version)
     active = ParticleRow.status == Status.ACTIVE.value
     # Selecting the indexed column keeps both lookups on the index alone.
     version = ParticleRow.schema_version
-    below = select(version).where(active, version < schema_version)
-    above = select(version).where(active, version > schema_version)
+    below = select(version).where(active, version < lower)
+    above = select(version).where(active, version >= upper)
     result = await session.execute(select(or_(below.exists(), above.exists())))
     return bool(result.scalar_one())
 

@@ -38,6 +38,7 @@ from particles.api.client.base import (
     DepositOutcome,
     DismissOutcome,
     ExtractOutcome,
+    MergedSource,
     MergeOutcome,
     NotYetRemoteError,
     ParticleDetail,
@@ -72,6 +73,8 @@ if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
+    from particles.operations.projection import DocManifest
+    from particles.operations.projection.memory_region import MemoryRegion
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
     from particles.store.session_exposure_store import SessionExposure
@@ -220,8 +223,10 @@ class HttpBackend:
                 f"engine.base_url to use the local store."
             ) from exc
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        resp = await self._request("POST", path, json=payload)
+    async def _post(
+        self, path: str, payload: dict[str, Any], params: dict[str, Any] | None = None
+    ) -> Any:
+        resp = await self._request("POST", path, json=payload, params=params)
         if resp.status_code >= 400:
             raise EngineHttpError(f"{resp.status_code} from {path}: {_detail(resp)}")
         return resp.json()
@@ -273,7 +278,11 @@ class HttpBackend:
                 "follow_comment_links": follow_comment_links,
             },
         )
-        return DepositOutcome(entry_id=body["entry_id"], snapshot_id=body["snapshot_id"])
+        return DepositOutcome(
+            entry_id=body["entry_id"],
+            snapshot_id=body["snapshot_id"],
+            unchanged=bool(body.get("unchanged", False)),
+        )
 
     async def deposit_file(
         self,
@@ -311,7 +320,11 @@ class HttpBackend:
         if resp.status_code >= 400:
             raise EngineHttpError(f"{resp.status_code} from /corpus/deposit/file: {_detail(resp)}")
         body = resp.json()
-        return DepositOutcome(entry_id=body["entry_id"], snapshot_id=body["snapshot_id"])
+        return DepositOutcome(
+            entry_id=body["entry_id"],
+            snapshot_id=body["snapshot_id"],
+            unchanged=bool(body.get("unchanged", False)),
+        )
 
     async def deposit_file_split(
         self,
@@ -439,6 +452,7 @@ class HttpBackend:
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         only_changed_components: bool = False,
+        include_schema_stale: bool = False,
     ) -> dict[str, object]:
         # progress/on_plan/on_status are local-stderr streams with no HTTP
         # analogue; ignored here. The plan still comes back in the response body.
@@ -457,6 +471,7 @@ class HttpBackend:
                 "extractor_id": extractor_id,
                 "include_failed": include_failed,
                 "provider_model": provider_model,
+                "include_schema_stale": include_schema_stale,
                 "dry_run": dry_run,
             },
         )
@@ -499,7 +514,9 @@ class HttpBackend:
         body = await self._get("/subjects/search", params=params)
         return [Subject.model_validate(s) for s in body]
 
-    async def subject_show(self, subject_id: str) -> Subject | None:
+    async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
+        # The engine route resolves IDs and prefixes only, so ``by_name`` has no
+        # remote analogue and a name misses as not found.
         body = await self._get_optional(f"/subjects/{subject_id}")
         return Subject.model_validate(body) if body is not None else None
 
@@ -640,9 +657,57 @@ class HttpBackend:
         # An engine that predates the line ids sends no ``lines``; the model defaults them.
         return RenderedDigest.model_validate(body)
 
+    async def memory_region(
+        self,
+        store: str,
+        *,
+        manifest: DocManifest,
+        base_dir: Path,
+        observer_project: str | None,
+        exclude_source_tags: list[str],
+        fold_targets: list[str],
+    ) -> MemoryRegion:
+        # The engine renders from the client's manifest and answers the fold
+        # verdicts; the memory directory never leaves the client.
+        # ``base_dir`` is a client path the engine cannot read, so a manifest
+        # with a file section is refused here, before any request.
+        from particles.operations.projection.memory_region import (
+            ClientFileSectionError,
+            MemoryRegion,
+            body_hash,
+            has_client_file_section,
+        )
+
+        del base_dir
+        if has_client_file_section(manifest):
+            raise ClientFileSectionError(
+                "the memory manifest includes a file section, which a remote engine cannot read"
+            )
+        body = await self._post(
+            f"/memory/projection/{store}",
+            {
+                "manifest": manifest.model_dump(mode="json"),
+                "observer_project": observer_project,
+                "exclude_source_tags": exclude_source_tags,
+                "fold_targets": fold_targets,
+            },
+        )
+        region = MemoryRegion(
+            body=body["body"],
+            content_hash=body["content_hash"],
+            fold_verdicts=dict(body.get("fold_verdicts") or {}),
+        )
+        if body_hash(region.body) != region.content_hash:
+            raise EngineHttpError(
+                f"/memory/projection/{store} returned a body that does not match its hash"
+            )
+        return region
+
     async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
-        # Like the harvest deposits, the row lands in the engine's own store.
-        await self._post("/session-exposures", exposure.model_dump(mode="json"))
+        # The row lands in the store the digest was read from.
+        await self._post(
+            "/session-exposures", exposure.model_dump(mode="json"), params={"store": store}
+        )
 
     async def events_list(
         self,
@@ -712,12 +777,28 @@ class HttpBackend:
             subject=Subject.model_validate(body["subject"]), added=list(body["added"])
         )
 
-    async def subject_merge(self, source_id: str, target_id: str) -> MergeOutcome:
-        body = await self._post(f"/subjects/{source_id}/merge", {"target_id": target_id})
+    async def subject_merge(
+        self, source_ids: list[str], target_id: str, *, dry_run: bool = False
+    ) -> MergeOutcome:
+        body = await self._post(
+            "/subjects/merge",
+            {"source_ids": source_ids, "target_id": target_id, "dry_run": dry_run},
+        )
         return MergeOutcome(
             subject=Subject.model_validate(body["subject"]),
             aliases_added=list(body["aliases_added"]),
             particles_relinked=int(body["particles_relinked"]),
+            sources=[
+                MergedSource(
+                    subject_id=str(s["subject_id"]),
+                    canonical_name=str(s["canonical_name"]),
+                    particles_relinked=int(s["particles_relinked"]),
+                    refs_carried=[str(r) for r in s.get("refs_carried", [])],
+                    refs_withheld=[str(r) for r in s.get("refs_withheld", [])],
+                )
+                for s in body.get("sources", [])
+            ],
+            dry_run=bool(body.get("dry_run", False)),
         )
 
     async def subject_split(
@@ -839,9 +920,8 @@ class HttpBackend:
     # ------------------------------------------------------------------
     # Agent belief-write surface — POST to the engine belief-write
     # endpoints, which run §6.6 reconciliation + construction server-side and
-    # govern write-enablement themselves (§5). ``store`` is ignored here: the
-    # engine writes its canonical (default) store; multi-store routing is
-    # deferred.
+    # govern write-enablement themselves (§5). ``store`` rides the ``store``
+    # query parameter, and the engine writes that store.
     # ------------------------------------------------------------------
 
     async def particle_assert(
@@ -871,6 +951,7 @@ class HttpBackend:
                 "tags": tags,
                 "project_key": project_key,
             },
+            params={"store": store},
         )
         return AgentWriteResult.model_validate(body)
 
@@ -905,11 +986,16 @@ class HttpBackend:
                 "reason": reason,
                 "project_key": project_key,
             },
+            params={"store": store},
         )
         return AgentWriteResult.model_validate(body)
 
     async def particle_retract(self, *, particle_id: str, reason: str, store: str) -> None:
-        await self._post("/particles/retract", {"particle_id": particle_id, "reason": reason})
+        await self._post(
+            "/particles/retract",
+            {"particle_id": particle_id, "reason": reason},
+            params={"store": store},
+        )
 
     async def deposit_text(
         self,
@@ -944,6 +1030,7 @@ class HttpBackend:
                 "tags": tags or [],
                 "author_id": identity,
             },
+            params={"store": store},
         )
         return body["entry_id"], body["snapshot_id"]
 
@@ -977,6 +1064,7 @@ class HttpBackend:
                     content_published_at.isoformat() if content_published_at else None
                 ),
             },
+            params={"store": store},
         )
         return TextDepositOutcome(
             entry_id=body["entry_id"],

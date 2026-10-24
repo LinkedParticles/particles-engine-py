@@ -170,6 +170,17 @@ Batches API: ≈ US$2.70 per question.
   `top_k` sweep and the re-judge replay that set, so the three depths differ
   in retrieval and nothing else. Its write-side tuple is pinned in the set's
   manifest and re-checked on every replay.
+- **Correction (2026-10-23): four questions did not read one store.** Four
+  haystacks (`001be529`, `1d4da289`, `gpt4_76048e76`, `91b15a6e`) repeat one
+  session id under two dates. A replay on a build before 1.146.8 re-deposited
+  every session, so the two renderings of that id were versioned and
+  re-extracted on each such run: the `v1-reuse` and `v2-p2` arms of 2026-09-18
+  and the `names` and `none` arms of 2026-09-20. Each of those reports says it
+  deposited and extracted nothing, which is wrong for those four questions; its
+  line "Candidate cache: 8 unique session extraction(s)" is the accurate one.
+  The other 146 questions read one population. A replay now reads the stores
+  only, and a kept set's manifest records a digest of each store's snapshots,
+  so a replay whose stores changed is refused.
 - Sonnet 5 rejects the `temperature` parameter, so the answer and judge calls
   ran at the model's default sampling: a re-run reproduces these numbers only
   within sampling noise. Steps 1 and 4 of § Why the scores changed measure

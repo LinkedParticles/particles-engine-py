@@ -17,7 +17,7 @@ unscoped read is unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -27,7 +27,6 @@ from particles.core.observer_scope import visible
 from particles.core.schema import ObserverScopeNote, Particle
 from particles.core.status import Status
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
-from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import list_particles_filtered
 
 __all__ = [
@@ -57,6 +56,8 @@ class ScopeFilter:
     lapsed: int = 0
     """Beliefs in view for no project because no source still states them—
     disclosed apart from ``unattributed``."""
+    as_of: datetime | None = None
+    """The instant of an as-of read, whose projects are today's attribution."""
 
     @property
     def in_scope(self) -> int:
@@ -71,7 +72,18 @@ class ScopeFilter:
             in_scope=self.in_scope,
             unattributed=self.unattributed,
             lapsed=self.lapsed,
+            attribution=as_of_attribution(self.as_of) if self.engaged else None,
         )
+
+
+def as_of_attribution(as_of: datetime | None) -> str | None:
+    """The as-of read's attribution sentence, or ``None`` for a read of now."""
+    if as_of is None:
+        return None
+    return (
+        f"Projects are today's attribution, applied to what the store believed at "
+        f"{as_of.isoformat()}; they are not what a session in that project saw then."
+    )
 
 
 def merged_scope_note(notes: list[ObserverScopeNote]) -> ObserverScopeNote | None:
@@ -89,6 +101,7 @@ def merged_scope_note(notes: list[ObserverScopeNote]) -> ObserverScopeNote | Non
         in_scope=sum(n.in_scope for n in notes),
         unattributed=sum(n.unattributed for n in notes),
         lapsed=sum(n.lapsed for n in notes),
+        attribution=next((n.attribution for n in notes if n.attribution), None),
     )
 
 
@@ -117,16 +130,16 @@ async def filter_visible(
         return ScopeFilter(ids, engaged=False, total=len(ids), unattributed=0)
 
     scopes = await load_scopes(session, particles, as_of=as_of)
-    widened = await _widened_particle_ids(session, ids)
-    in_view = frozenset(
-        pid
-        for pid, scope in scopes.items()
-        if visible(scope, observer_project, widened=pid in widened)
-    )
-    unattributed = sum(1 for pid, s in scopes.items() if s.unattributed and pid not in widened)
-    lapsed = sum(1 for pid, s in scopes.items() if s.lapsed and pid not in widened)
+    in_view = frozenset(pid for pid, scope in scopes.items() if visible(scope, observer_project))
+    unattributed = sum(1 for s in scopes.values() if s.unattributed)
+    lapsed = sum(1 for s in scopes.values() if s.lapsed and not s.widened)
     return ScopeFilter(
-        in_view, engaged=True, total=len(ids), unattributed=unattributed, lapsed=lapsed
+        in_view,
+        engaged=True,
+        total=len(ids),
+        unattributed=unattributed,
+        lapsed=lapsed,
+        as_of=as_of,
     )
 
 
@@ -164,9 +177,3 @@ async def list_particles_in_view(
         session, status=status, subject_id=subject_id, limit=None, offset=0
     )
     return (await in_view(session, everything, observer_project))[offset : offset + limit]
-
-
-async def _widened_particle_ids(session: AsyncSession, ids: Collection[str]) -> set[str]:
-    if not await any_widening(session):
-        return set()
-    return await widened_ids(session, ScopeTarget.PARTICLE, ids)

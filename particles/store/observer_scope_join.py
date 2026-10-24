@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy import or_, select
@@ -91,20 +91,49 @@ class SourceRef:
     snapshot_id: str | None
 
 
-async def load_scopes(
+@dataclass(frozen=True)
+class Attestation:
+    """The corpus entries attesting one sourced belief.
+
+    ``ever`` is every entry the belief's group names, ``now`` the ones that
+    currently state it (every entry in ``ever`` when currency is not asked
+    for). ``tags`` holds each entry's tags; ``widened`` is whether an operator
+    widened one of them.
+    """
+
+    ever: frozenset[str]
+    now: frozenset[str]
+    tags: Mapping[str, Sequence[str]]
+    widened: bool = False
+
+
+@dataclass(frozen=True)
+class AttestationGraph:
+    """Every belief's attesting entries, with derived beliefs resolved to their premises.
+
+    ``sourced`` has an entry for each belief that names no premise (and for a
+    premise id that could not be found, with nothing attesting it);
+    ``premises`` maps each derived belief to the premises it names. Together
+    they reach every belief asked about and every premise beneath it, up to
+    ``_MAX_DERIVATION_DEPTH``.
+    """
+
+    sourced: Mapping[str, Attestation]
+    premises: Mapping[str, Sequence[str]]
+
+
+async def load_attestations(
     session: AsyncSession,
     particles: Sequence[Particle],
     *,
     as_of: datetime | None = None,
     current_only: bool = True,
-) -> dict[str, BeliefScope]:
-    """Each belief's observer scope, keyed by particle id.
+) -> AttestationGraph:
+    """The attesting entries behind each belief: the one join observer scope and its readers share.
 
-    ``as_of`` evaluates "latest extracted snapshot" at that instant,
-    so an as-of read sees the scopes the store would have given then.
-    ``current_only=False`` counts every snapshot an entry ever attested — the
-    reading for a claim being written right now, whose own snapshot is not
-    extracted yet.
+    :func:`load_scopes` folds these into project scopes; the agent-memory
+    region's rule-file filter reads their tags. ``as_of`` and
+    ``current_only`` mean what they mean on :func:`load_scopes`.
     """
     known = {p.id: p for p in particles}
     premises: dict[str, list[str]] = {}
@@ -117,7 +146,7 @@ async def load_scopes(
             sourced.add(p.id)
 
     # Premises are particles too, and may themselves be derived: resolve the
-    # whole derivation graph first, so leaves are scoped in one batch.
+    # whole derivation graph first, so leaves are read in one batch.
     frontier = {pid for refs in premises.values() for pid in refs} - premises.keys() - sourced
     for _ in range(_MAX_DERIVATION_DEPTH):
         if not frontier:
@@ -133,9 +162,41 @@ async def load_scopes(
                 sourced.add(pid)
         frontier = next_frontier - premises.keys() - sourced
 
-    resolved: dict[str, BeliefScope] = await _scopes_of_sourced(
+    attested = await _attestations_of_sourced(
         session, sourced, known, as_of=as_of, current_only=current_only
     )
+    return AttestationGraph(sourced=attested, premises=premises)
+
+
+async def load_scopes(
+    session: AsyncSession,
+    particles: Sequence[Particle],
+    *,
+    as_of: datetime | None = None,
+    current_only: bool = True,
+) -> dict[str, BeliefScope]:
+    """Each belief's observer scope, keyed by particle id.
+
+    ``as_of`` evaluates "latest extracted snapshot" at that instant,
+    so an as-of read sees the scopes the store would have given then.
+    ``current_only=False`` counts every snapshot an entry ever attested — the
+    reading for a claim being written right now, whose own snapshot is not
+    extracted yet.
+
+    An operator's widening of a belief is read here too and marked on that
+    belief's scope (``BeliefScope.widened``), so every reader of the join
+    (the lens, the write gate, the disclosure pass, the census ordering,
+    curation) sees one answer. A widening of a whole source is
+    applied inside the fold, as before. Both are today's statements, at any
+    ``as_of``.
+    """
+    graph = await load_attestations(session, particles, as_of=as_of, current_only=current_only)
+    premises = graph.premises
+    harness_tags = get_config().observer_scope.harness_tags
+    resolved: dict[str, BeliefScope] = {
+        pid: _scope_of_attestation(attestation, harness_tags)
+        for pid, attestation in graph.sourced.items()
+    }
 
     def scope_of(pid: str, trail: frozenset[str]) -> BeliefScope:
         if pid in resolved:
@@ -146,30 +207,82 @@ async def load_scopes(
         resolved[pid] = scope
         return scope
 
-    return {p.id: scope_of(p.id, frozenset()) for p in particles}
+    scopes = {p.id: scope_of(p.id, frozenset()) for p in particles}
+    if await any_widening(session):
+        for pid in await widened_ids(session, ScopeTarget.PARTICLE, list(scopes)):
+            scopes[pid] = replace(scopes[pid], widened=True)
+    return scopes
+
+
+async def own_attribution(session: AsyncSession, particle: Particle) -> tuple[BeliefScope, bool]:
+    """A belief's scope from its **own** attesting entries, and whether a widening reaches it.
+
+    What an operator supersede's successor inherits (decision 3):
+    the entries the belief's own ``SOURCE`` refs name, read as currently
+    stated, with no ``CO_EVIDENTIAL`` partner pooled in, since a key pooled
+    through a link would otherwise become a stored tag that outlives the
+    link. A derived belief has no entries of its own and takes its premises'
+    meet. The flag is set when the belief, or a source of its group, is widened.
+    """
+    widened = False
+    if await any_widening(session):
+        widened = bool(await widened_ids(session, ScopeTarget.PARTICLE, [particle.id]))
+        if not widened:
+            groups = await _co_evidential_groups(session, [particle.id])
+            refs_of = await _source_refs(session, groups[particle.id], {particle.id: particle})
+            entries = {r.entry_id for refs in refs_of.values() for r in refs}
+            widened = bool(await widened_ids(session, ScopeTarget.CORPUS_ENTRY, entries))
+    if any(r.type is ProvenanceRefType.PARTICLE for r in particle.provenance):
+        derived = (await load_scopes(session, [particle]))[particle.id]
+        return replace(derived, widened=False), widened
+    refs = (await _source_refs(session, [particle.id], {particle.id: particle}))[particle.id]
+    currency = await get_entry_currency(session, {r.entry_id for r in refs})
+    refs = [r for r in refs if r.entry_id in currency]
+    now = {r.entry_id for r in refs if attests(r, currency[r.entry_id])}
+    if refs and not now:
+        return LAPSED_SCOPE, widened
+    harness_tags = get_config().observer_scope.harness_tags
+    return scope_of_entries((currency[e].tags for e in now), harness_tags), widened
 
 
 def attests(ref: SourceRef, currency: EntryCurrency | None) -> bool:
     """Whether one provenance ref is a *current* statement by its entry.
 
-    A ``MUTABLE`` entry attests only through its latest extracted snapshot; an
-    entry of any other mutability, a ref with no snapshot, and an entry with no
-    extracted snapshot yet (nothing newer can have replaced it) attest
-    through every ref.
+    A ``MUTABLE`` entry attests only through its current generation; an entry
+    of any other mutability, a ref with no snapshot, and an entry with no
+    processed generation yet (nothing newer can have replaced it) attest
+    through every ref. An entry whose current generation is an ``ABSENT``
+    record attests nothing, through any ref. That check comes
+    after the first two returns, which an absence cannot meet (only a
+    ``MUTABLE`` entry gets one, and a hard-deleted entry has no records), and
+    before the last two.
     """
-    if currency is None or not currency.mutable or currency.latest_snapshot_id is None:
+    if currency is None or not currency.mutable:
+        return True
+    if currency.absent:
+        return False
+    if currency.latest_snapshot_id is None:
         return True
     return ref.snapshot_id is None or ref.snapshot_id == currency.latest_snapshot_id
 
 
-async def _scopes_of_sourced(
+def _scope_of_attestation(attestation: Attestation, harness_tags: Collection[str]) -> BeliefScope:
+    """Fold one sourced belief's attesting entries into its scope."""
+    if attestation.widened:
+        return GLOBAL_SCOPE
+    if attestation.ever and not attestation.now:
+        return LAPSED_SCOPE
+    return scope_of_entries((attestation.tags[e] for e in attestation.now), harness_tags)
+
+
+async def _attestations_of_sourced(
     session: AsyncSession,
     ids: Collection[str],
     known: Mapping[str, Particle],
     *,
     as_of: datetime | None,
     current_only: bool,
-) -> dict[str, BeliefScope]:
+) -> dict[str, Attestation]:
     if not ids:
         return {}
     groups = await _co_evidential_groups(session, ids)
@@ -182,24 +295,24 @@ async def _scopes_of_sourced(
         if await any_widening(session)
         else set()
     )
-    harness_tags = get_config().observer_scope.harness_tags
 
-    scopes: dict[str, BeliefScope] = {}
+    attested: dict[str, Attestation] = {}
     for pid in ids:
         # An "entry id" with no corpus entry behind it is not a source at all.
         refs = [r for m in groups[pid] for r in refs_of.get(m, ()) if r.entry_id in currency]
-        ever = {r.entry_id for r in refs}
-        if ever & widened_entries:
-            scopes[pid] = GLOBAL_SCOPE
-            continue
+        ever = frozenset(r.entry_id for r in refs)
         now = (
-            {r.entry_id for r in refs if attests(r, currency[r.entry_id])} if current_only else ever
+            frozenset(r.entry_id for r in refs if attests(r, currency[r.entry_id]))
+            if current_only
+            else ever
         )
-        if ever and not now:
-            scopes[pid] = LAPSED_SCOPE
-            continue
-        scopes[pid] = scope_of_entries((currency[e].tags for e in now), harness_tags)
-    return scopes
+        attested[pid] = Attestation(
+            ever=ever,
+            now=now,
+            tags={e: currency[e].tags for e in ever},
+            widened=bool(ever & widened_entries),
+        )
+    return attested
 
 
 async def _source_refs(

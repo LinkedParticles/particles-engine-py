@@ -71,7 +71,10 @@ log = logging.getLogger(__name__)
 #: Serialisation version of the ``cards_json`` envelope. 2: open
 #: conflicts are ``INCONSISTENCY`` cards and ``comment`` is no longer a gesture;
 #: a format-1 collection is upgraded on read (:func:`_upgrade_format_1`).
-BLOB_FORMAT = 2
+#: 3: subjectless beliefs of one source share a
+#: ``subjectless_source`` card. A format-2 collection is served as it stands
+#: until the next build; its per-belief ``no_subject`` keys stay valid.
+BLOB_FORMAT = 3
 
 #: The kinds whose finder the cycle runs **delta-scoped**, and which
 #: therefore carry forward instead of being replaced.
@@ -176,8 +179,9 @@ class Resolved:
             return True
         if card.kind is CardKind.INCONSISTENCY:
             return card.inconsistency_id in self.records
-        if card.kind is CardKind.GATED_SUBJECTS:
-            # A batch card is suppressed by its key when a relink ran.
+        if card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE):
+            # A batch card is suppressed by its key when a relink ran;
+            # a source card loses the touched members instead.
             return False
         return any(pid in self.particle_ids for pid in card.particle_ids)
 

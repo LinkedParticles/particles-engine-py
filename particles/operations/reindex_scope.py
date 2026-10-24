@@ -6,18 +6,20 @@
 
 ``operations/reindex.py`` gathers the store reads (prefix matches, latest
 COMPLETE snapshots, selector matches, FAILED/PENDING pairs, stale-schema
-pairs, the collapse plan) and hands them here as plain values. Everything in
-this module is a function of its arguments: no session, no clock, no
-filesystem, so the scope rules, including the intersection, are
-testable without a database.
+pairs, the collapse plan, the snapshots newer-minor particles cite) and
+hands them here as plain values. Everything in this module is a function of
+its arguments: no session, no clock, no filesystem, so the scope rules,
+including the intersection, are testable without a database.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, NamedTuple
 
+from particles.core.validity import ensure_utc
 from particles.extraction.components import ComponentRecord, ComponentTable
 
 #: Length of a full corpus entry id (a UUID string). Anything shorter is a
@@ -99,7 +101,8 @@ def decide_reindex_scope(
             auto-discovery path asked for them.
         collapsed: snapshot ids the collapse marks as superseded,
             which no scope retries.
-        stale_schema: pairs whose ACTIVE particles carry an old schema version.
+        stale_schema: pairs whose ACTIVE particles carry an older minor of the
+            SDK's schema major (D5); empty unless the operator asked.
 
     **Named entries** are intersected with ``selected`` when both are given.
     Before that fix the named branch discarded every other flag,
@@ -124,6 +127,54 @@ def decide_reindex_scope(
         scope.extend(selected)
     scope.extend(stale_schema)
     return ReindexScope(list(set(scope)))
+
+
+# ---------------------------------------------------------------------------
+# D2: an older SDK never re-mints a newer-minor particle.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NewerSchemaSkip:
+    """The work left once the snapshots holding newer-minor particles are dropped."""
+
+    #: Whole-entry replays kept, in their original order.
+    replays: dict[str, list[str]]
+    #: Ordinary snapshot pairs kept, in their original order.
+    pairs: list[Pair]
+    #: Snapshots dropped, a dropped replay counting each of its snapshots.
+    skipped: int
+
+
+def skip_newer_schema(
+    replays: Mapping[str, Sequence[str]],
+    pairs: Sequence[Pair],
+    *,
+    held_snapshots: Set[str],
+    held_entries: Set[str],
+) -> NewerSchemaSkip:
+    """Drop the work that would retire a particle a newer SDK wrote (D2).
+
+    A reindex re-mint is a housekeeping replacement: the successor stands in
+    for the same claim, so under an SDK older than the record it would retire
+    the richer row in favour of a poorer copy. Such work is left for a current
+    SDK and counted.
+
+    Args:
+        replays: whole-entry replays, entry to its snapshots.
+        pairs: ordinary ``(entry_id, snapshot_id)`` pairs.
+        held_snapshots: snapshots any newer-minor ACTIVE particle cites, which
+            a per-snapshot re-extraction would supersede.
+        held_entries: entries any newer-minor ACTIVE particle has a SOURCE ref
+            to, which a whole-entry replay would retire.
+    """
+    kept_replays = {
+        entry_id: list(snaps) for entry_id, snaps in replays.items() if entry_id not in held_entries
+    }
+    skipped = sum(len(snaps) for entry_id, snaps in replays.items() if entry_id in held_entries)
+    kept_pairs = [pair for pair in pairs if pair[1] not in held_snapshots]
+    skipped += len(pairs) - len(kept_pairs)
+    return NewerSchemaSkip(replays=kept_replays, pairs=kept_pairs, skipped=skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +300,43 @@ def select_changed_components(
         else:
             skipped.append(pair)
     return ComponentSelection(kept=kept, skipped=skipped)
+
+
+def retarget_to_current(
+    pairs: Sequence[Pair],
+    current: Mapping[str, str],
+    captured: Mapping[str, datetime],
+) -> tuple[list[Pair], int]:
+    """Re-aim each pair naming an older generation at its entry's current one.
+
+    ``current`` maps a ``MUTABLE`` entry to its current generation's snapshot
+    id; an entry missing from it (another mutability, or nothing processed
+    yet) is left as it is. ``captured`` holds the capture time of every
+    snapshot named here. A pair whose snapshot was captured before its entry's
+    current generation is replaced by ``(entry, current)``: a provenance scope
+    names the snapshot a claim was first extracted from, and re-extracting
+    that older text would supersede claims the current version still states.
+    A pair captured after it (a pending newer snapshot) is kept.
+
+    Returns the pairs, de-duplicated with first-seen order kept, and how many
+    were re-aimed; the caller reports the count on the plan line.
+    """
+    out: list[Pair] = []
+    seen: set[Pair] = set()
+    retargeted = 0
+    for entry_id, snapshot_id in pairs:
+        target = current.get(entry_id)
+        pair = (entry_id, snapshot_id)
+        if (
+            target is not None
+            and target != snapshot_id
+            and snapshot_id in captured
+            and target in captured
+            and ensure_utc(captured[snapshot_id]) < ensure_utc(captured[target])
+        ):
+            pair = (entry_id, target)
+            retargeted += 1
+        if pair not in seen:
+            seen.add(pair)
+            out.append(pair)
+    return out, retargeted

@@ -231,6 +231,24 @@ async def test_lookup_matches_across_normalization(db_session: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lookup_matches_a_restatement_that_drops_its_quotation_marks(
+    db_session: Any,
+) -> None:
+    """the vault replay re-minted a claim for its quotation marks alone."""
+    stored = _particle(
+        "\u201cNo hay negros en el Tibet\u201d publica episodios un par de veces al mes."
+    )
+    await insert_particle(db_session, stored)
+    await db_session.flush()
+
+    found = await get_active_particles_by_content_hashes(
+        db_session,
+        [content_hash("No hay negros en el Tibet publica episodios un par de veces al mes.")],
+    )
+    assert [p.id for p in found] == [stored.id]
+
+
+@pytest.mark.asyncio
 async def test_append_provenance_is_idempotent_and_keeps_decay_anchor(db_session: Any) -> None:
     """Append-only, deduped, and never disturbs provenance[0] (the anchor)."""
     p = _particle("A corroborated claim.", entry_id="entry-1", snapshot_id="snap-1")

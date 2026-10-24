@@ -305,6 +305,62 @@ class TestParseExtractionResponse:
         assert "assertion_modality" not in without
 
 
+class TestCallLlmRateLimit:
+    """a 429 at the extraction seam waits and retries, so it does not
+    fail the call (which would leave the snapshot PENDING and count its file as
+    failed in the audit)."""
+
+    class _RateLimited(Exception):
+        status_code = 429
+
+    @pytest.mark.asyncio
+    async def test_a_429_is_retried_not_reported_transient(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.extraction.general import _call_llm
+
+        monkeypatch.setattr(get_config().extraction, "rate_limit_backoff_seconds", 0.0)
+        reply = (
+            '[{"content": "c", "subjects": [], '
+            '"confidence_value": 0.9, "uncertainty_nature": "EPISTEMIC"}]'
+        )
+        calls: list[int] = []
+
+        async def _fake_complete(purpose: str, prompt: str, **kwargs: Any) -> tuple[str, str]:
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._RateLimited("rate limited")
+            return reply, "anthropic:test-model"
+
+        with patch("particles.llm.complete_with_provider_model", _fake_complete):
+            candidates, _notes, transient = await _call_llm("The sky is blue.")
+        assert len(calls) == 2
+        assert transient is False
+        assert [c.content for c in candidates] == ["c"]
+
+    @pytest.mark.asyncio
+    async def test_a_429_past_the_retries_is_a_transient_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.extraction.general import _call_llm
+
+        monkeypatch.setattr(get_config().extraction, "rate_limit_backoff_seconds", 0.0)
+        monkeypatch.setattr(get_config().extraction, "rate_limit_retries", 2)
+        calls: list[int] = []
+
+        async def _fake_complete(purpose: str, prompt: str, **kwargs: Any) -> tuple[str, str]:
+            calls.append(1)
+            raise self._RateLimited("rate limited")
+
+        with patch("particles.llm.complete_with_provider_model", _fake_complete):
+            candidates, _notes, transient = await _call_llm("The sky is blue.")
+        assert len(calls) == 3
+        assert transient is True
+        assert candidates == []
+
+
 class TestCallLlmFencing:
     """F3: the extraction call routes trusted rules to ``system`` and wraps the
     untrusted source in a per-call nonce fence in the user turn, so an injected

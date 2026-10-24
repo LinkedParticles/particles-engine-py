@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -52,6 +53,9 @@ from particles.interchange import (
     write_jsonl,
     write_yaml_ld,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _particle() -> Particle:
@@ -368,6 +372,28 @@ def test_cli_interchange_export_import_smoke(cli_db, tmp_path) -> None:  # type:
     # Missing bundle dir is a clean error, not a traceback.
     res = runner.invoke(app, ["interchange", "import", str(tmp_path / "nope")])
     assert res.exit_code == 1
+
+
+def test_cli_interchange_import_refuses_another_major_cleanly(cli_db, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A bundle of another schema major is a clean exit 1 naming the cause."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from particles.api.cli import app
+
+    runner = CliRunner()
+    bundle_dir = tmp_path / "bundle"
+    assert runner.invoke(app, ["interchange", "export", "-o", str(bundle_dir)]).exit_code == 0
+    manifest = bundle_dir / "manifest.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest.write_text(json.dumps({**data, "schemaVersion": "2.0.0"}), encoding="utf-8")
+
+    for verb in ("import", "restore"):
+        res = runner.invoke(app, ["interchange", verb, str(bundle_dir)])
+        assert res.exit_code == 1, res.output
+        assert "failed" in res.output and "2.0.0" in res.output
+        assert res.exception is None or isinstance(res.exception, SystemExit)
 
 
 # ---------------------------------------------------------------------------
@@ -990,3 +1016,218 @@ class TestPackageRootSurface:
             assert probe.VALUE == 42
         finally:
             sys.modules.pop(f"{package}.zzz_probe", None)
+
+
+# ---------------------------------------------------------------------------
+# Same-major schema-version compatibility (D6)
+# ---------------------------------------------------------------------------
+
+#: The SDK version these tests pretend to be, so a newer minor (1.3.0), an
+#: older minor (1.1.0) and a same-minor PATCH (1.2.4) all exist around it.
+_SDK = "1.2.0"
+
+
+@pytest.fixture
+def sdk_at_1_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the codec (and the bundle manifest) read ``SCHEMA_VERSION`` as 1.2.0.
+
+    The codec reads it through ``particle_schema_default()``, which looks up
+    the attribute on ``particles.core.schema`` at call time, so that is the
+    one attribute to patch.
+    """
+    import particles.core.schema as core_schema
+
+    monkeypatch.setattr(core_schema, "SCHEMA_VERSION", _SDK)
+
+
+def _unit_at(version: str, **extra: object) -> dict[str, object]:
+    unit = to_unit(_particle(), _subjects())
+    unit["schemaVersion"] = version
+    unit.update(extra)
+    return unit
+
+
+@pytest.mark.usefixtures("sdk_at_1_2")
+class TestSchemaVersionCompatibility:
+    @pytest.mark.parametrize(
+        ("unit_version", "stored"),
+        [
+            ("1.3.0", "1.2.0"),  # newer minor: becomes a record of the SDK's contract
+            ("1.1.0", "1.1.0"),  # older minor: keeps its own stamp
+            ("1.2.4", "1.2.4"),  # MAJOR.MINOR tie: the record keeps its PATCH
+            ("1.2.0", "1.2.0"),
+        ],
+    )
+    def test_compatible_unit_is_stamped_with_the_lower_version(
+        self, unit_version: str, stored: str
+    ) -> None:
+        parsed = from_unit(_unit_at(unit_version))
+        assert parsed.particle.schema_version == stored
+        assert parsed.particle.content == "Water is H2O."
+
+    @pytest.mark.parametrize("unit_version", ["2.0.0", "0.3.0", "1.x", "1.2", 1])
+    def test_incompatible_unit_is_rejected(self, unit_version: object) -> None:
+        from particles.interchange.codec import IncompatibleSchemaVersionError
+
+        with pytest.raises(IncompatibleSchemaVersionError) as info:
+            from_unit(_unit_at("1.2.0", schemaVersion=unit_version))
+        assert "incompatible" in str(info.value)
+        assert info.value.current == _SDK
+
+    def test_a_newer_minor_may_add_a_contributor_key(self) -> None:
+        # The F32 refusal stays for every contract this SDK knows; a newer
+        # minor's added key is dropped and reported, never silently.
+        contributor = {"id": "github:torvalds", "role": "author", "weight": 1}
+        parsed = from_unit(_unit_at("1.3.0", contributors=[contributor, dict(contributor)]))
+        assert parsed.particle.contributors is not None
+        assert [c.id for c in parsed.particle.contributors] == ["github:torvalds"] * 2
+        assert parsed.dropped_keys == ["contributors[].weight"]
+
+    @pytest.mark.parametrize("unit_version", ["1.2.0", "1.1.0"])
+    def test_a_known_contract_still_refuses_an_unexpected_contributor_key(
+        self, unit_version: str
+    ) -> None:
+        contributor = {"id": "github:torvalds", "role": "author", "weight": 1}
+        with pytest.raises(ValueError, match="F32"):
+            from_unit(_unit_at(unit_version, contributors=[contributor]))
+
+    def test_newer_major_message_names_the_remedy(self) -> None:
+        from particles.interchange.codec import IncompatibleSchemaVersionError
+
+        with pytest.raises(IncompatibleSchemaVersionError, match="newer Particles SDK"):
+            from_unit(_unit_at("2.0.0"))
+
+    def test_unit_without_a_stamp_reads_as_the_sdks_own(self) -> None:
+        unit = _unit_at(_SDK)
+        del unit["schemaVersion"]
+        assert from_unit(unit).particle.schema_version == _SDK
+
+    def test_unknown_keys_are_dropped_and_named(self) -> None:
+        parsed = from_unit(_unit_at("1.3.0", zetaField=1, alphaField={"x": 1}))
+        assert parsed.dropped_keys == ["alphaField", "zetaField"]
+        assert parsed.particle.content == "Water is H2O."
+
+    def test_a_current_unit_drops_nothing(self) -> None:
+        assert from_unit(to_unit(_particle(), _subjects())).dropped_keys == []
+
+    def test_every_emitted_key_is_known(self) -> None:
+        """``to_unit`` never writes a key ``from_unit`` would drop as unknown."""
+        from particles.interchange.codec import PARTICLE_UNIT_KEYS
+
+        assert set(to_unit(_particle(), _subjects())) <= PARTICLE_UNIT_KEYS
+
+    @pytest.mark.parametrize(
+        ("row_version", "stamped"),
+        [("1.3.0", "1.2.0"), ("1.2.4", "1.2.4"), ("1.1.0", "1.1.0")],
+    )
+    def test_export_stamps_the_lower_version(self, row_version: str, stamped: str) -> None:
+        row = _particle().model_copy(update={"schema_version": row_version})
+        assert to_unit(row, _subjects())["schemaVersion"] == stamped
+
+
+def _bundle(manifest_version: str, particles_member: str) -> dict[str, str]:
+    import json
+
+    manifest = {"formatVersion": FORMAT_VERSION, "schemaVersion": manifest_version}
+    return {"manifest.json": json.dumps(manifest), "particles.jsonl": particles_member}
+
+
+@pytest.mark.usefixtures("sdk_at_1_2")
+class TestSchemaVersionCompatibilityStore:
+    """The store-aware half: the import report and the bundle-level refusal."""
+
+    @pytest.mark.asyncio
+    async def test_import_counts_dropped_keys_and_stores_the_lower_stamp(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.interchange.store import import_units
+        from particles.store.particle_store import get_active_particles
+
+        first = _unit_at("1.3.0", futureField=1, otherField=2)
+        second = _unit_at("1.3.0", futureField=3)
+        second["content"] = "Ice is frozen water."
+        summary = await import_units(db_session, [first, second])
+
+        assert summary.imported == 2
+        assert summary.dropped_keys == {"futureField": 2, "otherField": 1}
+        stored = {p.content: p.schema_version for p in await get_active_particles(db_session)}
+        assert stored == {"Water is H2O.": _SDK, "Ice is frozen water.": _SDK}
+
+    @pytest.mark.asyncio
+    async def test_an_incompatible_unit_refuses_the_whole_batch(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.interchange.codec import IncompatibleSchemaVersionError
+        from particles.interchange.store import import_units
+        from particles.store.particle_store import get_active_particles
+
+        good = _unit_at("1.1.0")
+        bad = _unit_at("2.0.0")
+        with pytest.raises(IncompatibleSchemaVersionError):
+            await import_units(db_session, [good, bad])
+        assert await get_active_particles(db_session) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("manifest_version", ["2.0.0", "0.3.0", "1.x"])
+    async def test_import_refuses_an_incompatible_manifest_before_reading_members(
+        self, db_session: AsyncSession, manifest_version: str
+    ) -> None:
+        from particles.interchange.codec import IncompatibleSchemaVersionError
+        from particles.interchange.store import import_store_bundle
+
+        # A member that would fail to parse proves the refusal comes first.
+        files = _bundle(manifest_version, "this is not JSON\n")
+        with pytest.raises(IncompatibleSchemaVersionError, match="bundle manifest"):
+            await import_store_bundle(db_session, files)
+
+    @pytest.mark.asyncio
+    async def test_restore_refuses_an_incompatible_manifest(self, db_session: AsyncSession) -> None:
+        from particles.interchange.codec import IncompatibleSchemaVersionError
+        from particles.interchange.store import restore_store_bundle
+
+        with pytest.raises(IncompatibleSchemaVersionError, match="bundle manifest"):
+            await restore_store_bundle(db_session, _bundle("2.0.0", "this is not JSON\n"))
+
+    @pytest.mark.asyncio
+    async def test_bundle_of_a_newer_minor_imports_and_reports(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.interchange.store import import_store_bundle
+
+        files = _bundle("1.3.0", write_jsonl([_unit_at("1.3.0", futureField=True)]))
+        summary = await import_store_bundle(db_session, files)
+        assert summary.imported == 1
+        assert summary.dropped_keys == {"futureField": 1}
+
+    @pytest.mark.asyncio
+    async def test_restore_reports_dropped_keys(self, db_session: AsyncSession) -> None:
+        from particles.interchange.store import restore_store_bundle
+        from particles.store.particle_store import get_active_particles
+
+        files = _bundle("1.3.0", write_jsonl([_unit_at("1.3.0", futureField=True)]))
+        summary = await restore_store_bundle(db_session, files)
+        assert summary.particles == 1
+        assert summary.dropped_keys == {"futureField": 1}
+        [restored] = await get_active_particles(db_session)
+        assert restored.schema_version == _SDK
+
+    @pytest.mark.asyncio
+    async def test_export_stamps_rows_and_keeps_the_manifest_at_the_sdk(
+        self, db_session: AsyncSession
+    ) -> None:
+        import json
+
+        from particles.interchange.store import export_store_bundle
+        from particles.store.particle_store import insert_particle
+
+        newer = _particle().model_copy(update={"schema_version": "1.3.0", "subject_ids": []})
+        patch = _particle().model_copy(
+            update={"schema_version": "1.2.4", "subject_ids": [], "content": "Ice is cold."}
+        )
+        await insert_particle(db_session, newer)
+        await insert_particle(db_session, patch)
+
+        files = await export_store_bundle(db_session)
+        assert json.loads(files["manifest.json"])["schemaVersion"] == _SDK
+        stamps = {u["content"]: u["schemaVersion"] for u in read_jsonl(files["particles.jsonl"])}
+        assert stamps == {"Water is H2O.": _SDK, "Ice is cold.": "1.2.4"}

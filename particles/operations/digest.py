@@ -23,11 +23,14 @@ here; the terse one-line-per-belief formatting is
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
+from particles.core.observer_scope import scope_of_entries, visible
 from particles.core.schema import ContestedBadge, ObserverScopeNote
 from particles.core.status import Status
 from particles.db import session_scope
+from particles.ingest.refusal_hold import held_snapshots
 from particles.llm.usage import render_store_spend_line
 from particles.operations.llm_spend import store_llm_spend
 from particles.operations.query.contested import compute_contested_badges
@@ -53,6 +56,22 @@ class RenderedDigest(BaseModel):
 
     markdown: str
     lines: list[DigestLine] = Field(default_factory=list)
+
+
+async def _refused_in_view(session: AsyncSession, observer_project: str | None) -> int:
+    """How many held sources this observer may learn of.
+
+    A count, never a title, and only of sources whose corpus entry is in view
+    for the observer project under the same predicate the beliefs pass, so a
+    session never learns of another project's notes.
+    """
+    held = await held_snapshots(session)
+    if observer_project is None:
+        return len(held)
+    harness_tags = get_config().observer_scope.harness_tags
+    return sum(
+        1 for h in held if visible(scope_of_entries([h.tags], harness_tags), observer_project)
+    )
 
 
 async def build_digest(store: str, observer_project: str | None = None) -> str:
@@ -109,6 +128,7 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
         backrefs = await get_inconsistency_backrefs(session)
         # the store's recorded LLM spend, one closing line.
         spend = await store_llm_spend(session)
+        refused = await _refused_in_view(session, observer_project)
         subject_names = {s.id: s.canonical_name for s in await list_all_subjects(session)}
 
         # Order by rank score desc; id as a stable tiebreaker so the
@@ -135,7 +155,15 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
         for p, badge in zip(ordered, badges, strict=True)
     ]
     spend_line = render_store_spend_line(spend) if spend is not None else None
-    markdown, offsets = render_digest_located(store, entries, total, observer, spend_line)
+    refused_line = (
+        f"{refused} source(s) are not in memory: the extraction model declined them "
+        "(see `particles curate`)."
+        if refused
+        else None
+    )
+    markdown, offsets = render_digest_located(
+        store, entries, total, observer, spend_line, refused_line
+    )
     return RenderedDigest(
         markdown=markdown,
         lines=[

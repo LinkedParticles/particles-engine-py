@@ -230,6 +230,58 @@ def planned_extraction_estimate(
     )
 
 
+@dataclass(frozen=True)
+class ExtractionRange:
+    """An unbatched extraction run's band at list price, as a person reads it.
+
+    ``high_usd`` is :func:`planned_extraction_estimate`'s figure for the same
+    calls; ``low_usd`` spends no retries and no probes, and ``ceiling_usd``
+    bills every call at its full output budget. All three are ``None`` when
+    the extraction or probe model is unpriced.
+    """
+
+    calls: int
+    model: str
+    low_usd: float | None
+    high_usd: float | None
+    ceiling_usd: float | None
+    wall_seconds: float
+
+
+def extraction_range(calls: Sequence[ExtractionCall], *, entries: int) -> ExtractionRange:
+    """The band of :func:`planned_extraction_estimate`, unbatched, with its wall time."""
+    selection = get_config().llm.for_purpose("extraction")
+    estimate = estimate_extraction_calls(
+        calls, entries=entries, chars_per_token=chars_per_token(selection)
+    )
+    calls_made = estimate.estimated_llm_calls + round(estimate.expected_retries)
+    audit = get_config().audit
+    wall = (
+        estimate.output_tokens_expected / audit.estimate_extraction_output_tokens_per_second
+        + estimate.reconcile_probes * audit.estimate_seconds_per_probe
+    )
+    if calls_made == 0:
+        return ExtractionRange(0, selection.model, 0.0, 0.0, 0.0, 0.0)
+    prefix = _cached_prefix_usd(estimate, selection, calls_made)
+    probes = _price(
+        estimate.probe_price,
+        estimate.reconcile_probes * audit.estimate_probe_input_tokens,
+        estimate.reconcile_probes * audit.estimate_probe_output_tokens,
+    )
+    with_retries = estimate.input_tokens + estimate.retry_input_tokens
+    low = _price(estimate.extraction_price, estimate.input_tokens, estimate.output_tokens_low)
+    high = _price(estimate.extraction_price, with_retries, estimate.output_tokens_high)
+    ceiling = _price(estimate.extraction_price, with_retries, estimate.output_tokens_ceiling)
+    if prefix is None or (estimate.reconcile_probes and probes is None):
+        low = high = ceiling = None
+    else:
+        extra = prefix + (probes or 0.0)
+        low = None if low is None else low + prefix
+        high = None if high is None else high + extra
+        ceiling = None if ceiling is None else ceiling + extra
+    return ExtractionRange(calls_made, selection.model, low, high, ceiling, wall)
+
+
 def _cached_prefix_usd(
     estimate: AuditEstimate, selection: ProviderSelection, calls: int
 ) -> float | None:

@@ -611,6 +611,14 @@ export class ParticlesApiClient {
     );
   }
 
+  /**
+   * GET /curation/cards/{key}: one open card with every belief it names
+   * briefed. The queue previews five beliefs of a source card.
+   */
+  async curationCard(key: string): Promise<CurationCard> {
+    return this.request<CurationCard>("GET", `/curation/cards/${encodeURIComponent(key)}`);
+  }
+
   /** affirm ("still true") → POST /curation/affirm (BELIEF_AFFIRMED). */
   async affirm(
     particleId: string,

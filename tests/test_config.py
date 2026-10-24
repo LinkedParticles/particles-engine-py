@@ -916,3 +916,21 @@ class TestConfigDiscovery:
         monkeypatch.setenv("PARTICLES_CONFIG", str(tmp_path / "absent.yaml"))
 
         assert _find_config_file() is None
+
+
+def test_retired_agent_extraction_keys_are_dropped_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """was deprecated: its keys are dropped once, never an error."""
+    from particles.config import ParticlesConfig, _migrate_legacy_keys
+
+    raw: dict[str, object] = {
+        "claude_code": {"observer_scope": "project", "agent_extraction": {"mode": "off"}},
+        "extraction": {"agent_expected_claims_per_kchar": 1.9},
+    }
+    with caplog.at_level("WARNING", logger="particles.config"):
+        _migrate_legacy_keys(raw)
+    assert raw["claude_code"] == {"observer_scope": "project"}
+    assert raw["extraction"] == {}
+    assert "claude_code.agent_extraction" in caplog.text
+    ParticlesConfig.model_validate(raw)

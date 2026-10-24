@@ -30,13 +30,16 @@ dead end.
 
 from __future__ import annotations
 
+import asyncio
+import difflib
 import hashlib
 import logging
 import math
-from collections.abc import Callable, Sequence
+import re
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,11 +53,15 @@ from particles.core.schema import (
     Mutability,
     QualityReport,
     SuggestMode,
+    WarcRecordType,
 )
 from particles.core.status import Status
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import get_entry_by_uri, list_snapshots_for_entry
+from particles.db import store_is_in_memory
+from particles.ingest.absence import absences_last
 from particles.ingest.ladder_shell import rung_tally
+from particles.llm.errors import AccountLevelLLMError, describe_account_level_failure
 from particles.llm.usage import LLMUsage, format_usd, render_usage_line, track_usage
 from particles.operations._llm import (
     llm_circuit_open,
@@ -69,7 +76,14 @@ from particles.operations.curation.session import _attach_particle_briefs
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.lint.contradictions import CensusLadder, one_line
 from particles.operations.quality import get_quality_report
-from particles.store.particle_store import get_census_records, get_particle_ids_for_entries
+from particles.store.particle_store import (
+    get_census_records,
+    get_particle_ids_for_entries,
+    get_particles_by_ids,
+)
+
+if TYPE_CHECKING:
+    from particles.ingest.pipeline import SnapshotOutcome
 
 log = logging.getLogger(__name__)
 
@@ -765,9 +779,18 @@ def render_estimate(estimate: AuditEstimate) -> str:
     ]
     elapsed = time_summary(estimate)
     if elapsed is not None:
+        # The rates were measured one call at a time, so with concurrent
+        # extraction the figure is an upper bound.
+        concurrency = audit_cfg.extraction_concurrency
+        timing = (
+            f"Time: {elapsed} at most. It assumes the calls run one at a time, and up to "
+            f"{concurrency} extraction calls run at once (audit.extraction_concurrency). "
+            "The rates are "
+            if concurrency > 1
+            else f"Time: {elapsed}. Calls run one at a time, at "
+        )
         lines.append(
-            f"Time: {elapsed}. Calls run one at a time, at "
-            f"~{audit_cfg.estimate_extraction_output_tokens_per_second:g} output tokens a "
+            timing + f"~{audit_cfg.estimate_extraction_output_tokens_per_second:g} output tokens a "
             f"second for extraction and ~{audit_cfg.estimate_seconds_per_probe:g} s per probe "
             f"(audit.estimate_extraction_output_tokens_per_second, "
             f"audit.estimate_seconds_per_probe)"
@@ -857,6 +880,18 @@ class AuditReport(BaseModel):
     extraction_failures: int = 0
     extraction_failed_files: list[str] = Field(default_factory=list)
     extraction_partial_files: list[str] = Field(default_factory=list)
+    # files the extraction model refused, reported as ``held:
+    # refused`` and never as a failure. ``extraction_refused_files`` were
+    # refused this run; ``extraction_held_files`` were refused before and not
+    # sent, since the hold is current. Both stay PENDING.
+    extraction_refused_files: list[str] = Field(default_factory=list)
+    extraction_held_files: list[str] = Field(default_factory=list)
+    # extraction stopped on an account-level LLM failure (no credit, a
+    # rejected key, no permission), since every later call would fail the same
+    # way. ``extraction_stopped_reason`` is the error; ``extraction_untried``
+    # counts the snapshots it left PENDING, including the one that hit it.
+    extraction_stopped_reason: str | None = None
+    extraction_untried: int = 0
     # Store-level counts (the get_quality_report header).
     beliefs: int = 0
     subjects: int = 0
@@ -935,6 +970,10 @@ class AuditReport(BaseModel):
     # pre-existing store pollution — is never hidden behind the scoped count.
     duplicate_scope: Literal["harvested", "store"] | None = None
     duplicate_candidate_pairs_total: int = 0
+    # unjudged candidate pairs set aside because their two claims
+    # differ only in a number or an ordinal (one series' log lines, two runs'
+    # results). Outside every duplicate count above; disclosed beside them.
+    duplicate_number_variants: int = 0
     # The §4 estimate the run was gated on, when a harvest happened.
     estimate: AuditEstimate | None = None
     # ``--judge`` verdict split over ALL duplicate cards (not just exemplars):
@@ -952,14 +991,20 @@ class AuditReport(BaseModel):
     def complete(self) -> bool:
         """False when the audit did less than asked.
 
-        Two causes, each disclosed on its own: the semantic phase was skipped
-        (the contradiction check did not run), or a harvested file produced no
+        Three causes, each disclosed on its own: the semantic phase was skipped
+        (the contradiction check did not run), a harvested file produced no
         beliefs because its extraction failed (the census never saw what it
-        says). The structural findings still stand. The CLI turns this into its
-        exit status and headline, and ``--format json`` carries it next to
-        ``semantic_skip_reason`` and ``extraction_failed_files``.
+        says), or extraction stopped on an account-level LLM failure and left
+        the rest of the harvest untried. The structural findings
+        still stand. The CLI turns this into its exit status and headline, and
+        ``--format json`` carries it next to ``semantic_skip_reason`` and
+        ``extraction_failed_files``.
         """
-        return not self.semantic_skipped and not self.extraction_failures
+        return (
+            not self.semantic_skipped
+            and not self.extraction_failures
+            and self.extraction_stopped_reason is None
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -1012,10 +1057,13 @@ _BUCKET_ORDER: tuple[CardKind, ...] = (
     CardKind.CONFIDENCE_DECAY,
     CardKind.UNCITED_URL,
     CardKind.NO_SUBJECT,
+    CardKind.SUBJECTLESS_SOURCE,
     CardKind.GATED_SUBJECTS,
     CardKind.RETRACTION_CASCADE,
     CardKind.BROKEN_PROVENANCE,
     CardKind.FAILED_SNAPSHOTS,
+    CardKind.RANK_LIFT,
+    CardKind.REFUSED_SNAPSHOTS,
 )
 
 
@@ -1035,11 +1083,12 @@ def build_buckets(cards: Sequence[CurationCard], exemplars_per_class: int) -> li
             for card in group:
                 for basis in card.contested_bases or ():
                     bases[basis] = bases.get(basis, 0) + 1
-        # A batch card is one card over many beliefs; the census
-        # counts the beliefs, so folding orphans into it never shrinks the count.
+        # A batch card or a source card is one card
+        # over many beliefs; the census counts the beliefs, so folding orphans
+        # into it never shrinks the count.
         count = (
             sum(len(c.particle_ids) for c in group)
-            if kind is CardKind.GATED_SUBJECTS
+            if kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE)
             else len(group)
         )
         buckets.append(
@@ -1146,6 +1195,222 @@ async def record_disclosure_state(
 # ---------------------------------------------------------------------------
 
 
+class _ReadSlot:
+    """One concurrent extraction task's hold on a model-call slot.
+
+    Held from the claim through the extractor's read, and handed back as the
+    task starts to wait for its turn at the store. A task that waits for its
+    turn holding a slot can starve the task whose turn comes first, so the
+    release is what keeps the pass from deadlocking. Releasing twice is a no-op.
+    """
+
+    def __init__(self, slots: asyncio.Semaphore) -> None:
+        self._slots = slots
+        self._held = False
+
+    async def __aenter__(self) -> _ReadSlot:
+        await self._slots.acquire()
+        self._held = True
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        if self._held:
+            self._held = False
+            self._slots.release()
+
+
+# a token that carries a number or an ordinal: ``3``, ``0.81``,
+# ``#12``, ``v1.2``, ``3rd``, ``40%``, ``2026-09-25``, or a spelled-out one.
+_NUMBER_TOKEN_RE = re.compile(r"^[#v]?[+-]?\d[\d.,:/x×-]*(?:st|nd|rd|th|s|k|m|ms|h|d|%)?$")
+_NUMBER_WORDS = frozenset(
+    [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "twenty",
+        "hundred",
+        "thousand",
+        "million",
+        "first",
+        "second",
+        "third",
+        "fourth",
+        "fifth",
+        "sixth",
+        "seventh",
+        "eighth",
+        "ninth",
+        "tenth",
+        "last",
+        "once",
+        "twice",
+    ]
+)
+_TOKEN_STRIP = ".,;:!?()[]{}\"'`*_"
+
+
+def _claim_tokens(text: str) -> list[str]:
+    return [tok for raw in text.lower().split() if (tok := raw.strip(_TOKEN_STRIP))]
+
+
+def _is_number_token(token: str) -> bool:
+    return token in _NUMBER_WORDS or bool(_NUMBER_TOKEN_RE.match(token))
+
+
+def differs_only_in_numbers(a: str, b: str) -> bool:
+    """True when two claims are one sentence template with different numbers.
+
+    Every token run that differs must be a run of number or ordinal tokens on
+    both sides: ``iteration 3 scored 0.81`` against ``iteration 4 scored 0.79``.
+    The embedding barely sees such a token, so the pair reads as a near
+    duplicate while the number carries the whole distinction. Identical claims
+    are not a variant; an added or removed word is a real difference.
+    """
+    ta, tb = _claim_tokens(a), _claim_tokens(b)
+    if ta == tb:
+        return False
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=ta, b=tb, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "replace":
+            return False
+        if not all(map(_is_number_token, ta[i1:i2] + tb[j1:j2])):
+            return False
+    return True
+
+
+async def _drop_number_variants(
+    session: AsyncSession, cards: list[CurationCard]
+) -> tuple[list[CurationCard], int]:
+    """Drop unjudged duplicate cards whose claims differ only in a number."""
+    pairs = [c for c in cards if c.kind is CardKind.DUPLICATE_PAIR and c.verdict is None]
+    if not pairs:
+        return cards, 0
+    by_id = await get_particles_by_ids(session, [pid for c in pairs for pid in c.particle_ids])
+    dropped: set[int] = set()
+    for card in pairs:
+        texts = [by_id[pid].content for pid in card.particle_ids if pid in by_id]
+        if len(texts) == 2 and differs_only_in_numbers(*texts):
+            dropped.add(id(card))
+    return [c for c in cards if id(c) not in dropped], len(dropped)
+
+
+async def _extract_concurrently(
+    pending: Sequence[tuple[str, str, str]],
+    *,
+    store: str,
+    agent_id: str,
+    concurrency: int,
+    extract_snapshot: Callable[..., Awaitable[list[Any]]],
+    on_settled: Callable[[int, str, Sequence[object], SnapshotOutcome], None],
+    on_failed: Callable[[int, str, str, str, Exception], None],
+    on_untried: Callable[[str], None],
+) -> AccountLevelLLMError | None:
+    """Extract ``pending`` with up to ``concurrency`` model calls at once.
+
+    The gather / decide / apply split, at the extractor call: each
+    snapshot's claim and read run in a task of its own, on a session of its
+    own, and the task then waits for its turn (``extract_snapshot``'s
+    ``before_apply``). Turns go in harvest order and one at a time, so each
+    reconcile-and-write pass sees every earlier pass's writes, exactly as in
+    the serial loop, and the store has one writer. ``on_settled`` and
+    ``on_failed`` run inside the turn, so progress and the report's lists keep
+    harvest order too. A later snapshot of an entry already in the list starts
+    only after the earlier one is written, since its read depends on it (the
+    append-only delta base). A rate-limited call waits and retries
+    at the extraction seam rather than failing its file
+    (``extraction.rate_limit_retries``).
+
+    An account-level failure stops the run: no snapshot sends its
+    call after the first one, every snapshot it leaves PENDING goes to
+    ``on_untried`` (in-flight calls that hit it too), and the error is
+    returned. A stopped snapshot still waits its turn, so the writes that do
+    land keep harvest order.
+    """
+    from particles.db import session_scope
+    from particles.operations.extract import SnapshotOutcome
+
+    done = [asyncio.Event() for _ in pending]
+    slots = asyncio.Semaphore(concurrency)
+    stopped: list[AccountLevelLLMError] = []
+    earlier_of_entry: list[int | None] = []
+    last_index: dict[str, int] = {}
+    for i, (entry_id, _snapshot_id, _label) in enumerate(pending):
+        earlier_of_entry.append(last_index.get(entry_id))
+        last_index[entry_id] = i
+
+    async def _turn(i: int) -> None:
+        if i:
+            await done[i - 1].wait()
+
+    async def _one(i: int, entry_id: str, snapshot_id: str, label: str) -> None:
+        try:
+            earlier = earlier_of_entry[i]
+            if earlier is not None:
+                await done[earlier].wait()
+            outcome = SnapshotOutcome()
+            slot = _ReadSlot(slots)
+
+            async def _take_turn() -> None:
+                slot.release()
+                await _turn(i)
+
+            async with session_scope(store) as task_session:
+                try:
+                    written: Sequence[object] | None = None
+                    async with slot:
+                        # Checked once a slot is free, so no call is sent after
+                        # a stop; the turn is waited for outside the slot.
+                        if not stopped:
+                            written = await extract_snapshot(
+                                task_session,
+                                entry_id,
+                                snapshot_id,
+                                agent_id=agent_id,
+                                skip_if_superseded=True,
+                                outcome_out=outcome,
+                                before_apply=_take_turn,
+                            )
+                    if written is None:
+                        await _turn(i)
+                        on_untried(label)
+                        return
+                    # A snapshot skipped before its read never took its turn.
+                    await _turn(i)
+                    await task_session.commit()
+                except AccountLevelLLMError as exc:
+                    await task_session.rollback()
+                    stopped.append(exc)
+                    await _turn(i)
+                    on_untried(label)
+                except Exception as exc:  # noqa: BLE001 — census the rest; disclose the failure
+                    await task_session.rollback()
+                    await _turn(i)
+                    on_failed(i + 1, entry_id, snapshot_id, label, exc)
+                else:
+                    on_settled(i + 1, label, written, outcome)
+        finally:
+            done[i].set()
+
+    async with asyncio.TaskGroup() as group:
+        for i, (entry_id, snapshot_id, label) in enumerate(pending):
+            group.create_task(_one(i, entry_id, snapshot_id, label))
+    return stopped[0] if stopped else None
+
+
 async def run_memory_audit(
     session: AsyncSession,
     *,
@@ -1205,6 +1470,10 @@ async def run_memory_audit(
         failures = 0
         failed_labels: list[str] = []
         partial_labels: list[str] = []
+        refused_labels: list[str] = []
+        held_labels: list[str] = []
+        stopped: AccountLevelLLMError | None = None
+        untried = 0
         if harvested_entry_ids:
             # Deferred import: the pipeline pulls the extractor registry / LLM
             # stack; load it only when there is something to extract (AGENTS.md
@@ -1226,6 +1495,7 @@ async def run_memory_audit(
                 log.info("%s", collapse_line)
 
             pending: list[tuple[str, str, str]] = []  # (entry_id, snapshot_id, label)
+            absent: list[bool] = []
             for entry_id in dict.fromkeys(harvested_entry_ids):  # de-dupe, keep order
                 label: str | None = None
                 for snap in await list_snapshots_for_entry(session, entry_id):
@@ -1238,64 +1508,124 @@ async def run_memory_audit(
                         uri = entry.uri_r if entry is not None else None
                         label = uri.rstrip("/").rsplit("/", 1)[-1] if uri else entry_id[:8]
                     pending.append((entry_id, snap.snapshot_id, label))
+                    absent.append(snap.warc_record_type is WarcRecordType.ABSENT)
+            # a file whose every call the model refused is not sent
+            # again while the hold is current; it is reported as held.
+            from particles.ingest.refusal_hold import held_snapshot_ids
 
-            for index, (entry_id, snapshot_id, label) in enumerate(pending, start=1):
-                outcome = SnapshotOutcome()
-                try:
-                    written = await extract_snapshot(
-                        session,
-                        entry_id,
-                        snapshot_id,
-                        agent_id=agent_id,
-                        skip_if_superseded=True,
-                        outcome_out=outcome,
-                    )
-                    await session.commit()
-                    # An empty write is not proof of an empty source: a call that
-                    # produced nothing usable left the snapshot PENDING and wrote
-                    # nothing, and a reply cut at the budget lost its tail. Both are
-                    # disclosed per file (§6), never counted as a clean extraction.
-                    match outcome.extracted:
-                        case "none":
-                            failures += 1
-                            failed_labels.append(label)
-                        case "partial":
-                            extracted += 1
-                            partial_labels.append(label)
-                        case "full":
-                            extracted += 1
-                    if on_progress is not None:
-                        on_progress(
-                            AuditProgress(
-                                phase="extract",
-                                done=index,
-                                total=len(pending),
-                                label=label,
-                                particles=len(written),
-                                failed=outcome.extracted == "none",
-                                partial=outcome.extracted == "partial",
-                            )
+            held = await held_snapshot_ids(session, snapshot_ids=[s for _, s, _ in pending])
+            held_labels.extend(label for _, s, label in pending if s in held)
+            absent = [a for (_, s, _), a in zip(pending, absent, strict=True) if s not in held]
+            pending = [item for item in pending if item[1] not in held]
+            # absences after the RESPONSE work, as every extract loop.
+            pending = absences_last(pending, absent)
+
+            def _settled(
+                index: int, label: str, written: Sequence[object], outcome: SnapshotOutcome
+            ) -> None:
+                nonlocal extracted, failures
+                # An empty write is not proof of an empty source: a call that
+                # produced nothing usable left the snapshot PENDING and wrote
+                # nothing, and a reply cut at the budget lost its tail. Both are
+                # disclosed per file (§6), never counted as a clean extraction.
+                match outcome.extracted:
+                    case "none" if outcome.refusal_recorded:
+                        # Every call refused: held, not a failure.
+                        refused_labels.append(label)
+                    case "none":
+                        failures += 1
+                        failed_labels.append(label)
+                    case "partial":
+                        extracted += 1
+                        partial_labels.append(label)
+                    case "full":
+                        extracted += 1
+                if on_progress is not None:
+                    on_progress(
+                        AuditProgress(
+                            phase="extract",
+                            done=index,
+                            total=len(pending),
+                            label=label,
+                            particles=len(written),
+                            failed=outcome.extracted == "none",
+                            partial=outcome.extracted == "partial",
                         )
-                except Exception as exc:  # noqa: BLE001 — census the rest; disclose the failure
-                    await session.rollback()
-                    failures += 1
-                    failed_labels.append(label)
-                    log.warning(
-                        "audit: extraction failed for %s/%s: %s",
-                        entry_id[:8],
-                        snapshot_id[:8],
-                        exc,
                     )
-                    if on_progress is not None:
-                        on_progress(
-                            AuditProgress(
-                                phase="extract",
-                                done=index,
-                                total=len(pending),
-                                label=label,
-                                failed=True,
-                            )
+
+            def _failed(
+                index: int, entry_id: str, snapshot_id: str, label: str, exc: Exception
+            ) -> None:
+                nonlocal failures
+                failures += 1
+                failed_labels.append(label)
+                log.warning(
+                    "audit: extraction failed for %s/%s: %s",
+                    entry_id[:8],
+                    snapshot_id[:8],
+                    exc,
+                )
+                if on_progress is not None:
+                    on_progress(
+                        AuditProgress(
+                            phase="extract",
+                            done=index,
+                            total=len(pending),
+                            label=label,
+                            failed=True,
                         )
+                    )
+
+            def _untried(label: str) -> None:
+                nonlocal untried
+                untried += 1
+
+            # the model calls overlap, the store writes do not. An
+            # in-memory store cannot give each task its own session.
+            concurrency = get_config().audit.extraction_concurrency
+            if concurrency > 1 and len(pending) > 1 and not store_is_in_memory(store):
+                stopped = await _extract_concurrently(
+                    pending,
+                    store=store,
+                    agent_id=agent_id,
+                    concurrency=concurrency,
+                    extract_snapshot=extract_snapshot,
+                    on_settled=_settled,
+                    on_failed=_failed,
+                    on_untried=_untried,
+                )
+            else:
+                for index, (entry_id, snapshot_id, label) in enumerate(pending, start=1):
+                    outcome = SnapshotOutcome()
+                    try:
+                        written = await extract_snapshot(
+                            session,
+                            entry_id,
+                            snapshot_id,
+                            agent_id=agent_id,
+                            skip_if_superseded=True,
+                            outcome_out=outcome,
+                        )
+                        await session.commit()
+                    except AccountLevelLLMError as exc:
+                        # not a per-file failure. Every later call
+                        # would fail the same way, so stop and disclose once;
+                        # this snapshot and the rest are still PENDING.
+                        await session.rollback()
+                        stopped = exc
+                        untried = len(pending) - index + 1
+                        break
+                    except Exception as exc:  # noqa: BLE001 — census the rest; disclose the failure
+                        await session.rollback()
+                        _failed(index, entry_id, snapshot_id, label, exc)
+                        continue
+                    _settled(index, label, written, outcome)
+            if stopped is not None:
+                log.error(
+                    "audit: extraction stopped (account-level), %d snapshot(s) untried: %s",
+                    untried,
+                    stopped,
+                )
 
         # 2–3. Collect findings through the shared finder-normalization seam.
         duplicate_mode = SuggestMode.LLM_JUDGE if (judge and semantic) else SuggestMode.REPORT
@@ -1370,6 +1700,7 @@ async def run_memory_audit(
         # the duplicate harvest-scoping below narrows it.
         contested_ids = contested_ids_from(cards)
         disclosure_cards = list(cards)
+        cards, number_variants = await _drop_number_variants(session, cards)
 
         # harvest-scope the duplicate headline/exemplars. The scan ran
         # store-wide (REPORT enumeration is pure cosine); keep the store-wide total
@@ -1428,6 +1759,12 @@ async def run_memory_audit(
             extraction_failures=failures,
             extraction_failed_files=failed_labels,
             extraction_partial_files=partial_labels,
+            extraction_refused_files=refused_labels,
+            extraction_held_files=held_labels,
+            extraction_stopped_reason=(
+                describe_account_level_failure(stopped.cause) if stopped is not None else None
+            ),
+            extraction_untried=untried,
             beliefs=quality.active_particles,
             subjects=quality.total_subjects,
             snapshots_failed=quality.snapshots_failed,
@@ -1447,6 +1784,7 @@ async def run_memory_audit(
             contradiction_probes_run=probe_control.probes_run if probe_control is not None else 0,
             duplicate_scope="harvested" if harvested_scope_ids is not None else "store",
             duplicate_candidate_pairs_total=duplicate_total,
+            duplicate_number_variants=number_variants,
             estimate=estimate,
         )
     record_contradiction_census(report, probe_control)
@@ -1525,6 +1863,9 @@ def _incomplete_label(report: AuditReport) -> str:
     not extracted).
     """
     causes: list[str] = []
+    if report.extraction_stopped_reason is not None:
+        n = report.extraction_untried
+        causes.append(f"extraction stopped, {n} {_unit_noun(report, n)} untried")
     if report.extraction_failures:
         n = report.extraction_failures
         causes.append(f"{n} {_unit_noun(report, n)} not extracted")
@@ -1556,16 +1897,44 @@ def _extraction_lines(report: AuditReport) -> list[str]:
 
     Empty when this run extracted nothing (a re-audit, or a harvest whose
     every file was already extracted). Otherwise it always prints, including
-    the all-clear, so a reader never has to infer that no file was lost.
+    the all-clear, so a reader never has to infer that no file was lost. A run
+    that stopped on an account-level failure says so on its own line.
     """
+    refused = report.extraction_refused_files + report.extraction_held_files
     attempted = report.extracted_snapshots + report.extraction_failures
-    if not attempted:
+    stopped = report.extraction_stopped_reason is not None
+    if not attempted and not refused and not stopped:
         return []
+    held_lines = (
+        [
+            f"    held: refused by the extraction model, so absent from every count below "
+            f"until the model or the file changes: {_name_files(refused)}"
+        ]
+        if refused
+        else []
+    )
+    if stopped:
+        n = report.extraction_untried
+        held_lines.append(
+            f"    stopped: the LLM account is unavailable ({report.extraction_stopped_reason}), "
+            f"so {n} {_unit_noun(report, n)} were not tried and are still pending"
+        )
+    if not attempted:
+        head = (
+            f"  Extraction: {_count(len(refused), 'file')} held: refused, none extracted."
+            if refused
+            else "  Extraction: stopped before any file was extracted."
+        )
+        return [head, *held_lines]
     full = report.extracted_fully
     partial = len(report.extraction_partial_files)
     failed = report.extraction_failures
     if not partial and not failed:
-        return [f"  Extraction: all {attempted} {_unit_noun(report, attempted)} extracted in full."]
+        every = "" if stopped else "all "
+        return [
+            f"  Extraction: {every}{attempted} {_unit_noun(report, attempted)} extracted in full.",
+            *held_lines,
+        ]
     lines = [
         f"  Extraction: {full} of {attempted} {_unit_noun(report, attempted)} in full, "
         f"{partial} cut short at the output-token limit, {failed} not at all."
@@ -1580,6 +1949,7 @@ def _extraction_lines(report: AuditReport) -> list[str]:
             f"    cut short, so claims after the cut are missing: "
             f"{_name_files(report.extraction_partial_files)}"
         )
+    lines.extend(held_lines)
     return lines
 
 
@@ -1766,10 +2136,17 @@ def render_audit_report(report: AuditReport) -> str:
             f"all {store_dups}"
         )
 
+    if report.duplicate_number_variants:
+        n = report.duplicate_number_variants
+        lines.append(
+            f"  {_count(n, 'candidate pair')} set aside as not duplicates: the two claims "
+            f"differ only in a number"
+        )
+
     # --- Secondary line (only nonzero kinds; §5) ----------------------------
     also: list[str] = []
     uncited_n = report.count(CardKind.UNCITED_URL)
-    no_subject_n = report.count(CardKind.NO_SUBJECT)
+    no_subject_n = report.count(CardKind.NO_SUBJECT) + report.count(CardKind.SUBJECTLESS_SOURCE)
     cascade_n = report.count(CardKind.RETRACTION_CASCADE)
     provenance_n = report.count(CardKind.BROKEN_PROVENANCE)
     if uncited_n:
@@ -1836,6 +2213,14 @@ def render_audit_report(report: AuditReport) -> str:
     _class_block("Probably-stale facts", _STALE_KINDS, _NEXT_VERBS["stale"])
 
     # --- Disclosures + footer (§5/§6) ---------------------------------------
+    if report.extraction_stopped_reason is not None:
+        n = report.extraction_untried
+        lines.append("")
+        lines.append(
+            f"  Extraction stopped: the LLM account is unavailable, so {n} "
+            f"{_unit_noun(report, n)} were not tried. They are still pending: re-run this "
+            f"audit, or run 'particles extract --all-pending', once the account works."
+        )
     if report.extraction_failures:
         n = report.extraction_failures
         lines.append("")

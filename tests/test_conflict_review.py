@@ -27,6 +27,7 @@ from particles.core.conflict_review import (
     decide_demotion,
     decide_resolution,
     decide_retirement,
+    refusal_reason,
     trust_statement_source,
 )
 from particles.core.schema import (
@@ -509,3 +510,74 @@ class TestCascadeReviewContent:
 
         assert CLOSED_RECORD == (Status.RETRACTED, StatusReason.CONFLICT_RESOLVED)
         validate_transition(Status.INCONSISTENCY, CLOSED_RECORD[0])
+
+
+# -- A resolution never keeps a claim it cannot restore ------------
+
+
+def _source_moved_on() -> Particle:
+    """A claim the generation cascade retired: its source stopped stating it."""
+    return _claim(Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY),
+        (Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_UPDATE),
+        (Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION),
+        (Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED),
+    ],
+)
+def test_prefer_a_is_refused_when_a_has_left_active(status: Status, reason: StatusReason) -> None:
+    a, b = _claim(status, reason), _quarantined()
+    refusal = refusal_reason(ResolutionAction.PREFER_A, a, b)
+    assert refusal is not None
+    assert status.value in refusal and reason.value in refusal
+
+
+def test_prefer_a_is_refused_when_a_is_gone() -> None:
+    assert refusal_reason(ResolutionAction.PREFER_A, None, _quarantined()) is not None
+
+
+def test_prefer_a_runs_on_an_active_a() -> None:
+    assert refusal_reason(ResolutionAction.PREFER_A, _claim(), _quarantined()) is None
+
+
+def test_prefer_a_on_a_retired_value_hold_means_the_retirement_stands() -> None:
+    """A is the retired claim by design there, so the action is kept."""
+    a = _claim(Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION)
+    assert refusal_reason(ResolutionAction.PREFER_A, a, _quarantined(), retired_value=True) is None
+
+
+@pytest.mark.parametrize("b_state", ["active", "quarantined", "dangling"])
+def test_prefer_b_runs_on_a_b_it_can_keep(b_state: str) -> None:
+    b = {"active": _claim(), "quarantined": _quarantined(), "dangling": None}[b_state]
+    assert refusal_reason(ResolutionAction.PREFER_B, _source_moved_on(), b) is None
+
+
+def test_prefer_b_is_refused_when_b_was_retired_elsewhere() -> None:
+    b = _claim(Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED)
+    assert refusal_reason(ResolutionAction.PREFER_B, _claim(), b) is not None
+
+
+@pytest.mark.parametrize(
+    "action",
+    [ResolutionAction.BOTH_VALID, ResolutionAction.DEFER, ResolutionAction.DISCARD],
+)
+def test_actions_that_keep_no_single_side_are_never_refused(action: ResolutionAction) -> None:
+    assert refusal_reason(action, _source_moved_on(), _quarantined()) is None
+
+
+def test_cascade_leaves_a_record_whose_winning_a_has_left_active() -> None:
+    """A higher-trust A its source no longer states cannot be the one kept."""
+    a, b = _source_moved_on(), _quarantined()
+    assert decide_cascade(_wrapper(a.id, b.id), a, b, 0.9, 0.2, differential_threshold=0.3) is None
+
+
+def test_cascade_still_promotes_b_over_an_a_that_has_left_active() -> None:
+    a, b = _source_moved_on(), _quarantined()
+    verdict = decide_cascade(_wrapper(a.id, b.id), a, b, 0.2, 0.9, differential_threshold=0.3)
+    assert verdict is not None
+    assert verdict.winner is b
+    assert verdict.promote_winner is True

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import typer
@@ -21,6 +22,7 @@ from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
 if TYPE_CHECKING:
     from particles.core.schema import DedupReport, SuggestReport, UnmergeReport
+    from particles.operations.reread_merge import RereadReport
 
 links_app = typer.Typer(
     help="Manage typed relations between particles (e.g. co-evidential links).",
@@ -84,7 +86,7 @@ def links_suggest_cmd(
     subject: str | None = typer.Option(
         None,
         "--subject",
-        help="Restrict to one Subject (ID or canonical name).",
+        help="Restrict to one Subject (ID, ID prefix, or name).",
     ),
     all_subjects: bool = typer.Option(
         False,
@@ -132,7 +134,7 @@ def links_dedup_cmd(
     subject: str | None = typer.Option(
         None,
         "--subject",
-        help="Restrict to one Subject (ID or canonical name). Default: whole store.",
+        help="Restrict to one Subject (ID, ID prefix, or name). Default: whole store.",
     ),
     apply: bool = typer.Option(
         False,
@@ -146,15 +148,60 @@ def links_dedup_cmd(
     limit: int = typer.Option(
         20, "--limit", help="Groups listed in markdown output (counts are always complete)."
     ),
+    reread: bool = typer.Option(
+        False,
+        "--reread",
+        help="Work on reworded copies of one passage of an append-only source "
+        "(a transcript read twice before 1.166.0) instead of identical text. "
+        "Without --judge or --apply the run is a read-only census with a cost estimate.",
+    ),
+    judge: bool = typer.Option(
+        False,
+        "--judge",
+        help="With --reread: ask the duplicate judge and the update reading for "
+        "the pairs that have no recorded answer. Paid; prints the estimate and "
+        "asks first. Writes recorded verdicts only.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="With --judge: skip the confirmation"),
+    sheet: Path | None = typer.Option(
+        None,
+        "--sheet",
+        help="With --reread: write every SAME verdict to this CSV for labelling.",
+    ),
+    labels: Path | None = typer.Option(
+        None,
+        "--labels",
+        help="With --reread: score a labelled sheet against the admission bar.",
+    ),
 ) -> None:
-    """Merge identical-content duplicate beliefs into one survivor.
+    """Merge duplicate beliefs into one survivor.
 
     Exact content equality only, the same normalized key extract-time
     suppression uses (whitespace and trailing punctuation absorbed, wording and
     case preserved), so no similarity threshold and no LLM call.
     Redundant copies are linked CO_EVIDENTIAL to the survivor and superseded;
     nothing is ever deleted and the survivor is never mutated.
+
+    With --reread the pairs are reworded copies of one passage of an
+    append-only source. They merge only when the duplicate judge said they are
+    one claim, no update reading said the value changed, and the pair's
+    similarity stratum is admitted in links_suggest.reread.admitted.
     """
+    if not reread and (judge or sheet is not None or labels is not None):
+        typer.echo("--judge, --sheet and --labels need --reread.", err=True)
+        raise typer.Exit(1)
+    if reread:
+        if subject is not None:
+            typer.echo("--reread works on the whole store; --subject is not supported.", err=True)
+            raise typer.Exit(1)
+        if judge and apply:
+            typer.echo("--judge and --apply are separate steps; run one at a time.", err=True)
+            raise typer.Exit(1)
+        if labels is not None:
+            _score_labels(labels)
+            return
+        run(_links_dedup_reread(apply, judge, yes, sheet, output_format, limit))
+        return
     run(_links_dedup(subject, apply, output_format, limit))
 
 
@@ -365,17 +412,18 @@ async def _links_list(particle_id_prefix: str, kind_str: str | None = None) -> N
 
 
 async def _resolve_subject_id(session: AsyncSession, subject_arg: str) -> str:
-    """Resolve a ``--subject`` argument (ID or canonical name) to a Subject ID."""
-    from particles.store.subject_store import find_by_name, get_subject
+    """Resolve a ``--subject`` argument (ID, ID prefix, or name) to a Subject ID."""
+    from particles.store.subject_store import lookup_subject
 
-    by_id = await get_subject(session, subject_arg)
-    if by_id is not None:
-        return by_id.id
-    by_name = await find_by_name(session, subject_arg)
-    if by_name is not None:
-        return by_name.id
-    typer.echo(f"No Subject matches {subject_arg!r} (by ID or canonical name).", err=True)
-    raise typer.Exit(1)
+    try:
+        subject = await lookup_subject(session, subject_arg)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    if subject is None:
+        typer.echo(f"No subject matches {subject_arg!r} by ID, ID prefix, or name.", err=True)
+        raise typer.Exit(1)
+    return subject.id
 
 
 async def _links_suggest(
@@ -460,6 +508,102 @@ async def _links_dedup(
         typer.echo(report.model_dump_json(indent=2))
         return
     typer.echo(_render_dedup_markdown(report, limit))
+
+
+def _score_labels(path: Path) -> None:
+    import csv
+
+    from particles.operations.reread_merge import score_labels
+
+    if not path.is_file():
+        typer.echo(f"No such sheet: {path}", err=True)
+        raise typer.Exit(1)
+    with path.open(newline="", encoding="utf-8") as fh:
+        scores = score_labels(csv.DictReader(fh))
+    typer.echo(f"links dedup --reread --labels  {path}")
+    for score in scores:
+        verdict = "passes" if score.passes else "does not pass"
+        rule = f"{score.rule_correct}/{score.rule_labelled}" if score.rule_labelled else "no labels"
+        typer.echo(
+            f"  {score.stratum:<4} {score.correct}/{score.labelled} SAME verdicts correct, "
+            f"Wilson lower bound {score.lower_bound:.3f}: {verdict} "
+            f"(needs at least 100 labels and 0.950). Write rule: {rule}."
+        )
+
+
+async def _links_dedup_reread(
+    apply: bool,
+    judge: bool,
+    yes: bool,
+    sheet: Path | None,
+    output_format: str,
+    limit: int,
+) -> None:
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.links_suggest import AutoMergeDisabled
+    from particles.operations.reread_merge import (
+        RereadNotAdmitted,
+        apply_reread,
+        census_reread,
+        judge_reread,
+        sheet_texts,
+        write_sheet,
+    )
+
+    ensure_local("links dedup --reread")
+
+    def _confirm(report: RereadReport) -> bool:
+        # On stderr under --output-format json, so stdout stays one JSON document.
+        typer.echo(_render_reread_markdown(report, limit), err=output_format == "json")
+        if yes:
+            return True
+        return confirm("Ask these questions now?", default=False)
+
+    async def _run() -> RereadReport:
+        # --apply is one write and holds the writer lock throughout;
+        # the census reads only; --judge commits each answered batch under its
+        # own write transaction, so no lock is held across a model call.
+        async with session_scope(write=apply) as session:
+            try:
+                if apply:
+                    report = await apply_reread(session)
+                elif judge:
+                    report = await judge_reread(
+                        session,
+                        confirm=_confirm,
+                        progress=lambda m: typer.echo(f"  {m}", err=True),
+                    )
+                else:
+                    report = await census_reread(session)
+            except (AutoMergeDisabled, RereadNotAdmitted) as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from exc
+            if sheet is not None:
+                rows = write_sheet(report, await sheet_texts(session, report), sheet)
+                typer.echo(f"Wrote {rows} SAME verdict(s) to {sheet}.", err=True)
+        return report
+
+    if judge:
+        # The judge and the update readings are paid calls: metered as extract
+        # is, so `quality` and the digest count them. The census and
+        # --apply make no call and record nothing.
+        from particles.llm.usage import render_usage_line
+        from particles.operations.llm_spend import MeteredExtractRun
+
+        meter = MeteredExtractRun(actor="cli:links-dedup-reread", route="reread-judge")
+        try:
+            async with meter:
+                report = await _run()
+        finally:
+            if meter.llm_usage is not None:
+                typer.echo(render_usage_line(meter.llm_usage), err=True)
+    else:
+        report = await _run()
+
+    if output_format == "json":
+        typer.echo(report.model_dump_json(indent=2))
+        return
+    typer.echo(_render_reread_markdown(report, limit))
 
 
 async def _links_unmerge(
@@ -567,6 +711,70 @@ def _render_unmerge_markdown(report: UnmergeReport, limit: int) -> str:
             lines.append(f"        skip    {skip.particle_id[:8]}… {skip.reason.value} ({detail})")
     if len(report.groups) > len(shown):
         lines.append(f"  … {len(report.groups) - len(shown)} more group(s) not shown (--limit)")
+    return "\n".join(lines)
+
+
+def _render_reread_markdown(report: RereadReport, limit: int) -> str:
+    """Human-readable summary of a RereadReport for the CLI."""
+    title = {
+        "census": "census, nothing written",
+        "judge": "judge, recorded verdicts only",
+        "apply": "applied",
+    }[report.mode]
+    lines = [
+        f"links dedup --reread ({title})  {report.run_at.strftime('%Y-%m-%d %H:%M')} UTC",
+        f"  {report.population_pairs} pair(s) of {report.finder_pairs} duplicate candidates "
+        "are two readings of one append-only source",
+        f"  {report.components} group(s), {report.questions} question(s) "
+        f"(high {report.by_stratum.get('high', 0)}, low {report.by_stratum.get('low', 0)}); "
+        f"not asked: {report.skipped_shared_snapshot} share a snapshot with the survivor, "
+        f"{report.skipped_extra_subject} carry a Subject it lacks",
+        f"  up to {report.resolvable_pairs} of the {report.population_pairs} pair(s) can resolve",
+        f"  recorded: {report.judged} judged ({report.same} SAME, {report.different} DIFFERENT), "
+        f"{report.update_read} update reading(s), {report.update_changes} saying CHANGES",
+        f"  admitted: {report.admitted}; the write rule allows "
+        f"{report.would_merge.get('high', 0)} high and {report.would_merge.get('low', 0)} low",
+    ]
+    if report.blocked:
+        parts = ", ".join(f"{k} {v}" for k, v in sorted(report.blocked.items()))
+        lines.append(f"  not merging: {parts}")
+    if report.mode == "judge":
+        lines.append(
+            f"  asked: {report.asked_judge} judge question(s), "
+            f"{report.asked_update} update reading(s)"
+        )
+    if report.mode == "apply":
+        lines.append(
+            f"  merged {report.merged_groups} group(s): {report.merged_copies} copy/copies "
+            f"superseded, {report.links_created} link(s) created; run {report.run_id}"
+        )
+    est = report.estimate
+    if est is not None and (est.judge_questions or est.update_readings):
+
+        def usd(value: float | None) -> str:
+            return "unpriced" if value is None else f"US${value:.2f}"
+
+        lines.append(
+            f"  to ask: {est.judge_questions} judge question(s) in {est.judge_calls} call(s) "
+            f"on {est.judge_model}, up to {est.update_readings} update reading(s) on "
+            f"{est.update_model}: about {est.input_tokens:,} input tokens, "
+            f"{usd(est.usd_expected)} expected, {usd(est.usd_ceiling)} at the full output "
+            "budget"
+        )
+        if est.second_reading_usd_ceiling_each is not None:
+            lines.append(
+                f"  plus a second reading on {est.second_model} after each first CHANGES, "
+                f"at most {usd(est.second_reading_usd_ceiling_each)} each"
+            )
+    for warning in report.warnings:
+        lines.append(f"  ⚠ {warning}")
+    if report.mode == "apply" and limit:
+        merged = [i for i in report.items if i.merged][:limit]
+        if merged:
+            lines.append("")
+            lines.append(f"First {len(merged)} merged copy/copies:")
+            for item in merged:
+                lines.append(f"  {item.copy_id[:8]} → {item.survivor_id[:8]}  ({item.stratum})")
     return "\n".join(lines)
 
 

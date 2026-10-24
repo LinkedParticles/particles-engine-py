@@ -357,7 +357,7 @@ class TestDeprecatedTemperature:
         assert not adapter._TEMPERATURE_UNSUPPORTED
 
     def test_batch_path_honours_the_memo(self) -> None:
-        """A batch submission is all-or-nothing, so it reads the memo."""
+        """A batch reads the memo before it is built, so a known model sends no temperature."""
         from particles.llm.adapters.anthropic import (
             _TEMPERATURE_UNSUPPORTED,
             AnthropicProvider,

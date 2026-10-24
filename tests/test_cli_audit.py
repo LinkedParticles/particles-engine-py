@@ -31,6 +31,7 @@ from particles.api.cli import app
 from particles.api.cli import audit as audit_mod
 from particles.config import get_config
 from particles.operations.audit import AuditReport
+from particles.operations.projection.memory_region import MemoryRegion, body_hash
 
 runner = CliRunner()
 
@@ -65,6 +66,18 @@ class TestNoKeyRefusal:
         assert result.exit_code == 2
         assert "ANTHROPIC_API_KEY" in result.output
         assert "export ANTHROPIC_API_KEY" in result.output  # the one-line fix
+        deposit.assert_not_called()
+
+    def test_estimate_without_key_prints_the_estimate(
+        self, cli_db: Path, mem_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An estimate spends nothing, so it is readable before a key exists."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with patch("particles.operations.deposit.deposit_text_versioned") as deposit:
+            result = runner.invoke(app, ["audit", str(mem_dir), "--estimate"])
+        assert result.exit_code == 0, result.output
+        assert "Estimate:" in result.output
+        assert "nothing was deposited" in result.output
         deposit.assert_not_called()
 
     def test_reaudit_without_key_degrades_gracefully(
@@ -554,11 +567,12 @@ class TestProjectionTail:
         audit = AsyncMock(return_value=_fake_report())
         # The render is the only store read in the cycle; everything after it
         # (the MEMORY.md write, the per-project snapshot) runs for real.
-        body = AsyncMock(return_value="- Water is wet.\n")
+        rendered = "- Water is wet.\n"
+        body = AsyncMock(return_value=MemoryRegion(body=rendered, content_hash=body_hash(rendered)))
         with (
             patch("particles.operations.deposit.deposit_text_versioned", deposit),
             patch("particles.operations.audit.run_memory_audit", audit),
-            patch("particles.api.cli._memory_projection._render_region_body", body),
+            patch("particles.api.cli._memory_projection._render_region", body),
             patch(
                 "particles.api.cli._memory_projection._maybe_commit", AsyncMock(return_value=None)
             ),
@@ -923,6 +937,22 @@ class TestIncompleteAudit:
             "balance too low). Run `particles audit --store memory` once the LLM is "
             "available again to finish it."
         )
+
+    def test_notice_for_a_stopped_extraction_names_both_retries(self) -> None:
+        """the stop says why, how many were left, and how to finish."""
+        report = _fake_report(
+            store="memory",
+            extraction_stopped_reason="credit balance too low",
+            extraction_untried=3,
+        )
+        notice = audit_mod._incomplete_notice(report, [Path("/mem")])
+        assert notice == (
+            "audit incomplete: extraction stopped, the LLM account is unavailable "
+            "(credit balance too low). 3 files were not tried and are still pending. "
+            "Run `particles audit /mem --store memory` (or `particles extract "
+            "--all-pending --store memory`) once the account works."
+        )
+        assert report.complete is False
 
     def test_unextracted_file_exits_incomplete_and_names_the_retry(
         self, cli_db: Path, mem_dir: Path, monkeypatch: pytest.MonkeyPatch

@@ -113,8 +113,14 @@ class DemotionRuling(BaseModel):
 
     @property
     def pair_key(self) -> tuple[str, str]:
-        """``(retired hash, replacement hash)``: the identity a newer ruling replaces."""
-        return (self.retired.content_hash, self.replacement.content_hash)
+        """``(retired hash, replacement hash)``: the identity a newer ruling replaces.
+
+        Recomputed from the recorded text rather than read from the stored
+        hashes, so a ruling written before the content key last changed (the
+        typographic fold) is still replaced by a later ruling on the
+        same pair.
+        """
+        return (content_hash(self.retired.content), content_hash(self.replacement.content))
 
 
 def rulings_path() -> Path:

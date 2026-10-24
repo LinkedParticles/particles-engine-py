@@ -293,6 +293,7 @@ class TestSources:
     ) -> None:
         _seed(("DCO is enforced.", 0.9))
         transcript, _ = _project_dir(tmp_path, "-keyed")
+        get_config().claude_code.observer_scope = "store"
         _start(runner, transcript, session_id="store-wide")
         get_config().claude_code.observer_scope = "project"
         _start(runner, transcript, session_id="scoped")
@@ -392,12 +393,14 @@ def engine(cli_db: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[list[str]
 
 
 class TestRemote:
-    def test_http_row_lands_in_the_engine_store_with_digest_ids_only(
+    def test_http_row_lands_in_the_engine_store_after_the_loaded_trailer(
         self, runner: CliRunner, engine: list[str], projection_state: Path, tmp_path: Path
     ) -> None:
         a, b = _seed(("DCO is enforced.", 0.9), ("Commits are signed.", 0.8))
         transcript, memory_dir = _project_dir(tmp_path, "-remote")
-        # A loaded region the remote path never reads.
+        # A loaded region rendered through no observer: the engine's fresh
+        # render shows this session's observer, so the check
+        # pushes the full digest, and the row still records what was loaded.
         memory_dir.mkdir(parents=True)
         (memory_dir / "MEMORY.md").write_text(
             "<!-- BEGIN PROJECTED: memory-index (manifest: m) -->\n"
@@ -407,11 +410,13 @@ class TestRemote:
 
         _start(runner, transcript)
 
+        assert "/memory/projection/default" in engine
         assert "/digest/default" in engine
         assert "/session-exposures" in engine
         (row,) = _rows()
         assert row.action == "full"
         assert [(x.particle_id, x.shown_as) for x in row.beliefs] == [
+            (a, "projection"),
             (a, "digest"),
             (b, "digest"),
         ]

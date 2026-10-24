@@ -517,3 +517,81 @@ class TestReindexAndStructureRecordSpend:
         assert event.actor == "cli:structure"
         assert (event.payload or {})["route"] == "structure"
         assert _calls_in(event) == 1
+
+
+# ---------------------------------------------------------------------------
+# links dedup --reread --judge records through the same meter
+# ---------------------------------------------------------------------------
+
+
+def _paying_judge(*, calls: int) -> Any:
+    """A stand-in for the judge step that pays for ``calls`` calls through the mocked port."""
+
+    async def _judge(*_args: Any, **_kwargs: Any) -> Any:
+        from particles.llm import complete
+        from particles.operations.reread_merge import RereadReport
+
+        for _ in range(calls):
+            await complete("extraction", "are these one claim", max_tokens=100)
+        return RereadReport(mode="judge", asked_judge=calls)
+
+    return _judge
+
+
+class TestRereadJudgeRecordsSpend:
+    def test_judge_records_a_reread_judge_run_the_store_sum_counts(
+        self, paying_client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import app
+
+        monkeypatch.setattr(
+            "particles.operations.reread_merge.judge_reread", _paying_judge(calls=2)
+        )
+        result = CliRunner().invoke(app, ["links", "dedup", "--reread", "--judge", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "LLM usage:" in result.stderr
+        [event] = asyncio.run(_extract_runs())
+        assert event.actor == "cli:links-dedup-reread"
+        assert (event.payload or {})["route"] == "reread-judge"
+        assert _calls_in(event) == 2
+        spend = asyncio.run(_spend())
+        assert spend is not None and spend.runs == 1
+        assert spend.cost_usd == pytest.approx(2 * _COST_PER_CALL)
+
+    def test_the_census_records_nothing(
+        self, paying_client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import app
+
+        async def _census(*_args: Any, **_kwargs: Any) -> Any:
+            from particles.operations.reread_merge import RereadReport
+
+            return RereadReport(mode="census")
+
+        monkeypatch.setattr("particles.operations.reread_merge.census_reread", _census)
+        result = CliRunner().invoke(app, ["links", "dedup", "--reread"])
+
+        assert result.exit_code == 0, result.output
+        assert "LLM usage:" not in result.stderr
+        assert asyncio.run(_extract_runs()) == []
+
+    def test_json_output_is_one_document(
+        self, paying_client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import app
+        from particles.operations.reread_merge import RereadReport
+
+        async def _judge(*_args: Any, confirm: Any = None, **_kwargs: Any) -> RereadReport:
+            report = RereadReport(mode="judge")
+            assert confirm is None or confirm(report)
+            return report
+
+        monkeypatch.setattr("particles.operations.reread_merge.judge_reread", _judge)
+        result = CliRunner().invoke(
+            app, ["links", "dedup", "--reread", "--judge", "--yes", "--output-format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["mode"] == "judge"
+        assert "links dedup --reread" in result.stderr

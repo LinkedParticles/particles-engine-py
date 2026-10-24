@@ -609,3 +609,93 @@ async def test_no_llm_call_in_the_merge_path(
 
     report = await auto_merge_exact_duplicates(db_session, dry_run=False)
     assert report.merged_groups == 1
+
+
+# ---------------------------------------------------------------------------
+# D2: an older SDK never merges a group holding a newer-minor record
+# ---------------------------------------------------------------------------
+
+
+async def _seed_stamped_groups(session: AsyncSession, newer_member: int) -> Subject:
+    """Two groups; member ``newer_member`` of the first carries stamp 1.3.0.
+
+    Members 1 and 2 hold "claim one." (1 is older, so it is the survivor);
+    members 3 and 4 hold "claim two." at stamps the SDK's minor and below.
+    """
+    subj = await _seed_subject(session)
+    rows = (
+        (1, "claim one.", datetime(2026, 1, 1, tzinfo=UTC), "1.2.0"),
+        (2, "claim one.", datetime(2026, 2, 1, tzinfo=UTC), "1.2.0"),
+        (3, "claim two.", datetime(2026, 1, 1, tzinfo=UTC), "1.2.0"),
+        (4, "claim two.", datetime(2026, 2, 1, tzinfo=UTC), "1.1.0"),
+    )
+    for n, text, stamp, version in rows:
+        particle = _mk(text, _pid(n), [subj.id], asserted_at=stamp)
+        if n == newer_member:
+            version = "1.3.0"
+        await insert_particle(session, particle.model_copy(update={"schema_version": version}))
+    await session.commit()
+    return subj
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_member", [1, 2], ids=["newer-survivor", "newer-copy"])
+async def test_a_group_holding_a_newer_minor_member_is_not_merged(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, newer_member: int
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", "1.2.0")
+    await _seed_stamped_groups(db_session, newer_member)
+
+    report = await auto_merge_exact_duplicates(db_session, dry_run=False)
+
+    assert report.total_groups == 2
+    assert (report.merged_groups, report.merged_particles) == (1, 1)
+    assert report.held_newer_schema_groups == 1
+    held = [g for g in report.groups if not g.merged]
+    assert [g.survivor_id for g in held] == [_pid(1)]
+    assert any(
+        w.startswith("1 group(s) / 1 redundant copy/copies hold a particle written by a newer")
+        for w in report.warnings
+    )
+    for pid in (_pid(1), _pid(2)):
+        kept = await get_particle(db_session, pid)
+        assert kept is not None and kept.status is Status.ACTIVE
+    # The control group, at the SDK's minor and below, merges as before.
+    loser = await get_particle(db_session, _pid(4))
+    assert loser is not None
+    assert (loser.status, loser.status_reason) == (
+        Status.SUPERSEDED,
+        StatusReason.DUPLICATE_MERGED,
+    )
+    [event] = await list_events(db_session)
+    assert event.payload is not None and event.payload["survivor"] == _pid(3)
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_discloses_the_held_group(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", "1.2.0")
+    await _seed_stamped_groups(db_session, newer_member=2)
+
+    report = await auto_merge_exact_duplicates(db_session, dry_run=True)
+
+    assert report.total_groups == 2 and report.merged_groups == 0
+    assert report.held_newer_schema_groups == 1
+    assert any("newer schema minor" in w for w in report.warnings)
+    assert await list_events(db_session) == []
+
+
+@pytest.mark.asyncio
+async def test_stamps_at_or_below_the_sdk_minor_merge_as_before(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", "1.3.0")
+    await _seed_stamped_groups(db_session, newer_member=2)
+
+    report = await auto_merge_exact_duplicates(db_session, dry_run=False)
+
+    assert (report.merged_groups, report.merged_particles) == (2, 2)
+    assert not any("newer schema minor" in w for w in report.warnings)

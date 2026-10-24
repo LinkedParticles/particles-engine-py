@@ -61,6 +61,8 @@ if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
+    from particles.operations.projection import DocManifest
+    from particles.operations.projection.memory_region import MemoryRegion
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
     from particles.store.session_exposure_store import SessionExposure
@@ -94,11 +96,16 @@ class DepositOutcome:
     machinery runs against the local store). Over HTTP it is empty — the
     display-only follow list degrades gracefully; the secondary
     entries are still deposited engine-side.
+
+    ``unchanged`` is ``True`` when the entry's latest snapshot
+    already held these bytes, so nothing was written and the IDs are the
+    existing ones. An importer-routed URL deposit always reports ``False``.
     """
 
     entry_id: str
     snapshot_id: str
     follow_targets: list[FollowTarget] = field(default_factory=list)
+    unchanged: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,7 +127,8 @@ class TextDepositOutcome:
 class ExtractOutcome:
     """Result of an extraction run: the particles plus local-only display extras.
 
-    ``page_stats``, ``carry_forward_ids`` and ``suppressed_ids`` are populated
+    ``page_stats``, ``carry_forward_ids``, ``suppressed_ids``,
+    ``revision_settled`` and ``restated`` are populated
     only by ``LocalBackend`` — the ``/extract`` endpoint returns just the
     particles, so over HTTP these display extras are empty (graceful
     degradation). ``entry_id`` echoes the (possibly prefix-resolved) entry the
@@ -138,6 +146,12 @@ class ExtractOutcome:
     #: one entry per candidate suppressed as an exact duplicate,
     #: holding the id of the existing ACTIVE particle it was folded into.
     suppressed_ids: list[str] = field(default_factory=list)
+    #: confirmed contradictions with an earlier generation of the entry, settled
+    #: by the generation with no INCONSISTENCY record.
+    revision_settled: int = 0
+    #: candidates folded into the earlier generation's claim they restate
+    #: rather than minted.
+    restated: int = 0
     llm_usage: LLMUsage | None = None
 
 
@@ -158,12 +172,34 @@ class AliasOutcome:
 
 
 @dataclass(frozen=True)
+class MergedSource:
+    """One source of ``subjects merge``: its id, name, the links it moves, and its refs.
+
+    ``refs_carried`` are the ``artifact`` refs the target gains; ``refs_withheld``
+    are the ones of another project, which the merge drops. Both
+    are ``namespace:id`` strings.
+    """
+
+    subject_id: str
+    canonical_name: str
+    particles_relinked: int
+    refs_carried: list[str] = field(default_factory=list)
+    refs_withheld: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class MergeOutcome:
-    """Result of ``subjects merge``: the surviving target + what folded in."""
+    """Result of ``subjects merge``: the surviving target + what folded in.
+
+    With ``dry_run`` nothing was written and ``subject`` is the target as it
+    stands; the other fields say what the merge would do.
+    """
 
     subject: Subject
     aliases_added: list[str]
     particles_relinked: int
+    sources: list[MergedSource] = field(default_factory=list)
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -357,6 +393,7 @@ class Backend(Protocol):
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         only_changed_components: bool = False,
+        include_schema_stale: bool = False,
     ) -> dict[str, object]: ...
 
     # ------------------------------------------------------------------
@@ -383,7 +420,15 @@ class Backend(Protocol):
         self, query: str, *, limit: int | None = None, offset: int = 0
     ) -> list[Subject]: ...
 
-    async def subject_show(self, subject_id: str) -> Subject | None: ...
+    async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
+        """One Subject by ID or ID prefix; ``by_name`` also accepts a name or alias.
+
+        ``by_name`` is the read surfaces' lookup: the local backend
+        resolves it with ``lookup_subject``, which refuses an ambiguous
+        reference with ``ValueError``. A remote engine resolves IDs only, and
+        ignores the flag (graceful degradation).
+        """
+        ...
 
     async def corpus_show(self, entry_id: str) -> CorpusEntry | None: ...
 
@@ -461,7 +506,9 @@ class Backend(Protocol):
 
     async def subject_alias(self, subject_id: str, aliases: list[str]) -> AliasOutcome: ...
 
-    async def subject_merge(self, source_id: str, target_id: str) -> MergeOutcome: ...
+    async def subject_merge(
+        self, source_ids: list[str], target_id: str, *, dry_run: bool = False
+    ) -> MergeOutcome: ...
 
     async def subject_split(
         self,
@@ -590,11 +637,31 @@ class Backend(Protocol):
         """
         ...
 
+    async def memory_region(
+        self,
+        store: str,
+        *,
+        manifest: DocManifest,
+        base_dir: Path,
+        observer_project: str | None,
+        exclude_source_tags: list[str],
+        fold_targets: list[str],
+    ) -> MemoryRegion:
+        """Render the ``MEMORY.md`` region body from ``store``.
+
+        ``manifest`` is the client's projection policy and travels with the
+        request; ``base_dir`` is its directory, which only the local backend can
+        read. ``fold_targets`` are the file URIs whose fold verdicts the
+        caller needs. The HTTP backend refuses a manifest with a file
+        section (:class:`~particles.operations.projection.memory_region.ClientFileSectionError`).
+        """
+        ...
+
     async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
         """Append what one session was shown at session start.
 
         The engine resolves short ``p-`` ids to full ids. On the HTTP backend the
-        row lands in the engine's own store, like every hook write.
+        row lands in the engine's store named ``store``, like every hook write.
         """
         ...
 

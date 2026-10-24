@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import Particle
+from particles.core.schema import ObserverScopeNote, Particle
 from particles.core.scoring.relevance import OwnerRankLiftSweep, sweep_owner_rank_lift
 from particles.core.scoring.utility import (
     RankLiftSweep,
@@ -123,6 +123,27 @@ async def load_sweep_rows(
     ]
 
 
+async def head_population(
+    session: AsyncSession, observer_project: str | None
+) -> tuple[list[Particle] | None, ObserverScopeNote | None]:
+    """The ACTIVE beliefs a head read through ``observer_project`` ranks, and the disclosure.
+
+    ``(None, None)`` with no observer: the sweep loads the whole store, as
+    before. Under an observer the population is exactly what the digest
+    ranks for that project (gate-B criterion 3), and
+    on a store that was never rescoped the note says the read stayed
+    store-wide.
+    """
+    if observer_project is None:
+        return None, None
+    from particles.operations.query.observer_scope import filter_visible
+    from particles.store.particle_store import get_particles_by_status
+
+    actives = await get_particles_by_status(session, Status.ACTIVE)
+    scope = await filter_visible(session, actives, observer_project)
+    return [p for p in actives if p.id in scope.visible_ids], scope.note(observer_project)
+
+
 async def sweep_store_rank_lift(
     session: AsyncSession,
     *,
@@ -131,6 +152,7 @@ async def sweep_store_rank_lift(
     grid_max: float = DEFAULT_GRID_MAX,
     grid_steps: int = DEFAULT_GRID_STEPS,
     distinct_ratio: float = DEFAULT_DISTINCT_RATIO,
+    particles: list[Particle] | None = None,
 ) -> RankLiftSweep:
     """Sweep ``λ`` over one store and return the per-surface admissible bands.
 
@@ -147,10 +169,12 @@ async def sweep_store_rank_lift(
         grid_max: Largest ``λ`` to evaluate.
         grid_steps: Non-zero grid points (band edges resolve to one step).
         distinct_ratio: Fraction of head slots that must hold distinct content.
+        particles: The ACTIVE beliefs to rank (:func:`head_population`);
+            ``None`` ranks the whole store.
     """
     from particles.config import get_config
 
-    rows = await load_sweep_rows(session)
+    rows = await load_sweep_rows(session, particles)
     return sweep_rank_lift(
         rows,
         grid=rank_lift_grid(grid_max, grid_steps),
@@ -265,6 +289,7 @@ async def sweep_store_owner_rank_lift(
     grid_steps: int = DEFAULT_GRID_STEPS,
     min_owner_in_head: int = 1,
     max_owner_share: float = DEFAULT_MAX_OWNER_SHARE,
+    particles: list[Particle] | None = None,
 ) -> OwnerRankLiftSweep:
     """Sweep ``ω`` over one store and return the per-surface admissible bands.
 
@@ -284,11 +309,13 @@ async def sweep_store_owner_rank_lift(
         min_owner_in_head: Criterion 1's floor — viewer beliefs the head must
             hold for an ``ω`` to be admissible.
         max_owner_share: Criterion 2's ceiling on the cohort's head share.
+        particles: The ACTIVE beliefs to rank (:func:`head_population`);
+            ``None`` ranks the whole store.
     """
     from particles.config import get_config
 
     cfg = get_config()
-    rows = await load_sweep_rows(session)
+    rows = await load_sweep_rows(session, particles)
     return sweep_owner_rank_lift(
         rows,
         grid=rank_lift_grid(grid_max, grid_steps),

@@ -786,44 +786,46 @@ def scripted(tmp_path_factory: pytest.TempPathFactory) -> Generator[dict[str, An
     reset_config()
 
 
-class TestScriptedArm:
-    def test_the_bar_is_met_with_every_answer_from_the_table(
-        self, scripted: dict[str, Any]
-    ) -> None:
-        report: TripVsMoveReport = scripted["report"]
+def test_the_scripted_arm(scripted: dict[str, Any], subtests: pytest.Subtests) -> None:
+    """Every check on the one scripted run, each reported as its own subtest.
+
+    The run is six child processes, about 30 s on the 2-vCPU CI runner. These
+    checks were six tests sharing a module fixture, but CI splits the suite
+    across runners test by test, so most of them landed on a runner of their own
+    and paid for the run again (four paid it in full on 2026-10-20). One test
+    pays once wherever it lands, and a failing check still reports by name.
+    """
+    report: TripVsMoveReport = scripted["report"]
+
+    with subtests.test("the bar is met with every answer from the table"):
         assert report.verdict.bar_met is True
         assert [r.passed for r in report.runs] == [True] * 5
         assert all(r.refused_calls == {} for r in report.runs)
         assert report.arm == "scripted" and report.spend.estimate_source == "none"
 
-    def test_the_old_gate_reproduces_the_failure_the_fix_addressed(
-        self, scripted: dict[str, Any]
-    ) -> None:
+    with subtests.test("the old gate reproduces the failure the fix addressed"):
         run: CaseRun = scripted["old_gate"].runs[0]
         assert run.passed is False and run.refused_calls == {}
         assert run.checks["iii_trip_current"] and run.checks["i_delhi_residence_or_flight"]
 
-    def test_the_parents_store_and_home_are_untouched(self, scripted: dict[str, Any]) -> None:
+    with subtests.test("the parent's store and home are untouched"):
         assert scripted["sentinel"].read_bytes() == b"the parent's store; no run may touch it"
         assert list(scripted["parent_home"].iterdir()) == []
 
-    def test_each_run_kept_its_store_inside_its_own_directory(
-        self, scripted: dict[str, Any]
-    ) -> None:
+    with subtests.test("each run kept its store inside its own directory"):
         runs = sorted(p.name for p in scripted["runs"].iterdir())
         assert runs == ["move-1", "move-2", "move-3", "trip-alone-1", "trip-alone-2"]
         for name in runs:
             assert (scripted["runs"] / name / "particles.db").is_file()
 
-    def test_a_saved_report_rescores_to_the_same_verdict(self, scripted: dict[str, Any]) -> None:
-        report: TripVsMoveReport = scripted["report"]
+    with subtests.test("a saved report rescores to the same verdict"):
         saved = TripVsMoveReport.model_validate_json(report.model_dump_json())
         again = case.rescore(saved)
         assert [r.checks for r in again.runs] == [r.checks for r in report.runs]
         assert again.verdict == report.verdict
 
-    def test_the_events_the_checks_read_are_saved(self, scripted: dict[str, Any]) -> None:
-        move: CaseRun = scripted["report"].runs[0]
+    with subtests.test("the events the checks read are saved"):
+        move: CaseRun = report.runs[0]
         kinds = {e.event_type for e in move.events}
         assert "UPDATE_SUPERSESSION" in kinds
         assert any(r.restatement for r in move.rows)

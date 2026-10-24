@@ -94,7 +94,9 @@ def query_cmd(
     audience: str = typer.Option("GENERAL", help="GENERAL, EXPERT, or REGULATORY"),
     top_k: int = typer.Option(40, help="Number of particles to retrieve"),
     subject: str | None = typer.Option(
-        None, "--subject", help="Filter to particles about this subject ID"
+        None,
+        "--subject",
+        help="Filter to particles about this subject: an ID, an ID prefix, or a name or alias",
     ),
     tag: list[str] = typer.Option(
         [],
@@ -284,9 +286,13 @@ def query_cmd(
             # pass the subject through as a full ID (graceful degradation).
             resolved_subject = subject
         else:
-            s = run(backend.subject_show(subject))
+            try:
+                s = run(backend.subject_show(subject, by_name=True))
+            except ValueError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from None
             if s is None:
-                typer.echo(f"Subject {subject!r} not found.", err=True)
+                typer.echo(f"No subject matches {subject!r} by ID, ID prefix, or name.", err=True)
                 raise typer.Exit(1)
             resolved_subject = s.id
     modality: AssertionModality | None = None

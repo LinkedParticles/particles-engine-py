@@ -44,6 +44,7 @@ particles are never agent-mutable.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
@@ -52,6 +53,8 @@ from particles.config import get_config
 from particles.core.granularity import granularity_violation
 from particles.core.observer_scope import (
     PROJECT_TAG_PREFIX,
+    UNATTRIBUTED_MARKER,
+    BeliefScope,
     describe_scope,
     project_keys,
     project_tag,
@@ -78,7 +81,8 @@ from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import deposit_text as _deposit_text_seam
 from particles.extraction.registry import infer_domain
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
-from particles.store.observer_scope_join import lens_may_engage, load_scopes
+from particles.store.observer_scope_join import lens_may_engage, load_scopes, own_attribution
+from particles.store.observer_scope_store import ScopeTarget, add_widening
 from particles.store.particle_store import get_particle
 from particles.store.relation_store import create_relation
 
@@ -100,6 +104,11 @@ class AgentWriteResult(BaseModel):
     superseded_particle_id: str | None = None
     status: str | None = None
     inconsistency_id: str | None = None
+    # on an operator supersede over a rescoped store, the observer
+    # scope the successor took from its predecessor ("project -a", "global",
+    # "unattributed", each possibly "widened to every project"); ``None`` on
+    # every other write.
+    successor_scope: str | None = None
 
 
 def _clamp_confidence(value: float) -> float:
@@ -142,6 +151,7 @@ async def _resolve_provenance(
     source_excerpt: str | None,
     corpus_entry_id: str | None,
     project_key: str | None = None,
+    excerpt_tags: list[str] | None = None,
 ) -> tuple[str, str]:
     """Return (corpus_entry_id, snapshot_id) for the assertion's SOURCE ref (§3).
 
@@ -149,6 +159,9 @@ async def _resolve_provenance(
     (the deposit-excerpt pattern). If an existing ``corpus_entry_id`` is given
     instead, reuses its latest snapshot. An assertion with neither is rejected —
     an unprovenanced belief is the failure mode this design exists to end (§4).
+
+    ``excerpt_tags`` replaces the agent's scope tags for an operator supersede,
+    whose successor carries its predecessor's attribution.
     """
     if source_excerpt is not None:
         return await _deposit_text_seam(
@@ -156,7 +169,7 @@ async def _resolve_provenance(
             source_excerpt,
             deposited_by=identity,
             source_type=SourceType.CONVERSATION,
-            tags=_scope_tags(None, project_key),
+            tags=excerpt_tags if excerpt_tags is not None else _scope_tags(None, project_key),
             author_id=identity,
         )
     if corpus_entry_id is not None:
@@ -182,16 +195,21 @@ async def _resolve_provenance(
     )
 
 
-def _scope_tags(tags: list[str] | None, project_key: str | None) -> list[str] | None:
+def _scope_tags(tags: list[str] | None, project_key: str | None) -> list[str]:
     """Entry tags with the server-owned project key.
 
     The key is never the caller's to name: any ``project:`` tag it supplied is
-    dropped, and the bound server's own key — if it has one — is added.
+    dropped, and the bound server's own key is added. An agent write with no
+    binding is marked ``scope:unattributed`` instead, so agent
+    material is never global by omission. The marker is the server's too.
     """
-    kept = [tag for tag in tags or [] if not tag.startswith(PROJECT_TAG_PREFIX)]
-    if project_key:
-        kept.append(project_tag(project_key))
-    return kept or (None if tags is None else [])
+    kept = [
+        tag
+        for tag in tags or []
+        if not tag.startswith(PROJECT_TAG_PREFIX) and tag != UNATTRIBUTED_MARKER
+    ]
+    kept.append(project_tag(project_key) if project_key else UNATTRIBUTED_MARKER)
+    return kept
 
 
 async def _construct_and_insert(
@@ -212,6 +230,7 @@ async def _construct_and_insert(
     granularity: tuple[int, int] | None = None,
     project_key: str | None = None,
     operator: bool = False,
+    excerpt_tags: list[str] | None = None,
 ) -> tuple[str, Particle | None]:
     """Server-side particle construction + §6.6 consensus/fail-closed insert (§4a/§6b).
 
@@ -297,6 +316,7 @@ async def _construct_and_insert(
             source_excerpt=source_excerpt,
             corpus_entry_id=corpus_entry_id,
             project_key=project_key,
+            excerpt_tags=excerpt_tags,
         )
         if operator:
             # Range-checked by supersede_belief before any write.
@@ -574,7 +594,11 @@ async def supersede_belief(
         raise ValueError(f"confidence must be between 0 and 1, got {confidence}.")
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
-    await _load_mutable_target(session, supersedes_id, identity, operator=operator)
+    predecessor = await _load_mutable_target(session, supersedes_id, identity, operator=operator)
+    # decision 3: an operator replaces a claim, it does not move it,
+    # so the successor keeps the predecessor's own attribution. Read before the
+    # predecessor is retired.
+    successor = await _successor_attribution(session, predecessor) if operator else None
     # the successor's principal. The agent identity above still keys
     # the ownership check on the agent path.
     author = get_config().curation.operator_identity if operator else identity
@@ -607,7 +631,25 @@ async def supersede_belief(
         subject_ids=subject_ids,
         project_key=project_key,
         operator=operator,
+        excerpt_tags=successor.tags if successor is not None else None,
     )
+    # A widening carries over only to a successor whose excerpt took the
+    # predecessor's attribution and that landed ACTIVE (decision 3).
+    # A cited entry decides its own scope, and a successor held for review has
+    # not replaced anything yet: neither gets reach as a side effect.
+    carried = False
+    if successor is not None and successor.widen and source_excerpt is not None:
+        landed = await get_particle(session, candidate_id)
+        carried = landed is not None and landed.status is Status.ACTIVE
+    if carried:
+        await add_widening(session, ScopeTarget.PARTICLE, candidate_id, created_by=event_actor)
+        await record_event(
+            session,
+            actor=event_actor,
+            event_type=OperatorEventType.OBSERVER_SCOPE_WIDENED,
+            refs=[(EventRefKind.PARTICLE, candidate_id)],
+            payload={"carried_from": supersedes_id},
+        )
     await record_event(
         session,
         actor=event_actor,
@@ -627,7 +669,57 @@ async def supersede_belief(
             **({"card_key": card_key} if card_key else {}),
         },
     )
-    return _map_result(candidate_id, result)
+    mapped = _map_result(candidate_id, result)
+    if successor is not None and await lens_may_engage(session):
+        mapped.successor_scope = successor.describe(
+            excerpt=source_excerpt is not None, carried=carried
+        )
+    return mapped
+
+
+@dataclass(frozen=True)
+class _SuccessorAttribution:
+    """What an operator supersede's successor inherits (decision 3)."""
+
+    own: BeliefScope
+    widen: bool
+
+    @property
+    def tags(self) -> list[str]:
+        """The excerpt's tags: the predecessor's own keys, else the marker, else none."""
+        if self.own.is_global:
+            return []
+        if self.own.keys:
+            return [project_tag(key) for key in sorted(self.own.keys)]
+        return [UNATTRIBUTED_MARKER]
+
+    def describe(self, *, excerpt: bool, carried: bool) -> str:
+        if not excerpt:
+            # The operator named the successor's source; its scope is that entry's.
+            own = "the cited entry's"
+        elif self.own.is_global:
+            own = "global"
+        elif self.own.keys:
+            own = "project " + ", ".join(sorted(self.own.keys))
+        else:
+            own = (
+                "unattributed (marked scope:unattributed; "
+                "`particles memory rescope --assign ENTRY KEY` attributes it)"
+            )
+        if carried:
+            return f"{own}, widened to every project"
+        if not self.widen:
+            return own
+        why = "the cited entry decides its scope" if not excerpt else "it is held for review"
+        return (
+            f"{own}; the predecessor's widening was not carried over ({why}), "
+            "and `particles memory widen` grants it"
+        )
+
+
+async def _successor_attribution(session: Any, predecessor: Particle) -> _SuccessorAttribution:
+    own, widened = await own_attribution(session, predecessor)
+    return _SuccessorAttribution(own=own, widen=widened and not own.is_global)
 
 
 async def assign_subject_belief(

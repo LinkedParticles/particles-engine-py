@@ -50,7 +50,7 @@ from particles.store.particle_store import (
     strip_entry_provenance_refs,
 )
 from particles.store.relation_store import ParticleRelationRow
-from particles.store.subject_store import ParticleSubjectRow, SubjectRow
+from particles.store.subject_store import ParticleSubjectRow, SubjectRow, drop_aliases
 from particles.store.synthesis_cache_store import SynthesisCacheRow
 from particles.store.taxonomy_store import ParticleTagEdgeRow
 
@@ -291,4 +291,5 @@ async def purge_orphan_subjects(
         delete(SynthesisCacheRow).where(SynthesisCacheRow.subject_id.in_(orphan_ids))
     )
     await session.execute(delete(SubjectRow).where(SubjectRow.id.in_(orphan_ids)))
+    await drop_aliases(session, orphan_ids)
     return (len(orphan_ids), synth_result.rowcount or 0)

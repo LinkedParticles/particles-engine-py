@@ -14,8 +14,10 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,8 @@ from particles.corpus.store import (
     add_entry_tags,
     get_entry_by_content_hash,
     get_entry_by_uri,
+    get_latest_snapshot,
+    get_snapshot,
     list_snapshots_for_entry,
 )
 from particles.extraction.general import sniff_image_media_type
@@ -95,6 +99,12 @@ def save_blob(content: bytes, content_hash: str) -> str:
 def sha256(data: bytes) -> str:
     """Return the SHA-256 hex digest of data."""
     return hashlib.sha256(data).hexdigest()
+
+
+#: The ``content_hash`` of an ``ABSENT`` record: the SHA-256 of the empty body.
+#: Content-hash lookups read ``RESPONSE`` rows only, so it
+#: never deduplicates an empty file.
+EMPTY_BODY_SHA256 = sha256(b"")
 
 
 def _detect_source_type(
@@ -395,11 +405,15 @@ async def deposit_file(
     source_type: str | None = None,
     tags: list[str] | None = None,
     content_date: datetime | None = None,
+    out_unchanged: list[bool] | None = None,
+    identify_by_path: bool = False,
 ) -> tuple[str, str]:
     """Deposit a local file into the corpus.
 
     Source type is auto-detected from file extension. Deduplication is by
-    SHA-256 content hash; re-depositing the same file returns the existing entry.
+    SHA-256 content hash; re-depositing the same file returns the existing entry
+    and, when its bytes match the entry's latest snapshot, adds no snapshot and
+    queues no extraction (see :func:`write_entry_and_snapshot`).
 
     ``content_published_at`` is captured at deposit time so an
     archival document is not stamped with the import date. Precedence (highest
@@ -413,6 +427,12 @@ async def deposit_file(
         deposited_by: Agent ID recorded on the corpus entry.
         source_type: Override auto-detected source type.
         content_date: Explicit authorship date; overrides auto-detection.
+        out_unchanged: When supplied, receives one bool: ``True`` when the
+            deposit was skipped as unchanged.
+        identify_by_path: Identify the file by its path alone, never attaching
+            it to another path's entry by content hash. The vault walk passes
+            it, so two notes with identical bytes are two sources;
+            every other caller keeps content-hash dedup.
 
     Returns:
         Tuple of (entry_id, snapshot_id).
@@ -442,6 +462,9 @@ async def deposit_file(
         tags=tags or [],
         warc_record_type=WarcRecordType.RESPONSE,
         content_published_at=content_published_at,
+        content_date_explicit=content_date is not None,
+        out_unchanged=out_unchanged,
+        identified_by_uri=identify_by_path,
     )
 
 
@@ -595,17 +618,82 @@ def _iter_tree(
     return results
 
 
-def _iter_vault_markdown(vault_dir: Path) -> list[Path]:
-    """Walk ``vault_dir`` recursively and return ``.md`` / ``.markdown`` paths.
+#: The suffixes the vault walk deposits.
+VAULT_SUFFIXES = frozenset({".md", ".markdown"})
 
-    Skips files and directories whose names start with ``_`` or ``.`` so
-    Obsidian's ``.obsidian/`` settings dir, ``.trash/``, ``_attachments/``
-    and similar hidden / scaffold paths do not pollute the corpus.
+#: The ledger every exporter run writes into its output folder.
+#: A vault directory holding one is the store's own rendering of itself.
+EXPORT_LEDGER_NAME = ".particles-export.json"
 
-    Returns paths sorted deterministically so the progress callback and the
-    returned ``(entry_id, snapshot_id)`` list are stable across runs.
+
+@dataclass(frozen=True)
+class VaultWalk:
+    """One walk of a vault root: what it found, and whether it saw everything."""
+
+    files: list[Path]
+    """The notes the walk lists, sorted."""
+    export_dirs: list[Path]
+    """Directories skipped because they hold :data:`EXPORT_LEDGER_NAME`."""
+    errors: list[str]
+    """OS errors met while enumerating. A walk with any records no absence (§3.2)."""
+
+    @property
+    def complete(self) -> bool:
+        return not self.errors
+
+
+def vault_part_ignored(part: str) -> bool:
+    """The Obsidian ignore rule for one path component: ``_`` and ``.`` prefixes."""
+    return part.startswith(("_", "."))
+
+
+def walk_vault(vault_dir: Path) -> VaultWalk:
+    """Walk ``vault_dir`` under the vault ignore policy, recording any enumeration error.
+
+    Skips any path component starting with ``_`` or ``.`` relative to the root
+    (Obsidian's ``.obsidian/`` settings dir, ``.trash/``, ``_attachments/``),
+    and every directory holding the export ledger, so a vault that contains a
+    ``particles export obsidian`` folder never deposits the store's rendering of
+    itself as the owner's notes. Symlinked directories are not
+    followed, as ``rglob`` does not follow them.
+
+    Unlike ``Path.rglob``, which silently skips a subdirectory it may not read,
+    every OS error is recorded: a walk that missed part of the vault must not
+    be read as having seen every note.
     """
-    return _iter_tree(vault_dir, {".md", ".markdown"}, lambda p: p.startswith(("_", ".")))
+    errors: list[str] = []
+    files: list[Path] = []
+    export_dirs: list[Path] = []
+
+    def _record(exc: OSError) -> None:
+        errors.append(f"{exc.filename or vault_dir}: {exc.strerror or exc}")
+
+    for dirpath, dirnames, filenames in os.walk(vault_dir, onerror=_record):
+        here = Path(dirpath)
+        rel_parts = here.relative_to(vault_dir).parts
+        if any(vault_part_ignored(part) for part in rel_parts):
+            dirnames[:] = []
+            continue
+        if EXPORT_LEDGER_NAME in filenames:
+            export_dirs.append(here)
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if not vault_part_ignored(d)]
+        for name in filenames:
+            path = here / name
+            if vault_part_ignored(name) or path.suffix.lower() not in VAULT_SUFFIXES:
+                continue
+            if not path.is_file():
+                continue
+            files.append(path)
+    files.sort()
+    export_dirs.sort()
+    return VaultWalk(files=files, export_dirs=export_dirs, errors=errors)
+
+
+def _iter_vault_markdown(vault_dir: Path) -> list[Path]:
+    """The ``.md`` / ``.markdown`` paths :func:`walk_vault` lists, sorted."""
+    return walk_vault(vault_dir).files
 
 
 def iter_vault_files(vault_dir: Path) -> list[Path]:
@@ -613,10 +701,10 @@ def iter_vault_files(vault_dir: Path) -> list[Path]:
 
     The **shared walk seam**: :func:`deposit_vault` (the local path) and the
     remote ``import vault`` path (a client tree-walk that loops
-    ``backend.deposit_file``) both call this, so the Obsidian ignore policy
-    never drifts between the two.
+    ``backend.deposit_file``) both call this, so the Obsidian ignore policy and
+    the export-folder skip never drift between the two.
     """
-    return _iter_vault_markdown(vault_dir)
+    return walk_vault(vault_dir).files
 
 
 def iter_project_files(project_dir: Path, extensions: set[str] | None = None) -> list[Path]:
@@ -643,6 +731,10 @@ async def deposit_vault(
     deposited_by: str = "operator",
     tags: list[str] | None = None,
     progress: Callable[[str], None] | None = None,
+    out_unchanged: list[bool] | None = None,
+    mutability: Mutability = Mutability.MUTABLE,
+    files: list[Path] | None = None,
+    unreadable: list[Path] | None = None,
 ) -> list[tuple[str, str]]:
     """Deposit every Markdown file under ``vault_dir`` as ``LOCAL_MARKDOWN``.
 
@@ -651,8 +743,14 @@ async def deposit_vault(
     ``.obsidian/`` settings, ``_attachments/`` scaffolds, and similar
     metadata-only paths are not deposited as content). Each file is routed
     through :func:`deposit_file`, which means existing ``content_hash``
-    deduplication applies — re-running on the same vault is idempotent and
-    will not create duplicate corpus entries.
+    deduplication applies: re-running on the same vault creates no duplicate
+    corpus entries, and a note whose bytes are unchanged gets no new snapshot,
+    so a re-import queues extraction only for notes that changed.
+
+    Each note is deposited ``mutability`` (``MUTABLE`` by default; a vault is a
+    collection the owner keeps rewriting) / ``NEVER``, and identified by its
+    path alone. Recording absences and reclassifying older
+    ``STABLE`` entries is ``operations.vault_import``'s, which calls this.
 
     Honors the spec promise that operators with existing Obsidian
     vaults can onboard to Particles via one command, then `extract` + `lint`
@@ -666,6 +764,14 @@ async def deposit_vault(
         progress: Optional callback invoked once per file, before deposit,
             with a ``"[i/N] path/to/file.md"``-style message. Mirrors the
             progress shape used by ``particles reindex --verbose``.
+        out_unchanged: When supplied, receives one bool per deposited file,
+            parallel to the returned list: ``True`` for a file skipped as
+            unchanged.
+        mutability: The class each new entry is deposited with.
+        files: The walk's listing, when the caller already walked the root.
+        unreadable: When supplied, a note that cannot be read is appended here
+            and skipped instead of failing the walk; the vault import counts it
+            present.
 
     Returns:
         List of ``(entry_id, snapshot_id)`` tuples in deposit order; empty
@@ -674,7 +780,8 @@ async def deposit_vault(
     if not vault_dir.exists() or not vault_dir.is_dir():
         raise ValueError(f"Vault directory not found: {vault_dir}")
 
-    files = iter_vault_files(vault_dir)
+    if files is None:
+        files = iter_vault_files(vault_dir)
     if not files:
         if progress is not None:
             progress(f"No .md files found under {vault_dir}")
@@ -689,15 +796,49 @@ async def deposit_vault(
             except ValueError:
                 rel = path
             progress(f"[{i}/{total}] depositing {rel}")
+        if unreadable is not None:
+            try:
+                path.read_bytes()
+            except OSError as exc:
+                log.warning("import vault: cannot read %s (%s); skipped", path, exc)
+                unreadable.append(path)
+                continue
         entry_id, snapshot_id = await deposit_file(
             session,
             path,
             deposited_by=deposited_by,
             source_type=SourceType.LOCAL_MARKDOWN,
+            mutability=mutability,
+            fetch_policy=FetchPolicy.NEVER,
             tags=tags or [],
+            out_unchanged=out_unchanged,
+            identify_by_path=True,
         )
         results.append((entry_id, snapshot_id))
     return results
+
+
+async def record_absence(session: AsyncSession, *, entry_id: str, refers_to: str | None) -> str:
+    """Append an ``ABSENT`` record to ``entry_id``; return its snapshot id.
+
+    The observation that the source was looked for and not found: no blob, no
+    ``archive_path``, ``refers_to`` the entry's last ``RESPONSE``, the
+    empty-body digest as its ``content_hash`` (which no content-hash lookup
+    matches), written ``PENDING`` because it owes the retirement. The earlier
+    snapshots and their blobs are untouched. Flushes; the caller commits.
+    """
+    snap = Snapshot(
+        captured_at=datetime.now(UTC),
+        content_hash=EMPTY_BODY_SHA256,
+        warc_record_type=WarcRecordType.ABSENT,
+        archive_path=None,
+        refers_to=refers_to,
+        extraction_status=ExtractionStatus.PENDING,
+    )
+    session.add(SnapshotRow.from_model(snap, entry_id=entry_id))
+    await session.flush()
+    log.info("Recorded absence %s on entry %s", snap.snapshot_id[:8], entry_id[:8])
+    return snap.snapshot_id
 
 
 def _iter_clipper_markdown(captures_dir: Path) -> list[Path]:
@@ -853,6 +994,8 @@ async def deposit_web_clipper(
             overrides the frontmatter ``published`` date for every capture.
         progress: Optional callback invoked once per file, before deposit, with a
             ``"[i/N] depositing path"``-style message (mirrors ``deposit_vault``).
+        out_unchanged: As for :func:`deposit_vault`: one bool per file, ``True``
+            for a file skipped as unchanged.
 
     Returns:
         List of ``(entry_id, snapshot_id)`` tuples in deposit order; empty if
@@ -972,6 +1115,7 @@ async def deposit_project(
     tags: list[str] | None = None,
     extensions: set[str] | None = None,
     progress: Callable[[str], None] | None = None,
+    out_unchanged: list[bool] | None = None,
 ) -> list[tuple[str, str]]:
     """Deposit every source file under ``project_dir`` as ``PYTHON_SOURCE``.
 
@@ -1033,6 +1177,7 @@ async def deposit_project(
             deposited_by=deposited_by,
             source_type=SourceType.PYTHON_SOURCE,
             tags=tags or [],
+            out_unchanged=out_unchanged,
         )
         results.append((entry_id, snapshot_id))
     return results
@@ -1050,6 +1195,7 @@ async def deposit_url(
     follow_post_links: bool | None = None,
     follow_comment_links: bool | None = None,
     out_follow_targets: list[tuple[str, str, str]] | None = None,
+    out_unchanged: list[bool] | None = None,
 ) -> tuple[str, str]:
     """Fetch a URL and deposit it into the corpus.
 
@@ -1079,6 +1225,11 @@ async def deposit_url(
     the secondary corpus entry. Operator-facing surface (the CLI uses
     this to print the follow result so operators see both entries),
     not API-load-bearing.
+
+    ``out_unchanged`` (optional): receives ``True`` when the generic
+    fetch path found the entry's latest snapshot already holding these bytes and
+    wrote nothing. An importer-routed deposit is deduplicated by the same seam,
+    but the importer protocol returns IDs only, so nothing is appended for it.
 
     Returns (entry_id, snapshot_id) for the **primary** deposit. Follow
     targets surface via ``out_follow_targets``.
@@ -1175,6 +1326,7 @@ async def deposit_url(
         warc_record_type=WarcRecordType.RESPONSE,
         etag=resp.headers.get("etag"),
         last_modified=_parse_last_modified(resp.headers.get("last-modified")),
+        out_unchanged=out_unchanged,
     )
     await _reconcile_mentions_for_deposit(session, url=url, entry_id=entry_id)
     return entry_id, snapshot_id
@@ -1347,13 +1499,17 @@ async def deposit_text(
     source_type: str = SourceType.CONVERSATION,
     tags: list[str] | None = None,
     author_id: str | None = None,
+    out_unchanged: list[bool] | None = None,
 ) -> tuple[str, str]:
     """Deposit raw text (e.g. a conversation transcript).
 
     ``author_id`` records the principal the content is attributed to. For an
     agent assertion this is the server-bound asserter identity, which
     the §6.4 AUTHOR trust tier keys on (so agent-asserted beliefs rank below
-    operator content). Returns (entry_id, snapshot_id).
+    operator content). Text with no URI-R is matched by content hash, so the
+    same text deposited twice returns the first deposit's IDs and writes nothing;
+    ``out_unchanged`` receives ``True`` in that case. Returns
+    (entry_id, snapshot_id).
     """
     content = text.encode("utf-8")
     content_hash = sha256(content)
@@ -1372,6 +1528,7 @@ async def deposit_text(
         tags=tags or [],
         warc_record_type=WarcRecordType.RESPONSE,
         author_id=author_id,
+        out_unchanged=out_unchanged,
     )
 
 
@@ -1444,7 +1601,9 @@ async def deposit_text_versioned(
     return entry_id, snapshot_id, False
 
 
-def _identified_by_uri_alone(mutability: Mutability, tags: list[str] | None) -> bool:
+def _identified_by_uri_alone(
+    mutability: Mutability, tags: list[str] | None, *, by_path: bool = False
+) -> bool:
     """Whether a deposit must never attach to another URI's entry by content hash.
 
     A keyed ``MUTABLE`` source is one project's living file. Two projects'
@@ -1454,9 +1613,11 @@ def _identified_by_uri_alone(mutability: Mutability, tags: list[str] | None) -> 
     suppression folds their identical claims into one particle with two refs
     instead, which is the right shape for one belief with two
     sources. Keyless deposits keep
-    content-hash dedup — a file moved on disk is still one source.
+    content-hash dedup — a file moved on disk is still one source — except a
+    vault note, which the walk identifies by its path (``by_path``):
+    two template copies are two notes.
     """
-    return mutability == Mutability.MUTABLE and bool(project_keys(tags))
+    return by_path or (mutability == Mutability.MUTABLE and bool(project_keys(tags)))
 
 
 def _keyed_deposit_onto_global_entry(existing: CorpusEntry, tags: list[str] | None) -> bool:
@@ -1483,7 +1644,9 @@ async def _reconcile_project_keys(
     to a *global* entry — a hand deposit, a web page — because that would take
     an operator's deposit out of view for every other project; narrowing is an
     operator's act, not a side effect of someone re-depositing the same bytes.
-    Nothing is ever removed.
+    Nothing is ever removed. Each key added is recorded as an
+    ``OBSERVER_SCOPE_KEY_ASSIGNED`` event with actor ``deposit``,
+    so a reconcile is as visible in the event log as an operator's ``--assign``.
     """
     incoming = project_keys(tags)
     if not incoming:
@@ -1494,7 +1657,18 @@ async def _reconcile_project_keys(
     missing = sorted(incoming - project_keys(existing.tags))
     if not missing:
         return
+    # Deferred: corpus -> store is a pinned cycle-break seam (AGENTS.md § Deferred imports, case 1).
+    from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+
     await add_entry_tags(session, existing.entry_id, [project_tag(key) for key in missing])
+    for key in missing:
+        await record_event(
+            session,
+            actor="deposit",
+            event_type=OperatorEventType.OBSERVER_SCOPE_KEY_ASSIGNED,
+            refs=[(EventRefKind.CORPUS_ENTRY, existing.entry_id)],
+            payload={"assigned": key},
+        )
     log.info("Added project key(s) %s to entry %s", missing, existing.entry_id)
 
 
@@ -1529,6 +1703,57 @@ async def _reconcile_fetch_policy(
     )
 
 
+async def _unchanged_snapshot_id(
+    session: AsyncSession,
+    existing: CorpusEntry,
+    content_hash: str,
+    source_type: str,
+    explicit_date: datetime | None,
+) -> str | None:
+    """The snapshot an unchanged re-deposit returns, or ``None`` when it must snapshot.
+
+    Compared against the entry's **latest** snapshot only: bytes that match an
+    older generation but not the newest are a real change (a revert) and get a
+    snapshot of their own, so a ``MUTABLE`` entry's current generation still
+    tracks the source. ``explicit_date`` is an operator-supplied authorship
+    date; when it differs from the stored one the deposit is a re-dating and
+    snapshots. A date derived from the bytes or the file mtime never counts, so
+    a touched but unedited file stays unchanged.
+    """
+    if existing.source_type != source_type:
+        return None
+    latest = await get_latest_snapshot(session, existing.entry_id)
+    if latest is None or latest.content_hash != content_hash:
+        return None
+    # An ABSENT latest record matches no deposit: its digest is the empty
+    # body's, so without this a restored empty note would be skipped.
+    if latest.warc_record_type == WarcRecordType.ABSENT:
+        return None
+    # The fetch ladder writes each REVISIT against the then-latest snapshot, which
+    # may itself be a REVISIT, so walk the chain to the record that has the blob.
+    snap: Snapshot | None = latest
+    seen: set[str] = set()
+    while (
+        snap is not None
+        and snap.warc_record_type == WarcRecordType.REVISIT
+        and snap.refers_to
+        and snap.snapshot_id not in seen
+    ):
+        seen.add(snap.snapshot_id)
+        snap = await get_snapshot(session, snap.refers_to)
+    holder = snap if snap is not None else latest
+    if explicit_date is not None and _as_utc(holder.content_published_at) != _as_utc(explicit_date):
+        return None
+    return holder.snapshot_id
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """SQLite hands datetimes back naive; compare them as UTC."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 async def write_entry_and_snapshot(
     session: AsyncSession,
     uri_r: str | None,
@@ -1545,15 +1770,42 @@ async def write_entry_and_snapshot(
     last_modified: datetime | None = None,
     author_id: str | None = None,
     content_published_at: datetime | None = None,
+    content_date_explicit: bool = False,
+    out_unchanged: list[bool] | None = None,
+    identified_by_uri: bool = False,
 ) -> tuple[str, str]:
-    """Core deposit logic: check for existing entry, create/update, return IDs."""
+    """Core deposit logic: check for existing entry, create/update, return IDs.
+
+    **An unchanged re-deposit writes no snapshot**. When the matched
+    entry's latest snapshot already carries ``content_hash`` and the entry's
+    ``source_type`` is the one requested, the deposit returns the existing
+    ``(entry_id, snapshot_id)`` and adds nothing, so no extraction work is
+    queued. The returned snapshot is the one holding the bytes: a REVISIT's
+    ``refers_to`` rather than the blob-less REVISIT itself. Changed content, or
+    a changed ``source_type`` (the re-deposit-as-a-more-specific-type case
+    below), appends a ``PENDING`` snapshot exactly as before. So does an
+    operator's explicit authorship date (``content_date_explicit``, the CLI
+    ``--date``) that differs from the stored one: re-depositing with ``--date``
+    and then reindexing is the documented way to re-date an archival entry.
+    Re-extracting an unchanged source on purpose is
+    ``particles reindex --entry-ids``.
+
+    ``out_unchanged`` (optional): when supplied, one bool is appended per call,
+    ``True`` when the deposit was skipped as unchanged. The return shape stays
+    a 2-tuple, so the many existing callers that unpack it are unaffected.
+
+    ``identified_by_uri``: match the entry by ``uri_r`` alone and never by
+    content hash (the vault walk's path identity).
+    """
     # Check for existing entry: URI-R first, then content hash (deduplicates same
     # file deposited from different paths or re-deposited after a move) — except
     # for a keyed MUTABLE deposit, which is one project's own file.
     existing: CorpusEntry | None = None
     if uri_r:
         existing = await get_entry_by_uri(session, uri_r)
-    if existing is None and not _identified_by_uri_alone(mutability, tags):
+    if existing is None and not _identified_by_uri_alone(
+        mutability, tags, by_path=identified_by_uri
+    ):
         existing = await get_entry_by_content_hash(session, content_hash)
         if existing is not None and _keyed_deposit_onto_global_entry(existing, tags):
             # A project's deposit must not ride an operator's global entry into
@@ -1567,6 +1819,24 @@ async def write_entry_and_snapshot(
             )
     if existing is not None:
         await _reconcile_project_keys(session, existing, tags)
+        reused = await _unchanged_snapshot_id(
+            session,
+            existing,
+            content_hash,
+            source_type,
+            content_published_at if content_date_explicit else None,
+        )
+        if reused is not None:
+            log.info(
+                "Deposit unchanged for entry %s (latest snapshot has this content hash); "
+                "no new snapshot",
+                existing.entry_id,
+            )
+            if out_unchanged is not None:
+                out_unchanged.append(True)
+            return existing.entry_id, reused
+    if out_unchanged is not None:
+        out_unchanged.append(False)
 
     now = datetime.now(UTC)
 

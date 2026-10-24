@@ -307,10 +307,21 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
         "exemption class 3, local-only: rev-parse / add / diff / "
         "commit against a local working tree; adds no remote and pushes nothing",
     ),
+    ("api/cli/subjects.py", "_checkout_files", "git"): (
+        1,
+        "exemption class 3, local-only: `git ls-files` over the "
+        "checkout the operator names for `subjects fold-artifacts`; never fetches",
+    ),
     ("api/cli/hook.py", "_git", "git"): (
         1,
         "exemption class 3, local-only: the doctor's rev-parse / "
         "describe / tag --list over the install's own checkout; never fetches",
+    ),
+    ("api/cli/init.py", "_claude_mcp", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: `claude mcp add` / `remove` "
+        "edits the user's own Claude Code registration file; it "
+        "starts no server and fetches nothing",
     ),
     ("benchmark/update_gate/case.py", "run_one", _DYNAMIC): (
         1,

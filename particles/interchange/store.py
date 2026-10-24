@@ -22,23 +22,29 @@ Wraps the pure codec with the DB I/O the wire format needs:
 
 Provenance refs travel as-is and point at the *source* store's corpus entries
 (origin metadata); the corpus itself moves only via store-export (Part C).
+
+Import and restore both refuse a bundle whose manifest ``schemaVersion`` is
+incompatible with the SDK's before any member is read, and both report, per
+key, the unit keys the codec dropped (D6).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import SCHEMA_VERSION, Particle, Subject
+from particles.core.schema import Particle, Subject
 from particles.interchange.codec import (
     FORMAT_VERSION,
     SubjectRef,
+    check_schema_version,
     from_unit,
+    particle_schema_default,
     subject_from_unit,
     subject_to_unit,
     to_unit,
@@ -69,9 +75,25 @@ async def export_active(session: AsyncSession) -> list[dict[str, Any]]:
 
 @dataclass
 class ImportSummary:
+    """Outcome of an interchange import.
+
+    ``dropped`` counts *particles* the §6.6 ladder declined to insert.
+    ``dropped_keys`` counts unit *keys* this SDK does not know, per key name:
+    the codec drops them on decode (D6), so a unit written by a newer
+    minor of the schema imports as a record of this SDK's contract, and the
+    report says what was left behind.
+    """
+
     imported: int = 0
     dropped: int = 0
     subjects_created: int = 0
+    dropped_keys: dict[str, int] = field(default_factory=dict)
+
+
+def _count_dropped_keys(target: dict[str, int], keys: Iterable[str]) -> None:
+    """Add one to ``target[key]`` for every key in ``keys``."""
+    for key in keys:
+        target[key] = target.get(key, 0) + 1
 
 
 async def import_units(session: AsyncSession, units: Iterable[dict[str, Any]]) -> ImportSummary:
@@ -80,12 +102,24 @@ async def import_units(session: AsyncSession, units: Iterable[dict[str, Any]]) -
     Subjects are resolved by external reference first (the cross-store join key),
     then by canonical name; an unmatched named subject is created bare-local.
     Each particle is reconciled via the §6.6 ladder; a particle dropped by trust
-    resolution is counted in ``dropped``.
+    resolution is counted in ``dropped``. Unit keys the codec does not know are
+    counted per key in ``dropped_keys``.
+
+    Raises:
+        IncompatibleSchemaVersionError: If any unit's ``schemaVersion`` is
+            incompatible with the SDK's (D6). Every unit is checked
+            before the first write, so a refused batch writes nothing.
     """
     from particles.ingest.pipeline import (
         load_active_conflict_candidates,
         reconcile_and_insert,
     )
+
+    units = list(units)
+    for unit in units:
+        check_schema_version(
+            unit.get("schemaVersion", particle_schema_default()), what="interchange unit"
+        )
 
     summary = ImportSummary()
     # Load the §6.6 conflict-candidate set once for the whole batch and let
@@ -94,6 +128,7 @@ async def import_units(session: AsyncSession, units: Iterable[dict[str, Any]]) -
     candidate_cache = await load_active_conflict_candidates(session)
     for unit in units:
         parsed = from_unit(unit)
+        _count_dropped_keys(summary.dropped_keys, parsed.dropped_keys)
         subject_ids: list[str] = []
         for ref in parsed.subjects:
             sid, created = await _resolve_subject_ref(session, ref)
@@ -232,7 +267,7 @@ async def export_store_bundle(session: AsyncSession, *, container: str = "jsonl"
     subject_units = [subject_to_unit(s) for s in await list_all_subjects(session)]
     manifest = {
         "formatVersion": FORMAT_VERSION,
-        "schemaVersion": SCHEMA_VERSION,
+        "schemaVersion": particle_schema_default(),
         "exportedAt": datetime.now(UTC).isoformat(),
         "members": [particles_member, subjects_member],
         "counts": {"particles": len(particle_units), "subjects": len(subject_units)},
@@ -244,12 +279,41 @@ async def export_store_bundle(session: AsyncSession, *, container: str = "jsonl"
     }
 
 
+def _check_bundle_manifest(files: dict[str, str]) -> None:
+    """Refuse a bundle whose manifest is stamped with an incompatible schema (D6).
+
+    Runs before any member is read, so an incompatible bundle writes nothing. A
+    bundle with no manifest (restore's single-member corpus JSONL) or a
+    manifest without ``schemaVersion`` passes here; each unit is still checked
+    as it is decoded.
+
+    Raises:
+        IncompatibleSchemaVersionError: If the manifest's ``schemaVersion`` is
+            of another major, major ``0``, or malformed.
+        ValueError: If the manifest is not a JSON object.
+    """
+    raw = files.get(MANIFEST_NAME)
+    if raw is None:
+        return
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"bundle {MANIFEST_NAME} is not valid JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(f"bundle {MANIFEST_NAME} must be a JSON object")
+    if "schemaVersion" in manifest:
+        check_schema_version(manifest["schemaVersion"], what="bundle manifest")
+
+
 async def import_store_bundle(session: AsyncSession, files: dict[str, str]) -> ImportSummary:
     """Import a store-export bundle into the current store (single-store writes).
 
     Subjects are imported first (so standalone subjects exist and particle refs
-    resolve to them), then particles via the §6.6 ladder.
+    resolve to them), then particles via the §6.6 ladder. A manifest stamped
+    with an incompatible ``schemaVersion`` is refused before any member is read
+    (D6).
     """
+    _check_bundle_manifest(files)
     summary = ImportSummary()
     for unit in _read_member(files, SUBJECTS_BASE):
         if await _import_subject_unit(session, unit):
@@ -258,6 +322,7 @@ async def import_store_bundle(session: AsyncSession, files: dict[str, str]) -> I
     summary.imported = particle_summary.imported
     summary.dropped = particle_summary.dropped
     summary.subjects_created += particle_summary.subjects_created
+    summary.dropped_keys = particle_summary.dropped_keys
     return summary
 
 
@@ -306,6 +371,8 @@ class RestoreSummary:
 
     particles: int = 0
     subjects: int = 0
+    #: Unit keys this SDK does not know, counted per key (D6).
+    dropped_keys: dict[str, int] = field(default_factory=dict)
 
 
 async def _assert_empty_target(session: AsyncSession) -> None:
@@ -349,8 +416,12 @@ async def restore_store_bundle(session: AsyncSession, files: dict[str, str]) -> 
         with that id.
 
     Refuses a non-empty target with :class:`RestoreError` (the guard
-    rail). Flushes through the store inserts; the caller commits.
+    rail), and a manifest stamped with an incompatible ``schemaVersion`` with
+    :class:`~particles.interchange.codec.IncompatibleSchemaVersionError` before
+    any member is read (D6). Flushes through the store inserts; the
+    caller commits.
     """
+    _check_bundle_manifest(files)
     await _assert_empty_target(session)
 
     summary = RestoreSummary()
@@ -369,6 +440,8 @@ async def restore_store_bundle(session: AsyncSession, files: dict[str, str]) -> 
                     particle_units.append(unit)
 
     parsed_particles = [from_unit(unit) for unit in particle_units]
+    for parsed in parsed_particles:
+        _count_dropped_keys(summary.dropped_keys, parsed.dropped_keys)
 
     # 1. Restore subjects first, origin ids preserved. Standalone subject units
     #    (full bundle) take precedence; inline subject refs (corpus JSONL) fill in

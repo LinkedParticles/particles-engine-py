@@ -55,6 +55,7 @@ import hashlib
 import json
 import logging
 import shutil
+import sqlite3
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
@@ -1662,14 +1663,41 @@ def _write_side_tuple(
     }
 
 
+#: The key of :data:`load_stores_manifest`'s result that says whether each
+#: store's snapshots were checked against the manifest.
+SNAPSHOTS_VERIFIED = "store_snapshots_verified"
+
+
+def store_snapshot_digest(db_path: Path) -> str:
+    """A SHA-256 over every snapshot a scratch store holds.
+
+    One line per snapshot, ``uri_r``, record type and content hash, sorted, so
+    the digest names the population that was deposited and nothing else: a
+    session re-deposited under a second rendering adds a snapshot and changes
+    it, and a read-side replay leaves it alone. Read-only.
+    """
+    with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        rows = conn.execute(
+            "SELECT e.uri_r, s.warc_record_type, s.content_hash "
+            "FROM snapshots s JOIN corpus_entries e ON e.entry_id = s.entry_id"
+        ).fetchall()
+    lines = sorted("\t".join(str(v) for v in row) for row in rows)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 def write_stores_manifest(
     work_dir: Path, write_side: dict[str, str], question_ids: list[str]
 ) -> None:
-    """Stamp a kept store set with the write-side tuple that produced it."""
+    """Stamp a kept store set with the write-side tuple and each store's snapshots."""
     payload = {
-        "format": 1,
+        "format": 2,
         "write_side": write_side,
         "question_ids": sorted(question_ids),
+        "store_snapshots": {
+            qid: store_snapshot_digest(work_dir / f"{qid}.db")
+            for qid in sorted(question_ids)
+            if (work_dir / f"{qid}.db").exists()
+        },
     }
     (work_dir / STORES_MANIFEST).write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -1744,7 +1772,29 @@ def load_stores_manifest(
             f"{len(missing)} selected question(s) have no persisted store under "
             f"{work_dir} (first: {missing[0]}). Re-run the preparing arm."
         )
-    return {str(k): str(v) for k, v in stored.items()}
+    # a store whose snapshots changed since the set was stamped is a
+    # different population, whatever the tuple says. A replay before 1.146.8
+    # re-deposited and re-extracted the four haystacks that repeat a session id,
+    # and nothing could tell. A format-1 manifest has no digests; it is replayed
+    # with the result saying so, since refusing it would strand every set kept
+    # before this check and stamping it now would bless what it holds.
+    digests = payload.get("store_snapshots")
+    verified = isinstance(digests, dict)
+    if verified:
+        changed = sorted(
+            qid
+            for qid in question_ids
+            if digests.get(qid) != store_snapshot_digest(work_dir / f"{qid}.db")
+        )
+        if changed:
+            raise StoreReuseError(
+                f"{len(changed)} persisted store(s) under {work_dir} no longer hold the "
+                f"snapshots the manifest recorded (first: {changed[0]}), so replaying them "
+                f"would read a different population. Re-run the preparing arm."
+            )
+    out = {str(k): str(v) for k, v in stored.items()}
+    out[SNAPSHOTS_VERIFIED] = "true" if verified else "false"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2560,7 +2610,7 @@ async def run_memory_benchmark(
             # so an interrupted run still leaves its partial set usable — the
             # per-question .db existence check in load_stores_manifest is what
             # catches a set that is short.
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, sqlite3.Error):
                 write_stores_manifest(
                     resolved_work_dir,
                     _write_side_tuple(
@@ -2656,9 +2706,14 @@ async def run_memory_benchmark(
             f"{caching_extractor.hits} cache replay(s)."
         )
     if reused_from is not None:
+        verified = (
+            "each store's snapshots matched the manifest"
+            if reused_from.get(SNAPSHOTS_VERIFIED) == "true"
+            else "the manifest predates snapshot digests, so the stores were not checked against it"
+        )
         quality_notes.append(
-            f"Stores REUSED from {resolved_work_dir} — this run deposited and extracted "
-            f"nothing; the particle population is the one that store set was built with "
+            f"Stores REUSED from {resolved_work_dir} ({verified}): this run deposited and "
+            f"extracted nothing; the particle population is the one that store set was built with "
             f"(extraction model {reused_from.get('extraction_model_id')}, "
             f"similarity_threshold {reused_from.get('extraction.similarity_threshold')}, "
             f"duplicate_suppression "

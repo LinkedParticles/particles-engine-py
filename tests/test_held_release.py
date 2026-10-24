@@ -348,6 +348,93 @@ class TestRelease:
 
 
 @pytest.mark.asyncio
+class TestGenerationHolds:
+    """a record the generation cascade orphaned before is released."""
+
+    async def _note(
+        self, session: Any, ex: _Sessions, uri: str, claims: list[str], day: int
+    ) -> None:
+        from particles.corpus.deposit import deposit_text_versioned
+        from particles.ingest.pipeline import extract_snapshot
+
+        text = "\n\n".join(claims)
+        ex.claims[text.encode()] = [(c, [_LEDGERLY]) for c in claims]
+        entry_id, snapshot_id, _ = await deposit_text_versioned(
+            session,
+            text=text,
+            uri_r=uri,
+            source_type=SourceType.LOCAL_MARKDOWN,
+            mutability=Mutability.MUTABLE,
+            content_published_at=T0 + timedelta(days=day),
+        )
+        await session.commit()
+        await extract_snapshot(session, entry_id, snapshot_id, extractor=ex)
+        await session.commit()
+
+    async def test_a_same_entry_orphan_is_released(self, db_session: Any, probes: _Probes) -> None:
+        ex = _Sessions()
+        uri = "file:///notes/ledgerly.md"
+        await self._note(db_session, ex, uri, [PG, JSONB], day=4)
+        # A build before saw no generation: rung 3 held the new claim,
+        # and the cascade then retired the old one it was held behind.
+        with patch(
+            "particles.ingest.pipeline.load_generation_claims", AsyncMock(return_value=frozenset())
+        ):
+            await self._note(db_session, ex, uri, [ONE_FILE], day=12)
+        [record] = await _open_records(db_session)
+        pg = await _one(db_session, PG)
+        assert (pg.status, pg.status_reason) == (
+            Status.PROVENANCE_STALE,
+            StatusReason.RETRACTED_DEPENDENCY,
+        )
+
+        report = await _release(db_session)
+
+        assert (report.qualifying, len(report.released)) == (1, 1)
+        assert await _open_records(db_session) == []
+        assert (await _one(db_session, ONE_FILE, Status.ACTIVE)).content == ONE_FILE
+        [event] = await _events(db_session, "INCONSISTENCY_CLOSED")
+        assert event.payload["record_id"] == record.id
+        assert event.payload["partner_reason"] == "RETRACTED_DEPENDENCY"
+
+    async def test_an_orphan_whose_note_moved_on_is_not_examined(
+        self, db_session: Any, probes: _Probes
+    ) -> None:
+        """The note changed again after the hold: the held claim's text is no longer current."""
+        ex = _Sessions()
+        uri = "file:///notes/ledgerly.md"
+        await self._note(db_session, ex, uri, [PG, JSONB], day=4)
+        with patch(
+            "particles.ingest.pipeline.load_generation_claims", AsyncMock(return_value=frozenset())
+        ):
+            await self._note(db_session, ex, uri, [ONE_FILE], day=12)
+        await self._note(db_session, ex, uri, [NO_SERVER], day=20)
+        assert len(await _open_records(db_session)) == 1
+
+        report = await _release(db_session)
+
+        assert (report.qualifying, report.examined) == (0, 0)
+        assert len(await _open_records(db_session)) == 1
+
+    async def test_a_cross_entry_cascade_orphan_is_not_examined(
+        self, db_session: Any, probes: _Probes
+    ) -> None:
+        from particles.store.particle_store import update_particle_status
+
+        ex = _Sessions()
+        await _held(db_session, ex)
+        pg = await _one(db_session, PG)
+        await update_particle_status(
+            db_session, pg.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
+        )
+        await db_session.commit()
+
+        report = await _release(db_session)
+
+        assert (report.qualifying, report.examined) == (0, 0)
+        assert len(await _open_records(db_session)) == 1
+
+
 class TestBlocked:
     async def _blocked(self, session: Any) -> tuple[Particle, Particle, Particle, Particle]:
         ex = _Sessions()

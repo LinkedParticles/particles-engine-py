@@ -97,7 +97,6 @@ from particles.store.event_store import (
     record_event,
 )
 from particles.store.observer_scope_join import SourceRef, attests, lens_may_engage, load_scopes
-from particles.store.observer_scope_store import ScopeTarget, any_widening, widened_ids
 from particles.store.particle_store import (
     get_cascade_closed_record_ids,
     get_census_records,
@@ -311,7 +310,7 @@ async def _merge_survivors(session: AsyncSession, ids: set[str]) -> dict[str, st
 
 
 def _is_lapsed(scope: BeliefScope | None) -> bool:
-    return scope is not None and scope.lapsed and scope.in_view_for_no_project
+    return scope is not None and scope.lapsed and not scope.is_global and not scope.keys
 
 
 @dataclass
@@ -599,7 +598,10 @@ async def _reread_extract_records(session: AsyncSession, budget: int) -> Extract
     """Read each unstamped extract-time record a second time (gather + LLM).
 
     Oldest first, at most ``budget`` readings. Claim A must be ``ACTIVE``: a
-    record whose A has left the surface is left to review. Claim B, the
+    record whose A has left the surface is left to review and the release
+    pass, because a reading of a pair one side of which no reader
+    sees answers nothing; the question there is whether anything still
+    contradicts B. Claim B, the
     newcomer, is usually quarantined, and is read from its own snapshot with
     the chunk windowed around both claims (§1's builder), because the census's
     first best-matching paragraph can show a different run of a command a
@@ -854,15 +856,8 @@ async def run_disclosure(
             ),
         ) | await _other_open_pairs(session)
         engaged = await lens_may_engage(session)
-        widened = (
-            await widened_ids(session, ScopeTarget.PARTICLE, sorted(cand_ids))
-            if engaged and cand_ids and await any_widening(session)
-            else set()
-        )
 
         def scope(pid: str) -> BeliefScope:
-            if pid in widened:
-                return GLOBAL_SCOPE
             return cview.scopes.get(pid, GLOBAL_SCOPE)
 
         waiting_keys = {p.key for p in waiting}

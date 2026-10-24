@@ -192,6 +192,16 @@ def _incomplete_notice(report: AuditReport, paths: list[Path] | None = None) -> 
     """
     store_flag = "" if report.store == "default" else f" --store {report.store}"
     notices: list[str] = []
+    if report.extraction_stopped_reason is not None:
+        n = report.extraction_untried
+        noun = "file" if n == 1 else "files"
+        rerun = "particles audit" + "".join(f" {p}" for p in paths or []) + store_flag
+        drain = "particles extract --all-pending" + store_flag
+        notices.append(
+            f"audit incomplete: extraction stopped, the LLM account is unavailable "
+            f"({report.extraction_stopped_reason}). {n} {noun} were not tried and are still "
+            f"pending. Run `{rerun}` (or `{drain}`) once the account works."
+        )
     if report.extraction_failures:
         n = report.extraction_failures
         noun = "file" if n == 1 else "files"
@@ -598,7 +608,9 @@ async def _audit_impl(
 
     if harvesting:
         # §7: refuse before touching the store — extraction is the substance.
-        if not have_key:
+        # An estimate spends nothing, so it needs no key: it is
+        # read before anyone has decided to spend.
+        if not have_key and not estimate_only:
             _refuse_without_key()
 
         for path in [*paths, *([transcripts_dir] if transcripts_dir else [])]:
