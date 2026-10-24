@@ -36,6 +36,7 @@ from particles.api.cli._claude_code import (
 from particles.api.cli._memory_projection import (
     ARCHIVE_POINTER_PREFIX,
     archive_pointer_line,
+    archived_pointers,
     fold_authored_lines,
 )
 from particles.core.schema import (
@@ -288,15 +289,50 @@ class TestFoldAuthoredLines:
         "<!-- END PROJECTED: memory-index -->"
     )
 
-    def test_moves_outside_lines_and_leaves_pointer(self) -> None:
+    def test_moves_foldable_lines_and_leaves_pointer(self) -> None:
         text = f"{self.REGION}\n\n- authored note one\n\n- authored note two\n"
-        kept, folded = fold_authored_lines(text, "POINTER")
+        kept, folded = fold_authored_lines(
+            text, "POINTER", foldable={"- authored note one", "- authored note two"}
+        )
         assert folded == ["- authored note one", "- authored note two"]
         assert kept == f"{self.REGION}\n\nPOINTER\n"
+
+    def test_only_foldable_lines_move_and_the_rest_stay_in_order(self) -> None:
+        text = f"# Memory\n\n{self.REGION}\n\n- [A](a.md) — a\n- [B](b.md) — b\n\n- note\n"
+        kept, folded = fold_authored_lines(text, "POINTER", foldable={"- [A](a.md) — a"})
+        assert folded == ["- [A](a.md) — a"]
+        assert kept == f"# Memory\n\n{self.REGION}\n\nPOINTER\n\n- [B](b.md) — b\n\n- note\n"
+
+    def test_nothing_folds_by_default(self) -> None:
+        # a line folds only when the caller's test says it is represented.
+        text = f"{self.REGION}\n\n- authored note\n"
+        assert fold_authored_lines(text, "POINTER") == (text, [])
 
     def test_nothing_to_fold_returns_text_unchanged(self) -> None:
         text = f"{self.REGION}\n"
         assert fold_authored_lines(text, "POINTER") == (text, [])
+
+    def test_reinstated_lines_follow_the_held_ones(self) -> None:
+        text = f"{self.REGION}\n\nPOINTER\n\n- [B](b.md) — b\n"
+        kept, folded = fold_authored_lines(text, "POINTER", reinstate=["- [A](a.md) — a"])
+        assert folded == []
+        assert kept == f"{self.REGION}\n\nPOINTER\n\n- [B](b.md) — b\n- [A](a.md) — a\n"
+
+    def test_reinstating_alone_never_introduces_the_pointer_line(self) -> None:
+        text = f"{self.REGION}\n"
+        kept, folded = fold_authored_lines(text, "POINTER", reinstate=["- [A](a.md) — a"])
+        assert folded == []
+        assert kept == f"{self.REGION}\n\n- [A](a.md) — a\n"
+
+    def test_the_newest_archived_line_per_target_wins(self) -> None:
+        archive = (
+            "\n<!-- folded from MEMORY.md -->\n- [A](a.md) — old\n- a note\n"
+            "\n<!-- folded from MEMORY.md -->\n- [B](b.md) — b\n- [A](a.md) — new\n"
+        )
+        assert archived_pointers(archive) == {
+            "a.md": "- [A](a.md) — new",
+            "b.md": "- [B](b.md) — b",
+        }
 
     def test_existing_pointer_line_is_not_refolded(self) -> None:
         pointer = archive_pointer_line()
@@ -386,7 +422,7 @@ class TestFilterMemoryFileForDeposit:
 
 
 class TestProjectionCycle:
-    def test_renders_region_folds_and_backs_up(
+    def test_renders_region_and_backs_up_keeping_inline_lines(
         self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
     ) -> None:
         from particles.render.markdown import insert_projected_region_at_top
@@ -409,12 +445,14 @@ class TestProjectionCycle:
         # The region now carries the ranked bullets + trailer…
         assert "- DCO is enforced." in text
         assert "<!-- sources:" in text
-        # …the authored lines were folded to the archive with a pointer left…
-        assert "- an authored note about tabs" not in text
-        assert ARCHIVE_POINTER_PREFIX in text
-        archive = projection_state / "projects" / "-p1" / "MEMORY.archive.md"
-        assert "- an authored note about tabs" in archive.read_text()
-        assert record["projection"]["folded"] == 2
+        # …the inline lines stay: no region belief can be shown to carry one,
+        # so nothing folds and no archive pointer appears…
+        assert "- an authored note about tabs" in text
+        assert ARCHIVE_POINTER_PREFIX not in text
+        assert not (projection_state / "projects" / "-p1" / "MEMORY.archive.md").exists()
+        assert record["projection"]["folded"] == 0
+        assert record["projection"]["fold_held"] == {"not-a-pointer": 2}
+        assert record["projection"]["memory_md_lines"] == len(text.splitlines())
         # …the pre-splice file was backed up one-deep, and the snapshot written —
         # both under this project's own state directory.
         project_state = projection_state / "projects" / "-p1"
@@ -652,6 +690,468 @@ class TestProjectionCycle:
 
 
 # ---------------------------------------------------------------------------
+# The fold gate: a pointer folds only while the region carries its file
+# ---------------------------------------------------------------------------
+
+_POINTER = "- [Topic](topic.md) — the topic hook"
+
+
+def _extract(path: Path, *contents: str, status: str = "COMPLETE") -> list[str]:
+    """Stand in for extraction of ``path``'s newest snapshot (no model call).
+
+    Sets that snapshot's status and inserts one ACTIVE particle per content,
+    anchored to it, which is what the pipeline leaves behind (tests/AGENTS.md:
+    the LLM leg is simulated at the seam).
+    """
+
+    async def _run() -> list[str]:
+        from particles.core.schema import ExtractionStatus
+        from particles.corpus.store import (
+            get_entry_by_uri,
+            get_newest_response_snapshot,
+            update_extraction_status,
+        )
+        from particles.db import session_scope
+        from particles.store.particle_store import insert_particle
+
+        async with session_scope() as session:
+            entry = await get_entry_by_uri(session, path.resolve().as_uri())
+            assert entry is not None, path
+            newest = await get_newest_response_snapshot(session, entry.entry_id)
+            assert newest is not None
+            await update_extraction_status(session, newest[0], ExtractionStatus(status))
+            ids: list[str] = []
+            for content in contents:
+                p = _particle(content).model_copy(
+                    update={
+                        "provenance": [
+                            ProvenanceRef(
+                                type=ProvenanceRefType.SOURCE,
+                                corpus_entry_id=entry.entry_id,
+                                snapshot_id=newest[0],
+                            )
+                        ]
+                    }
+                )
+                await insert_particle(session, p, _EMB)
+                ids.append(p.id)
+            await session.commit()
+        return ids
+
+    return asyncio.run(_run())
+
+
+def _retract(particle_id: str) -> None:
+    async def _run() -> None:
+        from sqlalchemy import update
+
+        from particles.db import session_scope
+        from particles.store.particle_store import ParticleRow
+
+        async with session_scope() as session:
+            await session.execute(
+                update(ParticleRow)
+                .where(ParticleRow.id == particle_id)
+                .values(status=Status.RETRACTED.value)
+            )
+            await session.commit()
+
+    asyncio.run(_run())
+
+
+class TestFoldGate:
+    def _setup(self, tmp_path: Path, name: str, extra: str = "") -> tuple[Path, Path, Path]:
+        from particles.render.markdown import insert_projected_region_at_top
+
+        transcript, memory_dir = _project_dir(tmp_path, name)
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "topic.md").write_text("# Topic\nThe topic file's own content.\n")
+        memory_md = memory_dir / "MEMORY.md"
+        memory_md.write_text(
+            insert_projected_region_at_top(f"{_POINTER}\n{extra}", MEMORY_REGION, "memory.yaml")
+        )
+        return transcript, memory_dir, memory_md
+
+    @staticmethod
+    def _archive(state: Path, name: str) -> Path:
+        return state / "projects" / name / "MEMORY.archive.md"
+
+    def test_nothing_folds_before_the_target_is_extracted(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g1")
+
+        assert _session_end(runner, transcript).exit_code == 0  # topic.md deposited, PENDING
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["outcome"] == "rendered"
+        assert projection["folded"] == 0
+        assert projection["fold_held"] == {"not-extracted": 1}
+        assert _POINTER in memory_md.read_text()
+        assert not self._archive(projection_state, "-g1").exists()
+
+    def test_a_failed_extraction_keeps_the_pointer(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g2")
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic belief.", status="FAILED")
+
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["fold_held"] == {"not-extracted": 1}
+        assert _POINTER in memory_md.read_text()
+
+    def test_an_extracted_file_with_nothing_in_the_region_keeps_its_pointer(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g3")
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md")  # COMPLETE, but no belief
+
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["folded"] == 0
+        assert projection["fold_held"] == {"not-in-region": 1}
+        assert _POINTER in memory_md.read_text()
+        assert ARCHIVE_POINTER_PREFIX not in memory_md.read_text()
+
+    def test_a_represented_pointer_folds_and_returns_when_it_is_not(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g4", "- an inline note\n")
+        _session_end(runner, transcript)
+        (belief,) = _extract(memory_dir / "topic.md", "The topic belief.")
+
+        # The region now shows the file's belief: the pointer folds, the
+        # inline note stays, and the archive pointer line appears.
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["folded"] == 1
+        assert projection["fold_held"] == {"not-a-pointer": 1}
+        text = memory_md.read_text()
+        assert "- The topic belief." in text
+        assert _POINTER not in text
+        assert "- an inline note" in text
+        assert ARCHIVE_POINTER_PREFIX in text
+        archive = self._archive(projection_state, "-g4")
+        assert archive.read_text().count(_POINTER) == 1
+
+        # The belief leaves the region: the pointer comes back below it.
+        _retract(belief)
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["reinstated"] == 1
+        assert projection["fold_held"] == {"not-a-pointer": 1}  # lines that were in the file
+        text = memory_md.read_text()
+        assert _POINTER in text
+        assert text.index("- an inline note") < text.index(_POINTER)
+
+        # Represented again: it folds again, with no second copy in the archive.
+        _extract(memory_dir / "topic.md", "The topic belief, restated.")
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["folded"] == 1
+        assert _POINTER not in memory_md.read_text()
+        assert archive.read_text().count(_POINTER) == 1
+
+    def test_a_belief_from_an_older_version_of_the_file_does_not_count(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g5")
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic belief.")
+        topic = memory_dir / "topic.md"
+        topic.write_text("# Topic\nThe topic file, edited.\n")
+
+        # The edit is deposited as a new snapshot that is not extracted yet.
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["fold_held"] == {"not-extracted": 1}
+        assert "- The topic belief." in memory_md.read_text()  # still in the region
+        assert _POINTER in memory_md.read_text()
+
+        # Extracted with no belief of its own: the old one is not current.
+        _extract(topic)
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["fold_held"] == {"not-in-region": 1}
+        assert _POINTER in memory_md.read_text()
+
+    def test_a_pointer_to_a_deleted_file_is_not_reinstated(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g6")
+        _session_end(runner, transcript)
+        (belief,) = _extract(memory_dir / "topic.md", "The topic belief.")
+        _session_end(runner, transcript)
+        assert _POINTER not in memory_md.read_text()
+
+        (memory_dir / "topic.md").unlink()
+        _retract(belief)
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["reinstated"] == 0
+        assert _POINTER not in memory_md.read_text()
+
+    def test_fold_off_neither_folds_nor_reinstates(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from particles.config import reset_config
+
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "agent_memory:\n  projection:\n    fold_authored_lines: false\n"
+            f"storage:\n  database_url: sqlite+aiosqlite:///{cli_db}\n"
+        )
+        monkeypatch.setenv("PARTICLES_CONFIG", str(config))
+        reset_config()
+
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-g7")
+        archive = self._archive(projection_state, "-g7")
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "other.md").write_text("Other.\n")
+        archive.write_text("\n<!-- folded from MEMORY.md -->\n- [Other](other.md) — o\n")
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic belief.")  # represented, were the fold on
+
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["folded"] == 0
+        assert "fold_held" not in projection
+        assert "reinstated" not in projection
+        text = memory_md.read_text()
+        assert _POINTER in text
+        assert "other.md" not in text
+
+    def test_the_hook_consolidation_and_audit_paths_agree(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.api.cli.audit import _HarvestPlan, _run_projection_cycles
+        from particles.api.cli.memory import build_projection_runner
+
+        transcript, memory_dir, memory_md = self._setup(
+            tmp_path, "-g8", "- [Quiet](quiet.md) — q\n- an inline note\n"
+        )
+        (memory_dir / "quiet.md").write_text("Quiet.\n")
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic belief.")
+        _extract(memory_dir / "quiet.md")  # extracted, nothing in the region
+        initial = memory_md.read_text()
+        archive = self._archive(projection_state, "-g8")
+
+        def reset() -> None:
+            memory_md.write_text(initial)
+            archive.unlink(missing_ok=True)
+
+        def via_hook() -> None:
+            _session_end(runner, transcript)
+
+        def via_consolidation() -> None:
+            run, reason = build_projection_runner("default")
+            assert run is not None, reason
+            asyncio.run(run())
+
+        def via_audit() -> None:
+            plan = _HarvestPlan(memory_dirs=[(memory_dir, memory_md.read_text())])
+            assert asyncio.run(_run_projection_cycles("default", plan))
+
+        outcomes = []
+        for path in (via_hook, via_consolidation, via_audit):
+            reset()
+            path()
+            outcomes.append((memory_md.read_text(), archive.read_text()))
+
+        assert outcomes[0] == outcomes[1] == outcomes[2]
+        text, archived = outcomes[0]
+        assert _POINTER not in text and _POINTER in archived
+        assert "- [Quiet](quiet.md) — q" in text and "- an inline note" in text
+
+
+def _typed(memory_type: str, *, nested: bool = True) -> str:
+    """A topic file in Claude Code's memory format, typed ``memory_type``."""
+    type_lines = f"metadata:\n  type: {memory_type}\n" if nested else f"type: {memory_type}\n"
+    return f"---\nname: topic\ndescription: the topic\n{type_lines}---\n\nThe topic rule.\n"
+
+
+class TestNeverFoldTypes:
+    """Pointers to ``feedback`` / ``user`` files never fold (option d)."""
+
+    def _setup(self, tmp_path: Path, name: str, topic: str) -> tuple[Path, Path, Path]:
+        transcript, memory_dir, memory_md = TestFoldGate()._setup(tmp_path, name)
+        (memory_dir / "topic.md").write_text(topic)
+        return transcript, memory_dir, memory_md
+
+    @pytest.mark.parametrize(
+        ("topic", "label"),
+        [
+            (_typed("feedback"), "feedback"),
+            (_typed("user"), "user"),
+            (_typed("Feedback"), "case-insensitive"),
+            (_typed("feedback", nested=False), "top-level type"),
+        ],
+    )
+    def test_a_protected_pointer_stays_while_the_region_shows_its_belief(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        topic: str,
+        label: str,
+    ) -> None:
+        name = f"-n-{label.replace(' ', '-')}"
+        transcript, memory_dir, memory_md = self._setup(tmp_path, name, topic)
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic rule.")
+
+        # Represented, which would fold it alone.
+        for _ in range(2):
+            _session_end(runner, transcript)
+            projection = _last_log(tmp_path)["projection"]
+            assert projection["folded"] == 0
+            assert projection["fold_held"] == {"protected-type": 1}
+            text = memory_md.read_text()
+            assert "- The topic rule." in text
+            assert _POINTER in text
+            assert ARCHIVE_POINTER_PREFIX not in text
+        assert not TestFoldGate._archive(projection_state, name).exists()
+
+    @pytest.mark.parametrize("topic", [_typed("project"), _typed("reference")])
+    def test_other_types_still_fold(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        topic: str,
+    ) -> None:
+        name = "-n-" + topic.split("type: ")[1].split("\n")[0]
+        transcript, memory_dir, memory_md = self._setup(tmp_path, name, topic)
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic rule.")
+
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["folded"] == 1
+        assert _POINTER not in memory_md.read_text()
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "---\nname: topic\nmetadata:\n  node_type: memory\n---\n\nThe topic rule.\n",
+            "---\nname: [unclosed\n---\n\nThe topic rule.\n",
+            "---\nname: topic\n\nno closing fence\n",
+        ],
+        ids=["no-type", "malformed-yaml", "unclosed-frontmatter"],
+    )
+    def test_an_untyped_target_keeps_the_adr_0321_rule(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        topic: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        name = f"-n-{request.node.callspec.id}"
+        transcript, memory_dir, memory_md = self._setup(tmp_path, name, topic)
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["fold_held"] == {"not-extracted": 1}
+
+        _extract(memory_dir / "topic.md", "The topic rule.")
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["folded"] == 1
+        assert _POINTER not in memory_md.read_text()
+
+    def test_an_archived_protected_pointer_comes_back(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        # Folded by an earlier release, before the type was protected.
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-n-back", _typed("feedback"))
+        memory_md.write_text(memory_md.read_text().replace(f"{_POINTER}\n", ""))
+        assert _POINTER not in memory_md.read_text()
+        archive = TestFoldGate._archive(projection_state, "-n-back")
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(f"\n<!-- folded from MEMORY.md -->\n{_POINTER}\n")
+
+        # Protection needs no extraction: it comes back on the next cycle.
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["reinstated"] == 1
+        assert _POINTER in memory_md.read_text()
+
+        # And stays once the region shows its belief.
+        _extract(memory_dir / "topic.md", "The topic rule.")
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["folded"] == 0
+        assert projection["fold_held"] == {"protected-type": 1}
+        assert memory_md.read_text().count(_POINTER) == 1
+
+    def test_an_empty_list_lets_every_type_fold(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from particles.config import reset_config
+
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "agent_memory:\n  projection:\n    never_fold_types: []\n"
+            f"storage:\n  database_url: sqlite+aiosqlite:///{cli_db}\n"
+        )
+        monkeypatch.setenv("PARTICLES_CONFIG", str(config))
+        reset_config()
+
+        transcript, memory_dir, memory_md = self._setup(tmp_path, "-n-off", _typed("feedback"))
+        _session_end(runner, transcript)
+        _extract(memory_dir / "topic.md", "The topic rule.")
+
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["folded"] == 1
+        assert _POINTER not in memory_md.read_text()
+
+
+class TestMemoryFileType:
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (_typed("feedback"), "feedback"),
+            (_typed("USER"), "user"),
+            (_typed("project", nested=False), "project"),
+            ("---\nmetadata:\n  type: user\ntype: project\n---\n", "user"),
+            ("---\nmetadata: \n  type: feedback\n---\n", "feedback"),
+            ("---\nname: x\n---\nbody\n", None),
+            ("---\nmetadata:\n  type: 3\n---\n", None),
+            ("---\nmetadata:\n  type: '  '\n---\n", None),
+            ("---\n- a list\n---\n", None),
+            ("No frontmatter.\n", None),
+            ("", None),
+        ],
+    )
+    def test_reads_the_frontmatter_type(
+        self, tmp_path: Path, content: str, expected: str | None
+    ) -> None:
+        from particles.api.cli._claude_code import memory_file_type
+
+        path = tmp_path / "topic.md"
+        path.write_text(content)
+        assert memory_file_type(path) == expected
+
+    def test_an_unreadable_file_has_no_type(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import memory_file_type
+
+        assert memory_file_type(tmp_path / "missing.md") is None
+        (tmp_path / "binary.md").write_bytes(b"---\n\xff\xfe\n---\n")
+        assert memory_file_type(tmp_path / "binary.md") is None
+
+
+# ---------------------------------------------------------------------------
 # SessionStart trailer freshness (stage-1 seam #1)
 # ---------------------------------------------------------------------------
 
@@ -800,7 +1300,10 @@ class TestWorktreeSession:
 
         # The region Claude Code loaded is current, so nothing is injected twice.
         assert result.stdout == ""
-        assert _last_log(tmp_path)["skipped"] == "projection-current"
+        record = _last_log(tmp_path)
+        assert record["skipped"] == "projection-current"
+        # the key and the rule that gave it, for `hook doctor`.
+        assert (record["project_key"], record["project_resolved_from"]) == (_key, "repository")
 
     def test_consolidation_pass_skips_a_stray_worktree_directory(
         self, cli_db: Path, projection_state: Path, tmp_path: Path
@@ -1155,6 +1658,21 @@ class TestStoreBinding:
         assert outcome["outcome"] == "rendered"
 
 
+class TestLoadWindowWarning:
+    def test_silent_below_ninety_percent_of_both_limits(self) -> None:
+        from particles.api.cli._claude_code import memory_load_window_warning
+
+        assert memory_load_window_warning("- x\n" * 179) is None
+
+    def test_warns_on_lines_or_bytes(self) -> None:
+        from particles.api.cli._claude_code import memory_load_window_warning
+
+        by_lines = memory_load_window_warning("- x\n" * 180)
+        assert by_lines is not None and "180 lines" in by_lines
+        by_bytes = memory_load_window_warning("x" * 22_500 + "\n")
+        assert by_bytes is not None and "22,501 bytes" in by_bytes
+
+
 class TestIndexEntries:
     """a MEMORY.md index entry summarises a sibling file; it is not a claim."""
 
@@ -1200,3 +1718,208 @@ class TestIndexEntries:
         text = "- [Deploy](deploy.md) — status, schedule, open work\n- Authored fact.\n"
         assert filter_memory_file_for_deposit(text) == text
         assert filter_memory_file_for_deposit(text, source_dir=d) == "- Authored fact.\n"
+
+
+# ---------------------------------------------------------------------------
+# the cycle against a remote engine: the engine renders from the
+# client's manifest and answers the fold verdicts; the client splices.
+# ---------------------------------------------------------------------------
+
+_ENGINE = "http://engine.test"
+
+
+@pytest.fixture
+def remote_engine(
+    cli_db: Path, projection_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Run the hooks as a thin client of the in-process engine over ``cli_db``.
+
+    The client's config names the engine and opts into the remote harvest;
+    the fake home's hooks pin that config, which is the remote binding. The
+    returned list collects every request path the client sends.
+    """
+    import httpx
+
+    from particles.api.app import app as fastapi_app
+    from particles.config import reset_config
+    from tests._claude_projects import bind_hooks_to_engine
+
+    client_config = tmp_path / "client.yaml"
+    client_config.write_text(
+        f'engine:\n  base_url: "{_ENGINE}"\nclaude_code:\n  harvest:\n    allow_remote: true\n'
+    )
+    monkeypatch.setenv("PARTICLES_CONFIG", str(client_config))
+    monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
+    reset_config()
+    bind_hooks_to_engine(tmp_path, client_config)
+
+    paths: list[str] = []
+    real_async_client = httpx.AsyncClient
+
+    async def _record(request: httpx.Request) -> None:
+        paths.append(request.url.path)
+
+    def _asgi_client(
+        *, base_url: str, timeout: float, headers: dict[str, str], purpose: str = ""
+    ) -> httpx.AsyncClient:
+        return real_async_client(
+            transport=httpx.ASGITransport(app=fastapi_app),
+            base_url=base_url,
+            headers=headers,
+            event_hooks={"request": [_record]},
+        )
+
+    monkeypatch.setattr("particles.api.client.http.egress_client", _asgi_client)
+    return paths
+
+
+class TestRemoteEngine:
+    def test_the_engine_renders_and_the_client_splices(
+        self, runner: CliRunner, remote_engine: list[str], tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, memory_dir = _project_dir(tmp_path, "-r1")
+
+        assert _session_end(runner, transcript).exit_code == 0
+        log = _last_log(tmp_path)
+        assert "memory_skipped" not in log
+        assert log["projection"]["outcome"] == "created"
+        assert "- DCO is enforced." in (memory_dir / "MEMORY.md").read_text()
+        assert "/memory/projection/default" in remote_engine
+
+    def test_the_fold_folds_and_reinstates_as_it_does_locally(
+        self, runner: CliRunner, remote_engine: list[str], tmp_path: Path
+    ) -> None:
+        transcript, memory_dir, memory_md = TestFoldGate()._setup(tmp_path, "-r2")
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["fold_held"] == {"not-extracted": 1}
+        (belief,) = _extract(memory_dir / "topic.md", "The topic belief.")
+
+        _session_end(runner, transcript)
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["folded"] == 1
+        assert _POINTER not in memory_md.read_text()
+
+        _retract(belief)
+        _session_end(runner, transcript)
+        assert _last_log(tmp_path)["projection"]["reinstated"] == 1
+        assert _POINTER in memory_md.read_text()
+
+    def test_hooks_that_name_another_engine_leave_the_directory_alone(
+        self, runner: CliRunner, remote_engine: list[str], tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other.yaml"
+        other.write_text('engine:\n  base_url: "http://elsewhere.test"\n')
+        from tests._claude_projects import bind_hooks_to_engine
+
+        bind_hooks_to_engine(tmp_path, other)
+        _seed(("DCO is enforced.", 0.9))
+        transcript, memory_dir = _project_dir(tmp_path, "-r3")
+
+        assert _session_end(runner, transcript).exit_code == 0
+        log = _last_log(tmp_path)
+        assert "is not the store the installed Claude Code hooks name" in log["memory_skipped"]
+        assert "projection" not in log
+        assert not (memory_dir / "MEMORY.md").exists()
+        assert not any(p.startswith("/memory/projection") for p in remote_engine)
+
+    def test_a_current_region_injects_nothing(
+        self, runner: CliRunner, remote_engine: list[str], tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _ = _project_dir(tmp_path, "-r5")
+        _session_end(runner, transcript)
+        remote_engine.clear()
+
+        result = _session_start(runner, transcript)
+        assert result.exit_code == 0
+        assert result.stdout == ""
+        assert _last_log(tmp_path)["skipped"] == "projection-current"
+        # The fresh render the check compared against came from the engine.
+        assert "/memory/projection/default" in remote_engine
+
+    def test_a_stale_region_injects_only_the_difference(
+        self, runner: CliRunner, remote_engine: list[str], tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _ = _project_dir(tmp_path, "-r6")
+        _session_end(runner, transcript)
+        _seed(("A brand new belief learned elsewhere.", 0.8))  # the store moved
+
+        result = _session_start(runner, transcript)
+        assert result.exit_code == 0
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "A brand new belief learned elsewhere." in context
+        assert "DCO is enforced." not in context  # already in the loaded region
+        assert _last_log(tmp_path)["digest_mode"] == "projection-diff"
+
+    def test_an_engine_error_pushes_the_full_digest(
+        self,
+        runner: CliRunner,
+        remote_engine: list[str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi import HTTPException
+
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _ = _project_dir(tmp_path, "-r7")
+        _session_end(runner, transcript)
+
+        async def _fail(*_args: Any, **_kwargs: Any) -> Any:
+            raise HTTPException(status_code=503, detail="engine unavailable")
+
+        monkeypatch.setattr(
+            "particles.operations.projection.memory_region.render_memory_region", _fail
+        )
+        result = _session_start(runner, transcript)
+        assert result.exit_code == 0
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Memory digest" in context  # the full digest
+        assert "DCO is enforced." in context
+        assert "skipped" not in _last_log(tmp_path)
+
+    def test_a_slow_engine_pushes_the_full_digest_inside_the_deadline(
+        self,
+        runner: CliRunner,
+        remote_engine: list[str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _ = _project_dir(tmp_path, "-r8")
+        _session_end(runner, transcript)
+
+        async def _hang(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(
+            "particles.operations.projection.memory_region.render_memory_region", _hang
+        )
+        monkeypatch.setattr("particles.api.cli.hook._FRESHNESS_DEADLINE_SHARE", 0.02)
+        result = _session_start(runner, transcript)
+        assert result.exit_code == 0
+        record = _last_log(tmp_path)
+        assert record["outcome"] == "ok"
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "DCO is enforced." in context
+
+    def test_a_manifest_with_a_file_section_is_refused_before_any_request(
+        self,
+        runner: CliRunner,
+        remote_engine: list[str],
+        projection_state: Path,
+        tmp_path: Path,
+    ) -> None:
+        (projection_state / "intro.md").write_text("A hand-written intro.\n")
+        (projection_state / "memory.yaml").write_text(
+            _MANIFEST_YAML.replace("sections:\n", "sections:\n  - block: intro.md\n")
+        )
+        transcript, memory_dir = _project_dir(tmp_path, "-r4")
+
+        assert _session_end(runner, transcript).exit_code == 0
+        projection = _last_log(tmp_path)["projection"]
+        assert projection["outcome"] == "error"
+        assert "ClientFileSectionError" in projection["error"]
+        assert not (memory_dir / "MEMORY.md").exists()
+        assert not any(p.startswith("/memory/projection") for p in remote_engine)

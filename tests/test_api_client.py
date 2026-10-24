@@ -27,6 +27,8 @@ from particles.api.client import get_backend
 from particles.api.client.http import HttpBackend
 from particles.api.client.local import LocalBackend
 from particles.core.schema import LintReport, QualityReport
+from particles.operations.projection import DocManifest
+from particles.operations.projection.memory_region import MemoryRegion
 
 
 class TestGetBackend:
@@ -369,9 +371,22 @@ class TestHttpBackendOperatorVerbs:
     def test_subject_merge(self, http_backend: HttpBackend) -> None:
         source = asyncio.run(_seed_subject("Source subj"))
         target = asyncio.run(_seed_subject("Target subj"))
-        outcome = asyncio.run(http_backend.subject_merge(source, target))
+        outcome = asyncio.run(http_backend.subject_merge([source], target))
         assert outcome.subject.id == target
         assert isinstance(outcome.particles_relinked, int)
+        assert [s.subject_id for s in outcome.sources] == [source]
+
+    def test_subject_merge_many_dry_run(self, http_backend: HttpBackend) -> None:
+        a = asyncio.run(_seed_subject("Source one"))
+        b = asyncio.run(_seed_subject("Source two"))
+        target = asyncio.run(_seed_subject("Merge target"))
+        preview = asyncio.run(http_backend.subject_merge([a, b], target, dry_run=True))
+        assert preview.dry_run is True
+        assert set(preview.aliases_added) == {"Source one", "Source two"}
+        assert asyncio.run(http_backend.subject_show(a)) is not None
+        outcome = asyncio.run(http_backend.subject_merge([a, b], target))
+        assert outcome.dry_run is False
+        assert asyncio.run(http_backend.subject_show(b)) is None
 
     def test_subject_split_dry_run_refused_remotely(self, http_backend: HttpBackend) -> None:
         from particles.api.client.base import NotYetRemoteError
@@ -756,6 +771,180 @@ async def _get_particle_via_store(pid: str) -> object:
 
     async with session_scope() as session:
         return await get_particle(session, pid)
+
+
+@pytest.fixture
+def other_store(http_backend: HttpBackend, tmp_path: Path) -> Generator[str, None, None]:
+    """A second configured store, ``other``, on the in-process engine."""
+    from particles.config import get_config
+
+    get_config().storage.stores = {"other": f"sqlite+aiosqlite:///{tmp_path / 'other.db'}"}
+
+    async def _create() -> None:
+        from particles.db import Base, get_engine
+
+        async with get_engine("other").begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_create())
+    yield "other"
+
+    async def _dispose() -> None:
+        from particles.db import get_engine
+
+        await get_engine("other").dispose()
+
+    asyncio.run(_dispose())
+
+
+async def _uris(store: str) -> list[str]:
+    from sqlalchemy import select
+
+    from particles.corpus.store import CorpusEntryRow
+    from particles.db import session_scope
+
+    async with session_scope(store) as session:
+        return list((await session.execute(select(CorpusEntryRow.uri_r))).scalars())
+
+
+class TestHttpBackendStoreHandle:
+    """The routed writes carry their store handle."""
+
+    def test_a_harvest_deposit_lands_in_the_named_store(
+        self, http_backend: HttpBackend, other_store: str
+    ) -> None:
+        asyncio.run(
+            http_backend.deposit_text_at_uri(
+                text="a session",
+                uri_r="file:///tmp/sess.jsonl",
+                source_type="CONVERSATION",
+                mutability="MUTABLE",
+                tags=[],
+                deposited_by="claude-code-hook",
+                content_published_at=None,
+                store=other_store,
+            )
+        )
+        assert asyncio.run(_uris(other_store)) == ["file:///tmp/sess.jsonl"]
+        assert asyncio.run(_uris("default")) == []
+
+    def test_an_unknown_store_is_an_engine_error(self, http_backend: HttpBackend) -> None:
+        from particles.api.client.http import EngineHttpError
+
+        with pytest.raises(EngineHttpError, match="404"):
+            asyncio.run(http_backend.deposit_text(text="a note", tags=None, store="nope"))
+
+
+_MANIFEST = """\
+name: memory-index
+sections:
+  - title: "Memory index"
+    render: bullets
+    top_k: 60
+"""
+
+
+async def _seed_embedded(content: str) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from particles.core.schema import Confidence, Particle, UncertaintyNature
+    from particles.core.scoring.confidence import CalibrationSource
+    from particles.core.status import Status
+    from particles.db import session_scope
+    from particles.store.particle_store import insert_particle
+
+    p = Particle(
+        id=str(uuid4()),
+        content=content,
+        confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        asserted_by="test",
+        asserted_at=datetime.now(UTC),
+        status=Status.ACTIVE,
+    )
+    async with session_scope() as session:
+        await insert_particle(session, p, [0.5, 0.5, 0.5, 0.5])
+        await session.commit()
+
+
+class TestHttpBackendMemoryRegion:
+    """The engine renders the client's manifest exactly as the local cycle does."""
+
+    def _manifest(self, tmp_path: Path, text: str = _MANIFEST) -> DocManifest:
+        from particles.operations.projection import load_manifest
+
+        path = tmp_path / "memory.yaml"
+        path.write_text(text)
+        return load_manifest(path)
+
+    def test_local_and_remote_renders_are_byte_identical(
+        self, http_backend: HttpBackend, tmp_path: Path
+    ) -> None:
+        asyncio.run(_seed_embedded("The deploy runs nightly."))
+        manifest = self._manifest(tmp_path)
+        target = "file:///nowhere/topic.md"
+
+        async def _render(backend: LocalBackend | HttpBackend) -> MemoryRegion:
+            return await backend.memory_region(
+                "default",
+                manifest=manifest,
+                base_dir=tmp_path,
+                observer_project="-proj",
+                exclude_source_tags=["rule-file"],
+                fold_targets=[target],
+            )
+
+        local = asyncio.run(_render(LocalBackend()))
+        remote = asyncio.run(_render(http_backend))
+        assert remote == local
+        assert "- The deploy runs nightly." in remote.body
+        assert remote.fold_verdicts == {target: "not-extracted"}
+
+    def test_a_file_section_is_refused_before_any_request(
+        self, http_backend: HttpBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.operations.projection.memory_region import ClientFileSectionError
+
+        (tmp_path / "intro.md").write_text("Intro.\n")
+        manifest = self._manifest(tmp_path, _MANIFEST + "  - block: intro.md\n")
+
+        def _no_request(*_a: object, **_k: object) -> None:
+            raise AssertionError("no request expected")
+
+        monkeypatch.setattr(http_backend, "_post", _no_request)
+        with pytest.raises(ClientFileSectionError):
+            asyncio.run(
+                http_backend.memory_region(
+                    "default",
+                    manifest=manifest,
+                    base_dir=tmp_path,
+                    observer_project=None,
+                    exclude_source_tags=[],
+                    fold_targets=[],
+                )
+            )
+
+    def test_a_body_that_does_not_match_its_hash_is_refused(
+        self, http_backend: HttpBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.client.http import EngineHttpError
+
+        async def _tampered(*_a: object, **_k: object) -> dict[str, object]:
+            return {"body": "- injected\n", "content_hash": "0" * 64, "fold_verdicts": {}}
+
+        monkeypatch.setattr(http_backend, "_post", _tampered)
+        with pytest.raises(EngineHttpError, match="does not match its hash"):
+            asyncio.run(
+                http_backend.memory_region(
+                    "default",
+                    manifest=self._manifest(tmp_path),
+                    base_dir=tmp_path,
+                    observer_project=None,
+                    exclude_source_tags=[],
+                    fold_targets=[],
+                )
+            )
 
 
 class TestPlaintextTokenWarning:

@@ -18,9 +18,9 @@ source kinds choose. Two callers share it:
 It lives in ``ingest`` so extraction can call it with no import from
 ``operations``. Two ways of building a claim's context live here:
 
-* :func:`claim_context` is the census's: the claim's stored passage
-  (``particles particle source``: the chunk it hashed to, else the first
-  best-matching paragraph);
+* :func:`claim_context` is the census's: the chunk the claim was read from
+  (the chunk it hashed to, else the whole note), windowed per pair around
+  both claims' words, never a single located paragraph;
 * :func:`in_flight_context` is extraction's: the chunk the claim was read
   from, windowed around both claims' words, dated by the snapshot. It never
   picks a single paragraph, so a transcript that repeats a command is not read
@@ -46,16 +46,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config
 from particles.core.contradiction_disclosure import READING_OBSERVED, READING_STANDING
 from particles.core.probe_verdict import prompt_hash
-from particles.core.schema import Mutability, Particle, ProvenanceRefType, SourceType
+from particles.core.schema import Particle, ProvenanceRefType, SourceType
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import get_entry, get_snapshot, resolve_snapshot_for_blob
 from particles.extraction.general import sniff_image_media_type
 from particles.ingest.source_passage import (
-    PassageMatch,
     extractor_view_text,
     find_chunk,
     focus_window,
-    hydrate_source_passage,
+    is_record,
 )
 from particles.llm.breaker import _llm_call, llm_circuit_open, record_unusable_reply
 
@@ -197,9 +196,7 @@ def source_kind(source_type: str | None, mutability: str | None) -> SourceKind:
     else, and a claim with no readable source, reads as a note: the rule the
     second reading was measured under.
     """
-    if mutability == Mutability.APPEND_ONLY or source_type == SourceType.CONVERSATION:
-        return SourceKind.RECORD
-    return SourceKind.NOTE
+    return SourceKind.RECORD if is_record(source_type, mutability) else SourceKind.NOTE
 
 
 @dataclass(frozen=True)
@@ -263,44 +260,82 @@ def _content_of(partner: Particle | str | None) -> str | None:
     return partner.content if isinstance(partner, Particle) else partner
 
 
+@dataclass(frozen=True)
+class _SnapshotView:
+    """A stored claim's source as its own snapshot holds it (the gather result)."""
+
+    source: str = "unknown"
+    source_type: str | None = None
+    mutability: str | None = None
+    when: datetime | None = None
+    #: The snapshot's extractor-view text; ``""`` when unreadable or an image.
+    text: str = ""
+    chunk_hash: str | None = None
+
+    @property
+    def chunk(self) -> str:
+        """The chunk the claim was read from: its hashed chunk, else the whole text."""
+        found = find_chunk(self.text, self.chunk_hash) if self.chunk_hash and self.text else None
+        return found or self.text
+
+
+async def _snapshot_view(session: AsyncSession, particle: Particle) -> _SnapshotView:
+    """Read a stored claim's entry, snapshot and text (read-only; one blob read).
+
+    The first SOURCE ref names the entry, the snapshot and, on the chunked
+    path, the chunk hash. A ref that pins no snapshot reads the entry's latest.
+    A claim with no readable source comes back with ``unknown`` fields and no
+    text, so a store with missing blobs degrades to a reading of bare claims.
+    """
+    ref = next(
+        (
+            r
+            for r in particle.provenance
+            if r.type is ProvenanceRefType.SOURCE and r.corpus_entry_id
+        ),
+        None,
+    )
+    if ref is None:
+        return _SnapshotView()
+    source, source_type, mutability, when, text = "unknown", None, None, None, ""
+    entry = await get_entry(session, ref.corpus_entry_id)
+    if entry is not None:
+        source, source_type, mutability = (
+            source_name(entry.uri_r),
+            entry.source_type,
+            entry.mutability,
+        )
+    snapshot = (
+        await get_snapshot(session, ref.snapshot_id)
+        if ref.snapshot_id
+        else await resolve_snapshot_for_blob(session, ref.corpus_entry_id)
+    )
+    if snapshot is not None:
+        when = snapshot.content_published_at or snapshot.captured_at
+        try:
+            text = snapshot_text(load_blob(snapshot.content_hash), source_type)
+        except FileNotFoundError:
+            text = ""
+    return _SnapshotView(source, source_type, mutability, when, text, ref.chunk_hash)
+
+
 async def _claim_source(session: AsyncSession, particle: Particle) -> _ClaimSource:
     """Read a claim's source name, source date and passage (the gather step).
 
-    Read-only: the source-passage hydration (the ``particles particle source``
-    path, one blob read), the snapshot row, and the entry row for its
-    mutability. A claim with no readable source still gets one, with
-    ``unknown`` fields and no passage, so a store with missing blobs degrades
-    to a reading of the bare claims rather than failing.
+    The passage is the chunk the claim was read from (its hashed chunk, else
+    the whole note), windowed per pair by :func:`_claim_context_for`, as the
+    in-flight reading does. It used to be the first
+    best-matching paragraph, which in a transcript that repeats a command is
+    the earliest run rather than the one the claim describes.
     """
-    passage = await hydrate_source_passage(session, particle.id)
-    source, date, text, observed = "unknown", "unknown", "", "unknown"
-    source_type: str | None = None
-    mutability: str | None = None
-    if passage is not None:
-        source_type = passage.source_type
-        if passage.uri_r:
-            source = source_name(passage.uri_r)
-        # A WHOLE match (no paragraph cleared the overlap floor, as for a
-        # paraphrased claim) is the whole note; its window is still chosen by
-        # the claim's own words, or is empty when none occur.
-        if passage.match is not PassageMatch.UNAVAILABLE:
-            text = passage.text
-        if passage.corpus_entry_id:
-            entry = await get_entry(session, passage.corpus_entry_id)
-            mutability = entry.mutability if entry is not None else None
-        if passage.snapshot_id:
-            snapshot = await get_snapshot(session, passage.snapshot_id)
-            when = (snapshot.content_published_at or snapshot.captured_at) if snapshot else None
-            if when is not None:
-                date = when.date().isoformat()
-                observed = _observed_at(when)
+    view = await _snapshot_view(session, particle)
     return _ClaimSource(
-        source=source,
-        date=date,
-        text=text,
-        kind=source_kind(source_type, mutability),
-        observed=observed,
-        source_type=source_type,
+        source=view.source,
+        date=view.when.date().isoformat() if view.when is not None else "unknown",
+        text=view.chunk,
+        kind=source_kind(view.source_type, view.mutability),
+        observed=_observed_at(view.when),
+        source_type=view.source_type,
     )
 
 
@@ -401,44 +436,16 @@ async def snapshot_claim_context(
     rows, one blob read). A claim with no readable source degrades to a
     reading of its bare text, as :func:`claim_context` does.
     """
-    ref = next(
-        (
-            r
-            for r in particle.provenance
-            if r.type is ProvenanceRefType.SOURCE and r.corpus_entry_id
-        ),
-        None,
-    )
-    text = ""
-    source, source_type, mutability, when = "unknown", None, None, None
-    if ref is not None:
-        entry = await get_entry(session, ref.corpus_entry_id)
-        if entry is not None:
-            source, source_type, mutability = (
-                source_name(entry.uri_r),
-                entry.source_type,
-                entry.mutability,
-            )
-        snapshot = (
-            await get_snapshot(session, ref.snapshot_id)
-            if ref.snapshot_id
-            else await resolve_snapshot_for_blob(session, ref.corpus_entry_id)
-        )
-        if snapshot is not None:
-            when = snapshot.content_published_at or snapshot.captured_at
-            try:
-                text = snapshot_text(load_blob(snapshot.content_hash), source_type)
-            except FileNotFoundError:
-                text = ""
+    view = await _snapshot_view(session, particle)
     return in_flight_context(
         particle.content,
-        text=text,
-        chunk_hash=ref.chunk_hash if ref is not None else None,
+        text=view.text,
+        chunk_hash=view.chunk_hash,
         partner=_content_of(partner),
-        source=source,
-        source_type=source_type,
-        mutability=mutability,
-        when=when,
+        source=view.source,
+        source_type=view.source_type,
+        mutability=view.mutability,
+        when=view.when,
     )
 
 

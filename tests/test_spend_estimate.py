@@ -210,3 +210,34 @@ def test_the_judge_is_priced_at_its_own_chars_per_token() -> None:
     batched = requests_estimate("use_judge", requests, 1024, batched=True)
     discount = get_config().llm.batch_discount
     assert batched.usd == pytest.approx((judge.usd or 0) * (1 - discount))
+
+
+class TestExtractionRange:
+    """The band ``extract --all-pending`` prints before it spends."""
+
+    def test_low_at_most_high_at_most_ceiling(self) -> None:
+        from particles.operations.audit import ExtractionCall
+        from particles.operations.spend_estimate import extraction_range
+
+        band = extraction_range([ExtractionCall(chars=3000)] * 4, entries=4)
+        assert band.calls >= 4
+        assert band.low_usd is not None and band.high_usd is not None
+        assert band.ceiling_usd is not None
+        assert 0 < band.low_usd <= band.high_usd <= band.ceiling_usd
+        assert band.wall_seconds > 0
+
+    def test_an_unpriced_model_has_no_band(self) -> None:
+        from particles.config import ProviderSelection, get_config
+        from particles.operations.audit import ExtractionCall
+        from particles.operations.spend_estimate import extraction_range
+
+        get_config().llm.extraction = ProviderSelection(provider="anthropic", model="unpriced-x")
+        band = extraction_range([ExtractionCall(chars=3000)], entries=1)
+        assert (band.low_usd, band.high_usd, band.ceiling_usd) == (None, None, None)
+        assert band.model == "unpriced-x"
+
+    def test_nothing_to_read_costs_nothing(self) -> None:
+        from particles.operations.spend_estimate import extraction_range
+
+        band = extraction_range([], entries=0)
+        assert (band.calls, band.high_usd) == (0, 0.0)

@@ -19,10 +19,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from particles.config import get_config
-from particles.core.conflict_review import is_quarantined
+from particles.core.conflict_review import refusal_reason
 from particles.core.observer_scope import BeliefScope, join
-from particles.core.schema import JudgeVerdictKind, Particle
-from particles.core.status import Status
+from particles.core.schema import JudgeVerdictKind, Particle, ResolutionAction
 
 
 class CardKind(StrEnum):
@@ -37,13 +36,16 @@ class CardKind(StrEnum):
     CONTESTED = "contested"  # lint CONTESTED (was get_inconsistency_backrefs)
     NO_SUBJECT = "no_subject"  # lint NO_SUBJECT
     GATED_SUBJECTS = "gated_subjects"  # NO_SUBJECT orphans a relink recovers (batch)
+    SUBJECTLESS_SOURCE = "subjectless_source"  # NO_SUBJECT orphans of one source
     DUPLICATE_PAIR = "duplicate_pair"  # links suggest (REPORT)
     UNCITED_URL = "uncited_url"  # corpus links suggest
     FAILED_SNAPSHOTS = "failed_snapshots"  # quality report (batch)
+    REFUSED_SNAPSHOTS = "refused_snapshots"  # sources the extraction model refused
     PROPOSED_ABSTRACTION = "proposed_abstraction"  # candidate events
     STALE_BASIS = "stale_basis"  # unrestated re-anchor events
     INCONSISTENCY = "inconsistency"  # lint OPEN_INCONSISTENCY, one per open record
     DEMOTION = "demotion"  # a claim retired as replaced, with its replacement
+    RANK_LIFT = "rank_lift"  # the rank-lift monitor's alert, from the run record (batch)
 
 
 # The gestures each kind offers. The verbs another command
@@ -74,9 +76,19 @@ _GESTURES: dict[CardKind, tuple[str, ...]] = {
     # every orphan whose gated subject names the relink can
     # recover, as one card. relink applies the accepted tiers in place.
     CardKind.GATED_SUBJECTS: ("relink", "snooze"),
+    # the residue no relink recovers, one card per source. dismiss
+    # rules on the beliefs it names (member-scoped); each belief keeps its own
+    # no_subject:<id> key for assign-subject / supersede / retract.
+    CardKind.SUBJECTLESS_SOURCE: ("dismiss", "snooze"),
     CardKind.DUPLICATE_PAIR: ("merge", "dismiss", "snooze"),
     CardKind.UNCITED_URL: ("deposit", "dismiss"),
     CardKind.FAILED_SNAPSHOTS: ("reindex", "snooze"),
+    # an advisory about a store-wide setting. The resolving act is
+    # the operator re-running the sweep and choosing λ, which no gesture does.
+    CardKind.RANK_LIFT: ("snooze",),
+    # sources held because the extraction model refused them.
+    # retry-refused is surfaced: the card names the command that sends them.
+    CardKind.REFUSED_SNAPSHOTS: ("retry-refused", "snooze"),
     # propose mode: accept asserts the candidate abstraction with
     # its premise links; reject records the verdict (a labelled datapoint for
     # the §8 faithfulness evaluation). Both resolve via ABSTRACTION_RESOLVED.
@@ -151,6 +163,11 @@ KIND_TITLES: dict[CardKind, tuple[str, str]] = {
         "These beliefs name files, records, identifiers or commands the extraction gate "
         "withheld as subjects. Link them to project-scoped subjects in one pass?",
     ),
+    CardKind.SUBJECTLESS_SOURCE: (
+        "Subjectless beliefs from one source",
+        "These beliefs from one source are attached to no subject, so subject-scoped "
+        "reads never see them. Can they stand without one?",
+    ),
     CardKind.DUPLICATE_PAIR: (
         "Possible duplicate",
         "Are these two beliefs the same claim?",
@@ -162,6 +179,17 @@ KIND_TITLES: dict[CardKind, tuple[str, str]] = {
     CardKind.FAILED_SNAPSHOTS: (
         "Failed extractions",
         "Some corpus snapshots produced no beliefs because extraction failed.",
+    ),
+    CardKind.RANK_LIFT: (
+        "Usefulness ranking out of band",
+        "The nightly monitor found the usefulness rank-lift no longer puts the beliefs "
+        "used outside the head into it, or leaves no room for new ones. Re-check it with "
+        "the sweep shown?",
+    ),
+    CardKind.REFUSED_SNAPSHOTS: (
+        "Declined by the extraction model",
+        "The extraction model refused these sources, so they are not in memory. "
+        "Send them again, or leave them held?",
     ),
     CardKind.PROPOSED_ABSTRACTION: (
         "Proposed generalization",
@@ -209,6 +237,8 @@ _GESTURE_HELP: dict[str, str] = {
     # Surfaced gestures: the card names the resolving command.
     "reindex": "Re-extract the failed snapshots. Not applied by this command: run "
     "`particles reindex`.",
+    "retry-refused": "Send the held sources to the extraction model again. Not applied "
+    "by this command: run `particles extract --all-pending --retry-refused`.",
 }
 
 _KIND_GESTURE_HELP: dict[tuple[CardKind, str], str] = {
@@ -218,6 +248,9 @@ _KIND_GESTURE_HELP: dict[tuple[CardKind, str], str] = {
     "and hide this card for good.",
     (CardKind.DUPLICATE_PAIR, "dismiss"): "They are different claims. Hide this card for good.",
     (CardKind.UNCITED_URL, "dismiss"): "Not worth depositing. Stop suggesting this URL.",
+    (CardKind.SUBJECTLESS_SOURCE, "dismiss"): "These beliefs can stand without a subject. "
+    "Hide them for good; a later subjectless belief from this source is asked about again. "
+    "To fix one belief instead, apply assign-subject, supersede or retract to its own key.",
     (CardKind.DEMOTION, "affirm"): "The replacement was right. Hide this card for good.",
     (CardKind.DEMOTION, "dismiss"): "Both claims hold. Hide this card for good. The "
     "retired claim stays retired, because a demotion cannot be reversed: assert it "
@@ -255,24 +288,25 @@ def describe_gesture(card: CurationCard, gesture: str, *, snooze_days: int) -> s
     return text
 
 
-def resolve_actions_for(a: Particle | None, b: Particle | None) -> list[str]:
+def resolve_actions_for(
+    a: Particle | None, b: Particle | None, *, retired_value: bool = False
+) -> list[str]:
     """The review actions a conflict card offers, given claims A and B.
 
-    An action is offered only when it can do what it says:
-
-    - ``PREFER_A`` needs A ACTIVE. PREFER_A demotes B and never re-promotes A,
-      so on a record whose A was demoted it would close the conflict with
-      neither claim ACTIVE (holds the review verb's own semantics).
-    - ``PREFER_B`` needs B ACTIVE or quarantined, the only B it can restore.
-    - ``BOTH_VALID`` and ``DISCARD`` are always offered.
+    An action is offered only when it can do what it says, by the rule the
+    review verb refuses on, ``refusal_reason``. ``PREFER_A`` needs A
+    ACTIVE, and ``PREFER_B`` needs B ACTIVE or quarantined, the only B it can
+    keep. A card also withholds ``PREFER_B`` when B is missing, which the verb
+    still allows on a wrapper whose B ref dangles. On a retired-value hold
+    (``retired_value``) ``PREFER_A`` means the retirement stands and is offered
+    with A retired. ``BOTH_VALID`` and ``DISCARD`` are always
+    offered.
     """
     offered: list[str] = []
     for action in RESOLVE_ACTIONS:
-        if action == "PREFER_A" and (a is None or a.status is not Status.ACTIVE):
+        if action == "PREFER_B" and b is None:
             continue
-        if action == "PREFER_B" and (
-            b is None or (b.status is not Status.ACTIVE and not is_quarantined(b))
-        ):
+        if refusal_reason(ResolutionAction(action), a, b, retired_value=retired_value):
             continue
         offered.append(action)
     return offered
@@ -307,8 +341,8 @@ class ObserverScopeBrief(BaseModel):
     widened: bool = False
 
 
-def scope_brief(scope: BeliefScope, *, widened: bool = False) -> ObserverScopeBrief:
-    """The card's reading of one derived scope."""
+def scope_brief(scope: BeliefScope) -> ObserverScopeBrief:
+    """The card's reading of one derived scope; a widening is its own flag."""
     if scope.is_global:
         kind = ObserverScopeKind.GLOBAL
     elif scope.keys:
@@ -318,7 +352,7 @@ def scope_brief(scope: BeliefScope, *, widened: bool = False) -> ObserverScopeBr
     else:
         kind = ObserverScopeKind.UNATTRIBUTED
     projects = [] if scope.is_global else sorted(scope.keys)
-    return ObserverScopeBrief(kind=kind, projects=projects, widened=widened)
+    return ObserverScopeBrief(kind=kind, projects=projects, widened=scope.widened)
 
 
 def _project_list(keys: list[str]) -> str:
@@ -462,6 +496,13 @@ class CurationCard(BaseModel):
     # with the briefs on the served slice; None when no inconsistency backs
     # the card.
     conflict: ConflictBrief | None = None
+    # the corpus entry a SUBJECTLESS_SOURCE card groups, its
+    # first-SOURCE entry. Part of ``key``. None for every other kind.
+    corpus_entry_id: str | None = None
+    # the monitor alert a RANK_LIFT card fronts, the run that raised
+    # it. Part of ``key``, so a snooze covers one alert and a later transition
+    # raises a fresh card. None for every other kind.
+    rank_lift_alert: str | None = None
     # the review actions an INCONSISTENCY card offers, computed
     # from its members' statuses when the slice is served. Every client
     # renders exactly this list. None for every other kind.
@@ -500,9 +541,17 @@ class CurationCard(BaseModel):
             return f"uncited_url:{self.corpus_url}"
         if self.kind is CardKind.FAILED_SNAPSHOTS:
             return "failed_snapshots"
+        if self.kind is CardKind.RANK_LIFT:
+            return f"rank_lift:{self.rank_lift_alert}"
+        if self.kind is CardKind.REFUSED_SNAPSHOTS:
+            # A constant: the card is one batch, whatever sources it names.
+            return "refused_snapshots"
         if self.kind is CardKind.GATED_SUBJECTS:
             # A constant: the card is one batch, whatever beliefs it covers.
             return "gated_subjects"
+        if self.kind is CardKind.SUBJECTLESS_SOURCE:
+            # the source, whatever beliefs it currently names.
+            return f"subjectless_source:{self.corpus_entry_id}"
         if self.kind is CardKind.PROPOSED_ABSTRACTION:
             return f"proposed_abstraction:{self.candidate_event_id}"
         if self.kind is CardKind.INCONSISTENCY:
@@ -525,6 +574,12 @@ class CurationCard(BaseModel):
                 diagnostic="",
                 suggested_gestures=gestures_for(CardKind.FAILED_SNAPSHOTS),
             )
+        if key == "refused_snapshots":
+            return cls(
+                kind=CardKind.REFUSED_SNAPSHOTS,
+                diagnostic="",
+                suggested_gestures=gestures_for(CardKind.REFUSED_SNAPSHOTS),
+            )
         if key == "gated_subjects":
             return cls(
                 kind=CardKind.GATED_SUBJECTS,
@@ -540,6 +595,24 @@ class CurationCard(BaseModel):
                 corpus_url=rest,
                 diagnostic="",
                 suggested_gestures=gestures_for(CardKind.UNCITED_URL),
+            )
+        if prefix == CardKind.RANK_LIFT.value:
+            if not rest:
+                raise ValueError(f"Unrecognized card key {key!r}.")
+            return cls(
+                kind=CardKind.RANK_LIFT,
+                rank_lift_alert=rest,
+                diagnostic="",
+                suggested_gestures=gestures_for(CardKind.RANK_LIFT),
+            )
+        if prefix == CardKind.SUBJECTLESS_SOURCE.value:
+            if not rest:
+                raise ValueError(f"Unrecognized card key {key!r}.")
+            return cls(
+                kind=CardKind.SUBJECTLESS_SOURCE,
+                corpus_entry_id=rest,
+                diagnostic="",
+                suggested_gestures=gestures_for(CardKind.SUBJECTLESS_SOURCE),
             )
         if prefix == CardKind.PROPOSED_ABSTRACTION.value:
             return cls(

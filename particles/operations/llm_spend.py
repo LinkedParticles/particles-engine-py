@@ -62,8 +62,9 @@ def build_extract_run_payload(
 
     ``llm_usage`` has the ``CONSOLIDATION_RUN`` payload's shape, so one reader
     sums both. ``route`` names the entry point (``single``, ``all-pending``,
-    ``http``, ``reindex``, ``structure``); ``snapshots`` counts the snapshots
-    the run attempted (``structure`` annotates particles and counts none).
+    ``http``, ``reindex``, ``structure``, ``modality``, ``reread-judge``);
+    ``snapshots`` counts the snapshots the run attempted (``structure``,
+    ``modality`` and ``reread-judge`` read no snapshot and count none).
     """
     return {
         "format": EXTRACT_RUN_PAYLOAD_FORMAT,
@@ -137,6 +138,12 @@ class MeteredExtractRun:
         self._started_at = datetime.now(UTC)
         self._scope: AbstractContextManager[UsageAccumulator] | None = None
         self._accumulator: UsageAccumulator | None = None
+
+    def usage_so_far(self) -> LLMUsage:
+        """The run's measured usage up to now, for a budget checked mid-run."""
+        if self._accumulator is None:
+            return LLMUsage()
+        return self._accumulator.snapshot()
 
     async def __aenter__(self) -> MeteredExtractRun:
         self._started_at = datetime.now(UTC)

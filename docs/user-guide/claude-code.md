@@ -204,17 +204,12 @@ it with one line of config.
 
 ```yaml
 claude_code:
-  observer_scope: store     # the default: every session sees the whole store
-  # observer_scope: project # a session sees global beliefs plus its own project's
+  observer_scope: project   # the default: global beliefs plus this project's
+  # observer_scope: store   # every session sees the whole store
 ```
 
-With `store`, the session-start digest ranks *all* of the store's ACTIVE
-beliefs, so a belief learned in project A appears in project B's sessions, and
-the `MEMORY.md` projection writes that same view into each project's file. For
-a rule like "every commit needs a sign-off" that is what you want.
-
-With `project`, a session reads the same store **through its project**. It
-sees:
+With `project`, the default, a session reads the store **through its
+project**. It sees:
 
 - **global beliefs**: anything you deposited by hand (a web page, a document),
   your user-level rule files (`~/.claude/CLAUDE.md`), and anything you have
@@ -232,6 +227,14 @@ same one line. The digest header says which view it is and how many beliefs
 are in scope, and the `MEMORY.md` region ends with a comment naming its
 observer. **It is a relevance scope, not access control:** one owner, one
 store, and the whole store is one flag away.
+
+With `store`, the session-start digest ranks *all* of the store's ACTIVE
+beliefs, so a belief learned in project A appears in project B's sessions, and
+the `MEMORY.md` projection writes that same view into each project's file.
+Choose it if you want every project's memory everywhere; a rule you want in
+every project is better widened (below). A `config.yaml` copied from an older
+sample names `store` explicitly, so an upgrade keeps it; `particles init
+claude-code` says so in its next steps rather than rewriting your choice.
 
 A git worktree is the same project as its repository (§ What the hooks do), so
 a session in a worktree sees its repository's view.
@@ -258,7 +261,38 @@ particles memory rescope --assign <entry-id> <project>   # or one at a time
 ```
 
 Sources whose only project no longer exists on this machine are also listed
-so you can give them a live one.
+so you can give them a live one. `init` names both counts, and the lapsed
+beliefs, in its next steps, with the command for each. It never assigns a
+project for you: which project a source belongs to is your decision.
+
+**Agent writes are never global by omission.** Something an agent saves
+through an MCP server that has no project binding, or through the
+memory-server facade, carries a `scope:unattributed` marker, so it reads as in
+view for no project rather than for every project. Writes saved before this
+change only change when you say so:
+
+```bash
+particles memory rescope --mark-agent-writes --dry-run   # what would be marked, and every depositor it did not match
+particles memory rescope --mark-agent-writes             # one recorded event per entry
+particles memory rescope --unmark <entry-id>             # reverse one mark
+```
+
+A depositor the dry run lists as unmatched, an agent identity you have since
+renamed, joins with `--identity <name>`. `--default-key` never attributes a
+marked entry; `--assign` does.
+
+**Fix a wrong key.** A session that moved between checkouts can leave a source
+with a key it should not have:
+
+```bash
+particles memory rescope --withdraw <entry-id> <project>
+```
+
+It refuses a source's last key, because removing it would change who sees the
+source rather than repair it. With `--leave-unattributed` the last key may go,
+and the source is left in view for no project, never for every project:
+making something global is `widen`, below. Every one of these changes is a
+recorded event naming the source and the key.
 
 **Make a belief global.** "This rule I learned in one project is how I work
 everywhere" is your call, so it is yours to record:
@@ -273,12 +307,25 @@ The belief and its sources are untouched; the widening is a standing note the
 lens consults. There is deliberately no way for the agent to do this itself.
 
 **The MCP server has its own switch**, because it is launched per session and
-is not specific to Claude Code. Register it with `--project-observer cwd` and
-it is bound to the project of the directory it was started in:
+is not specific to Claude Code. `particles init claude-code` registers it at
+user scope with `--project-observer cwd`, so it is bound to the project of the
+directory each session starts in; an existing Particles registration keeps its
+executable and env pins and only gains the flag, `--dry-run` shows the
+command, and `--remove` puts the registration back as it was. Without the
+`claude` CLI on your path, `init` prints the command instead:
 
 ```bash
 claude mcp add --scope user particles -- particles mcp serve --project-observer cwd
 ```
+
+Outside a repository the directory is its own project, as Claude Code treats
+it, so a session started in your home directory sees what earlier
+home-directory sessions learned and no repository's. A server started at the
+filesystem root runs unbound and says so. The server keys on the directory it
+started in, and the hooks key on the directory a session was launched in;
+those agree except for a session that moved between checkouts, where the
+hooks fall back to the transcript directory's name. `particles hook doctor`
+lists such sessions, and flags this directory when the two keys differ.
 
 Its `query`, `particles_list`, `particle_search` and `graph_view` then return
 that project's view, and say so in an `observer` field. Passing
@@ -287,7 +334,8 @@ and says that too. Looking a belief up by id (`particle_show`) is never
 filtered. What the agent writes through a bound server is attributed to that
 project: a deposit carries the project's key whatever tags the agent passes,
 and an assertion may cite an existing source only if it is one of that
-project's. A link the agent writes with `link_add` must join two beliefs that
+project's. An as-of read through a bound server says its projects are
+today's attribution, not what a session saw then. A link the agent writes with `link_add` must join two beliefs that
 are already in view for exactly the same projects. Linking two beliefs pools
 their sources, so a link across scopes would move a belief into another
 project's view, or into every project's when the partner is global. The server
@@ -316,8 +364,12 @@ the disagreement goes to `particles review` instead.
 
 Measured on the two-project fixture (`docs/benchmarks/observer-scope.md`),
 every line each project states is in view for that project, where before
-this a shared-subject fact was out of view about a third of the time. `store`
-remains the default until you choose otherwise.
+this a shared-subject fact was out of view about a third of the time. That is
+why `project` is now the default. One limit: in a small project, the
+owner-relevance lift (`owner_lens.rank_lift`) may promote nothing, because
+beliefs about you there need a larger lift than the store-wide setting
+gives. The project's digest is then the one it would have had without the
+lift.
 
 ### Other ways to narrow it
 
@@ -431,46 +483,12 @@ sources](../operator-guide/mutable-local-sources.md#only-the-newest-pending-vers
 Session transcripts are the larger share of the bill, and a long transcript
 that grew is re-extracted only from where it changed.
 
-**Extraction without an API key.** A Claude Code session can extract its own
-transcript instead. Set `claude_code.agent_extraction.mode` to
-`on` and re-run `particles init claude-code`, which then also installs a
-`Stop` hook. At the end of a turn, once the session has grown by
-`min_new_chars` (default 8000) past what was extracted and at least
-`min_interval_seconds` (default 600) after its last ask, the hook deposits
-the transcript and asks the agent, in one extra turn you can see, to record
-that stretch through the `extraction_submit` tool. Your Claude plan pays for
-that turn, and Particles makes no extraction call.
-
-Every claim the agent submits must quote the deposited transcript verbatim.
-Tool results and model reasoning are not in the deposit, so a claim drawn
-from them is dropped, and so is a claim whose only quote is a tool-call line.
-The resulting beliefs carry their own extractor id, `claude-code-agent`, and
-the session's model, and their confidence is mapped through a calibration
-fitted for that model when one exists. The background extractor then reads
-only what the agent did not cover. Three settings need care:
-
-- The store must be write-enabled (`mcp.write.enabled_stores`), or the
-  `extraction_submit` tool is not offered.
-- The hook asks only in a session that has the Particles MCP server. A server
-  registered in one repository's `.mcp.json` covers sessions there only, so
-  register it at user scope (`claude mcp add --scope user`) to cover every
-  project.
-- `mode: shadow` asks and verifies but writes nothing, which is how to see
-  what the agent would record before turning it on. Each stretch is asked
-  about once: after an answer, the next ask starts where the answered one
-  ended, while the background extractor still reads the whole transcript.
-  Shadow mode also keeps each answer's accepted claims, with the confidence
-  the agent stated and the passage it quoted, in a local file
-  (`agent-extraction-shadow.jsonl` in the state directory, readable by your
-  account only), so a later pass can measure how well that confidence
-  matches the hit rate. Set `keep_shadow_candidates: false` to keep only the
-  counts.
-- Without an API key, the contradiction check on a near-duplicate claim
-  cannot run, so such a pair is held for review in `particles review` rather
-  than merged or kept silently.
-
-`particles hook doctor` reports whether the Stop hook, the write store and
-the mode line up, and counts recent asks.
+**Extraction needs a provider.** Background extraction calls the model
+configured for the `extraction` purpose, so it needs an API key or a local
+provider. An earlier release could ask the session's own agent to extract its
+transcript instead; that was withdrawn. An install made while it was on still
+carries a `Stop` hook entry that now does nothing: re-run `particles init
+claude-code` to remove it, and `particles hook doctor` reports it until then.
 
 ## The MEMORY.md projection
 
@@ -502,17 +520,58 @@ edit *inside* the region, nothing is lost; the edited region is deposited as
 authored input on the next cycle and reconciled into the store before the
 region is re-rendered.
 
-**Fold-and-archive (default-on).** Once agent-authored lines outside the
-region have been harvested, the next cycle *moves* them (never deletes) to
-that project's append-only archive,
-`~/.particles/claude-code/projects/<project>/MEMORY.archive.md` (itself
-harvested as corpus input, under that project's key), leaving one pointer line behind. The file thus
-converges to the projected region + not-yet-harvested lines + the pointer, and
-duplication between an authored line and its projected consolidation is
-bounded to one cycle. Opt out with
-`agent_memory.projection.fold_authored_lines: false` in `config.yaml`; a
-harvest that did not succeed never triggers a fold, and every folded line is
-recoverable from the archive or the corpus.
+**Rule files stay out of the region.** The `AGENTS.md` and `CLAUDE.md` files
+that `particles rules sync` tracks are in the store too, and their flat,
+imperative sentences rank high: on one real store they took 54 of the
+region's 60 lines. They are operating documentation that Claude Code reads
+from the files themselves (a root file at every session start, a nested one
+when a session works in that directory), so the region leaves out any belief
+whose current sources are all rule files. A belief that a memory
+file also states stays in, and rule-file beliefs remain available to `query`,
+the digest and every other surface. The excluded source tags are
+`agent_memory.projection.exclude_source_tags` in `config.yaml` (default
+`[rule-file]`). The setting is read at render time, so it applies without
+editing `memory.yaml`; `[]` restores the unfiltered region.
+
+**Fold-and-archive (default-on).** An index line below the region, the
+`- [Title](file.md) — hook` pointer Claude Code writes for each memory file,
+is moved (never deleted) to that project's append-only archive,
+`~/.particles/claude-code/projects/<project>/MEMORY.archive.md`, only while
+the region carries that file. Two things must hold in the same
+cycle:
+
+- the file's current content has been extracted, so a memory written in the
+  session that just ended keeps its pointer until a later cycle (usually the
+  nightly `memory consolidate`) has extracted it;
+- the region just rendered shows at least one belief that the current
+  version of the file states.
+
+When either stops holding, the pointer comes back below the region on the
+next cycle, taken from the archive. A pointer to a file you deleted does not
+come back.
+
+Pointers to your standing rules and to what Claude knows about you never
+fold. When the topic file's frontmatter `metadata.type` is `feedback` or
+`user`, its pointer stays in `MEMORY.md` whatever the region shows, and one
+an earlier version archived comes back on the next cycle. The region ranks
+beliefs by confidence, which does not keep a rule in view, and a rule out of
+view is a mistake repeated. The list is
+`agent_memory.projection.never_fold_types` in `config.yaml`; a file with no
+type folds as described above. Every other line below the region (an inline note, a heading, a
+pointer to a missing file) stays where it is, because the store records which
+file a belief came from but not which line. One pointer line,
+`*Older agent memories were consolidated…*`, marks that something was folded.
+The archive is itself harvested as corpus input, under that project's key,
+and a pointer that folds twice is archived once.
+
+Each SessionEnd record in `hooks.jsonl` says what happened: `folded`,
+`reinstated`, `fold_held` (the lines kept, counted by reason: `not-a-pointer`,
+`not-extracted`, `not-in-region`, `protected-type`) and the file's size
+(`memory_md_lines`, `memory_md_bytes`). Claude Code loads only the first 200 lines / 25 KB of
+`MEMORY.md`, and the index sits below the region, so `particles hook doctor`
+warns once the file passes 90 % of either limit. Opt out of the fold with
+`agent_memory.projection.fold_authored_lines: false` in `config.yaml`; with it
+off, nothing is folded and nothing is brought back.
 
 **Editing the manifest.** The region is driven by a standard projection
 manifest at `~/.particles/claude-code/memory.yaml`, yours to edit:
@@ -763,9 +822,9 @@ anything itself.
   uses the remote digest freely (read-only), but `session-end` **refuses to
   ship transcripts off-machine** unless you set
   `claude_code.harvest.allow_remote: true`; refusals are logged and the
-  catch-up sweep back-fills once enabled. The MEMORY.md re-render, utility
-  mining and the Stop-hook extraction ask need the store on the same machine
-  and are skipped against a remote engine; see
+  catch-up sweep back-fills once enabled. Against a remote engine the
+  MEMORY.md region is rendered by the engine and spliced on this machine.
+  Utility mining needs the store on the same machine and is skipped; see
   [Remote engine](../operator-guide/remote-engine.md#claude-code-hooks-against-a-remote-engine).
 - **Distill-then-redact.** Only the distilled rendering is deposited; tool
   results never are. The pattern redaction is best-effort defence in depth,

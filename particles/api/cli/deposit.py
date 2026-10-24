@@ -247,7 +247,7 @@ def deposit_cmd(
             )
             raise typer.Exit(1)
     try:
-        entry_id, snapshot_id, follow_targets = run(
+        entry_id, snapshot_id, follow_targets, unchanged = run(
             _deposit(
                 source,
                 deposited_by,
@@ -271,6 +271,14 @@ def deposit_cmd(
         raise typer.Exit(1)
     typer.echo(f"entry_id:    {entry_id}")
     typer.echo(f"snapshot_id: {snapshot_id}")
+    if unchanged:
+        # the latest snapshot already holds these bytes, so nothing
+        # was written and no extraction is owed.
+        typer.echo(
+            "unchanged:   the latest snapshot already holds this content; "
+            "nothing new to extract (re-extract with "
+            f"`particles reindex --entry-ids {entry_id}`)"
+        )
     if follow_targets:
         # surface every secondary entry the follow machinery
         # deposited so the operator sees what got added beyond the
@@ -293,7 +301,7 @@ async def _deposit(
     content_date: datetime | None = None,
     mutability: str | None = None,
     fetch_policy: str | None = None,
-) -> tuple[str, str, list[tuple[str, str, str]]]:
+) -> tuple[str, str, list[tuple[str, str, str]], bool]:
     backend = get_backend()
     if source.startswith("http://") or source.startswith("https://"):
         # a URL deposit's mutability and fetch policy come
@@ -331,7 +339,7 @@ async def _deposit(
             fetch_policy=fetch_policy,
         )
     follow_targets = [(f.entry_id, f.snapshot_id, f.uri) for f in outcome.follow_targets]
-    return outcome.entry_id, outcome.snapshot_id, follow_targets
+    return outcome.entry_id, outcome.snapshot_id, follow_targets, outcome.unchanged
 
 
 async def _deposit_text(

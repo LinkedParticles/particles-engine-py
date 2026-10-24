@@ -400,6 +400,35 @@ class TestParticleIdsForEntries:
         assert await get_particle_ids_for_entries(db_session, []) == set()
 
 
+class TestActiveParticleIdsForSnapshot:
+    """``get_active_particle_ids_for_snapshot`` — what an entry's snapshot currently states."""
+
+    @pytest.mark.asyncio
+    async def test_only_active_beliefs_anchored_to_that_snapshot(self, db_session: Any) -> None:
+        from sqlalchemy import update
+
+        from particles.store.particle_store import get_active_particle_ids_for_snapshot
+
+        def anchored(snapshot_id: str) -> Particle:
+            ref = ProvenanceRef(
+                type=ProvenanceRefType.SOURCE, corpus_entry_id="e1", snapshot_id=snapshot_id
+            )
+            return _particle().model_copy(update={"provenance": [ref]})
+
+        current, older, retired = anchored("s2"), anchored("s1"), anchored("s2")
+        for p in (current, older, retired):
+            await insert_particle(db_session, p)
+        await db_session.execute(
+            update(ParticleRow)
+            .where(ParticleRow.id == retired.id)
+            .values(status=Status.RETRACTED.value)
+        )
+
+        assert await get_active_particle_ids_for_snapshot(db_session, "e1", "s2") == [current.id]
+        assert await get_active_particle_ids_for_snapshot(db_session, "e1", "s1") == [older.id]
+        assert await get_active_particle_ids_for_snapshot(db_session, "e2", "s2") == []
+
+
 class TestGetActiveNarratives:
     """the NARRATIVE-only read the wiki exporter uses
     instead of paying a second full-store ACTIVE load."""

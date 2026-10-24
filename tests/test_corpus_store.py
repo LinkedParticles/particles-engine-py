@@ -32,6 +32,7 @@ from particles.corpus.store import (
     get_document_supersession_map,
     get_entry_source_facts,
     get_entry_uri_map,
+    get_newest_response_snapshot,
     get_snapshot_source_meta,
     get_source_types_for_entries,
     resolve_snapshot_for_blob,
@@ -105,6 +106,48 @@ def _snap(snapshot_id: str, content_hash: str, *, captured: datetime) -> Snapsho
         extraction_status=ExtractionStatus.COMPLETE,
         warc_record_type=WarcRecordType.RESPONSE,
     )
+
+
+class TestGetNewestResponseSnapshot:
+    """The fold test's "has the file as it is now been extracted?" read."""
+
+    @pytest.mark.asyncio
+    async def test_a_newer_pending_snapshot_is_the_answer(self, db_session: AsyncSession) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        db_session.add(CorpusEntryRow.from_model(_entry("entry-1", "file:///m/topic.md")))
+        db_session.add(SnapshotRow.from_model(_snap("s-old", "a" * 64, captured=base), "entry-1"))
+        pending = _snap("s-new", "b" * 64, captured=base + timedelta(days=1))
+        pending.extraction_status = ExtractionStatus.PENDING
+        db_session.add(SnapshotRow.from_model(pending, "entry-1"))
+        await db_session.commit()
+
+        assert await get_newest_response_snapshot(db_session, "entry-1") == (
+            "s-new",
+            ExtractionStatus.PENDING,
+        )
+
+    @pytest.mark.asyncio
+    async def test_revisits_and_collapsed_snapshots_are_skipped(
+        self, db_session: AsyncSession
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        db_session.add(CorpusEntryRow.from_model(_entry("entry-1", "file:///m/topic.md")))
+        db_session.add(SnapshotRow.from_model(_snap("s-1", "a" * 64, captured=base), "entry-1"))
+        revisit = _snap("s-2", "a" * 64, captured=base + timedelta(days=1))
+        revisit.warc_record_type = WarcRecordType.REVISIT
+        db_session.add(SnapshotRow.from_model(revisit, "entry-1"))
+        collapsed = SnapshotRow.from_model(
+            _snap("s-3", "c" * 64, captured=base + timedelta(days=2)), "entry-1"
+        )
+        collapsed.superseded_by_snapshot_id = "s-1"
+        db_session.add(collapsed)
+        await db_session.commit()
+
+        assert await get_newest_response_snapshot(db_session, "entry-1") == (
+            "s-1",
+            ExtractionStatus.COMPLETE,
+        )
+        assert await get_newest_response_snapshot(db_session, "no-such-entry") is None
 
 
 class TestResolveSnapshotForBlob:

@@ -115,7 +115,18 @@ def import_cmd(
     run(_import(bundle, store))
 
 
+def _echo_dropped_keys(dropped_keys: dict[str, int]) -> None:
+    """Name the keys a newer schema minor carried that this SDK does not know."""
+    if dropped_keys:
+        listed = ", ".join(f"{key} ({count})" for key, count in sorted(dropped_keys.items()))
+        typer.echo(
+            "Keys this SDK does not know were dropped from the imported particles "
+            f"(written by a newer schema minor): {listed}."
+        )
+
+
 async def _import(bundle: Path, store: str) -> None:
+    from particles.interchange.codec import IncompatibleSchemaVersionError
     from particles.interchange.store import import_store_bundle
 
     try:
@@ -124,12 +135,17 @@ async def _import(bundle: Path, store: str) -> None:
         typer.echo(f"Import failed: {exc}", err=True)
         raise typer.Exit(1) from exc
     async with session_scope(store) as session:
-        summary = await import_store_bundle(session, files)
+        try:
+            summary = await import_store_bundle(session, files)
+        except IncompatibleSchemaVersionError as exc:
+            typer.echo(f"Import failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
         await session.commit()
     typer.echo(
         f"Imported {summary.imported} particle(s), {summary.subjects_created} new subject(s), "
         f"{summary.dropped} dropped."
     )
+    _echo_dropped_keys(summary.dropped_keys)
 
 
 @interchange_app.command("restore")
@@ -152,6 +168,7 @@ def restore_cmd(
 
 
 async def _restore(bundle: Path, store: str) -> None:
+    from particles.interchange.codec import IncompatibleSchemaVersionError
     from particles.interchange.store import RestoreError, restore_store_bundle
 
     try:
@@ -166,7 +183,7 @@ async def _restore(bundle: Path, store: str) -> None:
     async with session_scope(store) as session:
         try:
             summary = await restore_store_bundle(session, files)
-        except RestoreError as exc:
+        except (RestoreError, IncompatibleSchemaVersionError) as exc:
             typer.echo(f"Restore failed: {exc}", err=True)
             raise typer.Exit(1) from exc
         await session.commit()
@@ -174,3 +191,4 @@ async def _restore(bundle: Path, store: str) -> None:
         f"Restored {summary.particles} particle(s) and {summary.subjects} subject(s) "
         "(origin ids preserved)."
     )
+    _echo_dropped_keys(summary.dropped_keys)

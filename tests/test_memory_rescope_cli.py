@@ -180,6 +180,73 @@ class TestRescopeVerb:
         assert asyncio.run(_tags(page)) == ["web"]
 
 
+async def _agent_deposit(text: str, who: str) -> str:
+    from particles.corpus.deposit import deposit_text
+    from particles.db import session_scope
+
+    async with session_scope(write=True) as session:
+        entry_id, _ = await deposit_text(session, text, who, "CONVERSATION", [], author_id=who)
+        await session.commit()
+    return entry_id
+
+
+class TestMarkAgentWrites:
+    def test_preview_then_mark_then_unmark(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        agent = asyncio.run(_agent_deposit("an agent's note", "mcp:claude-code"))
+        asyncio.run(_agent_deposit("a renamed agent's note", "mcp:old-name"))
+
+        dry = runner.invoke(app, ["memory", "rescope", "--mark-agent-writes", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "would mark 1 keyless entry" in dry.output
+        assert "by mcp:old-name (not matched)" in dry.output
+        assert "--identity NAME" in dry.output
+        assert asyncio.run(_tags(agent)) == []
+
+        real = runner.invoke(
+            app, ["memory", "rescope", "--mark-agent-writes", "--identity", "mcp:old-name"]
+        )
+        assert real.exit_code == 0, real.output
+        assert "marked 2 keyless entries" in real.output
+        assert asyncio.run(_tags(agent)) == ["scope:unattributed"]
+
+        undone = runner.invoke(app, ["memory", "rescope", "--unmark", agent])
+        assert undone.exit_code == 0, undone.output
+        assert asyncio.run(_tags(agent)) == []
+
+    def test_the_marking_flags_are_separate_steps(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        both = runner.invoke(app, ["memory", "rescope", "--mark-agent-writes", "--unmark", "e"])
+        assert both.exit_code == 2 and "separate steps" in both.output
+        stray = runner.invoke(app, ["memory", "rescope", "--identity", "x"])
+        assert stray.exit_code == 2 and "only with --mark-agent-writes" in stray.output
+
+
+class TestWithdrawVerb:
+    def test_the_last_key_is_refused_then_left_unattributed(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        entry = asyncio.run(_deposit("claude-code://session/w", ["claude-code", "project:-a"]))
+
+        refused = runner.invoke(app, ["memory", "rescope", "--withdraw", entry, "-a"])
+        assert refused.exit_code == 2 and "last project key" in refused.output
+        assert asyncio.run(_tags(entry)) == ["claude-code", "project:-a"]
+
+        done = runner.invoke(
+            app, ["memory", "rescope", "--withdraw", entry, "-a", "--leave-unattributed"]
+        )
+        assert done.exit_code == 0, done.output
+        assert asyncio.run(_tags(entry)) == ["claude-code"]
+
+    def test_leave_unattributed_needs_withdraw(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        result = runner.invoke(app, ["memory", "rescope", "--leave-unattributed"])
+        assert result.exit_code == 2 and "only with --withdraw" in result.output
+
+
 class TestWidenVerb:
     def test_widen_and_revoke_a_source(self, runner: CliRunner, cli_db: Path, home: Path) -> None:
         entry_id = asyncio.run(_deposit("claude-code://session/w", ["claude-code", "project:-b"]))

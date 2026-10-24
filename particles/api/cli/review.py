@@ -16,7 +16,7 @@ from particles.api.cli._progress import confirm
 from particles.api.client import get_backend
 from particles.core.schema import Particle, ResolutionAction
 from particles.db import session_scope
-from particles.operations.review import prior_reviews
+from particles.operations.review import ResolutionRefused, prior_reviews
 
 
 @app.command("review")
@@ -91,15 +91,19 @@ def review_cmd(
             typer.echo(f"Dry run: would apply {bulk_action} to {len(particles_list)} conflicts.")
             return
         typer.echo(f"Applying {bulk_action} to {len(particles_list)} conflicts…")
-        succeeded = failed = 0
+        succeeded = refused = failed = 0
         for p in particles_list:
             try:
                 run(get_backend().review_resolve(p.id, bulk_action, reviewer_id, domain, note))
                 succeeded += 1
+            except ResolutionRefused as exc:
+                typer.echo(f"  Skipped {p.id[:8]}…: {exc}", err=True)
+                refused += 1
             except Exception as exc:
                 typer.echo(f"  Failed {p.id[:8]}…: {exc}", err=True)
                 failed += 1
-        typer.echo(f"Done: {succeeded} resolved, {failed} failed.")
+        skipped = f", {refused} refused" if refused else ""
+        typer.echo(f"Done: {succeeded} resolved{skipped}, {failed} failed.")
         return
 
     # Single-particle listing

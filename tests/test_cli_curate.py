@@ -126,6 +126,56 @@ def queue() -> Any:
 # ---------------------------------------------------------------------------
 
 
+class TestCardOption:
+    """one card by key, every belief briefed."""
+
+    def test_card_takes_no_other_option(self, cli_db: Path, queue: AsyncMock) -> None:
+        result = runner.invoke(app, ["curate", "--card", "subjectless_source:e", "--kind", "stale"])
+        assert result.exit_code == 2
+        assert "--card takes no other option" in _plain(result.output)
+
+    def test_unknown_card_fails_plainly(self, cli_db: Path) -> None:
+        with patch(
+            "particles.operations.curation.get_curation_card", new=AsyncMock(return_value=None)
+        ):
+            result = runner.invoke(app, ["curate", "--card", "subjectless_source:e"])
+        assert result.exit_code == 1
+        assert "No open card with key" in _plain(result.output)
+
+    def test_source_card_lists_each_beliefs_own_key(self, cli_db: Path) -> None:
+        card = _card(
+            CardKind.SUBJECTLESS_SOURCE,
+            corpus_entry_id="e-1",
+            particle_ids=["p-1", "p-2"],
+            particles=[_brief("p-1", "First narration."), _brief("p-2", "Second narration.")],
+            diagnostic="2 belief(s) with no subject from claude-code://session/x",
+        )
+        with patch(
+            "particles.operations.curation.get_curation_card", new=AsyncMock(return_value=card)
+        ):
+            result = runner.invoke(
+                app, ["curate", "--card", "subjectless_source:e-1"], catch_exceptions=False
+            )
+        assert result.exit_code == 0
+        assert "key: no_subject:p-1" in result.output
+        assert "key: no_subject:p-2" in result.output
+        assert "key: subjectless_source:e-1" in result.output
+        assert "more:" not in result.output
+
+    def test_queue_points_at_the_unsampled_beliefs(self, cli_db: Path, queue: AsyncMock) -> None:
+        card = _card(
+            CardKind.SUBJECTLESS_SOURCE,
+            corpus_entry_id="e-1",
+            particle_ids=["p-1", "p-2", "p-3", "p-4"],
+            particles=[_brief(f"p-{i}", f"Narration {i}.") for i in (1, 2, 3)],
+        )
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        result = runner.invoke(app, ["curate"], catch_exceptions=False)
+        # Every sampled brief is listed, not only the first two.
+        assert all(f"Narration {i}." in result.output for i in (1, 2, 3))
+        assert "and 1 more: particles curate --card subjectless_source:e-1" in result.output
+
+
 class TestKindOption:
     def test_unknown_kind_is_rejected_before_the_store_is_touched(
         self, cli_db: Path, queue: AsyncMock

@@ -63,6 +63,7 @@ from particles.api.cli._progress import (
     set_heartbeat_status,
 )
 from particles.core.progress import ProgressEvent
+from particles.core.schema import ObserverScopeNote
 from particles.db import DEFAULT_STORE, session_scope
 from particles.operations.utility_feedback import CLI_ACTOR
 from particles.operations.utility_sweep import (
@@ -265,6 +266,46 @@ def rescope_cmd(
             "of the current directory."
         ),
     ),
+    mark_agent_writes: bool = typer.Option(
+        False,
+        "--mark-agent-writes",
+        help=(
+            "Mark each existing keyless agent write `scope:unattributed`, so it reads as "
+            "unattributed rather than global, then stop. Each mark is recorded."
+        ),
+    ),
+    identity: list[str] = typer.Option(
+        [],
+        "--identity",
+        metavar="NAME",
+        help=(
+            "With --mark-agent-writes, also treat this depositor as an agent (repeatable). "
+            "The two configured asserter identities are always included."
+        ),
+    ),
+    unmark: str | None = typer.Option(
+        None,
+        "--unmark",
+        metavar="ENTRY_ID",
+        help="Reverse one recorded --mark-agent-writes mark, then stop.",
+    ),
+    withdraw: tuple[str, str] | None = typer.Option(
+        None,
+        "--withdraw",
+        metavar="ENTRY_ID KEY",
+        help=(
+            "Remove one wrong project key from one entry, then stop. Refuses the entry's "
+            "last key unless --leave-unattributed."
+        ),
+    ),
+    leave_unattributed: bool = typer.Option(
+        False,
+        "--leave-unattributed",
+        help=(
+            "With --withdraw, allow the last key to go: the entry is left in view for no "
+            "project, never global."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report what would change; write nothing."
     ),
@@ -287,9 +328,106 @@ def rescope_cmd(
     `--default-key`), and entries whose every key names a project that no longer
     exists. `particles init claude-code` runs it for you. Until it has run once,
     `claude_code.observer_scope: project` stays store-wide and says so.
+
+    Agent writes made with no project binding carry the `scope:unattributed`
+    marker, so they read as unattributed rather than global. Older
+    ones change only when you run `--mark-agent-writes`, which matches entries
+    by who deposited them and lists every depositor it did not match;
+    `--unmark` reverses one mark. `--default-key` never attributes a marked
+    entry, since its project is not known: `--assign` does.
+
+    A wrong key is repaired with `--withdraw ENTRY_ID KEY`, recorded as its
+    own event. It never removes an entry's last key unless you also pass
+    `--leave-unattributed`, and even then the entry is left in view for no
+    project rather than made global. Putting a belief in view everywhere is
+    `particles memory widen`.
     """
     configure_output(verbose, debug, quiet, progress)
+    modes = [assign is not None, mark_agent_writes, unmark is not None, withdraw is not None]
+    if sum(modes) > 1:
+        typer.echo(
+            "Error: --assign, --mark-agent-writes, --unmark and --withdraw are separate steps.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if identity and not mark_agent_writes:
+        typer.echo("Error: --identity applies only with --mark-agent-writes.", err=True)
+        raise typer.Exit(2)
+    if leave_unattributed and withdraw is None:
+        typer.echo("Error: --leave-unattributed applies only with --withdraw.", err=True)
+        raise typer.Exit(2)
+    if withdraw is not None:
+        run(_withdraw(withdraw, leave_unattributed=leave_unattributed, store=store))
+        return
+    if mark_agent_writes:
+        run(_mark_agent_writes(identity, dry_run=dry_run, store=store))
+        return
+    if unmark is not None:
+        run(_unmark(unmark, store=store))
+        return
     run(_rescope(assign=assign, default_key=default_key, dry_run=dry_run, store=store))
+
+
+async def _mark_agent_writes(extra: list[str], *, dry_run: bool, store: str) -> None:
+    from particles.operations.observer_scope import agent_identities, mark_agent_writes
+
+    identities = agent_identities(extra)
+    async with session_scope(store, write=not dry_run) as session:
+        report = await mark_agent_writes(
+            session, identities=identities, dry_run=dry_run, actor=CLI_ACTOR
+        )
+        if not dry_run:
+            await session.commit()
+    verb = "would mark" if dry_run else "marked"
+    typer.echo(
+        f"Agent writes in '{store}': {verb} {len(report.marked)} keyless "
+        f"entr{'y' if len(report.marked) == 1 else 'ies'} `scope:unattributed`."
+    )
+    typer.echo(f"  Agent identities: {', '.join(identities)}")
+    for who, count in sorted(report.conversation_by_depositor.items()):
+        matched = "matched" if who in identities else "not matched"
+        typer.echo(f"  {count:5d}  keyless conversation entries by {who} ({matched})")
+    if report.unmatched:
+        typer.echo("  A depositor you recognise as an agent can be added with `--identity NAME`.")
+    if dry_run:
+        typer.echo("\nDry run: nothing was written.")
+
+
+async def _withdraw(target: tuple[str, str], *, leave_unattributed: bool, store: str) -> None:
+    from particles.operations.observer_scope import withdraw_key
+
+    entry_id, key = target[0], _resolve_key_argument(target[1])
+    async with session_scope(store, write=True) as session:
+        try:
+            changed = await withdraw_key(
+                session, entry_id, key, actor=CLI_ACTOR, leave_unattributed=leave_unattributed
+            )
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        await session.commit()
+    typer.echo(
+        f"Entry {entry_id} no longer carries project key {key}."
+        if changed
+        else f"Entry {entry_id} did not carry project key {key}."
+    )
+
+
+async def _unmark(entry_id: str, *, store: str) -> None:
+    from particles.operations.observer_scope import unmark
+
+    async with session_scope(store, write=True) as session:
+        try:
+            changed = await unmark(session, entry_id, actor=CLI_ACTOR)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        await session.commit()
+    typer.echo(
+        f"Entry {entry_id} is no longer marked unattributed."
+        if changed
+        else f"Entry {entry_id} was already unmarked."
+    )
 
 
 def _claude_projects_root() -> Path:
@@ -369,6 +507,12 @@ async def _rescope(
         typer.echo(
             "  `--assign ENTRY_ID KEY` attributes one; `--default-key KEY` (or `.`) "
             "attributes them all."
+        )
+    if report.marked:
+        typer.echo(
+            f"\n{len(report.marked)} agent write{' is' if len(report.marked) == 1 else 's are'} "
+            "marked unattributed, so no project sees them; `--assign ENTRY_ID KEY` "
+            "or `particles memory widen --entry` places one."
         )
     if dry_run:
         typer.echo("\nDry run: nothing was written.")
@@ -548,6 +692,49 @@ def sweep_rank_lift_cmd(
             "is unsatisfiable at large N on any store with over-extraction."
         ),
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        metavar="KEY",
+        help=(
+            "Rank the head a session in this project sees: global beliefs plus the "
+            "project's own (gate B). `.` means the current directory's project."
+        ),
+    ),
+    off_head_cohort: bool = typer.Option(
+        False,
+        "--off-head-cohort",
+        help=(
+            "Judge the configured lambda the way the nightly monitor does, "
+            "with no targets to name: the head must hold the beliefs applied outside "
+            "it, and keep room for beliefs with no use yet. Prints the verdict and "
+            "both bands for the view."
+        ),
+    ),
+    min_sessions: int | None = typer.Option(
+        None,
+        "--min-sessions",
+        help=(
+            "With --off-head-cohort: sessions a belief must have been applied in, "
+            "outside the head, to join the cohort. Default utility.monitor.min_sessions."
+        ),
+    ),
+    capture: float | None = typer.Option(
+        None,
+        "--capture",
+        help=(
+            "With --off-head-cohort: the share of the cohort the head must hold. "
+            "Default utility.monitor.capture."
+        ),
+    ),
+    entry_share: float | None = typer.Option(
+        None,
+        "--entry-share",
+        help=(
+            "With --off-head-cohort: the share of head slots that must hold beliefs "
+            "with no use yet. Default utility.monitor.entry_share."
+        ),
+    ),
     format_: str = typer.Option(
         "markdown", "--format", help="Output format: markdown (default) or json."
     ),
@@ -567,8 +754,27 @@ def sweep_rank_lift_cmd(
     the sweep reports where they land, how many head slots hold distinct
     content, the resulting band per surface, and whether the configured value
     is inside it.
+
+    `--off-head-cohort` reads the configured value the way the nightly
+    consolidation monitor does, so a verdict it recorded reproduces
+    by hand.
     """
     configure_output(verbose, debug, quiet, progress)
+    if not off_head_cohort and any(v is not None for v in (min_sessions, capture, entry_share)):
+        typer.echo(
+            "Error: --min-sessions, --capture and --entry-share need --off-head-cohort.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if min_sessions is not None and min_sessions < 1:
+        typer.echo("Error: --min-sessions must be at least 1.", err=True)
+        raise typer.Exit(2)
+    if capture is not None and not 0.0 < capture <= 1.0:
+        typer.echo("Error: --capture must be in (0, 1].", err=True)
+        raise typer.Exit(2)
+    if entry_share is not None and not 0.0 <= entry_share < 1.0:
+        typer.echo("Error: --entry-share must be in [0, 1).", err=True)
+        raise typer.Exit(2)
     if format_ not in _FORMATS:
         typer.echo(f"Error: --format must be one of: {', '.join(_FORMATS)}.", err=True)
         raise typer.Exit(2)
@@ -584,6 +790,19 @@ def sweep_rank_lift_cmd(
     if any(n < 1 for n in head):
         typer.echo("Error: --head must be at least 1.", err=True)
         raise typer.Exit(2)
+    if off_head_cohort:
+        run(
+            _monitor_rank_lift(
+                store=store,
+                heads=list(head),
+                min_sessions=min_sessions,
+                capture=capture,
+                entry_share=entry_share,
+                fmt=format_,
+                project=_resolve_key_argument(project) if project else None,
+            )
+        )
+        return
     run(
         _sweep_rank_lift(
             store=store,
@@ -593,6 +812,7 @@ def sweep_rank_lift_cmd(
             grid_steps=grid_steps,
             distinct_ratio=distinct_ratio,
             fmt=format_,
+            project=_resolve_key_argument(project) if project else None,
         )
     )
 
@@ -606,11 +826,13 @@ async def _sweep_rank_lift(
     grid_steps: int,
     distinct_ratio: float,
     fmt: str,
+    project: str | None = None,
 ) -> None:
     import json
 
     from particles.config import get_config
     from particles.operations.utility_sweep import (
+        head_population,
         render_rank_lift_sweep,
         sweep_store_rank_lift,
     )
@@ -625,6 +847,7 @@ async def _sweep_rank_lift(
         # Resolve before scoring: an unresolvable target must fail fast and
         # loudly, not ride through the sweep as a rank-0 (see the helper).
         target_ids = await _resolve_target_ids(session, targets, store=store)
+        population, scope_note = await head_population(session, project)
         sweep = await sweep_store_rank_lift(
             session,
             head_sizes=heads,
@@ -632,12 +855,14 @@ async def _sweep_rank_lift(
             grid_max=grid_max,
             grid_steps=grid_steps,
             distinct_ratio=distinct_ratio,
+            particles=population,
         )
 
     if fmt == "json":
         typer.echo(
             json.dumps(
                 {
+                    "observer": scope_note.model_dump() if scope_note else None,
                     "scored": sweep.scored,
                     "configured_rank_lift": sweep.configured_rank_lift,
                     "configured_admissible": sweep.configured_admissible,
@@ -676,7 +901,57 @@ async def _sweep_rank_lift(
             )
         )
         return
+    _echo_sweep_scope(scope_note)
     typer.echo(render_rank_lift_sweep(sweep))
+
+
+async def _monitor_rank_lift(
+    *,
+    store: str,
+    heads: list[int],
+    min_sessions: int | None,
+    capture: float | None,
+    entry_share: float | None,
+    fmt: str,
+    project: str | None,
+) -> None:
+    import json
+
+    from particles.core.scoring.utility import MonitorThresholds
+    from particles.operations.rank_lift_monitor import (
+        render_rank_lift_monitor,
+        run_rank_lift_monitor,
+        thresholds_from_config,
+    )
+
+    configured, _sessions = thresholds_from_config()
+    thresholds = MonitorThresholds(
+        capture=capture if capture is not None else configured.capture,
+        min_cohort=configured.min_cohort,
+        entry_share=entry_share if entry_share is not None else configured.entry_share,
+    )
+    async with session_scope(store) as session:
+        report = await run_rank_lift_monitor(
+            session,
+            run_id="manual",
+            thresholds=thresholds,
+            min_sessions=min_sessions,
+            head_sizes=heads or None,
+            only=project,
+        )
+    if fmt == "json":
+        typer.echo(json.dumps(report.payload(), indent=2))
+        return
+    typer.echo(render_rank_lift_monitor(report))
+
+
+def _echo_sweep_scope(note: ObserverScopeNote | None) -> None:
+    """The head a ``--project`` sweep ranked, said before its report."""
+    if note is None:
+        return
+    from particles.render.markdown import observer_scope_line
+
+    typer.echo(observer_scope_line(note) + "\n")
 
 
 async def _resolve_target_ids(
@@ -1324,6 +1599,15 @@ def sweep_owner_lift_cmd(
             "behaves as a threshold over the whole cohort rather than a graded lift."
         ),
     ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        metavar="KEY",
+        help=(
+            "Rank the head a session in this project sees: global beliefs plus the "
+            "project's own (gate B). `.` means the current directory's project."
+        ),
+    ),
     format_: str = typer.Option(
         "markdown", "--format", help="Output format: markdown (default) or json."
     ),
@@ -1373,6 +1657,7 @@ def sweep_owner_lift_cmd(
             min_owner_in_head=min_owner_in_head,
             max_owner_share=max_owner_share,
             fmt=format_,
+            project=_resolve_key_argument(project) if project else None,
         )
     )
 
@@ -1387,11 +1672,13 @@ async def _sweep_owner_lift(
     min_owner_in_head: int,
     max_owner_share: float,
     fmt: str,
+    project: str | None = None,
 ) -> None:
     import json
 
     from particles.config import get_config
     from particles.operations.utility_sweep import (
+        head_population,
         render_owner_rank_lift_sweep,
         sweep_store_owner_rank_lift,
     )
@@ -1410,6 +1697,7 @@ async def _sweep_owner_lift(
                 "stay in the head."
             ),
         )
+        population, scope_note = await head_population(session, project)
         sweep = await sweep_store_owner_rank_lift(
             session,
             head_sizes=heads,
@@ -1418,12 +1706,14 @@ async def _sweep_owner_lift(
             grid_steps=grid_steps,
             min_owner_in_head=min_owner_in_head,
             max_owner_share=max_owner_share,
+            particles=population,
         )
 
     if fmt == "json":
         typer.echo(
             json.dumps(
                 {
+                    "observer": scope_note.model_dump() if scope_note else None,
                     "scored": sweep.scored,
                     "owner_population": sweep.owner_population,
                     "configured_rank_lift": sweep.configured_rank_lift,
@@ -1463,4 +1753,5 @@ async def _sweep_owner_lift(
             )
         )
         return
+    _echo_sweep_scope(scope_note)
     typer.echo(render_owner_rank_lift_sweep(sweep))

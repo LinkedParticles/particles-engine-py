@@ -110,6 +110,11 @@ $ particles deposit [OPTIONS] [source]
 
 Extract particles from a corpus entry, or all PENDING entries at once.
 
+With ``--all-pending`` the run prints its estimate first and asks before
+spending above ``extraction.confirm_call_threshold`` calls. ``--budget-usd``
+stops it between snapshots and reports what is left; edits of sources the
+store has already read are extracted before sources it has never read.
+
 **Usage**:
 
 ```console
@@ -126,6 +131,12 @@ $ particles extract [OPTIONS] [entry_id]
 * `--agent-id <str>`: Asserted-by agent ID  [default: cli-user]
 * `--all-pending`: Extract all PENDING snapshots in deposit order
 * `--tag <str>`: With --all-pending, extract only snapshots of corpus entries that carry this tag (for example memory-file for Claude Code memory files).
+* `--retry-refused`: With --all-pending, also send the sources the extraction model refused, which a run otherwise holds until the model or the content changes or extraction.refusal_retry_days passes.
+* `--force`: With --snapshot-id, extract a snapshot older than the source's current version. Its claims the current version does not state are retired again at once, and for a source recorded as no longer found, the claims its deletion retired come back.
+* `--estimate`: With --all-pending, print what the run would read and cost, then exit without a model call. Needs no API key.
+* `-y, --yes`: With --all-pending, skip the question asked above extraction.confirm_call_threshold.
+* `--budget-usd <float range>`: With --all-pending, stop before a snapshot whose estimate would carry the run's spend past this many US dollars (list price). What is left stays pending.  [x>=0.0]
+* `--extraction-model <str>`: Extract this run with another model, as provider:model (for example anthropic:claude-haiku-5-5). Routes extraction and subject resolution only.
 * `-v, --verbose`: Show quality notes and INFO logs
 * `--debug`: Show raw LLM prompt/response and DEBUG logs
 * `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
@@ -151,7 +162,7 @@ $ particles query [OPTIONS] [question]
 * `--min-confidence <float>`: Minimum confidence threshold  [default: 0.0]
 * `--audience <str>`: GENERAL, EXPERT, or REGULATORY  [default: GENERAL]
 * `--top-k <int>`: Number of particles to retrieve  [default: 40]
-* `--subject <str>`: Filter to particles about this subject ID
+* `--subject <str>`: Filter to particles about this subject: an ID, an ID prefix, or a name or alias
 * `--tag <str>`: Filter by taxonomy tag (subtree-expanded; repeatable)
 * `--include-ancestors`: Match particles tagged with a broader ancestor of each --tag as well (up-expansion over taxonomy parent links)
 * `--show-particles`: Print retrieved particles with scores before the answer
@@ -267,6 +278,7 @@ $ particles reindex [OPTIONS]
 * `--extractor-id <str>`: Extractor name (e.g. github-repo-extractor): re-extract all of its particles regardless of version. Useful when a shared upstream change (e.g. a prompt revision in general.py) affects delegating extractors.
 * `--provider-model <str>`: "<provider>:<model>" pairing (e.g. openai:gpt-5.6-luna): re-extract every particle that pairing produced. The handle for undoing an uncalibrated provider swap. Matched exactly, and the scope unit is the snapshot, so a snapshot with a model-mixed population is re-extracted whole. Particles with no recorded pairing never match.
 * `--no-failed / --no-no-failed`: Skip FAILED snapshot entries. Applies to auto-discovery only; --entry-ids resolves each entry to its latest COMPLETE snapshot.  [default: no-no-failed]
+* `--include-schema-stale`: Add the snapshots whose particles carry an older minor of the schema version to the scope. Off by default, because after a schema bump the whole store qualifies and the sweep is a paid run; the plan line reports how many particles the flag would add. Applies to auto-discovery only. Particles a newer SDK wrote are never re-extracted.
 * `--dry-run`: Print the work plan (entries / snapshots / particles in scope, with per-snapshot counts and any known-missing blobs) and exit without extracting: zero LLM calls, zero writes.
 * `--estimate`: Measure what an --extractor-version reindex would change before running it: re-extract a seeded sample of the snapshots it would sweep, judge each sample's new claims against its stored ones, and report the projected share of changed snapshots and the projected cost of the full sweep. Spends only on the sample and writes nothing. Prints the plan and asks before spending; a non-interactive run needs --yes. Local store only.
 * `--yes`: With --estimate: spend on the sample without asking.
@@ -563,11 +575,11 @@ Manage subjects (canonical real-world entities).
 
     particles subjects list [--order name|degree] [--phantoms-only]
     particles subjects search QUERY
-    particles subjects show ID
+    particles subjects show ID|NAME
     particles subjects alias ID NAME [NAME ...]
     particles subjects confirm SUBJECT_ID NAMESPACE:ID
     particles subjects unlink SUBJECT_ID NAMESPACE:ID
-    particles subjects merge SOURCE_ID TARGET_ID [--dry-run]
+    particles subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]
     particles subjects delete SUBJECT_ID [--force]
     particles subjects gc [--dry-run]          (alias: prune-empty)
     particles subjects set-class SUBJECT_ID CLASS   (e.g. nmo:NumismaticObject)
@@ -575,6 +587,9 @@ Manage subjects (canonical real-world entities).
         (--new-name "Applied Optoelectronics" | --new-external-id wikidata:Q30297735) \
         [--dry-run]
     particles subjects relink-gated [--tier N ...] [--sample N --seed S] [--apply]
+    particles subjects rebuild-aliases [--check]
+    particles subjects fold-artifacts [--repo DIR] [--namespace KEY] [--apply]
+    particles subjects fold-artifacts --undo EVENT_ID
 
 **Usage**:
 
@@ -584,22 +599,27 @@ $ particles subjects [OPTIONS] [action] [rest]...
 
 **Arguments**:
 
-* `action`: Action: list, search, show, alias, confirm, unlink, merge, split, delete, gc, set-class, fix-labels, find-duplicates, relink-gated  [default: list]
+* `action`: Action: list, search, show, alias, confirm, unlink, merge, split, delete, gc, set-class, fix-labels, find-duplicates, relink-gated, rebuild-aliases, fold-artifacts  [default: list]
 * `rest...`: Arguments for the chosen action
 
 **Options**:
 
 * `--dry-run`: Preview merge/split/gc without committing
+* `-y, --yes`: merge only: skip the confirmation prompt
 * `--force`: delete only: remove a non-phantom subject (one with ACTIVE particles)
 * `--phantoms-only`: list only: restrict to phantom subjects (zero ACTIVE particles)
 * `--order <str>`: list only: 'name' (alphabetical) or 'degree' (most ACTIVE linked particles first)  [default: name]
 * `-p, --particle <str>`: Particle ID to split off from the source (split only; repeat for multiple)
 * `--new-name <str>`: Approximate name for the new Subject (split only). Canonicalised via the resolver.
 * `--new-external-id <str>`: Authoritative external identifier for the new Subject (split only), e.g. wikidata:Q30297735. Skips resolver search; pulls metadata directly.
-* `--apply`: relink-gated only: write the links. Without it the run only reports.
+* `--apply`: relink-gated and fold-artifacts only: write the links or merges. Without it the run only reports.
 * `--tier <int>`: relink-gated only: a recovery tier to use (1 record, 2 structured claim, 3 backticks). Repeat for several. Default: subject_gate.relink_tiers.
 * `--sample <int range>`: relink-gated only: print this many planned relinks, for a precision check.  [default: 0; x>=0]
 * `--seed <int>`: relink-gated only: the seed that picks the --sample relinks.  [default: 0]
+* `--check`: rebuild-aliases only: report how the alias index differs from a rebuild, change nothing, and exit 1 when it does.
+* `--namespace <str>`: fold-artifacts only: the project key to fold. Defaults to the key of the --repo checkout.
+* `--repo <path>`: fold-artifacts only: a git checkout of the project. Its file list decides which bare names, partial paths and module names fold. Without it only absolute paths fold.
+* `--undo <str>`: fold-artifacts only: reverse the fold that recorded this event id.
 * `--help`: Show this message and exit.
 
 ## `particles benchmark`
@@ -1507,13 +1527,14 @@ $ particles curate [OPTIONS] COMMAND [ARGS]...
 **Options**:
 
 * `-n, --limit <int>`: Cap the cards shown (default: curation.session_size).
-* `-k, --kind <str>`: Restrict to one card kind: stale, retraction_cascade, broken_provenance, confidence_decay, recency_decay, contradiction, contested, no_subject, gated_subjects, duplicate_pair, uncited_url, failed_snapshots, proposed_abstraction, stale_basis, inconsistency, demotion.
+* `-k, --kind <str>`: Restrict to one card kind: stale, retraction_cascade, broken_provenance, confidence_decay, recency_decay, contradiction, contested, no_subject, gated_subjects, subjectless_source, duplicate_pair, uncited_url, failed_snapshots, refused_snapshots, proposed_abstraction, stale_basis, inconsistency, demotion, rank_lift.
 * `--semantic`: Run the LLM-assisted finders (semantic contradiction).
 * `--refresh`: Rebuild the card collection before showing it. Slow: the structural finders re-run store-wide. Contradiction cards carry forward from the last census unless --semantic re-probes them. Run this once on a store with no collection yet; the nightly `memory consolidate` does it for you after that.
 * `--no-snapshot`: Bypass the persisted collection entirely and run the finders for this invocation without caching the result.
 * `--precision`: Instead of the queue, report how often it was right: per card kind, the cards acted on, dismissed, snoozed and never touched over a window, with the denominator. Read from the gesture log; nothing is stored. --kind narrows the table to one kind.
 * `--since <str>`: With --precision: the start of the window, as YYYY-MM-DD or an ISO timestamp (default: curation.precision_window_days before now).
 * `--format <str>`: With --precision: table (default) or json.  [default: table]
+* `--card <str>`: Show one open card by its key, with every belief it names, each with its own key. A subjectless_source card previews five of its beliefs in the queue; this lists them all.
 * `--verbose`
 * `--debug`
 * `--help`: Show this message and exit.
@@ -2097,7 +2118,7 @@ $ particles hook [OPTIONS] COMMAND [ARGS]...
 
 * `session-start`: SessionStart hook: push the memory digest...
 * `session-end`: SessionEnd hook: harvest the session...
-* `stop`: Stop hook: ask the session's agent to...
+* `stop`: Retired Stop hook: exits 0 and does nothing.
 * `log`: Print recent hook-log entries (one JSONL...
 * `doctor`: Diagnose whether ``particles hook``...
 
@@ -2133,7 +2154,12 @@ $ particles hook session-end [OPTIONS]
 
 ### `particles hook stop`
 
-Stop hook: ask the session's agent to extract what it has not yet recorded.
+Retired Stop hook: exits 0 and does nothing.
+
+Agent-side extraction was deprecated and removed. An install
+made while it was on still runs this verb at the end of every turn until
+`particles init claude-code` is re-run, which drops the entry; until then
+it must not fail or block, so it returns at once.
 
 **Usage**:
 
@@ -2143,7 +2169,7 @@ $ particles hook stop [OPTIONS]
 
 **Options**:
 
-* `--store <str>`: Memory store the ask deposits into.  [required]
+* `--store <str>`: Ignored; kept for old installs.  [default: default]
 * `--help`: Show this message and exit.
 
 ### `particles hook log`
@@ -2208,10 +2234,21 @@ $ particles import [OPTIONS] COMMAND [ARGS]...
 Walk a Markdown vault and deposit every ``.md`` file as ``LOCAL_MARKDOWN``.
 
 Recursively walks ``vault_dir`` (skipping any path under a ``_`` or ``.``
-component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
-and registers each Markdown file in the corpus. Re-running on the same
-vault is idempotent: existing ``content_hash`` deduplication means
-unchanged files are not re-deposited.
+component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc., and
+any folder holding a Particles export) and registers each Markdown file in
+the corpus, identified by its path. Notes are living documents: each is
+deposited ``MUTABLE``, so after an edit the next ``extract`` retires the
+claims the note no longer states, with no model call. A note whose content
+matches its latest snapshot is reported unchanged and skipped, so only new
+and edited notes are queued for extraction.
+
+A previously imported note this walk no longer finds is recorded as no
+longer found, and the next ``extract`` retires its claims. Nothing is
+erased: the note's text stays in the corpus and ``query --as-of`` still
+shows what it said. The first deletion under a folder, and any walk that
+would record more than a quarter of its notes as gone, stop and list the
+notes (exit 1) until you pass ``--confirm-absent``. Run the import after
+your sync client reports it is idle.
 
 Typical onboarding workflow:
 
@@ -2233,6 +2270,9 @@ $ particles import vault [OPTIONS] {vault_dir}
 
 * `--deposited-by <str>`: Agent or operator ID.  [default: operator]
 * `--tags <str>`: Comma-separated tags applied to every deposited entry.
+* `--mutability <mutable|stable>`: Deposit this run's notes MUTABLE (the default: an edit retires what the note no longer says) or STABLE (an archive folder that will not change).
+* `--confirm-absent`: Record the notes this walk no longer finds even when a guard asks first: the first deletion under this folder, or a mass deletion.
+* `--keep-missing`: Record no deletion this run, for a partial checkout made on purpose.
 * `-v, --verbose`: Print per-file progress while depositing.
 * `--debug`: Show DEBUG-level logs from deposit/fetch.
 * `--help`: Show this message and exit.
@@ -2246,7 +2286,8 @@ Recursively walks ``project_dir`` for source files (``.py`` by default; see
 configured build/cache directories (``import_project.ignore_dirs``), but
 keeping underscore-prefixed module files (``__init__.py`` / ``_shared.py``).
 Re-running on the same tree is idempotent: ``content_hash`` deduplication
-means only changed files get a new snapshot.
+means only changed files get a new snapshot, and the rest are reported
+unchanged.
 
 Typical onboarding workflow:
 
@@ -2586,7 +2627,7 @@ $ particles links [OPTIONS] COMMAND [ARGS]...
 * `remove`: Remove a typed relation between two...
 * `list`: List all relations incident to a particle,...
 * `suggest`: Propose (and optionally resolve)...
-* `dedup`: Merge identical-content duplicate beliefs...
+* `dedup`: Merge duplicate beliefs into one survivor...
 * `unmerge`: Revert an exact-duplicate auto-merge,...
 
 ### `particles links add`
@@ -2661,7 +2702,7 @@ $ particles links suggest [OPTIONS]
 
 **Options**:
 
-* `--subject <str>`: Restrict to one Subject (ID or canonical name).
+* `--subject <str>`: Restrict to one Subject (ID, ID prefix, or name).
 * `--all`: Scan every Subject. Mutually exclusive with --subject.
 * `--threshold <float range>`: Cosine-similarity floor (default: links_suggest.candidate_threshold).  [0.0<=x<=1.0]
 * `--llm-judge`: Send each Subject's candidate cluster to the LLM for per-pair verdicts.
@@ -2672,13 +2713,18 @@ $ particles links suggest [OPTIONS]
 
 ### `particles links dedup`
 
-Merge identical-content duplicate beliefs into one survivor.
+Merge duplicate beliefs into one survivor.
 
 Exact content equality only, the same normalized key extract-time
 suppression uses (whitespace and trailing punctuation absorbed, wording and
 case preserved), so no similarity threshold and no LLM call.
 Redundant copies are linked CO_EVIDENTIAL to the survivor and superseded;
 nothing is ever deleted and the survivor is never mutated.
+
+With --reread the pairs are reworded copies of one passage of an
+append-only source. They merge only when the duplicate judge said they are
+one claim, no update reading said the value changed, and the pair's
+similarity stratum is admitted in links_suggest.reread.admitted.
 
 **Usage**:
 
@@ -2688,10 +2734,15 @@ $ particles links dedup [OPTIONS]
 
 **Options**:
 
-* `--subject <str>`: Restrict to one Subject (ID or canonical name). Default: whole store.
+* `--subject <str>`: Restrict to one Subject (ID, ID prefix, or name). Default: whole store.
 * `--apply`: Merge the groups. Requires links_suggest.auto_merge.enabled in config.yaml. Without this flag the run is a read-only census.
 * `--output-format <str>`: Output format: markdown or json  [default: markdown]
 * `--limit <int>`: Groups listed in markdown output (counts are always complete).  [default: 20]
+* `--reread`: Work on reworded copies of one passage of an append-only source (a transcript read twice before 1.166.0) instead of identical text. Without --judge or --apply the run is a read-only census with a cost estimate.
+* `--judge`: With --reread: ask the duplicate judge and the update reading for the pairs that have no recorded answer. Paid; prints the estimate and asks first. Writes recorded verdicts only.
+* `-y, --yes`: With --judge: skip the confirmation
+* `--sheet <path>`: With --reread: write every SAME verdict to this CSV for labelling.
+* `--labels <path>`: With --reread: score a labelled sheet against the admission bar.
 * `--help`: Show this message and exit.
 
 ### `particles links unmerge`
@@ -2916,6 +2967,19 @@ attribute (in view for **no** project until you `--assign` them or pass
 exists. `particles init claude-code` runs it for you. Until it has run once,
 `claude_code.observer_scope: project` stays store-wide and says so.
 
+Agent writes made with no project binding carry the `scope:unattributed`
+marker, so they read as unattributed rather than global. Older
+ones change only when you run `--mark-agent-writes`, which matches entries
+by who deposited them and lists every depositor it did not match;
+`--unmark` reverses one mark. `--default-key` never attributes a marked
+entry, since its project is not known: `--assign` does.
+
+A wrong key is repaired with `--withdraw ENTRY_ID KEY`, recorded as its
+own event. It never removes an entry's last key unless you also pass
+`--leave-unattributed`, and even then the entry is left in view for no
+project rather than made global. Putting a belief in view everywhere is
+`particles memory widen`.
+
 **Usage**:
 
 ```console
@@ -2926,6 +2990,11 @@ $ particles memory rescope [OPTIONS]
 
 * `--assign ENTRY_ID KEY`: Give one corpus entry a project key, then stop. Refuses a global entry.
 * `--default-key KEY`: Give this key to every harvested entry that is still unattributed afterwards. On a one-project machine this is the one flag you need; `.` means the project of the current directory.
+* `--mark-agent-writes`: Mark each existing keyless agent write `scope:unattributed`, so it reads as unattributed rather than global, then stop. Each mark is recorded.
+* `--identity NAME`: With --mark-agent-writes, also treat this depositor as an agent (repeatable). The two configured asserter identities are always included.
+* `--unmark ENTRY_ID`: Reverse one recorded --mark-agent-writes mark, then stop.
+* `--withdraw ENTRY_ID KEY`: Remove one wrong project key from one entry, then stop. Refuses the entry's last key unless --leave-unattributed.
+* `--leave-unattributed`: With --withdraw, allow the last key to go: the entry is left in view for no project, never global.
 * `--dry-run`: Report what would change; write nothing.
 * `--store <str>`: Store handle.  [default: default]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
@@ -3010,6 +3079,10 @@ the sweep reports where they land, how many head slots hold distinct
 content, the resulting band per surface, and whether the configured value
 is inside it.
 
+`--off-head-cohort` reads the configured value the way the nightly
+consolidation monitor does, so a verdict it recorded reproduces
+by hand.
+
 **Usage**:
 
 ```console
@@ -3024,6 +3097,11 @@ $ particles memory sweep-rank-lift [OPTIONS]
 * `--grid-max <float>`: Largest lambda to evaluate.  [default: 0.12]
 * `--grid-steps <int>`: Non-zero grid points; band edges resolve to one step.  [default: 120]
 * `--distinct-ratio <float>`: Fraction of head slots that must hold distinct content. Not 1.0; that is unsatisfiable at large N on any store with over-extraction.  [default: 0.95]
+* `--project KEY`: Rank the head a session in this project sees: global beliefs plus the project's own (gate B). `.` means the current directory's project.
+* `--off-head-cohort`: Judge the configured lambda the way the nightly monitor does, with no targets to name: the head must hold the beliefs applied outside it, and keep room for beliefs with no use yet. Prints the verdict and both bands for the view.
+* `--min-sessions <int>`: With --off-head-cohort: sessions a belief must have been applied in, outside the head, to join the cohort. Default utility.monitor.min_sessions.
+* `--capture <float>`: With --off-head-cohort: the share of the cohort the head must hold. Default utility.monitor.capture.
+* `--entry-share <float>`: With --off-head-cohort: the share of head slots that must hold beliefs with no use yet. Default utility.monitor.entry_share.
 * `--format <str>`: Output format: markdown (default) or json.  [default: markdown]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
@@ -3157,6 +3235,7 @@ $ particles memory sweep-owner-lift [OPTIONS]
 * `--grid-steps <int>`: Non-zero grid points; band edges resolve to one step.  [default: 120]
 * `--min-owner <int>`: Viewer beliefs the head must hold for an omega to pass (criterion 1).  [default: 1]
 * `--max-owner-share <float>`: Largest fraction of the head the viewer cohort may occupy (criterion 2). This is the quantity to calibrate against: A(p) is a flat step, so omega behaves as a threshold over the whole cohort rather than a graded lift.  [default: 0.5]
+* `--project KEY`: Rank the head a session in this project sees: global beliefs plus the project's own (gate B). `.` means the current directory's project.
 * `--format <str>`: Output format: markdown (default) or json.  [default: markdown]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).

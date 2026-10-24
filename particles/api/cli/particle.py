@@ -132,6 +132,14 @@ def _render_particle_header(particle: Particle) -> None:
     typer.echo("Content:")
     typer.echo(f"  {particle.content}")
     typer.echo("")
+    # the source now states this claim in other words. The content
+    # keeps its first wording; the latest restatement is shown beside it.
+    restated = (particle.properties or {}).get("restated_as")
+    if isinstance(restated, dict) and restated.get("text"):
+        snapshot = str(restated.get("snapshot_id") or "")[:8]
+        typer.echo(f"Restated as (snapshot {snapshot}):")
+        typer.echo(f"  {restated['text']}")
+        typer.echo("")
 
 
 async def _render_particle_detail(session: AsyncSession, particle: Particle) -> None:

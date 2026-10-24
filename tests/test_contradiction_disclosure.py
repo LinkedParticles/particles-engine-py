@@ -780,3 +780,26 @@ async def _extract_records(session: Any) -> list[Any]:
     from particles.store.particle_store import get_inconsistency_particles
 
     return [r for r in await get_inconsistency_particles(session) if not is_census_record(r)]
+
+
+async def test_a_widened_belief_no_source_states_is_still_lapsed(db_session: Any) -> None:
+    """Moving widenings into the join leaves liveness as it was (item 5).
+
+    The old liveness check read scopes without widenings, so a widened belief
+    whose sources had all dropped it was lapsed; it still is. A widening puts a
+    belief in every project's view, but it does not make a source state it.
+    """
+    from particles.operations.contradiction_disclosure import _view
+    from particles.operations.observer_scope import widen
+    from particles.store.observer_scope_store import ScopeTarget
+
+    old = await generation(db_session, "g", "v1", project_source_tags("-a"))
+    dropped = await belief(db_session, "Dropped by its file.", old)
+    await generation(db_session, "g", "v2", project_source_tags("-a"))
+    await rescoped(db_session)
+    await widen(db_session, ScopeTarget.PARTICLE, dropped.id, actor="op")
+
+    view = await _view(db_session, [dropped.id])
+
+    assert view.scopes[dropped.id].widened and view.scopes[dropped.id].lapsed
+    assert not view.live(dropped.id)

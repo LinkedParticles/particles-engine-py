@@ -43,6 +43,7 @@ from particles.config import get_config
 from particles.core.probe_verdict import ProbeKind, prompt_hash, subject_link_key
 from particles.llm.breaker import _llm_call, record_unusable_reply
 from particles.llm.fencing import data_fence_instruction, fence, make_nonce
+from particles.llm.usage import observe_sampling
 from particles.store.probe_verdict_store import lookup_answer, record_answer
 
 if TYPE_CHECKING:
@@ -284,14 +285,15 @@ async def judge_candidates(
             return _judgement(pick, qids, recorded=True)
 
     system, user = judge_request(name, claim, offered, nonce=make_nonce())
-    reply = await _llm_call(
-        user,
-        max_tokens=get_config().subjects.wikidata_judge_max_tokens,
-        system=system,
-        response_schema=_RESPONSE_SCHEMA,
-        purpose="subject_resolution",
-        temperature=0.0,
-    )
+    with observe_sampling() as sampling:
+        reply = await _llm_call(
+            user,
+            max_tokens=get_config().subjects.wikidata_judge_max_tokens,
+            system=system,
+            response_schema=_RESPONSE_SCHEMA,
+            purpose="subject_resolution",
+            temperature=0.0,
+        )
     if reply is None:
         return None
     pick = parse_judge_reply(reply, qids)
@@ -306,6 +308,7 @@ async def judge_candidates(
         verdict=pick != NONE_OF_THESE,
         answer=_answer_json(None if pick == NONE_OF_THESE else pick, qids),
         model=model,
+        temperature=sampling.value(),
     )
     log.info("Wikidata judge for %r: %s of %d candidate(s)", name, pick, len(qids))
     return _judgement(pick, qids, recorded=False)

@@ -10,6 +10,8 @@ wiring lives in ``tests/test_reindex.py``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from particles.extraction.components import (
     MIXED_DIGEST,
     ComponentRecord,
@@ -24,7 +26,9 @@ from particles.operations.reindex_scope import (
     decide_reindex_scope,
     is_prefix,
     resolve_prefix,
+    retarget_to_current,
     select_changed_components,
+    skip_newer_schema,
     union_selectors,
 )
 
@@ -290,3 +294,91 @@ class TestSelectChangedComponents:
     def test_the_selection_is_refused_until_a_bump_has_stamped_a_store(self) -> None:
         """flipping this on is the action the row's trigger names."""
         assert ONLY_CHANGED_COMPONENTS_ENABLED is False
+
+
+# ---------------------------------------------------------------------------
+# retarget_to_current
+# ---------------------------------------------------------------------------
+
+T0 = datetime(2026, 10, 1, tzinfo=UTC)
+
+
+class TestRetargetToCurrent:
+    """A provenance scope names an old snapshot; the current one is re-extracted."""
+
+    CAPTURED = {"old": T0, "cur": T0 + timedelta(days=2), "pending": T0 + timedelta(days=3)}
+
+    def test_an_older_snapshot_is_re_aimed_at_the_current_generation(self) -> None:
+        pairs, retargeted = retarget_to_current([("e", "old")], {"e": "cur"}, self.CAPTURED)
+        assert pairs == [("e", "cur")] and retargeted == 1
+
+    def test_a_pair_already_on_both_snapshots_collapses_to_one(self) -> None:
+        """A claim with both refs puts both pairs in scope; the entry is reindexed once."""
+        pairs, retargeted = retarget_to_current(
+            [("e", "old"), ("e", "cur")], {"e": "cur"}, self.CAPTURED
+        )
+        assert pairs == [("e", "cur")] and retargeted == 1
+
+    def test_a_newer_pending_snapshot_is_kept(self) -> None:
+        pairs, retargeted = retarget_to_current([("e", "pending")], {"e": "cur"}, self.CAPTURED)
+        assert pairs == [("e", "pending")] and retargeted == 0
+
+    def test_an_entry_with_no_current_generation_is_left_alone(self) -> None:
+        """Another mutability, or nothing processed yet: not in ``current``."""
+        pairs, retargeted = retarget_to_current([("e", "old")], {}, self.CAPTURED)
+        assert pairs == [("e", "old")] and retargeted == 0
+
+    def test_order_is_first_seen(self) -> None:
+        pairs, _ = retarget_to_current(
+            [("b", "old"), ("a", "x"), ("b", "cur")],
+            {"b": "cur"},
+            {**self.CAPTURED, "x": T0},
+        )
+        assert pairs == [("b", "cur"), ("a", "x")]
+
+    def test_naive_and_aware_capture_times_compare(self) -> None:
+        """SQLite hands capture times back naive; the store's normalization is UTC."""
+        captured = {"old": T0.replace(tzinfo=None), "cur": T0 + timedelta(days=1)}
+        pairs, _ = retarget_to_current([("e", "old")], {"e": "cur"}, captured)
+        assert pairs == [("e", "cur")]
+
+
+# ---------------------------------------------------------------------------
+# skip_newer_schema (D2)
+# ---------------------------------------------------------------------------
+
+
+class TestSkipNewerSchema:
+    def test_nothing_held_keeps_everything(self) -> None:
+        decided = skip_newer_schema(
+            {"r1": ["a", "b"]}, [E1, E2], held_snapshots=set(), held_entries=set()
+        )
+        assert decided.replays == {"r1": ["a", "b"]}
+        assert decided.pairs == [E1, E2]
+        assert decided.skipped == 0
+
+    def test_a_pair_is_dropped_by_its_snapshot(self) -> None:
+        """A per-snapshot re-extraction supersedes what cites that snapshot."""
+        decided = skip_newer_schema({}, [E1, E2, E3], held_snapshots={"s2"}, held_entries={"e2"})
+        assert decided.pairs == [E1, E3]
+        assert decided.skipped == 1
+
+    def test_a_pair_of_a_held_entry_but_another_snapshot_is_kept(self) -> None:
+        """Only the snapshot the newer particle cites is at risk on the pair path."""
+        decided = skip_newer_schema(
+            {}, [E1, ("e1", "s9")], held_snapshots={"s1"}, held_entries={"e1"}
+        )
+        assert decided.pairs == [("e1", "s9")]
+        assert decided.skipped == 1
+
+    def test_a_replay_is_dropped_by_its_entry_and_counts_every_snapshot(self) -> None:
+        """A whole-entry replay retires every claim with a SOURCE ref to the entry."""
+        decided = skip_newer_schema(
+            {"r1": ["a", "b", "c"], "r2": ["d"]},
+            [E1],
+            held_snapshots={"zz"},
+            held_entries={"r1"},
+        )
+        assert decided.replays == {"r2": ["d"]}
+        assert decided.pairs == [E1]
+        assert decided.skipped == 3

@@ -26,22 +26,33 @@ from __future__ import annotations
 
 import json
 import logging
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._estimate_text import duration_text, range_text
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._progress import progress_line
 from particles.api.client import get_backend
-from particles.core.schema import SourceType
+from particles.core.schema import Mutability, SourceType
 from particles.db import session_scope
 
 if TYPE_CHECKING:
     from particles.extraction.migration_preview import MigrationPreview
+    from particles.operations.vault_import import VaultImportReport
 
 log = logging.getLogger(__name__)
+
+
+class VaultMutability(StrEnum):
+    """The two promises ``import vault --mutability`` accepts."""
+
+    MUTABLE = "MUTABLE"
+    STABLE = "STABLE"
+
 
 # Named with a trailing underscore because ``import`` is a Python keyword
 # and we cannot bind the module-level Typer instance to that identifier.
@@ -80,6 +91,19 @@ def _refuse_in_remote_mode(verb: str) -> None:
         raise typer.Exit(1)
 
 
+def _deposit_summary(total: int, unchanged: int, root: Path) -> str:
+    """The closing line of ``import vault`` / ``import project``.
+
+    A file whose content matches its entry's latest snapshot writes nothing and
+    queues no extraction, so the line says how many of the walked files were
+    skipped that way; ``Deposited N file(s)`` still counts every file walked.
+    """
+    line = f"Deposited {total} file(s) from {root}."
+    if unchanged:
+        line += f" {unchanged} unchanged (skipped); {total - unchanged} new or changed."
+    return line
+
+
 async def _import_tree_remote(
     paths: list[Path],
     *,
@@ -87,6 +111,7 @@ async def _import_tree_remote(
     deposited_by: str,
     tags: list[str],
     verbose: bool,
+    out_unchanged: list[bool] | None = None,
 ) -> list[tuple[str, str]]:
     """Route each walked file to the engine via ``backend.deposit_file``.
 
@@ -123,6 +148,8 @@ async def _import_tree_remote(
                 content_date=None,
             )
             results.append((outcome.entry_id, outcome.snapshot_id))
+            if out_unchanged is not None:
+                out_unchanged.append(outcome.unchanged)
         except (EngineUnreachableError, httpx.TransportError):
             raise  # the engine is gone — stop rather than log a skip per file
         except Exception as exc:  # noqa: BLE001 — per-file isolation is intentional
@@ -146,6 +173,28 @@ def import_vault_cmd(
     tags: str | None = typer.Option(
         None, help="Comma-separated tags applied to every deposited entry."
     ),
+    mutability: VaultMutability | None = typer.Option(
+        None,
+        "--mutability",
+        case_sensitive=False,
+        help=(
+            "Deposit this run's notes MUTABLE (the default: an edit retires what the note "
+            "no longer says) or STABLE (an archive folder that will not change)."
+        ),
+    ),
+    confirm_absent: bool = typer.Option(
+        False,
+        "--confirm-absent",
+        help=(
+            "Record the notes this walk no longer finds even when a guard asks first: the "
+            "first deletion under this folder, or a mass deletion."
+        ),
+    ),
+    keep_missing: bool = typer.Option(
+        False,
+        "--keep-missing",
+        help="Record no deletion this run, for a partial checkout made on purpose.",
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Print per-file progress while depositing."
     ),
@@ -154,10 +203,21 @@ def import_vault_cmd(
     """Walk a Markdown vault and deposit every ``.md`` file as ``LOCAL_MARKDOWN``.
 
     Recursively walks ``vault_dir`` (skipping any path under a ``_`` or ``.``
-    component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc.)
-    and registers each Markdown file in the corpus. Re-running on the same
-    vault is idempotent: existing ``content_hash`` deduplication means
-    unchanged files are not re-deposited.
+    component: Obsidian's ``.obsidian/`` settings, ``_attachments/``, etc., and
+    any folder holding a Particles export) and registers each Markdown file in
+    the corpus, identified by its path. Notes are living documents: each is
+    deposited ``MUTABLE``, so after an edit the next ``extract`` retires the
+    claims the note no longer states, with no model call. A note whose content
+    matches its latest snapshot is reported unchanged and skipped, so only new
+    and edited notes are queued for extraction.
+
+    A previously imported note this walk no longer finds is recorded as no
+    longer found, and the next ``extract`` retires its claims. Nothing is
+    erased: the note's text stays in the corpus and ``query --as-of`` still
+    shows what it said. The first deletion under a folder, and any walk that
+    would record more than a quarter of its notes as gone, stop and list the
+    notes (exit 1) until you pass ``--confirm-absent``. Run the import after
+    your sync client reports it is idle.
 
     Typical onboarding workflow:
 
@@ -168,7 +228,18 @@ def import_vault_cmd(
     """
     configure_logging(verbose, debug)
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    unchanged: list[bool] = []
+    if confirm_absent and keep_missing:
+        typer.echo("Error: --confirm-absent and --keep-missing cannot be combined.", err=True)
+        raise typer.Exit(2)
     if get_backend().remote:
+        if mutability is not None or confirm_absent or keep_missing:
+            typer.echo(
+                "Note: against a remote engine the notes are uploaded one file at a time, "
+                "so --mutability, --confirm-absent and --keep-missing do not apply and "
+                "deleted notes are not recorded.",
+                err=True,
+            )
         # walk the client's tree with the shared ignore policy, then
         # route each file to the engine via backend.deposit_file (no new endpoint).
         from particles.corpus.deposit import iter_vault_files
@@ -180,11 +251,26 @@ def import_vault_cmd(
                 deposited_by=deposited_by,
                 tags=tag_list,
                 verbose=verbose,
+                out_unchanged=unchanged,
             )
         )
-    else:
-        results = run(_import_vault(vault_dir, deposited_by, tag_list, verbose))
-    typer.echo(f"Deposited {len(results)} file(s) from {vault_dir}.")
+        typer.echo(_deposit_summary(len(results), sum(unchanged), vault_dir))
+        return
+    report = run(
+        _import_vault(
+            vault_dir,
+            deposited_by,
+            tag_list,
+            verbose,
+            mutability=Mutability(mutability.value) if mutability else Mutability.MUTABLE,
+            confirm_absent=confirm_absent,
+            keep_missing=keep_missing,
+        )
+    )
+    for line in _vault_report_lines(report, vault_dir):
+        typer.echo(line)
+    if report.refusal is not None:
+        raise typer.Exit(1)
 
 
 async def _import_vault(
@@ -192,20 +278,147 @@ async def _import_vault(
     deposited_by: str,
     tags: list[str],
     verbose: bool,
-) -> list[tuple[str, str]]:
-    from particles.corpus.deposit import deposit_vault
+    *,
+    mutability: Mutability,
+    confirm_absent: bool,
+    keep_missing: bool,
+) -> VaultImportReport:
+    from particles.operations.vault_import import import_vault
 
     progress = progress_line if verbose else None
     async with session_scope() as session:
-        results = await deposit_vault(
+        report = await import_vault(
             session,
             vault_dir,
             deposited_by=deposited_by,
             tags=tags,
+            mutability=mutability,
+            confirm_absent=confirm_absent,
+            keep_missing=keep_missing,
             progress=progress,
         )
         await session.commit()
-    return results
+    return report
+
+
+#: The budget the import suggests for a first extraction: what a
+#: note-taker trying the tool would spend, not a default anything applies.
+_START_BUDGET_USD = 3.0
+
+#: How many missing notes a refusal lists before collapsing the rest to a count.
+_MISSING_LIST_CAP = 20
+
+
+def _vault_report_lines(report: VaultImportReport, root: Path) -> list[str]:
+    """The summary ``import vault`` prints (§4, §5)."""
+    missing = len(report.missing)
+    parts = [f"{report.changed} new or changed"]
+    if report.unchanged_count:
+        parts.append(f"{report.unchanged_count} unchanged")
+    if missing:
+        parts.append(f"{missing} no longer found")
+    owed = report.changed or report.absences
+    lines = [
+        f"Deposited {len(report.results)} note(s) from {root}: {', '.join(parts)}"
+        + ("; changes take effect at the next extract." if owed else ".")
+    ]
+    lines += _queued_lines(report)
+    if report.export_dirs:
+        lines.append(
+            f"Skipped {len(report.export_dirs)} folder(s) holding a Particles export "
+            "(.particles-export.json): the store's own rendering is not your notes."
+        )
+    if report.unreadable:
+        lines.append(
+            f"Could not read {len(report.unreadable)} note(s); they were skipped and are "
+            "not treated as deleted:"
+        )
+        lines += [f"  {path}" for path in report.unreadable]
+    if report.reclassified:
+        lines.append(
+            f"Reclassified {len(report.reclassified)} earlier note entr(ies) from STABLE to "
+            "MUTABLE; nothing was retired."
+        )
+        lines.append(
+            f"  {report.backfill_entries} of them hold more than one version; "
+            f"`particles corpus refresh --backfill-cascade` would retire "
+            f"{report.backfill_claims} claim(s) their older versions stated "
+            "(it previews first and asks for --yes)."
+        )
+    if report.walk_errors:
+        lines.append(
+            f"The walk met {len(report.walk_errors)} error(s) reading {root}, so no note "
+            "was recorded as no longer found:"
+        )
+        lines += [f"  {error}" for error in report.walk_errors]
+    if not missing:
+        return lines
+    share = f"{100 * report.absent_fraction:.0f}% of {report.previously_imported} imported before"
+    if report.absences:
+        lines.append(
+            f"Recorded {missing} note(s) as no longer found ({share}); the next extract "
+            "retires their claims."
+        )
+        lines.append(
+            "  This is not an erasure: the text stays in the corpus and `query --as-of` "
+            "shows it. `particles corpus delete <entry>` erases a note."
+        )
+    elif report.kept_missing:
+        lines.append(f"{missing} note(s) no longer found ({share}); --keep-missing recorded none.")
+    elif report.refusal is not None:
+        reason = {
+            "first": "This is the first deletion under this folder, so it is shown before "
+            "anything is retired.",
+            "always": "import_vault.confirm_absent is `always`, so every deletion is shown "
+            "before anything is retired.",
+            "mass": "That is more notes than a deletion usually removes; an unmounted "
+            "volume, an unfinished sync or a folder one level too deep looks the same.",
+        }[report.refusal]
+        lines.append(f"{missing} note(s) no longer found ({share}), and none were recorded.")
+        lines.append(f"  {reason}")
+        for note in report.missing[:_MISSING_LIST_CAP]:
+            lines.append(f"  {_display_path(note.path, root)}")
+        if missing > _MISSING_LIST_CAP:
+            lines.append(f"  … and {missing - _MISSING_LIST_CAP} more")
+        lines.append(
+            "  Re-run with --confirm-absent to record them, or --keep-missing to keep them. "
+            "Everything else was deposited."
+        )
+    return lines
+
+
+def _queued_lines(report: VaultImportReport) -> list[str]:
+    """The price of the extraction the import queued, and how to start small."""
+    plan = report.queued
+    if plan is None or plan.total is None or not plan.total.calls:
+        return []
+    lines = [
+        f"  The next extract reads {len(plan.snapshots)} note(s): {range_text(plan.total)}, "
+        f"{duration_text(plan.total.wall_seconds)}."
+    ]
+    alt = plan.alternative
+    if (
+        alt is not None
+        and alt.high_usd is not None
+        and plan.total.high_usd is not None
+        and alt.high_usd < plan.total.high_usd
+    ):
+        lines.append(f"  On {alt.model}: {range_text(alt, name_model=False)}.")
+    if report.flat_mtimes:
+        lines.append(
+            "  Most notes share one modification time (a copy or a sync rewrote them), so "
+            "the newest-first order is path order. Importing one folder first starts smaller."
+        )
+    lines.append("  To start small, newest notes first:")
+    lines.append(f"    particles extract --all-pending --budget-usd {_START_BUDGET_USD:g}")
+    return lines
+
+
+def _display_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root.resolve()))
+    except ValueError:
+        return str(path)
 
 
 @import_app.command("project")
@@ -243,7 +456,8 @@ def import_project_cmd(
     configured build/cache directories (``import_project.ignore_dirs``), but
     keeping underscore-prefixed module files (``__init__.py`` / ``_shared.py``).
     Re-running on the same tree is idempotent: ``content_hash`` deduplication
-    means only changed files get a new snapshot.
+    means only changed files get a new snapshot, and the rest are reported
+    unchanged.
 
     Typical onboarding workflow:
 
@@ -255,6 +469,7 @@ def import_project_cmd(
     configure_logging(verbose, debug)
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
     ext_set = {e.strip() for e in ext.split(",") if e.strip()} if ext else None
+    unchanged: list[bool] = []
     if get_backend().remote:
         # walk the client's tree with the shared ignore policy, then
         # route each file to the engine via backend.deposit_file (no new endpoint).
@@ -267,11 +482,14 @@ def import_project_cmd(
                 deposited_by=deposited_by,
                 tags=tag_list,
                 verbose=verbose,
+                out_unchanged=unchanged,
             )
         )
     else:
-        results = run(_import_project(project_dir, deposited_by, tag_list, ext_set, verbose))
-    typer.echo(f"Deposited {len(results)} file(s) from {project_dir}.")
+        results = run(
+            _import_project(project_dir, deposited_by, tag_list, ext_set, verbose, unchanged)
+        )
+    typer.echo(_deposit_summary(len(results), sum(unchanged), project_dir))
 
 
 async def _import_project(
@@ -280,6 +498,7 @@ async def _import_project(
     tags: list[str],
     extensions: set[str] | None,
     verbose: bool,
+    out_unchanged: list[bool] | None = None,
 ) -> list[tuple[str, str]]:
     from particles.corpus.deposit import deposit_project
 
@@ -292,6 +511,7 @@ async def _import_project(
             tags=tags,
             extensions=extensions,
             progress=progress,
+            out_unchanged=out_unchanged,
         )
         await session.commit()
     return results

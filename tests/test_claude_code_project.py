@@ -299,3 +299,107 @@ def test_transcript_project_key_matches_what_the_hook_stamps(tmp_path: Path) -> 
         projects / claude_project_slug(worktree) / "s.jsonl", str(worktree)
     )
     assert transcript_project_key(transcript) == claude_project_slug(repo)
+
+
+class TestServerProjectKey:
+    """What a bound MCP server keys on."""
+
+    def test_a_repository_and_its_linked_worktree_share_the_key(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import claude_project_slug, server_project_key
+
+        repo = make_repo(tmp_path / "src" / "repo")
+        worktree = make_worktree(repo, tmp_path / "elsewhere" / "wt")
+
+        assert server_project_key(repo) == claude_project_slug(repo)
+        assert server_project_key(worktree) == claude_project_slug(repo)
+
+    def test_a_directory_outside_any_repository_is_its_own_project(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import claude_project_slug, server_project_key
+
+        home = tmp_path / "home"
+        home.mkdir()
+        assert server_project_key(home) == claude_project_slug(home)
+
+    def test_the_filesystem_root_is_no_project(self) -> None:
+        from particles.api.cli._claude_code import server_project_key
+
+        assert server_project_key(Path("/")) is None
+
+
+class TestObserverBindingLines:
+    """`hook doctor` shows where a digest's key and a server's can part."""
+
+    def test_a_fallback_and_a_mismatch_are_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        from particles.api.cli._claude_code import append_hook_log, claude_project_slug
+        from particles.api.cli.hook import _observer_binding_lines
+        from particles.config import get_config
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        get_config().claude_code.state_dir = str(tmp_path / "state")
+        here = make_repo(tmp_path / "src" / "repo")
+        (home / ".claude.json").write_text(
+            json.dumps(
+                {"mcpServers": {"particles": {"command": "/p/particles", "args": ["mcp", "serve"]}}}
+            )
+        )
+        append_hook_log(
+            {
+                "event": "session-start",
+                "cwd": str(here),
+                "project_key": "-moved-elsewhere",
+                "project_resolved_from": "transcript-dir",
+            }
+        )
+
+        lines = "\n".join(_observer_binding_lines(here))
+
+        assert "MCP server is not bound" in lines
+        assert f"a bound server takes {claude_project_slug(here)}" in lines
+        assert "the hooks last resolved -moved-elsewhere" in lines
+        assert "read different projects here" in lines
+        assert "-moved-elsewhere (transcript-dir)" in lines
+
+    def test_agreement_raises_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        from particles.api.cli._claude_code import append_hook_log, claude_project_slug
+        from particles.api.cli.hook import _observer_binding_lines
+        from particles.config import get_config
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        get_config().claude_code.state_dir = str(tmp_path / "state")
+        here = make_repo(tmp_path / "src" / "repo")
+        (home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "particles": {
+                            "command": "/p/particles",
+                            "args": ["mcp", "serve", "--project-observer", "cwd"],
+                        }
+                    }
+                }
+            )
+        )
+        append_hook_log(
+            {
+                "event": "session-start",
+                "cwd": str(here),
+                "project_key": claude_project_slug(here),
+                "project_resolved_from": "repository",
+            }
+        )
+
+        lines = _observer_binding_lines(here)
+
+        assert not any("⚠" in line for line in lines)

@@ -419,6 +419,23 @@ class TestPure:
         assert is_reanchor_restatement(written)
         assert not is_reanchor_restatement(original)
 
+    def test_the_restatement_carries_this_sdks_stamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """D2: a minted record never copies its predecessor's stamp."""
+        monkeypatch.setattr("particles.core.reanchor.SCHEMA_VERSION", "1.2.0")
+        original = Particle(
+            content=WALK,
+            confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            provenance=[
+                ProvenanceRef(type=ProvenanceRefType.SOURCE, corpus_entry_id="e", snapshot_id="s")
+            ],
+            asserted_by="general-extractor",
+            schema_version="1.0.0",
+        )
+        retired = original.model_copy(update={"id": str(uuid.uuid4()), "content": RESIDENCE})
+        written = build_restatement(original, retired, RESTATED, provider_model=None, now=T0)
+        assert written.schema_version == "1.2.0"
+
 
 # ---------------------------------------------------------------------------
 # The pass, on the Delhi scenario
@@ -1462,6 +1479,57 @@ class TestCandidacy:
             report = await run_reanchor(db_session, cursor=None)
         [cands] = [call.args[3] for call in probe.await_args_list]
         assert len(cands) == 2 and report.candidates == 2
+
+    async def _stamp(self, session: Any, content: str, stamp: str) -> Particle:
+        from particles.store.particle_store import ParticleRow
+
+        particle = await _one(session, content)
+        row = await session.get(ParticleRow, particle.id)
+        row.schema_version = stamp
+        await session.commit()
+        return particle
+
+    async def test_a_claim_written_by_a_newer_minor_is_left_active(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D2: an older SDK never replaces a newer record with its own copy."""
+        from particles.operations.consolidation import render_reanchor_line
+        from particles.operations.reanchor import run_reanchor
+
+        monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", "1.2.0")
+        await _delhi(db_session)
+        walk = await self._stamp(db_session, WALK, "1.3.0")
+        with _Scripted() as probe:
+            report = await run_reanchor(db_session, cursor=None)
+            await db_session.commit()
+        [cands] = [call.args[3] for call in probe.await_args_list]
+        assert WALK not in {c.content for c in cands}
+        assert report.skipped_newer_schema == 1
+        assert report.payload()["skipped_newer_schema"] == 1
+        assert "1 candidate(s) written by a newer schema" in render_reanchor_line(report)
+        assert not report.restated
+        kept = await _one(db_session, WALK)
+        assert kept.id == walk.id and kept.status is Status.ACTIVE
+
+    @pytest.mark.parametrize("stamp", ["1.1.0", "1.2.0"])
+    async def test_a_claim_at_or_below_the_sdk_minor_is_restated(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch, stamp: str
+    ) -> None:
+        from particles.operations.reanchor import run_reanchor
+
+        monkeypatch.setattr("particles.operations.version_guard.SCHEMA_VERSION", "1.2.0")
+        await _delhi(db_session)
+        await self._stamp(db_session, WALK, stamp)
+        with _Scripted():
+            report = await run_reanchor(db_session, cursor=None)
+            await db_session.commit()
+        assert report.skipped_newer_schema == 0
+        assert len(report.restated) == 1
+        old = await _one(db_session, WALK)
+        assert (old.status, old.status_reason) == (
+            Status.SUPERSEDED,
+            StatusReason.SUPERSEDED_BY_REANCHOR,
+        )
 
 
 @pytest.mark.asyncio

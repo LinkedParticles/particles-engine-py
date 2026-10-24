@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,8 @@ from particles.api.cli._claude_code import (
     memory_manifest_path,
     merge_particles_hook_entries,
     particles_hook_commands,
+    particles_mcp_registrations,
+    plan_mcp_registration,
     render_settings_json,
     repository_root,
     rule_file_project_key,
@@ -330,13 +334,13 @@ def _install(
 
     command_base = command_override or _default_command_base()
     hook_env = _hook_command_env(handle, config_path, will_write_config=new_config_text is not None)
-    # the Stop entry rides only an install that uses agent extraction.
-    agent_mode = get_config().claude_code.agent_extraction.mode
+    # Re-running strips every Particles-owned entry first, so this also drops
+    # the Stop entry an install made while agent extraction (
+    # deprecated) was on.
     merged = merge_particles_hook_entries(
-        settings,
-        build_hook_commands(command_base, handle, hook_env, include_stop=agent_mode != "off"),
+        settings, build_hook_commands(command_base, handle, hook_env)
     )
-    _note_agent_extraction(result, agent_mode)
+    _note_explicit_store_scope(result, config_path)
     rendered = render_settings_json(merged)
     _warn_if_store_dsn_cwd_relative(handle, hook_env)
 
@@ -356,6 +360,8 @@ def _install(
             _say(f"--dry-run: would write {config_path} (store auto-create):")
             _say(new_config_text)
         _say(f"--dry-run: would create state directory {state_dir()}")
+        if not _is_project_scope(settings_path):
+            _register_mcp_server(result, executable=command_base, env=hook_env, dry_run=True)
         if get_config().agent_memory.projection.enabled:
             if not memory_manifest_path().exists():
                 _say(f"--dry-run: would write {memory_manifest_path()}:")
@@ -427,9 +433,108 @@ def _install(
     # 5. Project keys. Last, so whatever the audit just deposited
     # is covered; it is also what lets `claude_code.observer_scope: project`
     # engage on this store at all.
-    _rescope_store(handle)
+    _rescope_store(handle, result)
+
+    # 6. The MCP server, bound to each session's project.
+    if not _is_project_scope(settings_path):
+        _register_mcp_server(result, executable=command_base, env=hook_env, dry_run=False)
 
     return result
+
+
+#: Where `init` records the MCP registration change it made, so `--remove` reverts
+#: exactly that and nothing it did not do.
+_MCP_STATE = "mcp-registration.json"
+
+
+def _claude_mcp(argv: list[str]) -> bool:
+    """Run ``claude <argv>``; ``False`` when the CLI is missing or the call fails.
+
+    The ``claude`` CLI owns ``~/.claude.json``, which a running Claude Code
+    rewrites often, so the installer edits it through the CLI rather than in
+    place.
+    """
+    exe = shutil.which("claude")
+    if exe is None:
+        return False
+    try:
+        done = subprocess.run([exe, *argv], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _register_mcp_server(
+    result: dict[str, Any], *, executable: str, env: dict[str, str], dry_run: bool
+) -> None:
+    """Register (or bind) the user-scope Particles MCP server: ``mcp serve --project-observer cwd``.
+
+    A session's MCP reads then see the same project view as its digest. An
+    existing registration keeps its executable and env pins; only the launch
+    flag is added. The flag goes into the Claude Code registration, whose
+    server starts in the session's directory, never into machine-wide config.
+    """
+    plan = plan_mcp_registration(particles_mcp_registrations(), executable=executable, env=env)
+    if plan is None:
+        result["mcp_server"] = {"action": "unchanged", "bound": True}
+        return
+    wanted, replaced = plan
+    command = "claude " + shlex.join(wanted.add_argv())
+    action = "add" if replaced is None else "bind"
+    result["mcp_server"] = {"action": action, "name": wanted.name, "command": command}
+    if dry_run:
+        _say(f"--dry-run: would register the MCP server: {command}")
+        return
+    ok = (replaced is None or _claude_mcp(["mcp", "remove", "--scope", "user", wanted.name])) and (
+        _claude_mcp(wanted.add_argv())
+    )
+    if not ok:
+        result["mcp_server"]["action"] = "manual"
+        result["next_steps"].append(
+            "Register the Particles MCP server bound to each session's project: "
+            + (f"`claude mcp remove --scope user {wanted.name}` then " if replaced else "")
+            + f"`{command}`."
+        )
+        _say("Could not run `claude mcp`; the registration command is in next_steps.")
+        return
+    previous = None if replaced is None else replaced.add_argv()
+    (state_dir() / _MCP_STATE).write_text(
+        json.dumps({"name": wanted.name, "created": replaced is None, "previous": previous}),
+        encoding="utf-8",
+    )
+    _say(f"Registered the MCP server bound to each session's project ({wanted.name}).")
+    _say("  Restart running Claude Code sessions to pick it up.")
+
+
+def _unregister_mcp_server(result: dict[str, Any], *, dry_run: bool) -> None:
+    """Revert the registration change `init` recorded, and only that one."""
+    path = state_dir() / _MCP_STATE
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    name = str(recorded.get("name") or "particles")
+    previous = recorded.get("previous")
+    steps = [["mcp", "remove", "--scope", "user", name]]
+    if isinstance(previous, list):
+        steps.append([str(a) for a in previous])
+    result["mcp_server"] = {
+        "action": "restore" if previous else "remove",
+        "commands": ["claude " + shlex.join(s) for s in steps],
+    }
+    if dry_run:
+        for step in steps:
+            _say(f"--dry-run: would run claude {shlex.join(step)}")
+        return
+    if all(_claude_mcp(step) for step in steps):
+        path.unlink(missing_ok=True)
+        _say(
+            "Restored the MCP server registration as it was."
+            if previous
+            else f"Removed the MCP server registration '{name}' that init added."
+        )
+        return
+    result["next_steps"].extend(f"Run `claude {shlex.join(s)}`." for s in steps)
 
 
 def _hook_command_map(settings: dict[str, Any]) -> dict[str, list[str]]:
@@ -442,22 +547,26 @@ def _hook_command_map(settings: dict[str, Any]) -> dict[str, list[str]]:
     return out
 
 
-def _note_agent_extraction(result: dict[str, Any], mode: str) -> None:
-    """Report agent-side extraction's state, and recommend it to a keyless install.
+def _note_explicit_store_scope(result: dict[str, Any], config_path: Path) -> None:
+    """Tell a config that still says ``observer_scope: store`` the default moved.
 
-    The Stop entry is installed only when the mode is ``shadow`` or ``on``.
-    ``on`` becomes the keyless default only after a shadow week has measured
-    the agent-dependent defaults (§ Defaults are measured), so until
-    then a keyless install is told how to switch it on, not switched.
+    The compiled default is ``project``, but a ``config.yaml`` copied from an
+    older sample names ``store`` explicitly. A value the operator may have
+    chosen is never rewritten; the next step says what changed and how to
+    take it.
     """
-    from particles.extraction.agent import purpose_servable
+    import yaml
 
-    result["agent_extraction"] = mode
-    if mode == "off" and not purpose_servable("extraction"):
+    try:
+        tree = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return
+    section = tree.get("claude_code") if isinstance(tree, dict) else None
+    if isinstance(section, dict) and section.get("observer_scope") == "store":
         result["next_steps"].append(
-            "No extraction API key is configured. To let your Claude Code sessions extract "
-            "their own transcripts instead, set `claude_code.agent_extraction.mode: "
-            "on` in config.yaml and re-run `particles init claude-code` to install the Stop hook."
+            f"{config_path} sets `claude_code.observer_scope: store`, so every session keeps "
+            "reading the whole store. The default is now `project` (global beliefs plus the "
+            "session's project): delete that line, or set it to `project`, to take it."
         )
 
 
@@ -667,18 +776,28 @@ def _provision_rule_sources(handle: str, project_root: Path | None = None) -> No
         _say(f"Rule-source registration failed ({exc}) — run `particles rules sync` later.")
 
 
-def _rescope_store(handle: str) -> None:
+def _rescope_store(handle: str, result: dict[str, Any] | None = None) -> None:
     """Bring the store's project keys up to date. Additive and idempotent.
+
+    Then reports, in ``next_steps``, what a project observer would not show:
+    unattributed harvests, entries keyed only to projects
+    that no longer exist, lapsed beliefs, and the agent writes
+    `--mark-agent-writes` would mark, each with its command. It never assigns
+    a project itself: that is the operator's decision, not an installer's.
 
     Non-fatal, like the other post-install steps: the hooks are installed and
     correct whether or not this succeeds, and `particles memory rescope` is
     there to run by hand.
     """
-    from particles.api.cli._claude_code import entry_project_key
+    from particles.api.cli._claude_code import entry_project_key, is_live_project_key
+    from particles.core.status import Status
     from particles.db import session_scope
-    from particles.operations.observer_scope import rescope
+    from particles.operations.observer_scope import agent_identities, mark_agent_writes, rescope
+    from particles.store.observer_scope_join import load_scopes
+    from particles.store.particle_store import get_particles_by_status
 
     root = Path.home() / ".claude" / "projects"
+    steps: list[str] = result["next_steps"] if result is not None else []
 
     async def _go() -> None:
         async with session_scope(handle, write=True) as session:
@@ -688,12 +807,43 @@ def _rescope_store(handle: str) -> None:
                 actor="init",
             )
             await session.commit()
+            marks = await mark_agent_writes(
+                session, identities=agent_identities(), dry_run=True, actor="init"
+            )
+            actives = await get_particles_by_status(session, Status.ACTIVE)
+            lapsed = sum(1 for s in (await load_scopes(session, actives)).values() if s.lapsed)
         if report.added:
             _say(f"Added {len(report.added)} project key(s) to already-harvested sources.")
+        orphaned = [
+            entry_id
+            for entry_id, keys in report.keys_by_entry.items()
+            if not any(is_live_project_key(key, root) for key in keys)
+        ]
         if report.unattributed:
             _say(
                 f"{len(report.unattributed)} harvested source(s) could not be attributed to a "
                 "project — `particles memory rescope` lists them."
+            )
+            steps.append(
+                f"{len(report.unattributed)} harvested source(s) are in view for no project. "
+                "If they all belong to one, `particles memory rescope --default-key KEY` "
+                "attributes them; `--assign ENTRY_ID KEY` attributes one."
+            )
+        if orphaned:
+            steps.append(
+                f"{len(orphaned)} source(s) carry only keys of projects that no longer exist: "
+                "`particles memory rescope` lists them, `--assign ENTRY_ID KEY` places one."
+            )
+        if lapsed:
+            steps.append(
+                f"{lapsed} belief(s) are lapsed (no source states them any more): "
+                "`particles corpus refresh --backfill-cascade` retires them."
+            )
+        if marks.marked:
+            steps.append(
+                f"{len(marks.marked)} earlier agent write(s) read as global: "
+                "`particles memory rescope --mark-agent-writes --dry-run` previews marking them "
+                "unattributed."
             )
 
     try:
@@ -778,8 +928,10 @@ def _remove(settings_path: Path, *, dry_run: bool) -> dict[str, Any]:
         elif handle and not store_is_empty:
             _say(f"--dry-run: store '{handle}' holds data — its configuration would be kept.")
         result["store_config_reverted"] = revert_config_text is not None
+        _unregister_mcp_server(result, dry_run=True)
         return result
 
+    _unregister_mcp_server(result, dry_run=False)
     if installed:
         settings_path.write_text(render_settings_json(stripped), encoding="utf-8")
         noun = "entry" if len(installed) == 1 else "entries"

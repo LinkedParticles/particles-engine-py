@@ -506,6 +506,23 @@ Notes:
   `utility_rules` layer beside `decay_rules`; across adopted lenses it
   composes most-skeptical-wins (least promotion), like the other layers.
 
+### The nightly rank-lift monitor
+
+Calibrating once is not enough: the band moves as use accumulates, decays, or
+is re-mined. Scheduled consolidation checks the configured value on every run,
+without targets, against the beliefs the agent applies outside the head, and
+raises a curation card when a reading newly falls out of band. It never changes
+`rank_lift`. To reproduce or explore its verdict by hand:
+
+```bash
+particles memory sweep-rank-lift --off-head-cohort --head 60 --head 200
+```
+
+`--min-sessions`, `--capture` and `--entry-share` override the
+`utility.monitor` thresholds for that run, and `--project KEY` reads one
+project's view. See
+[Scheduled consolidation → The rank-lift monitor](scheduled-consolidation.md#the-rank-lift-monitor).
+
 ## Owner-relevance lens
 
 The third read-time axis. Truth asks *is it believable*, usefulness asks *has

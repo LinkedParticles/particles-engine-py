@@ -19,6 +19,7 @@ model.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1352,6 +1353,29 @@ class TestConflictCards:
         assert cards[records[3].id].resolve_actions == ["PREFER_B", "BOTH_VALID", "DISCARD"]
 
     @pytest.mark.asyncio
+    async def test_a_retired_value_hold_offers_keeping_the_retirement(
+        self, db_session: AsyncSession
+    ) -> None:
+        # A is the retired original by design, and PREFER_A means
+        # "the retirement stands", so a retired A does not withhold it there.
+        from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+
+        a = _active("r A", status=Status.RETRACTED, status_reason=StatusReason.EXPLICIT_RETRACTION)
+        b = _quarantined("r B")
+        await _insert(db_session, a, b)
+        record = _inconsistency(a.id, b.id).model_copy(
+            update={"properties": {RETIRED_VALUE_KEY: "retired"}}
+        )
+        await _insert(db_session, record)
+
+        assert (await _conflict_cards(db_session))[record.id].resolve_actions == [
+            "PREFER_A",
+            "PREFER_B",
+            "BOTH_VALID",
+            "DISCARD",
+        ]
+
+    @pytest.mark.asyncio
     async def test_a_belief_in_two_records_gets_two_cards(self, db_session: AsyncSession) -> None:
         m, x, y = _active("shared"), _active("x"), _active("y")
         await _insert(db_session, m, x, y)
@@ -1766,6 +1790,237 @@ class TestGatedSubjectsCard:
         assert bucket.kind is CardKind.GATED_SUBJECTS and bucket.count == 3
 
 
+# ---------------------------------------------------------------------------
+# the subjectless residue, one card per source
+# ---------------------------------------------------------------------------
+
+
+class TestSubjectlessSourceCard:
+    @staticmethod
+    async def _entry(session: AsyncSession, name: str) -> str:
+        from particles.core.schema import Mutability
+        from particles.corpus.deposit import deposit_text_versioned
+
+        entry_id, _snap, _same = await deposit_text_versioned(
+            session,
+            text=f"transcript {name}",
+            uri_r=f"claude-code://session/{name}",
+            source_type="CONVERSATION",
+            mutability=Mutability.APPEND_ONLY,
+            tags=["claude-code"],
+        )
+        return entry_id
+
+    @staticmethod
+    async def _orphans(
+        session: AsyncSession, entry_id: str, n: int, *, start: int = 0
+    ) -> list[Particle]:
+        # Plain prose: no backtick span or token a relink could recover, so
+        # these stay out of the gated_subjects batch.
+        base = datetime(2026, 10, 1, tzinfo=UTC)
+        out: list[Particle] = []
+        for i in range(start, start + n):
+            p = Particle(
+                content=f"the session narration number {i} has no subject",
+                confidence=Confidence(
+                    value=0.7, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                ),
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                provenance=[
+                    ProvenanceRef(
+                        type=ProvenanceRefType.SOURCE, corpus_entry_id=entry_id, snapshot_id=None
+                    )
+                ],
+                asserted_by="general-extractor",
+                asserted_at=base + timedelta(minutes=i),
+                subject_ids=[],
+            )
+            await insert_particle(session, p)
+            out.append(p)
+        await session.flush()
+        return out
+
+    @staticmethod
+    async def _source_cards(session: AsyncSession) -> list[CurationCard]:
+        return (await build_curation_queue(session, kind=CardKind.SUBJECTLESS_SOURCE)).cards
+
+    @pytest.mark.asyncio
+    async def test_orphans_of_one_source_share_a_card(self, db_session: AsyncSession) -> None:
+        busy = await self._entry(db_session, "busy")
+        members = await self._orphans(db_session, busy, 3)
+        [lone] = await self._orphans(db_session, await self._entry(db_session, "lone"), 1)
+
+        cards = await collect_cards(db_session, semantic=False)
+        [card] = [c for c in cards if c.kind is CardKind.SUBJECTLESS_SOURCE]
+        assert card.particle_ids == [p.id for p in members]  # assertion order
+        assert card.corpus_entry_id == busy
+        assert card.key == f"subjectless_source:{busy}"
+        assert card.suggested_gestures == ["dismiss", "snooze"]
+        assert "3 belief(s) with no subject from claude-code://session/busy" in card.diagnostic
+        # A source's only orphan keeps its one-gesture card (§1).
+        assert [c.particle_ids for c in cards if c.kind is CardKind.NO_SUBJECT] == [[lone.id]]
+        back = CurationCard.from_key(card.key)
+        assert back.kind is CardKind.SUBJECTLESS_SOURCE and back.corpus_entry_id == busy
+
+    def test_from_key_refuses_a_source_key_with_no_entry(self) -> None:
+        with pytest.raises(ValueError):
+            CurationCard.from_key("subjectless_source:")
+
+    def test_grouping_is_pure_over_its_inputs(self) -> None:
+        from particles.operations.curation.collect import group_orphans_by_source
+
+        def orphan(pid: str) -> CurationCard:
+            return CurationCard(
+                kind=CardKind.NO_SUBJECT,
+                particle_ids=[pid],
+                diagnostic="",
+                suggested_gestures=gestures_for(CardKind.NO_SUBJECT),
+            )
+
+        cards = [orphan(p) for p in ("a", "b", "c", "d", "e", "x")]
+        out = group_orphans_by_source(
+            cards,
+            sources={"a": "E", "b": "E", "c": "E", "d": "E", "e": "F"},
+            asserted_at={},
+            uris={},
+            suppressed={"no_subject:c"},
+            dismissed={"d"},
+        )
+        [source] = [c for c in out if c.kind is CardKind.SUBJECTLESS_SOURCE]
+        assert source.particle_ids == ["a", "b"]
+        assert source.diagnostic.endswith("from E")  # no URI known: the entry id
+        # c keeps its snoozed card, d was ruled on, e is alone, x has no source.
+        kept = sorted(c.particle_ids[0] for c in out if c.kind is CardKind.NO_SUBJECT)
+        assert kept == ["c", "e", "x"]
+
+    @pytest.mark.asyncio
+    async def test_dismiss_by_key_rules_on_members_and_new_orphans_return(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation import rebuild_curation_snapshot
+
+        busy = await self._entry(db_session, "busy")
+        await self._orphans(db_session, busy, 3)
+        await rebuild_curation_snapshot(db_session, semantic=False)
+        key = f"subjectless_source:{busy}"
+
+        msg = await apply_gesture(db_session, CurationCard.from_key(key), "dismiss")
+        await db_session.commit()
+        assert msg.startswith("Dismissed 3 belief(s)")
+        # Gone before the next build, and the next build does not bring it back.
+        assert await self._source_cards(db_session) == []
+        await rebuild_curation_snapshot(db_session, semantic=False)
+        assert await self._source_cards(db_session) == []
+
+        # The transcript grows: only the new orphans come back, on the same key.
+        fresh = await self._orphans(db_session, busy, 2, start=10)
+        await rebuild_curation_snapshot(db_session, semantic=False)
+        [card] = await self._source_cards(db_session)
+        assert card.key == key and card.particle_ids == [p.id for p in fresh]
+
+    @pytest.mark.asyncio
+    async def test_dismissing_an_emptied_card_is_refused(self, db_session: AsyncSession) -> None:
+        with pytest.raises(ValueError, match="No open subjectless beliefs"):
+            await apply_gesture(
+                db_session, CurationCard.from_key("subjectless_source:e"), "dismiss"
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_dismissal_hides_no_key(self, db_session: AsyncSession) -> None:
+        from particles.operations.curation.suppression import dismissed_members, suppressed_keys
+
+        busy = await self._entry(db_session, "busy")
+        members = await self._orphans(db_session, busy, 2)
+        card = CurationCard(
+            kind=CardKind.SUBJECTLESS_SOURCE,
+            corpus_entry_id=busy,
+            particle_ids=[p.id for p in members],
+            diagnostic="",
+            suggested_gestures=gestures_for(CardKind.SUBJECTLESS_SOURCE),
+        )
+        await apply_gesture(db_session, card, "dismiss")
+        await db_session.flush()
+        assert card.key not in await suppressed_keys(db_session)
+        assert await dismissed_members(db_session) == {p.id for p in members}
+
+        # A snooze, by contrast, hides the source's key for its window.
+        await apply_gesture(db_session, card, "snooze")
+        await db_session.flush()
+        assert card.key in await suppressed_keys(db_session)
+
+    @pytest.mark.asyncio
+    async def test_resolving_one_member_prunes_it_and_keeps_the_card(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation import rebuild_curation_snapshot
+
+        busy = await self._entry(db_session, "busy")
+        a, b, c = await self._orphans(db_session, busy, 3)
+        await rebuild_curation_snapshot(db_session, semantic=False)
+
+        # The per-belief key still dispatches though no card carries it (§3).
+        await apply_gesture(
+            db_session,
+            CurationCard.from_key(f"no_subject:{a.id}"),
+            "assign-subject",
+            subject="Session narration",
+        )
+        await apply_gesture(
+            db_session,
+            CurationCard.from_key(f"no_subject:{b.id}"),
+            "retract",
+            reason="narration",
+        )
+        await db_session.commit()
+        [card] = await self._source_cards(db_session)
+        assert card.particle_ids == [c.id]
+
+    @pytest.mark.asyncio
+    async def test_a_snoozed_member_keeps_its_own_card(self, db_session: AsyncSession) -> None:
+        busy = await self._entry(db_session, "busy")
+        a, b, c = await self._orphans(db_session, busy, 3)
+        await apply_gesture(db_session, CurationCard.from_key(f"no_subject:{a.id}"), "snooze")
+        await db_session.flush()
+
+        cards = await collect_cards(db_session, semantic=False)
+        [source] = [x for x in cards if x.kind is CardKind.SUBJECTLESS_SOURCE]
+        assert source.particle_ids == [b.id, c.id]
+        assert [x.key for x in cards if x.kind is CardKind.NO_SUBJECT] == [f"no_subject:{a.id}"]
+        queue = await build_curation_queue(db_session, semantic=False, kind=CardKind.NO_SUBJECT)
+        assert queue.cards == []  # still snoozed
+
+    @pytest.mark.asyncio
+    async def test_the_queue_samples_and_the_lookup_briefs_every_member(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation import get_curation_card
+
+        busy = await self._entry(db_session, "busy")
+        members = await self._orphans(db_session, busy, 7)
+        [card] = (
+            await build_curation_queue(db_session, semantic=False, kind=CardKind.SUBJECTLESS_SOURCE)
+        ).cards
+        assert len(card.particle_ids) == 7 and len(card.particles) == 5
+
+        full = await get_curation_card(db_session, card.key)
+        assert full is not None
+        assert [b.particle_id for b in full.particles] == [p.id for p in members]
+        assert await get_curation_card(db_session, "subjectless_source:nope") is None
+
+    def test_audit_counts_the_beliefs_a_source_card_names(self) -> None:
+        from particles.operations.audit import build_buckets
+
+        card = CurationCard(
+            kind=CardKind.SUBJECTLESS_SOURCE,
+            corpus_entry_id="e",
+            particle_ids=["p1", "p2", "p3"],
+            diagnostic="",
+            suggested_gestures=gestures_for(CardKind.SUBJECTLESS_SOURCE),
+        )
+        [bucket] = build_buckets([card], exemplars_per_class=3)
+        assert bucket.kind is CardKind.SUBJECTLESS_SOURCE and bucket.count == 3
+
+
 class TestObserverScopeOnCards:
     """Each brief names which projects see its belief; display only (Atlas review finding 8)."""
 
@@ -1792,7 +2047,7 @@ class TestObserverScopeOnCards:
         assert scope_brief(GLOBAL_SCOPE).kind is ObserverScopeKind.GLOBAL
         assert scope_brief(UNATTRIBUTED_SCOPE).kind is ObserverScopeKind.UNATTRIBUTED
         assert scope_brief(LAPSED_SCOPE).kind is ObserverScopeKind.LAPSED
-        assert scope_brief(UNATTRIBUTED_SCOPE, widened=True).widened
+        assert scope_brief(replace(UNATTRIBUTED_SCOPE, widened=True)).widened
 
     def test_merge_note_names_what_a_merge_puts_in_view(self) -> None:
         from particles.core.observer_scope import (

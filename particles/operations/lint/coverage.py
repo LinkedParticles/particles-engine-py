@@ -15,7 +15,7 @@ contradiction model:
   - ``_report_extraction_quality`` — distribution of ``calibration_source``;
     warns when EXTRACTOR_DIRECT dominates (>50%).
   - ``_report_pending_extractions`` — corpus entries stuck in PENDING/FAILED.
-  - ``_report_schema_versions`` — ACTIVE particles on a non-current schema.
+  - ``_report_schema_versions`` — ACTIVE particles on another schema stamp.
   - ``_check_structured_claim_subjects`` — a structured claim whose subject is
     not one of the particle's subjects (L-STR-11).
   - ``_check_bare_properties_keys`` — a persisted particle carrying a
@@ -33,6 +33,11 @@ from particles.core.schema import (
     ExtractionStatus,
     LintFinding,
     ParticleType,
+)
+from particles.core.schema_version import (
+    SchemaCompatibility,
+    schema_compatibility,
+    stamp_sort_key,
 )
 from particles.corpus.store import (
     list_collapsed_snapshot_ids,
@@ -364,19 +369,70 @@ async def _report_empty_complete_snapshots(session: AsyncSession) -> list[LintFi
 
 
 async def _report_schema_versions(session: AsyncSession) -> list[LintFinding]:
-    """Report schema_version distribution; flag particles with mismatched versions."""
+    """Report ACTIVE particles on any stamp other than the SDK's, the L-STR-07 audit.
+
+    One finding per distinct stamp, classified by how it relates to the SDK's:
+    another minor of the same major is compatible and reported at INFO, in
+    either direction; another major, or a stamp that does not parse, blocks
+    every operation the guard covers and is reported as
+    ``SCHEMA_VERSION_MISMATCH`` at WARNING. Equal stamps (any PATCH) report
+    nothing. The census is the guard's own ``GROUP BY``, a handful of rows.
+    """
     findings: list[LintFinding] = []
-    for version, count in (await count_active_particles_by_schema_version(session)).items():
-        if version != SCHEMA_VERSION:
+    counts = await count_active_particles_by_schema_version(session)
+    for version in sorted(counts, key=stamp_sort_key):
+        count = counts[version]
+        kind = schema_compatibility(version, SCHEMA_VERSION)
+        if kind is SchemaCompatibility.EQUAL:
+            continue
+        if kind is SchemaCompatibility.OLDER_MINOR:
+            findings.append(
+                LintFinding(
+                    finding_type="SCHEMA_VERSION_OLDER_MINOR",
+                    severity="INFO",
+                    detail=(
+                        f"{count} ACTIVE particles have schema_version={version!r}"
+                        f" (current: {SCHEMA_VERSION!r}); fields added since that"
+                        " minor are unpopulated on them"
+                    ),
+                    recommended_action=(
+                        "Run the regeneration command the schema release names for"
+                        " its new fields, or `particles reindex --include-schema-stale`"
+                        " to re-extract these particles' sources"
+                    ),
+                )
+            )
+        elif kind is SchemaCompatibility.NEWER_MINOR:
+            findings.append(
+                LintFinding(
+                    finding_type="SCHEMA_VERSION_NEWER_MINOR",
+                    severity="INFO",
+                    detail=(
+                        f"{count} ACTIVE particles have schema_version={version!r}"
+                        f" (current: {SCHEMA_VERSION!r}); a newer SDK wrote them"
+                    ),
+                    recommended_action=(
+                        "Upgrade this SDK to read the fields that minor added; until"
+                        " then housekeeping passes leave these particles alone"
+                    ),
+                )
+            )
+        else:
+            remedy = (
+                "Upgrade this SDK; do not rebuild the store from it"
+                if kind is SchemaCompatibility.NEWER_MAJOR
+                else "Rebuild the particle store (`particles db init --force`, then"
+                " `particles extract --all-pending`)"
+            )
             findings.append(
                 LintFinding(
                     finding_type="SCHEMA_VERSION_MISMATCH",
                     severity="WARNING",
                     detail=(
                         f"{count} ACTIVE particles have schema_version={version!r}"
-                        f" (current: {SCHEMA_VERSION!r})"
+                        f" (current: {SCHEMA_VERSION!r}), which this SDK cannot read"
                     ),
-                    recommended_action="Migrate or reindex particles to current schema version",
+                    recommended_action=remedy,
                 )
             )
     return findings

@@ -6,23 +6,29 @@
 
 This is a single Typer command with manual action dispatch via a positional
 argument (list, search, show, alias, merge, confirm, unlink, split, delete,
-gc, set-class, fix-labels, find-duplicates, relink-gated) — Typer sub-Typer
+gc, set-class, fix-labels, find-duplicates, relink-gated, rebuild-aliases,
+fold-artifacts) — Typer sub-Typer
 style would be more idiomatic but the current shape is preserved for
 backwards compatibility.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._progress import confirm
 from particles.core.schema import Subject
 from particles.db import session_scope
 
 if TYPE_CHECKING:
+    from particles.api.client.base import Backend
+    from particles.operations.artifact_fold import FoldReport
     from particles.operations.subject_relink import RelinkReport
+    from particles.store.subject_store import AliasIndexDrift
 
 # (b): subjects actions with no engine endpoint. They refuse in
 # remote mode (per-action, inside ``subjects_cmd``) rather than silently
@@ -39,6 +45,8 @@ _SUBJECTS_LOCAL_ONLY = frozenset(
         "fix-labels",
         "find-duplicates",
         "relink-gated",
+        "rebuild-aliases",
+        "fold-artifacts",
     }
 )
 
@@ -49,13 +57,15 @@ def subjects_cmd(
         "list",
         help=(
             "Action: list, search, show, alias, confirm, unlink, merge, split, "
-            "delete, gc, set-class, fix-labels, find-duplicates, relink-gated"
+            "delete, gc, set-class, fix-labels, find-duplicates, relink-gated, "
+            "rebuild-aliases, fold-artifacts"
         ),
     ),
     rest: list[str] | None = typer.Argument(None, help="Arguments for the chosen action"),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview merge/split/gc without committing"
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="merge only: skip the confirmation prompt"),
     force: bool = typer.Option(
         False,
         "--force",
@@ -93,7 +103,10 @@ def subjects_cmd(
     apply: bool = typer.Option(
         False,
         "--apply",
-        help="relink-gated only: write the links. Without it the run only reports.",
+        help=(
+            "relink-gated and fold-artifacts only: write the links or merges."
+            " Without it the run only reports."
+        ),
     ),
     tier: list[int] | None = typer.Option(
         None,
@@ -112,17 +125,47 @@ def subjects_cmd(
     seed: int = typer.Option(
         0, "--seed", help="relink-gated only: the seed that picks the --sample relinks."
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help=(
+            "rebuild-aliases only: report how the alias index differs from a rebuild,"
+            " change nothing, and exit 1 when it does."
+        ),
+    ),
+    namespace: str | None = typer.Option(
+        None,
+        "--namespace",
+        help=(
+            "fold-artifacts only: the project key to fold. Defaults to the key of the"
+            " --repo checkout."
+        ),
+    ),
+    repo: Path | None = typer.Option(
+        None,
+        "--repo",
+        help=(
+            "fold-artifacts only: a git checkout of the project. Its file list decides"
+            " which bare names, partial paths and module names fold. Without it only"
+            " absolute paths fold."
+        ),
+    ),
+    undo: str | None = typer.Option(
+        None,
+        "--undo",
+        help="fold-artifacts only: reverse the fold that recorded this event id.",
+    ),
 ) -> None:
     """Manage subjects (canonical real-world entities).
 
     \b
         particles subjects list [--order name|degree] [--phantoms-only]
         particles subjects search QUERY
-        particles subjects show ID
+        particles subjects show ID|NAME
         particles subjects alias ID NAME [NAME ...]
         particles subjects confirm SUBJECT_ID NAMESPACE:ID
         particles subjects unlink SUBJECT_ID NAMESPACE:ID
-        particles subjects merge SOURCE_ID TARGET_ID [--dry-run]
+        particles subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]
         particles subjects delete SUBJECT_ID [--force]
         particles subjects gc [--dry-run]          (alias: prune-empty)
         particles subjects set-class SUBJECT_ID CLASS   (e.g. nmo:NumismaticObject)
@@ -130,6 +173,9 @@ def subjects_cmd(
             (--new-name "Applied Optoelectronics" | --new-external-id wikidata:Q30297735) \\
             [--dry-run]
         particles subjects relink-gated [--tier N ...] [--sample N --seed S] [--apply]
+        particles subjects rebuild-aliases [--check]
+        particles subjects fold-artifacts [--repo DIR] [--namespace KEY] [--apply]
+        particles subjects fold-artifacts --undo EVENT_ID
     """
     args = rest or []
 
@@ -173,19 +219,30 @@ def subjects_cmd(
             typer.echo("Provide a search query.", err=True)
             raise typer.Exit(1)
         subjects = run(backend.subjects_search(args[0]))
+        needle = args[0].lower()
         for s in subjects:
             ext = ", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids)
-            typer.echo(f"  {s.id[:8]}…  {s.canonical_name}" + (f"  [{ext}]" if ext else ""))
+            # Name the alias that matched when the canonical name did not.
+            via = (
+                ""
+                if needle in s.canonical_name.lower()
+                else next((f"  (alias: {a})" for a in s.aliases if needle in a.lower()), "")
+            )
+            typer.echo(f"  {s.id[:8]}…  {s.canonical_name}{via}" + (f"  [{ext}]" if ext else ""))
         if not subjects:
             typer.echo(f"No subjects matching '{args[0]}'.")
 
     elif action == "show":
         if not args:
-            typer.echo("Provide a subject ID.", err=True)
+            typer.echo("Provide a subject ID or name.", err=True)
             raise typer.Exit(1)
-        subject = run(backend.subject_show(args[0]))
+        try:
+            subject = run(backend.subject_show(args[0], by_name=True))
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
         if subject is None:
-            typer.echo(f"Subject {args[0]} not found.", err=True)
+            typer.echo(f"No subject matches {args[0]!r} by ID, ID prefix, or name.", err=True)
             raise typer.Exit(1)
         typer.echo(f"ID:          {subject.id}")
         typer.echo(f"Name:        {subject.canonical_name}")
@@ -238,6 +295,12 @@ def subjects_cmd(
         report = run(_relink_gated(apply=apply, tiers=tier, sample=sample, seed=seed))
         _print_relink_report(report)
 
+    elif action == "rebuild-aliases":
+        _rebuild_aliases(check=check)
+
+    elif action == "fold-artifacts":
+        _fold_artifacts(namespace=namespace, repo=repo, apply=apply, undo=undo)
+
     elif action == "find-duplicates":
         pairs = run(_find_duplicate_subjects())
         if pairs is None:
@@ -255,36 +318,12 @@ def subjects_cmd(
 
     elif action == "merge":
         if len(args) < 2:
-            typer.echo("Usage: subjects merge SOURCE_ID TARGET_ID [--dry-run]", err=True)
-            raise typer.Exit(1)
-        source_id, target_id = args[0], args[1]
-        source = run(backend.subject_show(source_id))
-        target = run(backend.subject_show(target_id))
-        if source is None:
-            typer.echo(f"Source subject {source_id!r} not found.", err=True)
-            raise typer.Exit(1)
-        if target is None:
-            typer.echo(f"Target subject {target_id!r} not found.", err=True)
-            raise typer.Exit(1)
-        if dry_run:
             typer.echo(
-                f"Dry run: would merge {source.id[:8]}… ({source.canonical_name})"
-                f" → {target.id[:8]}… ({target.canonical_name})"
+                "Usage: subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]",
+                err=True,
             )
-            typer.echo("  (no changes made)")
-            return
-        merge_outcome = run(backend.subject_merge(source.id, target.id))
-        updated = merge_outcome.subject
-        added_aliases = merge_outcome.aliases_added
-        relinked = merge_outcome.particles_relinked
-        typer.echo(
-            f"Merged {source.id[:8]}… ({source.canonical_name})"
-            f" → {updated.id[:8]}… ({updated.canonical_name})"
-        )
-        if added_aliases:
-            typer.echo(f"  Aliases added: {', '.join(added_aliases)}")
-        typer.echo(f"  Particles re-linked: {relinked}")
-        typer.echo("  Source subject deleted.")
+            raise typer.Exit(1)
+        _merge_subjects(backend, args[:-1], args[-1], dry_run=dry_run, yes=yes)
 
     elif action == "delete":
         if not args:
@@ -493,7 +532,8 @@ def subjects_cmd(
         typer.echo(
             f"Unknown action: {action}."
             " Use list, search, show, alias, merge, split, delete, gc, set-class,"
-            " confirm, unlink, fix-labels, or find-duplicates.",
+            " confirm, unlink, fix-labels, find-duplicates, relink-gated, rebuild-aliases,"
+            " or fold-artifacts.",
             err=True,
         )
         raise typer.Exit(1)
@@ -515,6 +555,58 @@ async def _relink_gated(
         result = await apply_gated_relink(session, plan, actor="cli:subjects-relink-gated")
         await session.commit()
         return build_report(plan, sample=sample, seed=seed, result=result)
+
+
+def _merge_subjects(
+    backend: Backend, source_ids: list[str], target_id: str, *, dry_run: bool, yes: bool
+) -> None:
+    """Fold every source into the target after one preview and one confirmation."""
+    try:
+        plan = run(backend.subject_merge(source_ids, target_id, dry_run=True))
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    target = plan.subject
+    verb = "Would merge" if dry_run else "Merging"
+    typer.echo(
+        f"{verb} {len(plan.sources)} subject(s) into {target.id[:8]}… ({target.canonical_name}):"
+    )
+    for src in plan.sources:
+        typer.echo(
+            f"  {src.subject_id[:8]}… {src.canonical_name}"
+            f"  ({src.particles_relinked} particle link(s))"
+        )
+        for ref in src.refs_carried:
+            typer.echo(f"    carries {ref} to the target")
+        for ref in src.refs_withheld:
+            typer.echo(f"    drops {ref}: it names another project")
+    if plan.aliases_added:
+        typer.echo(f"  Aliases to add: {', '.join(plan.aliases_added)}")
+    typer.echo(f"  Particle links to re-point: {plan.particles_relinked}")
+    typer.echo("  The source subjects are deleted. A merge cannot be undone.")
+    if dry_run:
+        typer.echo("  (no changes made)")
+        return
+    if not yes:
+        confirm(f"Merge {len(plan.sources)} subject(s)?", abort=True)
+
+    # Re-plan inside the write: the store validates every source again, so a
+    # source another session merged meanwhile refuses the whole merge.
+    try:
+        outcome = run(backend.subject_merge([s.subject_id for s in plan.sources], target.id))
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    updated = outcome.subject
+    typer.echo(
+        f"Merged {len(outcome.sources)} subject(s)"
+        f" into {updated.id[:8]}… ({updated.canonical_name})"
+    )
+    if outcome.aliases_added:
+        typer.echo(f"  Aliases added: {', '.join(outcome.aliases_added)}")
+    typer.echo(f"  Particles re-linked: {outcome.particles_relinked}")
+    typer.echo("  Source subjects deleted.")
 
 
 def _print_relink_report(report: RelinkReport) -> None:
@@ -540,6 +632,145 @@ def _print_relink_report(report: RelinkReport) -> None:
         )
     else:
         typer.echo("\nNothing written. Re-run with --apply to link them.")
+
+
+def _checkout_files(repo: Path) -> tuple[str, list[str]]:
+    """The project key and tracked file list of the checkout at ``repo``.
+
+    The key is the Claude Code adapter's for the checkout's repository root,
+    so a linked worktree names its main checkout's project.
+    """
+    import subprocess
+
+    from particles.api.cli._claude_code import claude_project_slug, repository_root
+
+    root = repository_root(repo.expanduser().absolute())
+    try:
+        done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["git", "-C", str(repo), "ls-files", "-z"],  # noqa: S607
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        typer.echo(f"Cannot list the files of {repo}: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    files = [f for f in done.stdout.decode("utf-8", "replace").split("\0") if f]
+    return claude_project_slug(root), files
+
+
+def _fold_artifacts(
+    *, namespace: str | None, repo: Path | None, apply: bool, undo: str | None
+) -> None:
+    """Fold a file's other spellings into its path Subject, or undo one fold."""
+    from particles.operations.artifact_fold import build_fold_report, undo_fold
+
+    if undo is not None:
+
+        async def _undo() -> list[str]:
+            async with session_scope(write=True) as session:
+                moved = await undo_fold(session, undo)
+                await session.commit()
+                return moved
+
+        try:
+            moved = run(_undo())
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"Undid fold {undo}: {len(moved)} particle link(s) moved back.")
+        return
+
+    files: list[str] | None = None
+    if repo is not None:
+        repo_key, files = _checkout_files(repo)
+        if namespace is not None and namespace != repo_key:
+            typer.echo(
+                f"--repo {repo} is project {repo_key}, not {namespace}; refusing to fold"
+                " one project against another's files.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        namespace = repo_key
+    if namespace is None:
+        typer.echo("Provide --repo DIR (or --namespace KEY to fold absolute paths only).", err=True)
+        raise typer.Exit(1)
+
+    async def _fold() -> FoldReport:
+        async with session_scope(write=apply) as session:
+            report = await build_fold_report(session, namespace, files, apply=apply)
+            if apply:
+                await session.commit()
+            return report
+
+    _print_fold_report(run(_fold()), applied=apply)
+
+
+def _print_fold_report(report: FoldReport, *, applied: bool) -> None:
+    from collections import Counter
+
+    def _span(subject_id: str) -> str:
+        span = report.spans.get(subject_id)
+        if span is None or span.first is None or span.last is None:
+            return "0 claims"
+        return f"{span.claims} claims, {span.first:%Y-%m-%d}..{span.last:%Y-%m-%d}"
+
+    source = f"{report.repo_files} files in the checkout" if report.repo_files else "no checkout"
+    typer.echo(f"Project {report.namespace_key} ({source}).")
+    for fold in report.folds:
+        typer.echo(
+            f"  {fold.rule.value:8s} {fold.source_name}  [{_span(fold.source_id)}]"
+            f"\n           -> {fold.target_path}  [{_span(fold.target_id)}]"
+        )
+    by_rule = Counter(f.rule.value for f in report.folds)
+    typer.echo(
+        f"\n{len(report.folds)} fold(s): "
+        + (", ".join(f"{n} {rule}" for rule, n in sorted(by_rule.items())) or "none")
+    )
+    if report.refusals:
+        typer.echo(f"{len(report.refusals)} left as they are:")
+        for reason, n in Counter(r.reason.value for r in report.refusals).most_common():
+            typer.echo(f"  {n:5d}  {reason}")
+        for r in report.refusals:
+            typer.echo(f"  {r.rule.value:8s} {r.name}: {r.reason.value}")
+    if applied:
+        typer.echo(
+            f"\nApplied {len(report.applied_events)} fold(s). Undo one with"
+            " `particles subjects fold-artifacts --undo EVENT_ID`."
+        )
+    else:
+        typer.echo("\nNothing written. Re-run with --apply to merge them.")
+
+
+def _rebuild_aliases(*, check: bool) -> None:
+    """Rebuild the alias index from the recorded aliases, or report its drift."""
+    from particles.store.subject_store import check_alias_index, rebuild_alias_index
+
+    async def _check() -> AliasIndexDrift:
+        async with session_scope() as session:
+            return await check_alias_index(session)
+
+    async def _rebuild() -> int:
+        async with session_scope(write=True) as session:  # writer lock
+            written = await rebuild_alias_index(session)
+            await session.commit()
+            return written
+
+    if not check:
+        typer.echo(f"Alias index rebuilt: {run(_rebuild())} row(s).")
+        return
+    drift = run(_check())
+    if drift.clean:
+        typer.echo("Alias index matches the recorded aliases.")
+        return
+    typer.echo(
+        f"Alias index differs from a rebuild: {drift.missing} missing, {drift.extra} extra,"
+        f" {drift.orphaned} for deleted subjects, across {len(drift.subject_ids)} subject(s)."
+        " Run `particles subjects rebuild-aliases` to repair it.",
+        err=True,
+    )
+    for sid in drift.subject_ids[:20]:
+        typer.echo(f"  {sid}", err=True)
+    raise typer.Exit(1)
 
 
 async def _find_duplicate_subjects() -> list[tuple[Subject, Subject, float]] | None:

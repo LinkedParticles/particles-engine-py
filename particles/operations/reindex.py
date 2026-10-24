@@ -7,6 +7,11 @@
 Re-extracts particles for a scoped set of corpus entries:
   - Entries whose last extraction used a superseded extractor version
   - Entries with extraction_status = FAILED
+  - Entries whose particles carry an older minor of the schema, when asked
+    (D5)
+
+A snapshot holding a particle a newer schema minor wrote is never re-extracted
+by an older SDK, whichever selector reached it (D2).
 
 Default rate limit: 100 extractions per minute (operator-configurable).
 After completion: run a Lint pass over reindexed entries.
@@ -16,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
@@ -25,21 +30,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.schema import (
-    SCHEMA_VERSION,
     ExtractionStatus,
     Particle,
     ProvenanceRefType,
+    WarcRecordType,
 )
+from particles.core.schema_version import SchemaCompatibility
 from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import blob_size
 from particles.corpus.store import (
     clear_partial_reads,
     find_entry_ids_by_prefix,
     get_entry,
+    get_entry_currency,
     get_entry_uri_map,
     get_extraction_component_records,
     get_latest_completed_snapshot_id,
     get_partial_snapshot_id,
+    get_snapshot_captured_at,
+    get_snapshot_record_types,
+    list_absent_entry_ids,
     list_entry_snapshot_pairs_with_extraction_status,
     list_extraction_bases,
     list_snapshots_for_entry,
@@ -51,6 +61,7 @@ from particles.extraction.journal import EXTRACTOR_ID as JOURNAL_EXTRACTOR_ID
 from particles.extraction.journal import journal_component_table
 from particles.extraction.registry import select_extractor
 from particles.extraction.subject_gate import GATE_COMPONENT, gate_digest
+from particles.ingest.absence import absences_last
 from particles.ingest.append_base import in_scope
 from particles.ingest.pipeline import SnapshotOutcome
 from particles.observability import traced
@@ -62,15 +73,18 @@ from particles.operations.reindex_scope import (
     decide_reindex_scope,
     is_prefix,
     resolve_prefix,
+    retarget_to_current,
     select_changed_components,
+    skip_newer_schema,
     union_selectors,
 )
+from particles.operations.version_guard import active_stamps, assert_store_schema_current
 from particles.store.particle_store import (
+    get_active_particles_at_schema_versions,
     get_active_particles_for_entry,
     get_active_particles_with_extractor_id,
     get_active_particles_with_extractor_version,
     get_active_particles_with_provider_model,
-    get_active_particles_with_stale_schema_version,
     get_particles_by_ids,
     update_particle_status,
 )
@@ -115,6 +129,24 @@ class ReindexPlan(BaseModel):
     missing_blobs: int
     scope_description: str
     snapshot_plans: list[SnapshotPlan] = []
+    #: Entries the scope reached whose source is recorded as no longer found:
+    #: skipped, because re-extracting their last version would
+    #: bring a deleted note's claims back.
+    absent_entries: list[str] = []
+    #: Pairs that named an older generation of a ``MUTABLE`` entry and were
+    #: re-aimed at its current one.
+    retargeted: int = 0
+    #: ACTIVE particles stamped with an older minor of the SDK's schema major
+    #: (D5). Counted on auto-discovery only: with
+    #: ``include_schema_stale`` their snapshots are in scope, and without it
+    #: this is what the flag would add.
+    schema_stale_particles: int = 0
+    #: Whether stale-schema discovery was asked for (``include_schema_stale``).
+    schema_stale_included: bool = False
+    #: Snapshots the scope reached but skipped because an ACTIVE particle they
+    #: hold was written by a newer minor of the SDK's schema (D2).
+    #: Re-minting it here would retire the richer record for a poorer copy.
+    skipped_newer_schema: int = 0
 
     def format_line(self) -> str:
         """The one-line human summary printed before the first LLM call."""
@@ -124,7 +156,41 @@ class ReindexPlan(BaseModel):
         )
         if self.missing_blobs:
             line += f"; {self.missing_blobs} snapshot(s) missing their blob (extraction will fail)"
+        if self.absent_entries:
+            line += (
+                f"; {len(self.absent_entries)} entr(ies) skipped, their source is no longer found"
+            )
+        if self.retargeted:
+            line += (
+                f"; {self.retargeted} older snapshot(s) replaced by their entry's current version"
+            )
+        if self.skipped_newer_schema:
+            line += (
+                f"; {self.skipped_newer_schema} snapshot(s) skipped, they hold particles "
+                "a newer SDK wrote (reindex them with that SDK)"
+            )
+        if self.schema_stale_particles:
+            if self.schema_stale_included:
+                line += (
+                    f"; {self.schema_stale_particles} particle(s) at an older schema "
+                    "minor are in scope"
+                )
+            else:
+                line += (
+                    f"; {self.schema_stale_particles} particle(s) at an older schema "
+                    "minor not in scope (--include-schema-stale adds them)"
+                )
         return line
+
+    def format_absent_lines(self, cap: int = BLOB_MISSING_DISPLAY_CAP) -> list[str]:
+        """Human lines naming the skipped absent entries, capped like the blob lines."""
+        lines = [
+            f"  skipped: entry {entry_id[:8]}… is recorded as no longer found"
+            for entry_id in self.absent_entries[:cap]
+        ]
+        if len(self.absent_entries) > cap:
+            lines.append(f"  … and {len(self.absent_entries) - cap} more (see --format json)")
+        return lines
 
     def format_missing_blob_lines(self, cap: int = BLOB_MISSING_DISPLAY_CAP) -> list[str]:
         """Human warning lines for missing blobs, capped at ``cap`` + a remainder."""
@@ -145,13 +211,14 @@ def _describe_scope(
     extractor_id: str | None,
     include_failed: bool,
     provider_model: str | None,
+    include_schema_stale: bool = False,
 ) -> str:
     """Human-readable rendering of the requested scope, auto-discovery included.
 
-    The auto-discovery unions (FAILED/PENDING snapshots, stale schema) apply
-    whenever no entries are named — even alongside a particle-matching flag —
-    and that widening is exactly what the plan line exists to surface, so it
-    is spelled out rather than implied.
+    The auto-discovery unions (FAILED/PENDING snapshots, and stale schema when
+    asked for) apply whenever no entries are named, even alongside a
+    particle-matching flag, and that widening is exactly what the plan line
+    exists to surface, so it is spelled out rather than implied.
     """
     parts: list[str] = []
     if entry_ids:
@@ -163,11 +230,17 @@ def _describe_scope(
     if provider_model:
         parts.append(f"provider-model {provider_model}")
     if not entry_ids:
-        auto = "auto: stale schema"
-        if include_failed:
-            auto += " + failed/pending"
-        parts.append(auto)
-    return "; ".join(parts)
+        auto = [
+            name
+            for name, on in (
+                ("failed/pending", include_failed),
+                ("stale schema", include_schema_stale),
+            )
+            if on
+        ]
+        if auto:
+            parts.append(f"auto: {' + '.join(auto)}")
+    return "; ".join(parts) or "nothing selected"
 
 
 async def _build_plan(
@@ -242,6 +315,7 @@ async def reindex(
     on_plan: Callable[[str], None] | None = None,
     on_status: Callable[[str], None] | None = None,
     only_changed_components: bool = False,
+    include_schema_stale: bool = False,
 ) -> dict[str, object]:
     """Reindex corpus entries.
 
@@ -292,6 +366,15 @@ async def reindex(
             with ``ValueError`` while ``ONLY_CHANGED_COMPONENTS_ENABLED`` is
             off. A skipped snapshot keeps its old version stamp, so the next
             scope over that version selects it again.
+        include_schema_stale: also re-extract the snapshots whose ACTIVE
+            particles are stamped with an older minor of the SDK's schema
+            major (D5). Off by default: after a minor bump the whole
+            store qualifies, so the sweep is a paid run the operator chooses;
+            the plan reports how many particles it would add either way.
+            Applies to auto-discovery only, like ``include_failed``. Newer
+            minors are never selected, and a snapshot holding one is skipped
+            under every selector (D2), reported as
+            ``skipped_newer_schema``.
 
     Returns a summary dict with counts and any errors.
     """
@@ -305,6 +388,7 @@ async def reindex(
         include_failed=include_failed,
         provider_model=provider_model,
         only_changed_components=only_changed_components,
+        include_schema_stale=include_schema_stale,
         progress=progress,
         dry_run=dry_run,
     )
@@ -317,6 +401,8 @@ async def reindex(
         emit(plan_line)
         for line in plan.format_missing_blob_lines():
             emit(line)
+        for line in plan.format_absent_lines():
+            emit(line)
 
     if dry_run:
         return {
@@ -326,6 +412,7 @@ async def reindex(
             "failed": 0,
             "failed_entries": [],
             "lint_summary": {},
+            "skipped_newer_schema": plan.skipped_newer_schema,
             "plan": plan.model_dump(),
         }
 
@@ -381,6 +468,7 @@ async def reindex(
         "failed": len(failed),
         "failed_entries": failed,
         "lint_summary": lint_summary,
+        "skipped_newer_schema": plan.skipped_newer_schema,
         # Full plan, per-snapshot detail included: the human rendering caps the
         # missing-blob list and points at `--format json`, so the envelope must
         # actually carry the complete list. (The old counts-only exclusion
@@ -411,6 +499,7 @@ async def resolve_reindex_work(
     include_failed: bool = True,
     provider_model: str | None = None,
     only_changed_components: bool = False,
+    include_schema_stale: bool = False,
     progress: Callable[[str], None] | None = None,
     dry_run: bool = False,
 ) -> ResolvedWork:
@@ -422,11 +511,9 @@ async def resolve_reindex_work(
     collapse (see :func:`_collapse_for_auto_discovery`); with
     ``dry_run`` it reads.
     """
-    # refuse to reindex into a store with mismatched-schema
-    # particles. Reindex writes new ACTIVE particles and supersedes old
-    # ones — both operations assume the surrounding store is current.
-    from particles.operations.version_guard import assert_store_schema_current
-
+    # Refuse to reindex into a store holding particles of an incompatible
+    # schema (D3). Reindex writes new ACTIVE particles and
+    # supersedes old ones, both of which need a store this SDK can read.
     await assert_store_schema_current(session)
 
     # Apply step, ahead of the gather (D2): the collapse
@@ -435,6 +522,10 @@ async def resolve_reindex_work(
     collapsed = await _collapse_for_auto_discovery(
         session, entry_ids, include_failed, progress=progress, dry_run=dry_run
     )
+    # D5: the older minors of the SDK's major, from one GROUP BY.
+    # Counted on auto-discovery only, the one path the flag applies to, so the
+    # plan can say what the flag adds even when it is off.
+    older = {} if entry_ids else await active_stamps(session, SchemaCompatibility.OLDER_MINOR)
     scope = await _identify_scope(
         session,
         entry_ids,
@@ -444,7 +535,10 @@ async def resolve_reindex_work(
         provider_model,
         progress=progress,
         collapsed=collapsed,
+        schema_stale_versions=sorted(older) if include_schema_stale else (),
     )
+    scope, absent_entries = await _drop_absent_entries(session, scope)
+    scope, retargeted = await _retarget_to_current(session, scope)
     component_skipped: list[tuple[str, str]] = []
     if only_changed_components:
         scope, component_skipped = await _narrow_to_changed_components(
@@ -454,13 +548,19 @@ async def resolve_reindex_work(
     # snapshot is replayed whole, grouped by entry so the order is its capture
     # order however the scope enumerated its snapshots.
     replays, scope = await _group_append_only(session, scope)
+    replays, scope, skipped_newer = await _skip_newer_schema(session, replays, scope)
     work: list[tuple[str, list[str]]] = [(e, snaps) for e, snaps in replays.items()]
     work += [(entry_id, [snapshot_id]) for entry_id, snapshot_id in scope]
     # The upfront work plan (2026-08-02 incident): report what the resolved
     # scope will cost — entries, snapshots, supersede-able particles, known
     # missing blobs — BEFORE the first LLM call is spent.
     description = _describe_scope(
-        entry_ids, extractor_version, extractor_id, include_failed, provider_model
+        entry_ids,
+        extractor_version,
+        extractor_id,
+        include_failed,
+        provider_model,
+        include_schema_stale,
     )
     if component_skipped:
         description += (
@@ -473,7 +573,116 @@ async def resolve_reindex_work(
         description,
         replay_entries=frozenset(replays),
     )
+    plan.absent_entries = absent_entries
+    plan.retargeted = retargeted
+    plan.schema_stale_particles = sum(older.values())
+    plan.schema_stale_included = include_schema_stale and not entry_ids
+    plan.skipped_newer_schema = skipped_newer
     return ResolvedWork(work=work, replays=replays, plan=plan, component_skipped=component_skipped)
+
+
+async def _skip_newer_schema(
+    session: AsyncSession,
+    replays: dict[str, list[str]],
+    scope: list[tuple[str, str]],
+) -> tuple[dict[str, list[str]], list[tuple[str, str]], int]:
+    """Gather what :func:`skip_newer_schema` decides on, and apply it (D2).
+
+    Returns ``(replays, scope, skipped_snapshots)``. The newer-minor stamps
+    come from one GROUP BY; on a store that holds none, the normal case, no
+    particle is loaded and the work is returned untouched.
+    """
+    if not (replays or scope):
+        return replays, scope, 0
+    newer = await active_stamps(session, SchemaCompatibility.NEWER_MINOR)
+    if not newer:
+        return replays, scope, 0
+    held = await get_active_particles_at_schema_versions(session, sorted(newer))
+    decided = skip_newer_schema(
+        replays,
+        scope,
+        held_snapshots={ref.snapshot_id for p in held for ref in p.provenance if ref.snapshot_id},
+        held_entries={
+            ref.corpus_entry_id
+            for p in held
+            for ref in p.provenance
+            if ref.type is ProvenanceRefType.SOURCE and ref.corpus_entry_id
+        },
+    )
+    if decided.skipped:
+        log.info(
+            "Reindex: skipped %d snapshot(s) holding particles a newer schema minor wrote "
+            "(stamps %s); a current SDK reindexes them",
+            decided.skipped,
+            ", ".join(sorted(newer)),
+        )
+    return decided.replays, decided.pairs, decided.skipped
+
+
+async def _drop_absent_entries(
+    session: AsyncSession, scope: list[tuple[str, str]]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Skip the entries recorded as no longer found; run pending absences last.
+
+    Returns ``(scope, skipped_entry_ids)``. A ``RESPONSE`` of an entry whose
+    newest live record is ``ABSENT`` is dropped, named or not: re-extracting
+    it would bring the deleted note's claims back. A pending
+    ``ABSENT`` the auto-discovery reached is the work itself and stays, after
+    every ``RESPONSE`` pair, as in every extract loop.
+    """
+    if not scope:
+        return scope, []
+    absent = await list_absent_entry_ids(session, {entry_id for entry_id, _ in scope})
+    types = await get_snapshot_record_types(session, {sid for _, sid in scope})
+    is_absence = [types.get(sid) is WarcRecordType.ABSENT for _, sid in scope]
+    skipped = sorted(
+        {
+            entry_id
+            for (entry_id, _), absence in zip(scope, is_absence, strict=True)
+            if entry_id in absent and not absence
+        }
+    )
+    kept = [
+        (pair, absence)
+        for pair, absence in zip(scope, is_absence, strict=True)
+        if absence or pair[0] not in absent
+    ]
+    if skipped:
+        log.info(
+            "Reindex: skipped %d entr(ies) recorded as no longer found: %s",
+            len(skipped),
+            ", ".join(e[:8] for e in skipped),
+        )
+    return absences_last([pair for pair, _ in kept], [a for _, a in kept]), skipped
+
+
+async def _retarget_to_current(
+    session: AsyncSession, scope: list[tuple[str, str]]
+) -> tuple[list[tuple[str, str]], int]:
+    """Gather what :func:`retarget_to_current` decides on, and apply it.
+
+    The current generation is read through ``get_entry_currency``, the one
+    definition. Absent entries are already out of the scope,
+    so a current generation here is always an extracted ``RESPONSE``.
+    """
+    if not scope:
+        return scope, 0
+    currency = await get_entry_currency(session, {entry_id for entry_id, _ in scope})
+    current = {
+        entry_id: c.latest_snapshot_id
+        for entry_id, c in currency.items()
+        if c.mutable and c.latest_snapshot_id is not None and not c.absent
+    }
+    captured = await get_snapshot_captured_at(
+        session, {sid for _, sid in scope} | set(current.values())
+    )
+    pairs, retargeted = retarget_to_current(scope, current, captured)
+    if retargeted:
+        log.info(
+            "Reindex: %d older snapshot(s) replaced by their entry's current generation",
+            retargeted,
+        )
+    return pairs, retargeted
 
 
 def current_component_tables() -> dict[str, ComponentTable]:
@@ -647,6 +856,7 @@ async def _identify_scope(
     provider_model: str | None = None,
     progress: Callable[[str], None] | None = None,
     collapsed: AbstractSet[str] = frozenset(),
+    schema_stale_versions: Sequence[str] = (),
 ) -> list[tuple[str, str]]:
     """Return list of (entry_id, snapshot_id) pairs to reindex.
 
@@ -665,6 +875,11 @@ async def _identify_scope(
     safe but should never be silent. The store-wide auto-discovery unions
     (FAILED/PENDING, stale schema) are not gathered on that path: folding them
     in would re-open the same widening in a new place.
+
+    ``schema_stale_versions`` names the stamps stale-schema discovery selects
+    by: the older minors of the SDK's major when the operator passed
+    ``include_schema_stale``, and nothing otherwise (D5). The rows
+    are matched with ``IN``, never ``!=``, so a newer minor is never selected.
     """
     selected = await _particle_selector_pairs(
         session, extractor_version, extractor_id, provider_model
@@ -688,8 +903,10 @@ async def _identify_scope(
             else [],
             collapsed=collapsed,
             stale_schema=_source_pairs(
-                await get_active_particles_with_stale_schema_version(session, SCHEMA_VERSION)
-            ),
+                await get_active_particles_at_schema_versions(session, schema_stale_versions)
+            )
+            if schema_stale_versions
+            else [],
         )
 
     if decided.narrowed is not None:

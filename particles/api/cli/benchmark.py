@@ -361,6 +361,7 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
         select_questions,
     )
     from particles.benchmark.memory.runner import prepared_question_ids
+    from particles.benchmark.memory.schema import ReplayRecord
     from particles.config import get_config
     from particles.llm import (
         ReplayMode,
@@ -508,6 +509,13 @@ async def _benchmark_memory(  # noqa: PLR0913 — mirrors the CLI options
     _progress_line(render_usage_line(usage.snapshot()))
     if replay_mode is not ReplayMode.OFF:
         _progress_line(render_replay_line(replay))
+        # the saved report says it was replayed, not only stderr.
+        report.replay = ReplayRecord(
+            mode=replay_mode.value,
+            served=replay.hits,
+            sent=replay.misses,
+            recorded=replay.recorded,
+        )
 
     if output_format is _Format.json:
         rendered = report.model_dump_json(indent=2)

@@ -251,6 +251,40 @@ can read *why* precision fell without re-running. Set
 `benchmark.record_claim_text: false` if the fixture text must not land in
 report files.
 
+Each run file also carries the pass's measured LLM usage under
+`llm_usage`, including how many calls asked for a fixed temperature and how
+many ran without one because the model or endpoint does not take it. Most
+current Claude models refuse the parameter, so a judge or probe that asks
+for temperature 0 samples at the model's default. Extraction never asks for
+one.
+
+### Reading a difference between runs
+
+A comparison between two arms is judged against the spread its runs
+measured:
+
+- **State the number of runs** a bar is registered at, and register a
+  margin bar (one arm against another) at least two standard errors of the
+  difference wide at that number, using the spread earlier runs of the same
+  suite showed. Two standard errors is a working rule, not a significance
+  test: with three to six runs per arm the standard error is itself poorly
+  known.
+- **Report each arm's standard deviation** and how far the mean sits from
+  the bar, in standard errors. A result less than two standard errors from
+  its bar passes or fails on the mean and is inside the noise. It needs more
+  runs or an explicit decision, never a bar moved after the runs.
+- **A comparison of one run against one run** says so (n = 1). It is an
+  observation, not a result, until a same-input floor (the same count
+  between two runs over unchanged input) has been measured.
+- **Say which columns are deterministic.** The embedding judge is. An LLM
+  judge and every extraction are not.
+
+A run served from the LLM replay cache (`benchmark memory --llm-replay
+replay`) is one frozen sample of each reply. That is the right tool for an
+ablation, whose arms should differ only in the knob, and the wrong one for a
+repeat: two runs replaying one cache are not two samples. A saved
+memory-benchmark report says when it was replayed.
+
 ## Gold subjects: the subject-resolution column
 
 The three normative metrics score which claims an extractor emitted. They
@@ -392,6 +426,10 @@ Three more things bear on authoring for an LLM extractor:
   `calibrate --runs N` fits over the pooled pairs from N passes (cost
   N×, behind the same estimate/confirm gate); prefer it over persisting a
   single run.
+- Each stored record names the judge that labelled it, what that judge's
+  calls sent, and how many runs it pooled, and `extractor calibrations`
+  prints them. A record labelled by an LLM judge that sampled at its
+  default is still a valid pooled fit.
 
 ## Other harnesses
 

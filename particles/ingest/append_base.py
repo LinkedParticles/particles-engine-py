@@ -48,7 +48,6 @@ from particles.core.schema import (
 )
 from particles.corpus.deposit import load_blob
 from particles.corpus.store import ExtractionBaseRow, list_extraction_bases
-from particles.extraction.agent import EXTRACTOR_ID as AGENT_EXTRACTOR_ID
 from particles.extraction.append_delta import derive_base_offset
 from particles.extraction.general import EXTRACTOR_ID as GENERAL_EXTRACTOR_ID
 from particles.extraction.general import source_text_flags
@@ -81,30 +80,6 @@ class AppendPlan:
     fallback: str | None = None
     derived_offset: bool = False
     """The offset came from chunk hashes (§4), the base having no ``extracted_through``."""
-
-
-#: Extractors whose snapshots another extractor may read on from:
-#: base extractor id → the reading extractors that accept it as a delta base.
-#: A delta read assumes the base was extracted under the same claim rules, so
-#: the carried context and the new claims meet at one granularity. The agent
-#: extractor's prompt carries the general extractor's rules, so the general
-#: extractor may continue from a snapshot the session's agent extracted.
-#: One-way and explicit: a pairing not listed keeps the whole-read fallback.
-DELTA_COMPATIBLE: dict[str, frozenset[str]] = {
-    AGENT_EXTRACTOR_ID: frozenset({GENERAL_EXTRACTOR_ID}),
-}
-
-
-def delta_compatible(base_extractors: set[str], reader: str) -> bool:
-    """Whether ``reader`` may read on from a base whose claims ``base_extractors`` made.
-
-    True when the reader made some of the base's claims, the rule before,
-    or when every extractor that did is one :data:`DELTA_COMPATIBLE`
-    lets the reader continue from.
-    """
-    if reader in base_extractors:
-        return True
-    return all(reader in DELTA_COMPATIBLE.get(name, frozenset()) for name in base_extractors)
 
 
 def in_scope(entry: CorpusEntry, extractor: ExtractorPlugin) -> bool:
@@ -194,7 +169,7 @@ async def _plan_from(
         if p.extractor_ref is not None
         and any(ref.snapshot_id == base.snapshot_id for ref in p.provenance)
     }
-    if base_extractors and not delta_compatible(base_extractors, extractor_id):
+    if base_extractors and extractor_id not in base_extractors:
         return AppendPlan(
             base_snapshot_id=base.snapshot_id,
             fallback=f"{FALLBACK_OTHER_EXTRACTOR} ({', '.join(sorted(base_extractors))})",

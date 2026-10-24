@@ -69,6 +69,7 @@ from particles.core.schema import SuggestMode
 from particles.core.spend_budget import decide_spend
 from particles.core.status import Status
 from particles.db import write_lock, write_transaction
+from particles.ingest.absence import absences_last
 from particles.ingest.ladder_shell import rung_tally
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.llm.batch_budget import (
@@ -119,6 +120,15 @@ from particles.operations.lint.contradictions import (
 from particles.operations.lint.open_inconsistency import open_inconsistency_findings
 from particles.operations.modality import reclassified_particle_ids_since
 from particles.operations.paraphrases import ParaphraseReport, run_paraphrases
+from particles.operations.rank_lift_monitor import (
+    PAYLOAD_KEY as RANK_LIFT_PAYLOAD_KEY,
+)
+from particles.operations.rank_lift_monitor import (
+    RankLiftMonitorReport,
+    latest_monitor_block,
+    render_rank_lift_lines,
+    run_rank_lift_monitor,
+)
 from particles.operations.reanchor import ReanchorReport, prior_cursor, run_reanchor
 from particles.operations.reconcile import (
     UPDATE_PROBE_LEDGER,
@@ -200,6 +210,7 @@ PASS_ORDER: tuple[str, ...] = (
     "utility",
     "abstraction",
     "projection",
+    "rank_lift",
     "measure",
 )
 
@@ -885,6 +896,19 @@ class ConsolidationReport(BaseModel):
     #: Of those, snapshots that completed with no belief written, carried
     #: forward or folded into an existing one. Disclosed, never silent.
     pending_empty: int = 0
+    #: Confirmed contradictions between a snapshot and an earlier generation of
+    #: its own MUTABLE entry, settled by the generation with no INCONSISTENCY
+    #: record. Disclosed, as a record would have been.
+    pending_revision_settled: int = 0
+    #: Candidates folded into the earlier generation's claim they restate,
+    #: instead of minted.
+    pending_restated: int = 0
+    #: Earlier claims a reworded candidate retired by update, named by it.
+    pending_restatement_lineage: int = 0
+    #: Judged restatements that would have carried had the judge been admitted.
+    pending_restatement_shadow: int = 0
+    #: Restatement pairs over ``generation.restatement.max_judged``, not asked.
+    pending_restatement_unasked: int = 0
     #: Snapshots with a failed LLM call: the pipeline handed them back PENDING.
     #: Not extracted; the next run retries them behind every snapshot not yet
     #: tried.
@@ -895,6 +919,11 @@ class ConsolidationReport(BaseModel):
     #: Snapshots not tried because an earlier snapshot of the entry holds a
     #: partial whole read: they wait until it completes.
     pending_waiting: int = 0
+    #: Of ``pending_extracted``, the ``ABSENT`` records processed: a vault note
+    #: no longer found, its claims retired with no model call.
+    pending_absences: int = 0
+    #: The claims those absences retired.
+    absence_retired: int = 0
     pending_failed: int = 0
     pending_remaining: int = 0
     #: Listed as PENDING, then found superseded when its task reached it
@@ -910,6 +939,13 @@ class ConsolidationReport(BaseModel):
     # Superseded generations of MUTABLE entries skipped before the pass listed
     # its work. Not part of ``pending_total``: they were never owed.
     pending_collapsed: int = 0
+    #: PENDING snapshots not listed because the extraction model refused every
+    #: call of their last pass and the hold is current. Still
+    #: owed; not part of ``pending_total`` or the remainder.
+    pending_held: int = 0
+    #: Of ``pending_retry``, the snapshots whose every call this run was
+    #: refused: recorded, so later runs hold them.
+    pending_refused: int = 0
 
     # Pass 2 — reconcile sweep (probe-bearing: one semantic_lint call per
     # candidate pair, capped at consolidation.max_reconcile_probes).
@@ -1032,6 +1068,11 @@ class ConsolidationReport(BaseModel):
 
     # Pass 6 — projection re-render (the runner's telemetry dict).
     projection: dict[str, Any] | None = None
+
+    # Pass 6a — the rank-lift monitor: whether the configured λ still
+    # puts the beliefs used outside the head into it. Read only; recorded under
+    # the run record's ``rank_lift`` key.
+    rank_lift: RankLiftMonitorReport | None = None
 
     # Pass 6b — the closure measure: the store-wide contested
     # fraction and the window's autonomous versus gesture transitions. Read
@@ -1265,6 +1306,7 @@ def build_run_payload(
     budget: BudgetSummary | None = None,
     closure: ClosureMeasure | None = None,
     rungs: Mapping[str, Any] | None = None,
+    rank_lift: RankLiftMonitorReport | None = None,
 ) -> dict[str, Any]:
     """The versioned ``CONSOLIDATION_RUN`` payload (``format: 1``).
 
@@ -1287,6 +1329,8 @@ def build_run_payload(
     rung returned, the ladder's settled verdicts by the rung that decided
     them, and any shadow rung's verdicts. The key is written on every run, an
     empty block on a night no ladder ran, so its absence is never ambiguous.
+    ``rank_lift`` is additive too: the monitor's reading of every
+    view, omitted for a run that did not monitor.
     """
     payload: dict[str, Any] = {
         "format": RUN_PAYLOAD_FORMAT,
@@ -1321,6 +1365,8 @@ def build_run_payload(
         payload["budget"] = {**budget.model_dump(mode="json"), "limited": budget.limited}
     if closure is not None:
         payload[CLOSURE_PAYLOAD_KEY] = closure.payload()
+    if rank_lift is not None:
+        payload[RANK_LIFT_PAYLOAD_KEY] = rank_lift.payload()
     return payload
 
 
@@ -1366,6 +1412,20 @@ def _semantic_availability(structural_only: bool) -> tuple[bool, str | None]:
 # ---------------------------------------------------------------------------
 # The operation
 # ---------------------------------------------------------------------------
+
+
+def _restatement_parts(report: ConsolidationReport) -> list[str]:
+    """The pending-pass summary parts for the restatement match."""
+    parts: list[str] = []
+    if report.pending_restated:
+        parts.append(f"{report.pending_restated} restated claim(s) carried forward")
+    if report.pending_restatement_lineage:
+        parts.append(f"{report.pending_restatement_lineage} restatement(s) recorded as updates")
+    if report.pending_restatement_shadow:
+        parts.append(f"{report.pending_restatement_shadow} would-be restatement carry(ies)")
+    if report.pending_restatement_unasked:
+        parts.append(f"{report.pending_restatement_unasked} restatement pair(s) unasked")
+    return parts
 
 
 async def run_consolidation(
@@ -1794,6 +1854,18 @@ async def run_consolidation(
                     session, report, "projection", lambda: _pass_projection(report, runner)
                 )
 
+            # ------------------------------------ pass 6a: rank_lift
+            # Zero-LLM and read-only, so it runs on degraded nights too. After
+            # mining, abstraction and the re-render, so it reads tonight's store.
+            if not get_config().utility.monitor.enabled:
+                _skip(report, "rank_lift", "utility.monitor.enabled is false")
+            elif not get_config().utility.enabled:
+                _skip(report, "rank_lift", "utility.enabled is false (no rank-lift to judge)")
+            else:
+                await _run_pass(
+                    session, report, "rank_lift", lambda: _pass_rank_lift(session, report)
+                )
+
             # ---------------------------------------- pass 6b: measure
             # Zero-LLM and read-only, so it runs on every night, degraded ones
             # included. Last, so it reads the store this run leaves behind.
@@ -1838,6 +1910,7 @@ async def run_consolidation(
                 budget=report.budget,
                 closure=report.closure,
                 rungs=report.rung_counts,
+                rank_lift=report.rank_lift,
             )
             async with write_transaction(session):
                 event = await record_event(
@@ -2093,6 +2166,9 @@ def _pass_summary(
                 parts.append(f"{report.pending_failed} failed")
             if report.pending_empty:
                 parts.append(f"{report.pending_empty} with no beliefs")
+            if report.pending_revision_settled:
+                parts.append(f"{report.pending_revision_settled} revision pair(s) settled")
+            parts.extend(_restatement_parts(report))
             if report.pending_remaining:
                 parts.append(f"{report.pending_remaining} still pending")
         case "reconcile":
@@ -2164,6 +2240,8 @@ def _pass_summary(
             ]
         case "projection" if report.projection is not None:
             parts = [f"re-rendered {_plural(report.projection.get('rendered', 0), 'memory file')}"]
+        case "rank_lift" if report.rank_lift is not None:
+            parts = [render_rank_lift_lines(report.rank_lift)[0].strip()]
         case "measure" if report.closure is not None:
             parts = [line.strip() for line in render_closure_lines(report.closure, None)]
         case _:
@@ -2223,11 +2301,24 @@ async def _delta_scope_ids(session: AsyncSession, watermark: datetime) -> frozen
     return frozenset(changed)
 
 
-async def _count_backlog(session: AsyncSession, report: ConsolidationReport) -> int:
-    """Disclose the PENDING backlog without extracting (the degraded pass 1)."""
+async def catchup_listing(session: AsyncSession) -> tuple[list[PendingSnapshot], int]:
+    """The catch-up's PENDING listing with held snapshots left out, and how many were.
+
+    A snapshot a current refusal holds is still owed, but the
+    catch-up neither lists nor claims it, so it does not move the
+    order of the snapshots that are listed.
+    """
     from particles.corpus.store import list_pending_snapshots_for_catchup
+    from particles.ingest.refusal_hold import held_snapshot_ids
 
     pending = await list_pending_snapshots_for_catchup(session)
+    held = await held_snapshot_ids(session, snapshot_ids=[p.snapshot_id for p in pending])
+    return [p for p in pending if p.snapshot_id not in held], len(held)
+
+
+async def _count_backlog(session: AsyncSession, report: ConsolidationReport) -> int:
+    """Disclose the PENDING backlog without extracting (the degraded pass 1)."""
+    pending, report.pending_held = await catchup_listing(session)
     report.pending_total = len(pending)
     report.pending_remaining = len(pending)
     report.pending_oldest_at = min((p.waiting_since for p in pending), default=None)
@@ -2291,10 +2382,7 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
     """
     # Deferred import: the pipeline pulls the extractor registry / LLM stack;
     # load it only when there is something to extract (AGENTS.md case 2).
-    from particles.corpus.store import (
-        list_pending_snapshots_for_catchup,
-        reset_stale_in_progress,
-    )
+    from particles.corpus.store import reset_stale_in_progress
     from particles.operations.extract import collapse_superseded_pending, extract_snapshot
 
     # A run killed mid-extraction leaves its claims IN_PROGRESS, where no
@@ -2320,7 +2408,7 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
     # every one of them extracting a generation the file no longer holds.
     report.pending_collapsed = (await collapse_superseded_pending(session)).snapshots
 
-    pending = await list_pending_snapshots_for_catchup(session)
+    pending, report.pending_held = await catchup_listing(session)
     report.pending_total = len(pending)
     if pending and not purpose_allowed("extraction"):
         # no snapshot is claimed, so each stays PENDING with its
@@ -2349,11 +2437,27 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
         # The pooled tasks open sessions of their own; end this one's read so
         # it does not pin a connection for the whole pass.
         await session.commit()
-        extracted = await _pass_extract_pooled(chosen, report)
+        # an absence makes no model call, so it joins no batch;
+        # the absences the cap admitted are processed after the pooled
+        # RESPONSE work, in this session.
+        absent_ids = {item.snapshot_id for item in pending if item.absent}
+        extracted = await _pass_extract_pooled(
+            [pair for pair in chosen if pair[1] not in absent_ids], report
+        )
+        absences = [
+            item for item in pending if item.absent and (item.entry_id, item.snapshot_id) in chosen
+        ]
+        if absences:
+            extracted = await _pass_extract_serial(session, absences, report, extract_snapshot)
     else:
         cap = get_config().consolidation.max_pending_entries
+        chosen_serial = _prioritised(pending)[:cap]
+        # the absences the cap admitted run after the RESPONSE work.
         extracted = await _pass_extract_serial(
-            session, _prioritised(pending)[:cap], report, extract_snapshot
+            session,
+            absences_last(chosen_serial, [item.absent for item in chosen_serial]),
+            report,
+            extract_snapshot,
         )
     report.pending_oldest_at = await _oldest_pending_at(session)
     return extracted
@@ -2433,9 +2537,7 @@ def _one_per_entry(pending: Sequence[PendingSnapshot], cap: int) -> list[tuple[s
 
 
 async def _oldest_pending_at(session: AsyncSession) -> datetime | None:
-    from particles.corpus.store import list_pending_snapshots_for_catchup
-
-    pending = await list_pending_snapshots_for_catchup(session)
+    pending, _ = await catchup_listing(session)
     return min((p.waiting_since for p in pending), default=None)
 
 
@@ -2463,6 +2565,11 @@ def _record_extraction(
     back PENDING with nothing written, was reported as done, night after night.
     """
     outcome = run.outcome
+    report.pending_revision_settled += outcome.revision_settled
+    report.pending_restated += outcome.restated
+    report.pending_restatement_lineage += outcome.restatement_lineage
+    report.pending_restatement_shadow += outcome.restatement_shadow
+    report.pending_restatement_unasked += outcome.restatement_unasked
     if outcome.skipped is not None:
         if outcome.skipped == "superseded":
             report.pending_superseded_late += 1
@@ -2503,6 +2610,19 @@ def _record_extraction(
             outcome.rebilled_calls,
         )
         return
+    if outcome.failed_calls and outcome.refusal_recorded:
+        report.pending_retry += 1
+        report.pending_refused += 1
+        log.warning(
+            "consolidation: %s/%s left PENDING: the extraction model declined every call%s; "
+            "held until the model or the content changes or extraction.refusal_retry_days "
+            "passes (`particles extract %s` sends it now)",
+            entry_id[:8],
+            snapshot_id[:8],
+            f" (category {outcome.refusal_category})" if outcome.refusal_category else "",
+            entry_id[:8],
+        )
+        return
     if outcome.failed_calls:
         report.pending_retry += 1
         log.warning(
@@ -2516,6 +2636,10 @@ def _record_extraction(
         )
         return
     report.pending_extracted += 1
+    if outcome.absence_retired is not None:
+        report.pending_absences += 1
+        report.absence_retired += len(outcome.absence_retired)
+        return
     if not written and not run.carried and not run.suppressed:
         report.pending_empty += 1
         log.warning(
@@ -3322,6 +3446,19 @@ async def _pass_projection(report: ConsolidationReport, runner: ProjectionRunner
     return 0
 
 
+async def _pass_rank_lift(session: AsyncSession, report: ConsolidationReport) -> int:
+    """Pass 6a: the rank-lift monitor. Reads only; never changes λ.
+
+    The previous reading is the latest run record's ``rank_lift`` block, so the
+    alert compares against the last night that monitored, whatever ran since.
+    """
+    previous = await latest_monitor_block(session)
+    report.rank_lift = await run_rank_lift_monitor(
+        session, run_id=report.started_at.isoformat(), previous=previous
+    )
+    return 0
+
+
 async def _pass_measure(session: AsyncSession, report: ConsolidationReport, *, actor: str) -> int:
     """Pass 6b: the closure measure over the window since this actor's last run.
 
@@ -3462,15 +3599,24 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "pending_backlog": report.pending_remaining,
         "pending_extracted": report.pending_extracted,
         "pending_empty": report.pending_empty,
+        "pending_revision_settled": report.pending_revision_settled,
+        "pending_restated": report.pending_restated,
+        "pending_restatement_lineage": report.pending_restatement_lineage,
+        "pending_restatement_shadow": report.pending_restatement_shadow,
+        "pending_restatement_unasked": report.pending_restatement_unasked,
         "pending_retry": report.pending_retry,
         "pending_partial": report.pending_partial,
         "pending_waiting": report.pending_waiting,
+        "pending_absences": report.pending_absences,
+        "absence_retired": report.absence_retired,
         "pending_failed": report.pending_failed,
         "pending_reset_stale": report.pending_reset_stale,
         "pending_oldest_at": (
             report.pending_oldest_at.isoformat() if report.pending_oldest_at else None
         ),
         "pending_collapsed": report.pending_collapsed,
+        "pending_held": report.pending_held,
+        "pending_refused": report.pending_refused,
         "refresh_checked": report.refresh_checked,
         "refresh_updated": report.refresh_updated,
         "refresh_missing": report.refresh_missing,
@@ -3637,6 +3783,9 @@ def _pending_line(report: ConsolidationReport) -> str:
         parts.append(f"{report.pending_waiting} waiting")
     if report.pending_empty:
         parts.append(f"{report.pending_empty} with no beliefs")
+    if report.pending_revision_settled:
+        parts.append(f"{report.pending_revision_settled} revision pair(s) settled")
+    parts.extend(_restatement_parts(report))
     line = "  pending          " + ", ".join(parts)
     if report.pending_remaining:
         waiting = f"{report.pending_remaining} remain"
@@ -3645,6 +3794,13 @@ def _pending_line(report: ConsolidationReport) -> str:
         line += f" ({waiting}; the next run continues)"
     if report.pending_collapsed:
         line += f"; skipped {report.pending_collapsed} superseded snapshot(s)"
+    if report.pending_refused:
+        line += f"; {report.pending_refused} declined by the extraction model and now held"
+    if report.pending_held:
+        line += (
+            f"; {report.pending_held} held: refused (see `particles curate`, or "
+            "`particles extract --all-pending --retry-refused`)"
+        )
     return line
 
 
@@ -3681,6 +3837,11 @@ def render_reanchor_line(reanchor: ReanchorReport) -> str:
         parts.append(f"{len(reanchor.unrestated)} kept for review (stale_basis)")
     if reanchor.unanswered:
         parts.append(f"{reanchor.unanswered} candidate(s) the probe gave no verdict for")
+    if reanchor.skipped_newer_schema:
+        parts.append(
+            f"{reanchor.skipped_newer_schema} candidate(s) written by a newer schema "
+            "left for a newer SDK"
+        )
     if reanchor.waiting:
         parts.append(f"{reanchor.waiting} waiting")
     return "  re-anchor        " + ", ".join(parts)
@@ -3927,6 +4088,8 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
     if report.utility_behavioural:
         utility += f" ({report.utility_behavioural} behavioural)"
     lines.append(utility)
+    if report.rank_lift is not None:
+        lines.extend(render_rank_lift_lines(report.rank_lift))
     if report.abstraction is not None:
         ab = report.abstraction
         parts: list[str] = []

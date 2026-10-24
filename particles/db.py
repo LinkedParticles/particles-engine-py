@@ -182,6 +182,17 @@ def _store_is_file_sqlite(store: StoreHandle) -> bool:
     return _sqlite_file_path(_resolve_store_dsn(store)) is not None
 
 
+def store_is_in_memory(store: StoreHandle = DEFAULT_STORE) -> bool:
+    """True when ``store`` is an in-memory SQLite database.
+
+    Its sessions cannot run side by side: every one shares the single
+    connection that holds the data, so a caller that would open a session per
+    concurrent task runs serially instead.
+    """
+    dsn = _resolve_store_dsn(store)
+    return dsn.startswith("sqlite") and _sqlite_file_path(dsn) is None
+
+
 def _write_lock_path(store: StoreHandle) -> str:
     """Lockfile path for ``store`` — config override, else ``<db_file>.writelock``."""
     configured = get_config().storage.write_lock.path

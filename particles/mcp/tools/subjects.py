@@ -49,10 +49,11 @@ async def subjects_search(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Substring search over subject canonical names (case-insensitive).
+    """Substring search over subject names and aliases (case-insensitive).
 
     Args:
-        query: Substring to match against ``canonical_name``.
+        query: Substring to match against ``canonical_name`` or any recorded
+            alias, so "speaker" finds a subject whose alias is "the speaker".
         limit: Maximum subjects to return (default 50). A generic
             substring like "the" can match thousands of subjects, so
             this caps the page size.
@@ -78,7 +79,12 @@ async def subjects_show(
     """Show one subject with the particle IDs linked to it.
 
     Args:
-        subject_id: Full UUID or unambiguous prefix (≥ 8 chars).
+        subject_id: A full UUID, an unambiguous prefix (≥ 8 chars), or a
+            name or alias, matched case-insensitively and exactly. A
+            reference that matches more than one subject (a prefix shared
+            by several IDs, a name two subjects share, or a string that is
+            both a prefix and a name) raises with the candidates named. A
+            remote engine resolves IDs and prefixes only.
         particle_id_limit: Maximum particle IDs to include in
             ``particle_ids`` (default 100). For hot subjects the full
             list can blow the per-tool-result token cap; use

@@ -637,3 +637,166 @@ async def test_sequential_fallback_reports_an_empty_completion_as_empty(
 
     assert out == ["reply 0", None, None, "reply 3"]
     assert failures == [None, RequestFailure.EMPTY, RequestFailure.UNAVAILABLE, None]
+
+
+# ---------------------------------------------------------------------------
+# A model that refuses temperature: the batch path learns it too
+# ---------------------------------------------------------------------------
+
+_NO_TEMPERATURE_MODEL = "claude-haiku-5-5"
+
+
+@pytest.fixture
+def _forget_temperature_memo() -> Generator[None, None, None]:
+    from particles.llm.adapters import anthropic as adapter
+
+    adapter._TEMPERATURE_UNSUPPORTED.discard(_NO_TEMPERATURE_MODEL)
+    yield
+    adapter._TEMPERATURE_UNSUPPORTED.discard(_NO_TEMPERATURE_MODEL)
+
+
+def _errored(custom_id: str, message: str) -> SimpleNamespace:
+    """A Message Batches ``errored`` entry shaped like the SDK's (ErrorResponse → ErrorObject)."""
+    return SimpleNamespace(
+        custom_id=custom_id,
+        result=SimpleNamespace(
+            type="errored",
+            error=SimpleNamespace(
+                type="error",
+                error=SimpleNamespace(type="invalid_request_error", message=message),
+            ),
+        ),
+    )
+
+
+_TEMPERATURE_REJECTION = "`temperature` is deprecated for this model."
+
+
+def _two_batch_client(first: list[SimpleNamespace], second: list[SimpleNamespace]) -> MagicMock:
+    """A client whose first batch returns ``first`` and second returns ``second``."""
+    client = _batches_client([])
+    client.messages.batches.create.side_effect = [
+        SimpleNamespace(id="msgbatch_first"),
+        SimpleNamespace(id="msgbatch_second"),
+    ]
+    by_batch = {"msgbatch_first": first, "msgbatch_second": second}
+    client.messages.batches.results.side_effect = lambda batch_id: iter(by_batch[batch_id])
+    return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_forget_temperature_memo")
+async def test_batch_learns_a_temperature_rejection_and_reruns_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first-in-process batch whose every request errors on temperature still answers.
+
+    On 2026-10-22, 196 probes on claude-haiku-5-5 came back all unanswered
+    because only the single-call path learned the rejection.
+    """
+    from particles.llm.adapters.anthropic import _TEMPERATURE_UNSUPPORTED, AnthropicProvider
+
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    client = _two_batch_client(
+        [_errored(str(i), _TEMPERATURE_REJECTION) for i in range(4)],
+        [_succeeded(str(i), f"reply {i}") for i in range(4)],
+    )
+    llm.set_client(client)
+
+    provider = AnthropicProvider(model=_NO_TEMPERATURE_MODEL)
+    out = await provider.complete_many(_REQUESTS, max_tokens=10, temperature=0.0)
+
+    assert out == ["reply 0", "reply 1", "reply 2", "reply 3"]
+    first, second = (c.kwargs["requests"] for c in client.messages.batches.create.call_args_list)
+    assert [r["params"]["temperature"] for r in first] == [0.0] * 4
+    assert all("temperature" not in r["params"] for r in second)
+    assert _NO_TEMPERATURE_MODEL in _TEMPERATURE_UNSUPPORTED
+    client.messages.create.assert_not_called()
+
+    # The rest of the process skips the wasted attempt.
+    client.messages.batches.create.side_effect = None
+    client.messages.batches.create.return_value = SimpleNamespace(id="msgbatch_third")
+    client.messages.batches.results.side_effect = None
+    client.messages.batches.results.return_value = iter(
+        [_succeeded(str(i), f"again {i}") for i in range(4)]
+    )
+    assert await provider.complete_many(_REQUESTS, max_tokens=10, temperature=0.0) == [
+        f"again {i}" for i in range(4)
+    ]
+    third = client.messages.batches.create.call_args.kwargs["requests"]
+    assert all("temperature" not in r["params"] for r in third)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_forget_temperature_memo")
+async def test_batch_reruns_only_the_requests_refused_on_temperature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answered requests are kept; only the refused ones go out again, realigned by id."""
+    from particles.llm import RequestFailure
+    from particles.llm.adapters.anthropic import AnthropicProvider
+
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    client = _two_batch_client(
+        [
+            _succeeded("0", "reply 0"),
+            _errored("1", _TEMPERATURE_REJECTION),
+            _errored("2", "prompt is too long"),
+            _errored("3", _TEMPERATURE_REJECTION),
+        ],
+        # The re-run is its own batch: ids index into it, and arrive in any order.
+        [_succeeded("1", "reply 3"), _succeeded("0", "reply 1")],
+    )
+    llm.set_client(client)
+
+    failures: list[RequestFailure | None] = []
+    out = await AnthropicProvider(model=_NO_TEMPERATURE_MODEL).complete_many(
+        _REQUESTS, max_tokens=10, temperature=0.0, failures_out=failures
+    )
+
+    assert out == ["reply 0", "reply 1", None, "reply 3"]
+    assert failures == [None, None, RequestFailure.UNAVAILABLE, None]
+    second = client.messages.batches.create.call_args_list[1].kwargs["requests"]
+    assert [r["params"]["messages"][0]["content"] for r in second] == ["probe 1", "probe 3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_forget_temperature_memo")
+async def test_batch_error_unrelated_to_temperature_is_not_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a rejection naming the parameter is learned; other errors stay unavailable."""
+    from particles.llm.adapters.anthropic import _TEMPERATURE_UNSUPPORTED, AnthropicProvider
+
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    client = _batches_client([_errored(str(i), "prompt is too long") for i in range(4)])
+    llm.set_client(client)
+
+    out = await AnthropicProvider(model=_NO_TEMPERATURE_MODEL).complete_many(
+        _REQUESTS, max_tokens=10, temperature=0.0
+    )
+
+    assert out == [None] * 4
+    assert client.messages.batches.create.call_count == 1
+    assert _NO_TEMPERATURE_MODEL not in _TEMPERATURE_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_forget_temperature_memo")
+async def test_batch_that_sent_no_temperature_does_not_learn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch that never sent the parameter cannot have been refused for it."""
+    from particles.llm.adapters.anthropic import _TEMPERATURE_UNSUPPORTED, AnthropicProvider
+
+    _batch_config(tmp_path, monkeypatch, min_requests=2)
+    client = _batches_client([_errored(str(i), _TEMPERATURE_REJECTION) for i in range(4)])
+    llm.set_client(client)
+
+    out = await AnthropicProvider(model=_NO_TEMPERATURE_MODEL).complete_many(
+        _REQUESTS, max_tokens=10
+    )
+
+    assert out == [None] * 4
+    assert client.messages.batches.create.call_count == 1
+    assert _NO_TEMPERATURE_MODEL not in _TEMPERATURE_UNSUPPORTED

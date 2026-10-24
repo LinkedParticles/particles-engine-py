@@ -140,7 +140,7 @@ class TestLadders:
             assert rung.decide is not None, "the probe was offered"
             run.record(rung, rung.decide(run.item))
         assert offered == ["adjudicability", "generic_guard", "duplicate_key"]
-        assert run.settled().decided_by == RungStamp("duplicate_key", "1")
+        assert run.settled().decided_by == RungStamp("duplicate_key", "2")
 
     def test_the_update_ladder_confirms_changes_only(self) -> None:
         ladder = update_ladder("h")

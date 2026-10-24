@@ -206,7 +206,8 @@ class TestBoundMcpWrites:
         self, db_session: Any
     ) -> None:
         out = await _call("deposit_text", {"text": "notes", "tags": [f"project:{B}"]})
-        assert await self._entry_tags(out["corpus_entry_id"]) == []
+        # No key, and no global entry either: the agent's write is unattributed.
+        assert await self._entry_tags(out["corpus_entry_id"]) == ["scope:unattributed"]
 
     async def test_an_assertion_may_cite_its_own_projects_source_only(
         self, db_session: Any, bound_to_a: None

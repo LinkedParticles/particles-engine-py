@@ -17,6 +17,7 @@ served in well under a second on a store where building it fresh took minutes.
 
 Public surface:
     build_curation_queue   — the ranked, finite, snooze-filtered queue + staleness stamp
+    get_curation_card      — one open card by key, every belief briefed
     apply_gesture          — dispatch a card's gesture onto an existing write op
     BeliefRevision         — the operator's replacement belief for the supersede gesture
     rebuild_curation_snapshot — force a store-wide rebuild of the collection
@@ -41,12 +42,16 @@ from .session import (
     BeliefRevision,
     apply_gesture,
     build_curation_queue,
+    dismiss_source_card,
+    get_curation_card,
     rebuild_curation_snapshot,
 )
 from .snapshot import CurationQueueResult, QueueSource
 
 __all__ = [
     "build_curation_queue",
+    "dismiss_source_card",
+    "get_curation_card",
     "rebuild_curation_snapshot",
     "apply_gesture",
     "BeliefRevision",

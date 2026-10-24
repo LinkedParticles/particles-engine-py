@@ -366,12 +366,6 @@ class TestLlmPurposes:
         assert breaker.llm_failure_count() == before
         assert not breaker.llm_circuit_open()
 
-    def test_agent_side_purpose_is_unservable(self, refusing: None) -> None:
-        """A refused semantic_lint holds agent-side near pairs."""
-        from particles.extraction.agent import purpose_servable
-
-        assert purpose_servable("semantic_lint") is False
-
     @pytest.mark.asyncio
     async def test_background_probe_fails_open_quietly(
         self, refusing: None, caplog: pytest.LogCaptureFixture

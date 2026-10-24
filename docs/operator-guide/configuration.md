@@ -328,9 +328,9 @@ view of it; see [User Guide → Claude
 Code](../user-guide/claude-code.md#choose-what-a-session-sees) for what the
 view contains. Three switches, deliberately in three places:
 
-- `claude_code.observer_scope` (default `store`): `project` reads the
-  session-start digest, the `MEMORY.md` region and the freshness check through
-  the session's project. It takes effect only on a store that
+- `claude_code.observer_scope` (default `project` since; `store` is
+  the whole store): `project` reads the session-start digest, the `MEMORY.md`
+  region and the freshness check through the session's project. It takes effect only on a store that
   `particles memory rescope` has run on; until then the surfaces stay
   store-wide and say so, and `particles hook doctor` reports "NOT in effect".
 - `particles mcp serve --project-observer cwd`: binds one MCP server process to
@@ -341,7 +341,8 @@ view contains. Three switches, deliberately in three places:
   `project_key`, a curate merge). A **launch flag,
   not config**, because `config.yaml` is shared by every MCP client on the
   machine and a client started from your home directory should not be bound to
-  it.
+  it. `particles init claude-code` writes it into the Claude Code registration
+  only.
 - `observer_scope.harness_tags` (default `["claude-code"]`): the corpus-entry
   tags that mark a harness deposit. A harvested source with no project key is
   *unattributed*: in view store-wide and for no project, never global. Add
@@ -369,9 +370,26 @@ walkthrough. The load-bearing knobs:
 - `agent_memory.projection.enabled` (default `true`): render + splice the
   `memory-index` region and run the session-start freshness check. `false`
   falls back to a plain digest push with no region writes.
-- `agent_memory.projection.fold_authored_lines` (default `true`): move
-  agent-authored lines outside the projected region into the append-only
-  archive after each successful harvest (never destroyed).
+- `agent_memory.projection.fold_authored_lines` (default `true`): move a
+  memory-index pointer below the projected region into the append-only
+  archive while the region shows a belief its file currently states, and
+  bring it back once it does not. The file must be extracted
+  first; other lines are never moved. `false` turns both halves off.
+- `agent_memory.projection.never_fold_types` (default `[feedback, user]`):
+  memory types whose pointers never fold. A pointer whose topic file's
+  frontmatter `metadata.type` is listed stays in `MEMORY.md` whatever the
+  region shows, and one already in the archive comes back. A file with no
+  type follows the rule above; `[]` lets every typed pointer fold.
+- `agent_memory.projection.exclude_source_tags` (default `[rule-file]`):
+  source tags the region never selects from. A belief whose current
+  sources all carry one of these tags is dropped before the region's cut; one
+  that no source states any more is judged by the sources that ever stated it,
+  and one with no source at all is kept. The default keeps the rule files
+  `particles rules sync` tracks out of the region. Unlike the other knobs in
+  this block it is read at render time rather than baked into `memory.yaml`,
+  so changing it takes effect on the next render, and the next session start
+  sees the region as stale until then. A `select.allow` pin in the manifest
+  still wins. `[]` restores the unfiltered region.
 
 ### Git-versioned projection history
 

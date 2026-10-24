@@ -12,15 +12,17 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import ColumnElement, DateTime, String, Text, select
+from sqlalchemy import ColumnElement, DateTime, String, Text, delete, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.config import get_config
+from particles.core.artifact_fold import ARTIFACT_REF_NAMESPACE, artifact_ref_project
 from particles.core.schema import ContributorRef, ExternalRef, Subject
 from particles.db import Base
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
@@ -107,14 +109,156 @@ class ParticleSubjectRow(Base):
     subject_id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
 
 
+class SubjectAliasRow(Base):
+    """One recorded alias of a Subject, keyed for lookup.
+
+    A derived index over ``SubjectRow.aliases_json``, which stays the system of
+    record: :func:`rebuild_alias_index` re-derives it, so dropping it changes
+    speed, never an answer (D1). Every read joins ``subjects``, so a
+    row a missed delete left behind is invisible to answers and is reported by
+    :func:`check_alias_index`.
+    """
+
+    __tablename__ = "subject_aliases"
+
+    subject_id: Mapped[str] = mapped_column(String, primary_key=True)
+    alias_key: Mapped[str] = mapped_column(Text, primary_key=True, index=True)
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+def alias_key(name: str) -> str:
+    """The folded form the alias index compares.
+
+    ``str.lower()`` computed in Python, the comparison :func:`find_by_name`,
+    :func:`add_aliases` and the merge path make, so moving a lookup onto the
+    index changes no binding. SQLite's ``lower()`` folds ASCII only, which is
+    why the key is stored rather than computed in SQL.
+    """
+    return name.lower()
+
+
+def _alias_index_rows(subject_id: str, aliases: Sequence[str]) -> list[dict[str, str]]:
+    """The index rows for one Subject's aliases: one per key, first spelling kept."""
+    rows: dict[str, dict[str, str]] = {}
+    for alias in aliases:
+        rows.setdefault(
+            alias_key(alias),
+            {"subject_id": subject_id, "alias_key": alias_key(alias), "alias": alias},
+        )
+    return list(rows.values())
+
+
+async def _index_aliases(session: AsyncSession, subject_id: str, aliases: Sequence[str]) -> None:
+    """Replace one Subject's index rows with ``aliases`` (core SQL, no identity map)."""
+    await session.execute(delete(SubjectAliasRow).where(SubjectAliasRow.subject_id == subject_id))
+    rows = _alias_index_rows(subject_id, aliases)
+    if rows:
+        await session.execute(insert(SubjectAliasRow), rows)
+
+
+async def _set_aliases(session: AsyncSession, row: SubjectRow, aliases: list[str]) -> None:
+    """Write a Subject's aliases and its index rows together.
+
+    The one place ``aliases_json`` changes after a row is created;
+    ``tests/test_alias_index_writes.py`` fails on a write anywhere else.
+    """
+    row.aliases_json = json.dumps(aliases)
+    await _index_aliases(session, row.id, aliases)
+
+
+async def drop_aliases(session: AsyncSession, subject_ids: Collection[str]) -> None:
+    """Delete the index rows of Subjects being deleted."""
+    ids = list(subject_ids)
+    for i in range(0, len(ids), _IN_CHUNK):
+        chunk = ids[i : i + _IN_CHUNK]
+        await session.execute(delete(SubjectAliasRow).where(SubjectAliasRow.subject_id.in_(chunk)))
+
+
+async def _rows_with_alias(session: AsyncSession, name: str) -> list[SubjectRow]:
+    """Subjects holding ``name`` as an alias, earliest first, through the index.
+
+    Joined to ``subjects``, so an index row whose Subject is gone never answers.
+    """
+    result = await session.execute(
+        select(SubjectRow)
+        .join(SubjectAliasRow, SubjectAliasRow.subject_id == SubjectRow.id)
+        .where(SubjectAliasRow.alias_key == alias_key(name))
+        .order_by(SubjectRow.created_at, SubjectRow.id)
+    )
+    return list(result.scalars())
+
+
+@dataclass(frozen=True)
+class AliasIndexDrift:
+    """How the alias index differs from what ``aliases_json`` derives."""
+
+    missing: int
+    """Rows a rebuild would add."""
+    extra: int
+    """Rows a rebuild would remove whose Subject still exists."""
+    orphaned: int
+    """Rows whose Subject no longer exists."""
+    subject_ids: list[str]
+    """Every Subject id involved, sorted."""
+
+    @property
+    def clean(self) -> bool:
+        return not (self.missing or self.extra or self.orphaned)
+
+
+async def _expected_alias_rows(session: AsyncSession) -> set[tuple[str, str, str]]:
+    result = await session.execute(select(SubjectRow.id, SubjectRow.aliases_json))
+    return {
+        (r["subject_id"], r["alias_key"], r["alias"])
+        for sid, aliases_json in result
+        for r in _alias_index_rows(sid, json.loads(aliases_json))
+    }
+
+
+async def check_alias_index(session: AsyncSession) -> AliasIndexDrift:
+    """Compare the alias index with a rebuild of it, changing nothing."""
+    expected = await _expected_alias_rows(session)
+    actual_rows = await session.execute(
+        select(SubjectAliasRow.subject_id, SubjectAliasRow.alias_key, SubjectAliasRow.alias)
+    )
+    actual = {(sid, key, alias) for sid, key, alias in actual_rows}
+    subject_ids = set((await session.execute(select(SubjectRow.id))).scalars())
+    surplus = actual - expected
+    orphaned = {r for r in surplus if r[0] not in subject_ids}
+    missing = expected - actual
+    return AliasIndexDrift(
+        missing=len(missing),
+        extra=len(surplus - orphaned),
+        orphaned=len(orphaned),
+        subject_ids=sorted({r[0] for r in missing | surplus}),
+    )
+
+
+async def rebuild_alias_index(session: AsyncSession) -> int:
+    """Re-derive the alias index from ``aliases_json``; return the rows written.
+
+    The ``memory rebuild-utility`` shape: the index is disposable,
+    and this is what makes it so (D1). Does not commit.
+    """
+    rows = [
+        {"subject_id": sid, "alias_key": key, "alias": alias}
+        for sid, key, alias in sorted(await _expected_alias_rows(session))
+    ]
+    await session.execute(delete(SubjectAliasRow))
+    for i in range(0, len(rows), _IN_CHUNK):
+        await session.execute(insert(SubjectAliasRow), rows[i : i + _IN_CHUNK])
+    return len(rows)
+
+
 # ---------------------------------------------------------------------------
 # Repository helpers
 # ---------------------------------------------------------------------------
 
 
 async def insert_subject(session: AsyncSession, subject: Subject) -> None:
-    """Persist a new subject. Flushes but does not commit."""
+    """Persist a new subject and index its aliases. Flushes but does not commit."""
     session.add(SubjectRow.from_model(subject))
+    await _index_aliases(session, subject.id, subject.aliases)
     await session.flush()
 
 
@@ -145,6 +289,79 @@ async def get_subject(session: AsyncSession, subject_id: str) -> Subject | None:
             " use more characters."
         )
     return None
+
+
+#: Candidates a refused ambiguous reference names before eliding the rest.
+_AMBIGUOUS_SHOWN = 5
+
+
+async def lookup_subject(session: AsyncSession, ref: str) -> Subject | None:
+    """Resolve an operator-typed subject reference: ID, ID prefix, or name.
+
+    The read surfaces that take a subject argument (``query --subject``,
+    ``subjects show``, ``links``, the MCP ``subjects_show`` and
+    ``particles_list``) call this instead of :func:`get_subject`, so a reader
+    can type the name ``subjects list`` shows rather than copy an ID prefix.
+
+    1. A full ID returns its Subject at once.
+    2. Otherwise the ID-prefix matches and the name matches are pooled. A name
+       matches case-insensitively and exactly, canonical names first; aliases
+       answer only when no canonical name does (the :func:`find_by_name`
+       tiering). The persona forms answer through the persona Subject's
+       aliases, since this lookup binds nothing.
+    3. One distinct Subject in the pool is the answer, and an empty pool
+       returns ``None``. A larger pool raises: a reference that is both a hex
+       prefix and a name ("cafe"), a prefix several IDs share, and a name two
+       Subjects share are all refused with the candidates named, never settled
+       by a silent tie-break.
+
+    Raises:
+        ValueError: If the reference matches more than one Subject.
+    """
+    from sqlalchemy import func
+
+    ref = ref.strip()
+    if not ref:
+        return None
+    row = await session.get(SubjectRow, ref)
+    if row is not None:
+        return row.to_model()
+
+    pool: dict[str, tuple[SubjectRow, str]] = {}
+    # Bounded: past one more than the shown candidates the reference is refused
+    # anyway, and a one-character prefix can otherwise load most of the table.
+    prefix_rows = await session.execute(
+        select(SubjectRow)
+        .where(SubjectRow.id.like(f"{escape_like_pattern(ref)}%", escape=LIKE_ESCAPE))
+        .order_by(SubjectRow.id)
+        .limit(_AMBIGUOUS_SHOWN + 1)
+    )
+    for r in prefix_rows.scalars():
+        pool[r.id] = (r, "ID prefix")
+
+    name_lower = ref.lower()
+    by_canonical = await session.execute(
+        select(SubjectRow)
+        .where(func.lower(SubjectRow.canonical_name) == name_lower)
+        .order_by(SubjectRow.created_at, SubjectRow.id)
+    )
+    name_rows: list[tuple[SubjectRow, str]] = [(r, "name") for r in by_canonical.scalars()]
+    if not name_rows:
+        name_rows = [(r, "alias") for r in await _rows_with_alias(session, ref)]
+    for r, how in name_rows:
+        pool.setdefault(r.id, (r, how))
+
+    if not pool:
+        return None
+    if len(pool) == 1:
+        return next(iter(pool.values()))[0].to_model()
+    shown = list(pool.values())[:_AMBIGUOUS_SHOWN]
+    listing = "; ".join(f"{r.id[:8]}… {r.canonical_name} (by {how})" for r, how in shown)
+    more = ", and more" if len(pool) > _AMBIGUOUS_SHOWN else ""
+    raise ValueError(
+        f"Subject {ref!r} is ambiguous: it matches {listing}{more}."
+        " Pass more characters of the ID you mean."
+    )
 
 
 async def get_subject_classes(
@@ -267,14 +484,12 @@ async def find_by_name(
             )
         return rows[0].to_model()
 
-    # Scan aliases (acceptable at v0.3 scale; add a dedicated alias table if needed)
-    result = await session.execute(select(SubjectRow))
-    for row in result.scalars():
+    # Aliases through the index. Two Subjects sharing an alias
+    # resolve to the earliest, the canonical tier's tie-break.
+    for row in await _rows_with_alias(session, name):
         if row.canonical_name.lower() in skip_lower:
             continue
-        aliases: list[str] = json.loads(row.aliases_json)
-        if any(a.lower() == name_lower for a in aliases):
-            return row.to_model()
+        return row.to_model()
     return None
 
 
@@ -447,7 +662,7 @@ async def add_aliases(
     added = [a for a in new_aliases if a.lower() not in existing_lower]
     if added:
         current: list[str] = json.loads(row.aliases_json)
-        row.aliases_json = json.dumps(current + added)
+        await _set_aliases(session, row, current + added)
         await session.flush()
         await record_event(
             session,
@@ -563,69 +778,233 @@ async def remove_external_ref(
     return True
 
 
-async def merge_subjects(
-    session: AsyncSession, source_id: str, target_id: str, *, actor: str = "subjects-merge"
-) -> tuple[Subject, list[str], int]:
-    """Merge source subject into target. Source is deleted; its particles are re-linked.
+class SubjectNotFoundError(ValueError):
+    """A subject named in a merge does not exist (absent, or already merged)."""
 
-    The source's canonical_name and aliases are added to the target as aliases.
-    All particle_subjects join rows pointing to source are re-pointed to target.
-    Irreversible; the caller should confirm before committing.
 
-    Returns:
-        Tuple of (updated_target_subject, aliases_added, particles_relinked).
+@dataclass(frozen=True)
+class MergeSourcePlan:
+    """One source of a merge: who it is, which particles it links, and its refs.
+
+    ``refs_carried`` are the source's ``artifact`` refs the target gains, so a
+    later qualified mention of the source's name finds the target.
+    ``refs_withheld`` are the ``artifact`` refs of another project, which
+    the merge drops as it always did.
+    """
+
+    subject_id: str
+    canonical_name: str
+    particle_ids: tuple[str, ...]
+    refs_carried: tuple[ExternalRef, ...] = ()
+    refs_withheld: tuple[ExternalRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubjectMergePlan:
+    """What an N→1 merge will do, computed before any row changes.
+
+    The same plan drives the CLI's preview, the confirmation prompt, and the
+    mutation itself, so what the operator confirmed is what is written.
+    """
+
+    target: Subject
+    sources: tuple[MergeSourcePlan, ...]
+    aliases_added: tuple[str, ...]
+
+    @property
+    def particles_relinked(self) -> int:
+        """Particle links re-pointed, counted per source link (as the 1→1 merge did)."""
+        return sum(len(s.particle_ids) for s in self.sources)
+
+
+async def _missing_source_message(session: AsyncSession, source_id: str) -> str:
+    """Name the merge that already folded ``source_id`` away, when one did."""
+    from particles.store.event_store import list_events
+
+    events = await list_events(
+        session,
+        ref_kind=EventRefKind.SUBJECT,
+        ref_id=source_id,
+        event_type=OperatorEventType.SUBJECTS_MERGED,
+        limit=5,
+    )
+    for event in events:
+        payload = event.payload or {}
+        if source_id in payload.get("sources", []):
+            return (
+                f"Source subject {source_id} was already merged into "
+                f"{payload.get('target')} (event {event.event_id})"
+            )
+    if events:
+        # Events recorded before the N→1 form carry no ``sources`` list, so the
+        # role of this subject in them is not recorded.
+        return (
+            f"Source subject {source_id} not found; merge event "
+            f"{events[0].event_id} names it, so it was probably merged already"
+        )
+    return f"Source subject {source_id} not found"
+
+
+async def plan_subject_merge(
+    session: AsyncSession, source_ids: Sequence[str], target_id: str
+) -> SubjectMergePlan:
+    """Validate an N→1 merge and compute what it will move.
+
+    Ids may be full UUIDs or unambiguous prefixes. Every source is checked
+    before anything is written, so a bad source refuses the whole merge.
 
     Raises:
-        ValueError: If either subject is not found, or source == target.
+        SubjectNotFoundError: The target or a source does not exist. A source
+            that an earlier merge folded away is named as such.
+        ValueError: No sources, a source equal to the target, a source listed
+            twice, or an ambiguous prefix.
     """
-    source_row = await session.get(SubjectRow, source_id)
-    target_row = await session.get(SubjectRow, target_id)
-    if source_row is None:
-        raise ValueError(f"Source subject {source_id} not found")
-    if target_row is None:
-        raise ValueError(f"Target subject {target_id} not found")
-    if source_id == target_id:
-        raise ValueError("Source and target must be different subjects")
+    if not source_ids:
+        raise ValueError("At least one source subject is required")
+    target = await get_subject(session, target_id)
+    if target is None:
+        raise SubjectNotFoundError(f"Target subject {target_id} not found")
 
-    # Collect source names → add as aliases on target
-    source_names = [source_row.canonical_name] + json.loads(source_row.aliases_json)
-    target_existing_lower = {target_row.canonical_name.lower()} | {
-        a.lower() for a in json.loads(target_row.aliases_json)
+    resolved: list[Subject] = []
+    seen: set[str] = set()
+    for sid in source_ids:
+        source = await get_subject(session, sid)
+        if source is None:
+            raise SubjectNotFoundError(await _missing_source_message(session, sid))
+        if source.id == target.id:
+            raise ValueError(
+                f"Subject {source.id} ({source.canonical_name}) is the merge target;"
+                " it cannot also be a source"
+            )
+        if source.id in seen:
+            raise ValueError(f"Source subject {source.id} is listed more than once")
+        seen.add(source.id)
+        resolved.append(source)
+
+    existing_lower = {target.canonical_name.lower()} | {a.lower() for a in target.aliases}
+    added: list[str] = []
+    plans: list[MergeSourcePlan] = []
+    held_refs = {(r.namespace, r.id) for r in target.external_ids}
+    target_projects = {
+        artifact_ref_project(r.id)
+        for r in target.external_ids
+        if r.namespace == ARTIFACT_REF_NAMESPACE
     }
-    added = [n for n in source_names if n.lower() not in target_existing_lower]
-    if added:
+    for source in resolved:
+        for name in [source.canonical_name, *source.aliases]:
+            if name.lower() not in existing_lower:
+                existing_lower.add(name.lower())
+                added.append(name)
+        carried: list[ExternalRef] = []
+        withheld: list[ExternalRef] = []
+        for ref in source.external_ids:
+            if ref.namespace != ARTIFACT_REF_NAMESPACE or (ref.namespace, ref.id) in held_refs:
+                continue
+            if artifact_ref_project(ref.id) in target_projects:
+                held_refs.add((ref.namespace, ref.id))
+                carried.append(ref)
+            else:
+                withheld.append(ref)
+        result = await session.execute(
+            select(ParticleSubjectRow.particle_id).where(ParticleSubjectRow.subject_id == source.id)
+        )
+        plans.append(
+            MergeSourcePlan(
+                subject_id=source.id,
+                canonical_name=source.canonical_name,
+                particle_ids=tuple(result.scalars().all()),
+                refs_carried=tuple(carried),
+                refs_withheld=tuple(withheld),
+            )
+        )
+    return SubjectMergePlan(target=target, sources=tuple(plans), aliases_added=tuple(added))
+
+
+async def merge_subjects_many(
+    session: AsyncSession,
+    source_ids: Sequence[str],
+    target_id: str,
+    *,
+    actor: str = "subjects-merge",
+    extra_payload: dict[str, Any] | None = None,
+) -> tuple[Subject, SubjectMergePlan]:
+    """Merge several source subjects into one target in a single pass.
+
+    Each source's canonical_name and aliases are added to the target as
+    aliases; a source's ``artifact`` refs in one of the target's projects are
+    added to the target's refs; every particle link to a source
+    is re-pointed to the target; the sources are deleted. One
+    ``SUBJECTS_MERGED`` event records the whole merge. ``extra_payload`` is
+    merged into that event's payload (the fold records its rule and
+    the source as it was there).
+    Every source is validated first (:func:`plan_subject_merge`), so the merge
+    is all-or-nothing within the caller's transaction. Irreversible; the
+    caller confirms, then commits.
+
+    Returns:
+        Tuple of (updated_target_subject, plan_that_was_applied).
+    """
+    plan = await plan_subject_merge(session, source_ids, target_id)
+    target_id = plan.target.id
+    source_set = {s.subject_id for s in plan.sources}
+
+    target_row = await session.get(SubjectRow, target_id)
+    assert target_row is not None  # plan_subject_merge checked it
+    if plan.aliases_added:
         current_aliases: list[str] = json.loads(target_row.aliases_json)
-        target_row.aliases_json = json.dumps(current_aliases + added)
+        await _set_aliases(session, target_row, current_aliases + list(plan.aliases_added))
+    carried = [ref for src in plan.sources for ref in src.refs_carried]
+    if carried:
+        target_refs: list[dict[str, object]] = json.loads(target_row.external_ids_json)
+        target_refs.extend(
+            {"namespace": r.namespace, "id": r.id, "uri": r.uri, "confidence": r.confidence}
+            for r in carried
+        )
+        target_row.external_ids_json = json.dumps(target_refs)
 
     # Re-link particle_subjects join rows
     result = await session.execute(
-        select(ParticleSubjectRow).where(ParticleSubjectRow.subject_id == source_id)
+        select(ParticleSubjectRow).where(ParticleSubjectRow.subject_id.in_(source_set))
     )
-    ps_rows = result.scalars().all()
-    relinked = 0
     relinked_pids: list[str] = []
-    for ps_row in ps_rows:
+    already_on_target: list[str] = []
+    for ps_row in result.scalars().all():
         existing_link = await session.get(ParticleSubjectRow, (ps_row.particle_id, target_id))
+        if existing_link is not None and ps_row.particle_id not in relinked_pids:
+            already_on_target.append(ps_row.particle_id)
         if existing_link is None:
             session.add(ParticleSubjectRow(particle_id=ps_row.particle_id, subject_id=target_id))
+            # Flush so a particle linked to two sources finds this row on the
+            # next lookup instead of adding a second one with the same key.
+            await session.flush()
         relinked_pids.append(ps_row.particle_id)
         await session.delete(ps_row)
-        relinked += 1
 
-    # Update subject_ids_json on particle rows
+    # Update subject_ids_json on particle rows. A particle that named two of
+    # the merged subjects names the target once.
     from particles.store.particle_store import ParticleRow
 
     p_result = await session.execute(
-        select(ParticleRow).where(ParticleRow.subject_ids_json.contains(source_id))
+        select(ParticleRow).where(
+            or_(*(ParticleRow.subject_ids_json.contains(s) for s in source_set))
+        )
     )
     for p_row in p_result.scalars():
         ids: list[str] = json.loads(p_row.subject_ids_json)
-        if source_id in ids:
-            new_ids = [target_id if i == source_id else i for i in ids]
-            p_row.subject_ids_json = json.dumps(new_ids)
+        if not source_set.intersection(ids):
+            continue
+        new_ids: list[str] = []
+        for i in ids:
+            mapped = target_id if i in source_set else i
+            if mapped not in new_ids:
+                new_ids.append(mapped)
+        p_row.subject_ids_json = json.dumps(new_ids)
 
-    # Delete source subject
-    await session.delete(source_row)
+    for source in plan.sources:
+        source_row = await session.get(SubjectRow, source.subject_id)
+        if source_row is not None:
+            await session.delete(source_row)
+    await drop_aliases(session, source_set)
     await session.flush()
 
     await record_event(
@@ -633,15 +1012,125 @@ async def merge_subjects(
         actor=actor,
         event_type=OperatorEventType.SUBJECTS_MERGED,
         refs=[
-            (EventRefKind.SUBJECT, source_id),
+            *[(EventRefKind.SUBJECT, s.subject_id) for s in plan.sources],
             (EventRefKind.SUBJECT, target_id),
             *[(EventRefKind.PARTICLE, pid) for pid in relinked_pids],
         ],
-        payload={"aliases_added": added, "relinked": relinked},
+        payload={
+            "aliases_added": list(plan.aliases_added),
+            "relinked": plan.particles_relinked,
+            "sources": [s.subject_id for s in plan.sources],
+            "source_names": [s.canonical_name for s in plan.sources],
+            "target": target_id,
+            "refs_carried": [f"{r.namespace}:{r.id}" for r in carried],
+            "already_on_target": already_on_target,
+            **(extra_payload or {}),
+        },
     )
 
     subject_cache.clear(keep_negative=True)
-    return target_row.to_model(), added, relinked
+    return target_row.to_model(), plan
+
+
+async def restore_merged_source(
+    session: AsyncSession,
+    *,
+    source: Subject,
+    target_id: str,
+    particle_ids: Sequence[str],
+    keep_on_target: Collection[str],
+    aliases_added: Collection[str],
+    refs_carried: Collection[str],
+    actor: str,
+    payload: dict[str, Any],
+) -> list[str]:
+    """Reverse one 1→1 merge from what its event recorded.
+
+    Recreates ``source`` (same id, names, refs and class), takes back from the
+    target the aliases and ``namespace:id`` refs the merge gave it, and moves
+    each of ``particle_ids`` back onto the source. A particle in
+    ``keep_on_target`` was linked to the target before the merge and keeps
+    that link too. Records one ``SUBJECTS_SPLIT`` event carrying ``payload``.
+    Caller commits.
+
+    Returns:
+        The particle ids relinked to the source.
+
+    Raises:
+        ValueError: The source exists again, or the target does not.
+    """
+    if await session.get(SubjectRow, source.id) is not None:
+        raise ValueError(f"Subject {source.id} already exists; the merge was undone already")
+    target_row = await session.get(SubjectRow, target_id)
+    if target_row is None:
+        raise ValueError(f"Target subject {target_id} no longer exists")
+
+    await insert_subject(session, source)
+
+    drop_lower = {a.lower() for a in aliases_added}
+    aliases: list[str] = json.loads(target_row.aliases_json)
+    await _set_aliases(session, target_row, [a for a in aliases if a.lower() not in drop_lower])
+    refs: list[dict[str, Any]] = json.loads(target_row.external_ids_json)
+    target_row.external_ids_json = json.dumps(
+        [r for r in refs if f"{r['namespace']}:{r['id']}" not in refs_carried]
+    )
+
+    from particles.store.particle_store import ParticleRow
+
+    keep = set(keep_on_target)
+    relinked: list[str] = []
+    for pid in particle_ids:
+        p_row = await session.get(ParticleRow, pid)
+        if p_row is None:
+            continue
+        if await session.get(ParticleSubjectRow, (pid, source.id)) is None:
+            session.add(ParticleSubjectRow(particle_id=pid, subject_id=source.id))
+        ids: list[str] = json.loads(p_row.subject_ids_json)
+        if pid in keep:
+            new_ids = [*ids, source.id] if source.id not in ids else ids
+        else:
+            target_link = await session.get(ParticleSubjectRow, (pid, target_id))
+            if target_link is not None:
+                await session.delete(target_link)
+            new_ids = []
+            for i in ids:
+                mapped = source.id if i == target_id else i
+                if mapped not in new_ids:
+                    new_ids.append(mapped)
+            if source.id not in new_ids:
+                new_ids.append(source.id)
+        p_row.subject_ids_json = json.dumps(new_ids)
+        relinked.append(pid)
+    await session.flush()
+
+    await record_event(
+        session,
+        actor=actor,
+        event_type=OperatorEventType.SUBJECTS_SPLIT,
+        refs=[
+            (EventRefKind.SUBJECT, target_id),
+            (EventRefKind.SUBJECT, source.id),
+            *[(EventRefKind.PARTICLE, pid) for pid in relinked],
+        ],
+        payload={"source_id": target_id, "new_subject_id": source.id, **payload},
+    )
+    subject_cache.clear(keep_negative=True)
+    return relinked
+
+
+async def merge_subjects(
+    session: AsyncSession, source_id: str, target_id: str, *, actor: str = "subjects-merge"
+) -> tuple[Subject, list[str], int]:
+    """Merge one source subject into target: the 1→1 form of :func:`merge_subjects_many`.
+
+    Returns:
+        Tuple of (updated_target_subject, aliases_added, particles_relinked).
+
+    Raises:
+        ValueError: If either subject is not found, or source == target.
+    """
+    subject, plan = await merge_subjects_many(session, [source_id], target_id, actor=actor)
+    return subject, list(plan.aliases_added), plan.particles_relinked
 
 
 async def delete_subject(
@@ -686,6 +1175,7 @@ async def delete_subject(
 
     deleted = row.to_model()
     await session.delete(row)
+    await drop_aliases(session, [row.id])
     await session.flush()
 
     await record_event(
@@ -943,11 +1433,12 @@ async def search_subjects(
     limit: int | None = None,
     offset: int = 0,
 ) -> list[Subject]:
-    """Simple substring search over canonical_name (case-insensitive).
+    """Case-insensitive substring search over canonical names and aliases.
 
     Args:
         session: Active SQLAlchemy session.
-        query: Substring to match against ``canonical_name``.
+        query: Substring to match against ``canonical_name`` or any recorded
+            alias (through the index).
         limit: Maximum subjects to return. ``None`` returns every match
             (preserved for existing internal callers).
         offset: Number of matches to skip before returning. Used with
@@ -961,9 +1452,21 @@ async def search_subjects(
     # query of "%" matches every row in an unindexed full scan, and "_" matches
     # any single character. Mirrors the escaped prefix sites (e.g. get_subject).
     pattern = f"%{escape_like_pattern(query)}%"
+    # A Subject also matches through any recorded alias, inside
+    # the one statement, so limit/offset page the matches themselves.
+    by_alias = select(SubjectAliasRow.subject_id).where(
+        SubjectAliasRow.alias_key.like(
+            f"%{escape_like_pattern(alias_key(query))}%", escape=LIKE_ESCAPE
+        )
+    )
     stmt = (
         select(SubjectRow)
-        .where(SubjectRow.canonical_name.ilike(pattern, escape=LIKE_ESCAPE))
+        .where(
+            or_(
+                SubjectRow.canonical_name.ilike(pattern, escape=LIKE_ESCAPE),
+                SubjectRow.id.in_(by_alias),
+            )
+        )
         .order_by(SubjectRow.canonical_name)
     )
     if offset:

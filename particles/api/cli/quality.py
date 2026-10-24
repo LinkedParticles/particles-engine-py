@@ -49,7 +49,12 @@ def quality_cmd() -> None:
     typer.echo(f"  Entries:         {report.total_entries:>6,}")
     typer.echo(f"  Complete:        {report.snapshots_complete:>6,}")
     if report.snapshots_pending:
-        typer.echo(f"  Pending:         {report.snapshots_pending:>6,}")
+        held = (
+            f"  ({report.snapshots_held_refused:,} held: refused, see particles curate)"
+            if report.snapshots_held_refused
+            else ""
+        )
+        typer.echo(f"  Pending:         {report.snapshots_pending:>6,}{held}")
     if report.snapshots_failed:
         typer.echo(f"  Failed:          {report.snapshots_failed:>6,}  (run: particles reindex)")
     if report.snapshots_in_progress:

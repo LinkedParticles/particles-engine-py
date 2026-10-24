@@ -688,3 +688,53 @@ class TestIsSuiteStale:
 
     def test_empty_fit_against_no_suites_is_clean(self) -> None:
         assert is_suite_stale("", set()) is False
+
+
+class TestLabelProvenance:
+    """A record names the judge that labelled it, what it sent, and its runs."""
+
+    @staticmethod
+    def _record(**extra: object) -> ExtractorCalibration:
+        return ExtractorCalibration(
+            temperature=1.4,
+            transform="logit",
+            fitted_at=datetime(2026, 10, 23, tzinfo=UTC),
+            benchmark_suite_id="prose-calibration-001",
+            sample_size=40,
+            calibration_error_before=0.2,
+            calibration_error_after=0.1,
+            **extra,  # type: ignore[arg-type]
+        )
+
+    def test_a_record_from_before_the_keys_loads_and_says_nothing(self) -> None:
+        from particles.api.cli.extractor import _label_note
+
+        record = ExtractorCalibration.model_validate_json(self._record().model_dump_json())
+        assert (record.label_judge, record.label_temperature, record.runs) == (None, None, None)
+        assert _label_note(record) is None
+
+    def test_runs_must_be_positive(self) -> None:
+        with pytest.raises(ValueError):
+            self._record(runs=0)
+
+    def test_the_listing_names_the_judge_its_sampling_and_runs(self) -> None:
+        from particles.api.cli.extractor import _label_note
+
+        sampled = self._record(
+            label_judge="llm:anthropic:claude-sonnet-5-5", label_temperature="dropped", runs=13
+        )
+        assert _label_note(sampled) == (
+            "labelled by llm:anthropic:claude-sonnet-5-5, judge sampled at its default, "
+            "13 pooled run(s)"
+        )
+        embedded = self._record(label_judge="embedding@0.80", runs=1)
+        assert _label_note(embedded) == "labelled by embedding@0.80, 1 pooled run(s)"
+
+    def test_the_label_judge_names_the_embedding_floor_and_the_llm_route(self) -> None:
+        from particles.api.cli.extractor import _label_judge
+        from particles.benchmark.equivalence import EquivalenceJudge
+        from particles.config import get_config
+
+        assert _label_judge(EquivalenceJudge.EMBEDDING) == "embedding@0.80"
+        sel = get_config().llm.for_purpose("benchmark")
+        assert _label_judge(EquivalenceJudge.LLM) == f"llm:{sel.provider}:{sel.model}"

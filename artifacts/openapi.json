@@ -37,6 +37,17 @@
             ],
             "title": "Status"
           },
+          "successor_scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Successor Scope"
+          },
           "superseded_particle_id": {
             "anyOf": [
               {
@@ -411,13 +422,16 @@
           "contested",
           "no_subject",
           "gated_subjects",
+          "subjectless_source",
           "duplicate_pair",
           "uncited_url",
           "failed_snapshots",
+          "refused_snapshots",
           "proposed_abstraction",
           "stale_basis",
           "inconsistency",
-          "demotion"
+          "demotion",
+          "rank_lift"
         ],
         "title": "CardKind",
         "type": "string"
@@ -1065,6 +1079,17 @@
             ],
             "title": "Contested Bases"
           },
+          "corpus_entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corpus Entry Id"
+          },
           "corpus_url": {
             "anyOf": [
               {
@@ -1124,6 +1149,17 @@
             "readOnly": true,
             "title": "Question",
             "type": "string"
+          },
+          "rank_lift_alert": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank Lift Alert"
           },
           "resolve_actions": {
             "anyOf": [
@@ -1695,7 +1731,7 @@
         "type": "object"
       },
       "DepositResponse": {
-        "description": "Identifiers for the corpus entry + initial snapshot created by a deposit.\n\n``unchanged`` is set only by the versioned text-deposit path:\nthe entry's latest snapshot already carried the deposited content hash, so\nnothing was written and the existing IDs are echoed.",
+        "description": "Identifiers for the corpus entry + initial snapshot created by a deposit.\n\n``unchanged``: the entry's latest snapshot already\ncarried the deposited content hash, so nothing was written and the existing\nIDs are echoed. Every deposit route sets it, except a URL deposit handled by\na domain importer, which is deduplicated the same way but always reports\n``false``.",
         "properties": {
           "entry_id": {
             "title": "Entry Id",
@@ -1941,6 +1977,107 @@
         "title": "DepositUrlRequest",
         "type": "object"
       },
+      "DerivedSection": {
+        "description": "A section synthesised as cited prose from a store query.\n\nThe source binding is the structured cage (fork #1): ``tags`` / ``subjects``\nscope the candidate set away from cross-ADR drift clusters, and an optional\n``query`` refines within it. ``query`` is used as the synthesis topic and \u2014\nonly when an embedding model is loaded \u2014 for semantic re-ranking; the\ndeterministic drift gate ignores it and ranks by the \u00a76.6 recency-weighted\neffective confidence, so selection stays reproducible without an API key.",
+        "properties": {
+          "code_symbol_rank_weight": {
+            "default": 1.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Code Symbol Rank Weight",
+            "type": "number"
+          },
+          "direction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Direction"
+          },
+          "flowing": {
+            "default": true,
+            "title": "Flowing",
+            "type": "boolean"
+          },
+          "min_confidence": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Confidence",
+            "type": "number"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "render": {
+            "default": "prose",
+            "enum": [
+              "prose",
+              "bullets"
+            ],
+            "title": "Render",
+            "type": "string"
+          },
+          "select": {
+            "$ref": "#/components/schemas/Select"
+          },
+          "subjects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "top_k": {
+            "default": 12,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "DerivedSection",
+        "type": "object"
+      },
       "DigestLine": {
         "description": "Which belief one digest line shows, and where the line starts.",
         "properties": {
@@ -1989,6 +2126,84 @@
           "markdown"
         ],
         "title": "DigestResponse",
+        "type": "object"
+      },
+      "DocManifest": {
+        "description": "An ordered projection of the store into one Markdown document.\n\n``output`` is the default render target (overridable on the CLI). README is\nthe first instance; the mechanism is general.",
+        "properties": {
+          "framing": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Framing"
+          },
+          "max_bytes": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Bytes"
+          },
+          "max_lines": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lines"
+          },
+          "name": {
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Name",
+            "type": "string"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "sections": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DerivedSection"
+                },
+                {
+                  "$ref": "#/components/schemas/MechanicalBlock"
+                }
+              ]
+            },
+            "minItems": 1,
+            "title": "Sections",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "sections"
+        ],
+        "title": "DocManifest",
         "type": "object"
       },
       "DuplicateVerdict": {
@@ -2862,6 +3077,103 @@
         "title": "LintRequest",
         "type": "object"
       },
+      "MechanicalBlock": {
+        "description": "A hand-authored Markdown fragment spliced verbatim.\n\nContent that lives in no ADR \u2014 install / quickstart / badges. ``block`` is a\npath resolved relative to the manifest file (or absolute).",
+        "properties": {
+          "block": {
+            "minLength": 1,
+            "title": "Block",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block"
+        ],
+        "title": "MechanicalBlock",
+        "type": "object"
+      },
+      "MemoryProjectionRequest": {
+        "description": "The client's projection policy for one ``MEMORY.md`` render.",
+        "properties": {
+          "exclude_source_tags": {
+            "description": "Drop candidates held only by sources with one of these tags.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude Source Tags",
+            "type": "array"
+          },
+          "fold_targets": {
+            "description": "File URIs whose fold verdicts the client needs.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Fold Targets",
+            "type": "array"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/DocManifest",
+            "description": "The client's parsed memory manifest. A section that includes a file is refused."
+          },
+          "observer_project": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Render through this project observer.",
+            "title": "Observer Project"
+          }
+        },
+        "required": [
+          "manifest"
+        ],
+        "title": "MemoryProjectionRequest",
+        "type": "object"
+      },
+      "MemoryProjectionResponse": {
+        "description": "A rendered region body, its hash, and the fold verdicts asked of it.",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "content_hash": {
+            "description": "SHA-256 of `body`'s UTF-8 bytes.",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "fold_verdicts": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "not-extracted",
+                    "not-in-region"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Per fold target: null when the region represents the file, else why not.",
+            "title": "Fold Verdicts",
+            "type": "object"
+          }
+        },
+        "required": [
+          "body",
+          "content_hash"
+        ],
+        "title": "MemoryProjectionResponse",
+        "type": "object"
+      },
       "MemoryUsefulRequest": {
         "description": "Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits\nthe belief on the explicit utility channel. Does NOT touch confidence and does\nNOT claim the belief is true; it lifts the belief in the projection / digest\nranking only. For \"still true\", use ``/curation/affirm``.",
         "properties": {
@@ -3057,6 +3369,17 @@
       "ObserverScopeNote": {
         "description": "What reading through a project observer did to one result.\n\nDisclosure only \u2014 it never feeds ranking or confidence. ``engaged`` is\n``False`` when an observer was asked for but the store has not been\nrescoped yet, in which case the read stayed store-wide and says so rather\nthan returning a silently emptied result.",
         "properties": {
+          "attribution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attribution"
+          },
           "engaged": {
             "title": "Engaged",
             "type": "boolean"
@@ -3176,6 +3499,7 @@
         "enum": [
           "SOURCE_RETRACTED",
           "CORPUS_ENTRY_DELETED",
+          "CORPUS_ENTRY_RECLASSIFIED",
           "CONFLICT_CANDIDATE_DROPPED",
           "SUBJECTS_SPLIT",
           "SUBJECTS_MERGED",
@@ -3212,6 +3536,9 @@
           "OBSERVER_SCOPE_KEY_ASSIGNED",
           "OBSERVER_SCOPE_WIDENED",
           "OBSERVER_SCOPE_WIDEN_REVOKED",
+          "OBSERVER_SCOPE_MARKED_UNATTRIBUTED",
+          "OBSERVER_SCOPE_UNMARKED",
+          "OBSERVER_SCOPE_KEY_WITHDRAWN",
           "VOCABULARY_CHANGED",
           "VOCABULARY_PROPOSED",
           "VOCABULARY_RULED",
@@ -4148,6 +4475,11 @@
             "title": "Snapshots Failed",
             "type": "integer"
           },
+          "snapshots_held_refused": {
+            "default": 0,
+            "title": "Snapshots Held Refused",
+            "type": "integer"
+          },
           "snapshots_in_progress": {
             "title": "Snapshots In Progress",
             "type": "integer"
@@ -4809,6 +5141,14 @@
       "ReindexPlan": {
         "description": "Upfront work plan for a resolved reindex scope (computed pre-extraction).",
         "properties": {
+          "absent_entries": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Absent Entries",
+            "type": "array"
+          },
           "entries": {
             "title": "Entries",
             "type": "integer"
@@ -4821,9 +5161,29 @@
             "title": "Particles",
             "type": "integer"
           },
+          "retargeted": {
+            "default": 0,
+            "title": "Retargeted",
+            "type": "integer"
+          },
+          "schema_stale_included": {
+            "default": false,
+            "title": "Schema Stale Included",
+            "type": "boolean"
+          },
+          "schema_stale_particles": {
+            "default": 0,
+            "title": "Schema Stale Particles",
+            "type": "integer"
+          },
           "scope_description": {
             "title": "Scope Description",
             "type": "string"
+          },
+          "skipped_newer_schema": {
+            "default": 0,
+            "title": "Skipped Newer Schema",
+            "type": "integer"
           },
           "snapshot_plans": {
             "default": [],
@@ -4849,7 +5209,7 @@
         "type": "object"
       },
       "ReindexRequest": {
-        "description": "Reindex options. ``entry_ids=None`` reindexes every stale /\nfailed snapshot; ``extractor_version`` (when set) restricts to\nparticles emitted by that extractor version (used after an\nextractor upgrade). The particle-selecting fields\n(``extractor_version`` / ``extractor_id`` / ``provider_model``) union\nwith each other and intersect with ``entry_ids`` when both are sent,\nso naming entries can only narrow the scope.",
+        "description": "Reindex options. ``entry_ids=None`` reindexes every stale /\nfailed snapshot; ``extractor_version`` (when set) restricts to\nparticles emitted by that extractor version (used after an\nextractor upgrade). The particle-selecting fields\n(``extractor_version`` / ``extractor_id`` / ``provider_model``) union\nwith each other and intersect with ``entry_ids`` when both are sent,\nso naming entries can only narrow the scope.\n``include_schema_stale`` also re-extracts the snapshots whose particles\ncarry an older minor of the schema; it is off by default because after a\nminor bump the whole store qualifies (D5).",
         "properties": {
           "dry_run": {
             "default": false,
@@ -4897,6 +5257,11 @@
             "title": "Include Failed",
             "type": "boolean"
           },
+          "include_schema_stale": {
+            "default": false,
+            "title": "Include Schema Stale",
+            "type": "boolean"
+          },
           "provider_model": {
             "anyOf": [
               {
@@ -4918,7 +5283,7 @@
         "type": "object"
       },
       "ReindexResponse": {
-        "description": "Summary of a reindex run.\n\n``scope`` is the total number of corpus entries visited;\n``succeeded`` / ``failed`` partition that scope; ``failed_entries``\nlists the entry IDs that failed (for operator-pull retry).\n``lint_summary`` is the structural lint count-by-status the\npost-reindex lint pass produced (empty dict when lint was skipped\nbecause ``scope`` was 0). ``plan`` is the upfront work plan computed\nbefore extraction, per-snapshot detail included (dry and live runs\nalike: the missing-blob list must survive into the envelope because\nthe CLI's human rendering caps it).",
+        "description": "Summary of a reindex run.\n\n``scope`` is the total number of corpus entries visited;\n``succeeded`` / ``failed`` partition that scope; ``failed_entries``\nlists the entry IDs that failed (for operator-pull retry).\n``lint_summary`` is the structural lint count-by-status the\npost-reindex lint pass produced (empty dict when lint was skipped\nbecause ``scope`` was 0). ``plan`` is the upfront work plan computed\nbefore extraction, per-snapshot detail included (dry and live runs\nalike: the missing-blob list must survive into the envelope because\nthe CLI's human rendering caps it). ``skipped_newer_schema`` counts the\nsnapshots left alone because they hold a particle a newer schema minor\nwrote, which this SDK does not re-extract (D2).",
         "properties": {
           "dry_run": {
             "default": false,
@@ -4959,6 +5324,11 @@
             "title": "Scope",
             "type": "integer"
           },
+          "skipped_newer_schema": {
+            "default": 0,
+            "title": "Skipped Newer Schema",
+            "type": "integer"
+          },
           "succeeded": {
             "title": "Succeeded",
             "type": "integer"
@@ -4981,6 +5351,7 @@
           "MANUAL_CLI",
           "LLM_JUDGE",
           "EXACT_DUPLICATE",
+          "REREAD_DUPLICATE",
           "OBSERVER_DIVERGENCE"
         ],
         "title": "RelationCreatedBy",
@@ -5320,6 +5691,27 @@
           "reviewer_id"
         ],
         "title": "ReviewRequest",
+        "type": "object"
+      },
+      "Select": {
+        "description": "Claim-level selection override on a derived section.\n\nThe hard, per-id escape hatch for when the ``{tags, subjects, query}`` cage\nis too coarse: ``allow`` force-includes specific particle ids the query\nmissed (a union, exempt from ``top_k``); ``deny`` force-excludes ids the\nquery keeps surfacing (a post-filter subtraction). Ids are written in the\n``p-<shortid>`` or full-id form the sources trailer / ``particle_show`` use;\nthe selector normalises a short form to the canonical id at load-by-id time.\n\nBoth lists default empty, so a section omitting ``select`` is unchanged. An\nid appearing in **both** lists is a load-time error \u2014 the intent is\nundefined.",
+        "properties": {
+          "allow": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allow",
+            "type": "array"
+          },
+          "deny": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deny",
+            "type": "array"
+          }
+        },
+        "title": "Select",
         "type": "object"
       },
       "SessionExposure": {
@@ -6143,6 +6535,33 @@
         "title": "SubjectCoverageGap",
         "type": "object"
       },
+      "SubjectMergeManyRequest": {
+        "description": "An N\u21921 merge: every source folds into ``target_id`` in one pass.",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Ids",
+            "type": "array"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_ids",
+          "target_id"
+        ],
+        "title": "SubjectMergeManyRequest",
+        "type": "object"
+      },
       "SubjectMergeRequest": {
         "properties": {
           "target_id": {
@@ -6157,7 +6576,7 @@
         "type": "object"
       },
       "SubjectMergeResponse": {
-        "description": "Outcome of a merge: the surviving target, the aliases it absorbed, and how\nmany particle links were re-pointed. The source subject is deleted.",
+        "description": "Outcome of a merge: the surviving target, the aliases it absorbed, and how\nmany particle links were re-pointed. The sources are deleted, unless\n``dry_run`` is set, when nothing was written.",
         "properties": {
           "aliases_added": {
             "items": {
@@ -6166,9 +6585,22 @@
             "title": "Aliases Added",
             "type": "array"
           },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
           "particles_relinked": {
             "title": "Particles Relinked",
             "type": "integer"
+          },
+          "sources": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SubjectMergeSource"
+            },
+            "title": "Sources",
+            "type": "array"
           },
           "subject": {
             "$ref": "#/components/schemas/Subject"
@@ -6180,6 +6612,46 @@
           "particles_relinked"
         ],
         "title": "SubjectMergeResponse",
+        "type": "object"
+      },
+      "SubjectMergeSource": {
+        "description": "One merged source: its id and name (it is deleted), the links it moved, and\nits ``artifact`` refs: carried to the target, or withheld as another project's.",
+        "properties": {
+          "canonical_name": {
+            "title": "Canonical Name",
+            "type": "string"
+          },
+          "particles_relinked": {
+            "title": "Particles Relinked",
+            "type": "integer"
+          },
+          "refs_carried": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs Carried",
+            "type": "array"
+          },
+          "refs_withheld": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs Withheld",
+            "type": "array"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_id",
+          "canonical_name",
+          "particles_relinked"
+        ],
+        "title": "SubjectMergeSource",
         "type": "object"
       },
       "SubjectParticleIdsResponse": {
@@ -6821,7 +7293,8 @@
       "WarcRecordType": {
         "enum": [
           "RESPONSE",
-          "REVISIT"
+          "REVISIT",
+          "ABSENT"
         ],
         "title": "WarcRecordType",
         "type": "string"
@@ -7151,8 +7624,21 @@
     },
     "/corpus/deposit/text": {
       "post": {
-        "description": "Deposit raw text into the corpus (no fetch).",
+        "description": "Deposit raw text into the corpus (no fetch).\n\n``store`` selects the target store (404 on an unknown handle).",
         "operationId": "corpus_deposit_text_corpus_deposit_text_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -7621,6 +8107,61 @@
           }
         ],
         "summary": "Curation Affirm Endpoint"
+      }
+    },
+    "/curation/cards/{key}": {
+      "get": {
+        "description": "Return one open curation card by its key, with every belief it names briefed.\n\nThe queue previews five beliefs of a ``subjectless_source`` card;\nthis read lists them all, each resolvable on its own ``no_subject`` key. It\nruns the same live checks as ``GET /curation``. 404 when no open card has\nthe key.",
+        "operationId": "get_curation_card_endpoint_curation_cards__key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurationCard"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Curation Card Endpoint"
       }
     },
     "/curation/rebuild": {
@@ -8519,6 +9060,71 @@
         "summary": "Get Lint Report"
       }
     },
+    "/memory/projection/{store}": {
+      "post": {
+        "description": "Render the ``MEMORY.md`` region body for a thin client.\n\nThe client sends its own manifest, so its projection policy governs, and\nsplices the returned body into its memory directory itself; this route\nwrites nothing. Deterministic, with no model call. ``fold_targets`` are\nanswered against the body just rendered. 404 if the store handle is not\nconfigured on this engine; 422 for a manifest with a file section, which\nnames a client path this engine cannot read.\n\nBearer-gated regardless of ``api.require_auth_for_reads``, like\n``GET /digest/{store}``: the region is the same confidential roll-up.",
+        "operationId": "memory_projection_endpoint_memory_projection__store__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store",
+            "required": true,
+            "schema": {
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryProjectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProjectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Manifest names a client file this engine cannot read"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Memory Projection Endpoint"
+      }
+    },
     "/memory/useful": {
       "post": {
         "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. 403 when belief\nwrites are disabled (``mcp.write.enabled_stores`` default-deny).",
@@ -8692,8 +9298,21 @@
     },
     "/particles/assert": {
       "post": {
-        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode), a first-class result, not an error; so does re-asserting a claim an\noperator or reviewer retired (it is held for review), and\n``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a\ngranularity / provenance violation; 403 when belief writes are disabled.",
+        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode), a first-class result, not an error; so does re-asserting a claim an\noperator or reviewer retired (it is held for review), and\n``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a\ngranularity / provenance violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
         "operationId": "particle_assert_endpoint_particles_assert_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8822,8 +9441,21 @@
     },
     "/particles/retract": {
       "post": {
-        "description": "Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard\nviolation or empty reason; 403 when belief writes are disabled.",
+        "description": "Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard\nviolation or empty reason; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
         "operationId": "particle_retract_endpoint_particles_retract_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -8959,8 +9591,21 @@
     },
     "/particles/supersede": {
       "post": {
-        "description": "Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or\ngranularity violation; 403 when belief writes are disabled.",
+        "description": "Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or\ngranularity violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
         "operationId": "particle_supersede_endpoint_particles_supersede_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9779,7 +10424,7 @@
     },
     "/review/{particle_id}": {
       "post": {
-        "description": "Resolve an INCONSISTENCY particle (\u00a79.6).\n\nEvery action except DEFER closes the record. PREFER_A and PREFER_B demote\nthe other claim and may write a SourceTrustStatement. BOTH_VALID keeps\nboth claims as ALEATORY. DISCARD retracts both claims and writes no trust\nstatement.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
+        "description": "Resolve an INCONSISTENCY particle (\u00a79.6).\n\nEvery action except DEFER closes the record. PREFER_A and PREFER_B demote\nthe other claim and may write a SourceTrustStatement. BOTH_VALID keeps\nboth claims as ALEATORY. DISCARD retracts both claims and writes no trust\nstatement. An action that would keep a claim it cannot\nrestore, such as PREFER_A on a record whose claim A has left ACTIVE, is\nrefused with 409 and nothing is written.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
         "operationId": "review_particle_review__particle_id__post",
         "parameters": [
           {
@@ -9823,6 +10468,16 @@
             },
             "description": "Resource not found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Action refused on this record"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -9844,8 +10499,21 @@
     },
     "/session-exposures": {
       "post": {
-        "description": "Append the beliefs one session was shown at session start.\n\nThe SessionStart hook calls this after it has cut what it injects to its\nbyte budget. Short ``p-`` ids are resolved to full ids here. Rows are only\nappended, and no route reads them back.",
+        "description": "Append the beliefs one session was shown at session start.\n\nThe SessionStart hook calls this after it has cut what it injects to its\nbyte budget. Short ``p-`` ids are resolved to full ids here. Rows are only\nappended, and no route reads them back. ``store`` selects the store the\ndigest was read from (404 on an unknown handle).",
         "operationId": "record_session_exposure_endpoint_session_exposures_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -10010,6 +10678,70 @@
         "summary": "Create Subject"
       }
     },
+    "/subjects/merge": {
+      "post": {
+        "description": "Merge several source subjects into one target (HTTP mirror of `subjects merge`).\n\nIrreversible unless `dry_run` is set: every source is deleted and its\nparticles and aliases fold into the target, recorded as one operator event.\nEvery source is checked before anything is written, so one bad source\nrefuses the whole merge. 404 if a subject is absent or was already merged;\n400 if a source is the target or is listed twice.",
+        "operationId": "merge_subjects_many_endpoint_subjects_merge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubjectMergeManyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubjectMergeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Merge Subjects Many Endpoint"
+      }
+    },
     "/subjects/relink-gated": {
       "post": {
         "description": "Link subjectless beliefs to the project-scoped subjects they name.\n\nRecovers each belief's names from its own gated-subjects record, its\nstructured claim's subject term, or its backtick spans, and links them in\nplace, one event per run. The `relink` gesture of the `gated_subjects`\ncuration card. 403 when writes are disabled and `dry_run` is false. A\nreal relink is refused (503) under the dev-key skip, even from loopback;\na `dry_run` plan is served as before.",
@@ -10145,7 +10877,7 @@
     },
     "/subjects/{source_id}/merge": {
       "post": {
-        "description": "Merge a source subject into a target (HTTP mirror of `subjects merge`).\n\nIrreversible: the source is deleted and its particles + aliases fold into the\ntarget. 404 if either subject is absent; 400 on an invalid merge.",
+        "description": "Merge one source subject into a target (the one-source form of `POST /subjects/merge`).\n\nIrreversible: the source is deleted and its particles + aliases fold into the\ntarget. 404 if either subject is absent; 400 on an invalid merge.",
         "operationId": "merge_subjects_endpoint_subjects__source_id__merge_post",
         "parameters": [
           {

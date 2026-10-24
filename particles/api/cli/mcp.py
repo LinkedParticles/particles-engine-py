@@ -63,9 +63,17 @@ def mcp_serve_cmd(
             raise typer.Exit(2)
         from pathlib import Path
 
-        from particles.api.cli._claude_code import claude_project_slug, repository_root
+        from particles.api.cli._claude_code import server_project_key
 
-        bind_project(claude_project_slug(repository_root(Path.cwd())))
+        key = server_project_key(Path.cwd())
+        if key is None:
+            typer.echo(
+                "Particles MCP: started at the filesystem root, so this server is not bound "
+                "to a project; reads are store-wide.",
+                err=True,
+            )
+        else:
+            bind_project(key)
     # Named stores are reached per tool call and fail there with the same one-line
     # message; the default store is the one a fresh install's DATABASE_URL names.
     require_store_directory(DEFAULT_STORE)

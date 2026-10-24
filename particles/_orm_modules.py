@@ -23,6 +23,7 @@ call sites need no change.
 from __future__ import annotations
 
 import particles.corpus.follow_edges  # noqa: F401
+import particles.corpus.refusals  # noqa: F401
 import particles.corpus.store  # noqa: F401
 import particles.store.change_journal  # noqa: F401
 import particles.store.curation_snapshot_store  # noqa: F401

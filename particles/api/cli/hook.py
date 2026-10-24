@@ -56,6 +56,7 @@ from particles.api.cli._claude_code import (
     hook_log_path,
     install_report,
     kept_prefix_length,
+    memory_load_window_warning,
     observer_project_for,
     particles_hook_commands,
     particles_mcp_executables,
@@ -217,7 +218,13 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
         return None
 
     try:
-        project_key = resolve_session_project(payload).key
+        resolved = resolve_session_project(payload)
+        project_key = resolved.key
+        # which rule gave the key, so `hook doctor` can show a
+        # session whose digest key came from a fallback a bound server never takes.
+        record["project_key"] = project_key
+        record["project_resolved_from"] = resolved.resolved_from
+        record["cwd"] = str(payload.get("cwd") or "")
     except Exception:  # noqa: BLE001 — an unresolved project is never an observer
         log.debug("session project resolution failed", exc_info=True)
         project_key = ""
@@ -275,6 +282,10 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
         }
     )
 
+
+#: The share of the hook deadline the freshness check may spend before it
+#: degrades to the full push, which then has the rest.
+_FRESHNESS_DEADLINE_SHARE = 0.5
 
 #: Time the exposure write leaves the hook before its deadline, so a slow write
 #: (a held writer lock) can never cost the session its context.
@@ -334,12 +345,16 @@ async def _digest_decision(store: str, payload: dict[str, Any]) -> DigestDecisio
     *is* the current view), the difference-only push on a mismatch, and the
     full digest whenever the projection is disabled for the store or the
     region / trailer cannot be parsed. Its own failure must never cost the
-    session its digest, so any error degrades to the full push.
+    session its digest, so any error degrades to the full push, and so does a
+    check that outlives its share of the hook deadline: on a remote engine the
+    fresh render is a request, and a slow engine must leave the full push the
+    time it needs.
     """
     from particles.api.cli._memory_projection import digest_decision
 
+    budget = get_config().claude_code.hook_deadline_seconds * _FRESHNESS_DEADLINE_SHARE
     try:
-        return await digest_decision(store, payload)
+        return await asyncio.wait_for(digest_decision(store, payload), budget)
     except Exception:  # noqa: BLE001 — freshness is best-effort; digest must survive
         log.debug("projection freshness check failed; pushing the full digest", exc_info=True)
         return DigestDecision("full")
@@ -459,154 +474,34 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
     # the render-splice tail of the cycle. Ordering is the
     # safety property: this point is reached only when every deposit above
     # succeeded (harvest → extract → render → splice), so the splice can never
-    # overwrite content that hasn't been harvested. Remote engines are skipped:
-    # the memory directory is machine-local by platform design.
+    # overwrite content that hasn't been harvested. Against a remote engine the
+    # engine renders and this client splices.
     if memory_dir is not None and projection_enabled():
         from particles.api.cli._memory_projection import run_projection_cycle
-        from particles.api.client import get_backend
 
-        if not get_backend().remote:
-            record["projection"] = await run_projection_cycle(
-                store, memory_dir, memory_md_text, project_roots=project_roots
-            )
+        record["projection"] = await run_projection_cycle(
+            store, memory_dir, memory_md_text, project_roots=project_roots
+        )
     return None
 
 
 # ---------------------------------------------------------------------------
-# stop — the agent-side extraction ask
+# stop — retired (deprecated)
 # ---------------------------------------------------------------------------
 
 
-@hook_app.command("stop")
+@hook_app.command("stop", hidden=True)
 def stop_cmd(
-    store: str = typer.Option(..., "--store", help="Memory store the ask deposits into."),
+    store: str = typer.Option("default", "--store", help="Ignored; kept for old installs."),
 ) -> None:
-    """Stop hook: ask the session's agent to extract what it has not yet recorded."""
-    _run_hook("stop", store, _stop)
+    """Retired Stop hook: exits 0 and does nothing.
 
-
-async def _stop(store: str, payload: dict[str, Any], record: dict[str, Any]) -> str | None:
-    """Decide whether this Stop asks, and if so deposit, record the ask and block.
-
-    A continuation Stop (``stop_hook_active``) never asks; it records where the
-    agent's answering turn ended, which keeps the ask and the answer out of
-    every later snapshot. Nothing here fails the session: any error degrades
-    to exit 0 with no block, per the hook contract.
+    Agent-side extraction was deprecated and removed. An install
+    made while it was on still runs this verb at the end of every turn until
+    `particles init claude-code` is re-run, which drops the entry; until then
+    it must not fail or block, so it returns at once.
     """
-    cfg = get_config()
-    agent_cfg = cfg.claude_code.agent_extraction
-    if agent_cfg.mode == "off":
-        record["skipped"] = "agent-extraction-off"
-        return None
-    from particles.api.client import get_backend
-
-    if get_backend().remote:
-        record["skipped"] = "remote-backend"
-        return None
-    session_id = str(payload.get("session_id") or "")
-    transcript_path = Path(str(payload.get("transcript_path") or ""))
-    if not session_id or not transcript_path.is_file():
-        record["skipped"] = "no-transcript"
-        return None
-
-    # defer: lazy-init, the store and agent modules are heavy for a hook start.
-    from particles.api.cli._claude_code import particles_mcp_registered, transcript_last_record
-
-    # An ask the session cannot answer is a turn spent for nothing: ask only
-    # where the Particles MCP server, and so `extraction_submit`, is offered.
-    # A continuation is still recorded below, whatever the cwd says now.
-    session_cwd = Path(str(payload.get("cwd") or os.getcwd()))
-    if not payload.get("stop_hook_active") and not particles_mcp_registered(session_cwd):
-        record["skipped"] = "no-submit-tool"
-        return None
-    from particles.corpus.store import get_entry_by_uri, list_extraction_bases
-    from particles.db import session_scope
-    from particles.extraction.agent import build_ask, decide_ask, purpose_servable
-    from particles.ingest.agent_extraction import (
-        covered_through,
-        load_session_asks,
-        record_ask,
-        record_continuation,
-    )
-
-    jsonl_text = transcript_path.read_text(encoding="utf-8", errors="replace")
-    last_uuid, model = transcript_last_record(jsonl_text)
-    uri = f"claude-code://session/{session_id}"
-
-    if payload.get("stop_hook_active"):
-        async with session_scope(store) as session:
-            entry = await get_entry_by_uri(session, uri)
-            if entry is None or last_uuid is None:
-                record["skipped"] = "continuation-without-ask"
-                return None
-            ask = (await load_session_asks(session, entry.entry_id)).open_ask()
-            if ask is None:
-                record["skipped"] = "continuation-without-ask"
-                return None
-            await record_continuation(
-                session, entry_id=entry.entry_id, ask_id=ask.event_id, through_uuid=last_uuid
-            )
-            await session.commit()
-        record["continued"] = ask.event_id
-        return None
-
-    exclude = await _ask_exclusions(store, session_id, jsonl_text)
-    text = _distilled_session(jsonl_text, session_id, exclude)
-    if not text or last_uuid is None:
-        record["skipped"] = "empty-transcript"
-        return None
-    data = text.encode("utf-8")
-    async with session_scope(store) as session:
-        entry = await get_entry_by_uri(session, uri)
-        rows = await list_extraction_bases(session, entry.entry_id) if entry else []
-        asks = await load_session_asks(session, entry.entry_id) if entry else None
-    decision = decide_ask(
-        text=data,
-        covered_through=covered_through(rows),
-        now=datetime.now(UTC),
-        asks_at=asks.asked_at() if asks else [],
-        capped=purpose_servable("extraction"),
-        cfg=agent_cfg,
-        last_ask_answered=asks is None or asks.last_ask_answered(),
-        # Only in shadow: an `on` answer that closes its span closes every
-        # earlier snapshot, so starting past a span left to the background
-        # pass would let agent recall replace it.
-        asked_through=asks.asked_through() if asks and agent_cfg.mode == "shadow" else 0,
-        last_ask_start=asks.last_ask_start() if asks else None,
-    )
-    record["ask"] = decision.reason
-    if not decision.ask:
-        return None
-
-    project = resolve_session_project(payload).key
-    outcome = await _harvest_transcript(store, transcript_path, session_id, project)
-    async with session_scope(store) as session:
-        entry = await get_entry_by_uri(session, uri)
-        if entry is None:
-            record["skipped"] = "deposit-missing"
-            return None
-        snapshot_id = (
-            outcome.snapshot_id
-            if outcome is not None and not outcome.unchanged
-            else max(entry.snapshots, key=lambda s: s.captured_at).snapshot_id
-        )
-        ask = await record_ask(
-            session,
-            entry_id=entry.entry_id,
-            snapshot_id=snapshot_id,
-            session_id=session_id,
-            store=store,
-            start=decision.start,
-            end=decision.end,
-            provider_model=f"claude-code:{model or 'unknown'}",
-            after_uuid=last_uuid,
-            mode=agent_cfg.mode,
-        )
-        await session.commit()
-    record["asked"] = ask.event_id
-    record["span"] = [decision.start, decision.end]
-    span_text = data[decision.start : decision.end].decode("utf-8", errors="replace")
-    return json.dumps({"decision": "block", "reason": build_ask(ask.event_id, span_text)})
+    del store
 
 
 def _session_project_roots(payload: dict[str, Any]) -> tuple[Path, ...]:
@@ -620,13 +515,9 @@ def _memory_dir_refused(
 ) -> bool:
     """Whether ``store`` must leave ``memory_dir`` alone; the reason goes to the hook log.
 
-    A remote engine is exempt: its store is not named by a local DSN, and the
-    projection never runs against one.
+    Against a remote engine the binding is the engine and the handle the
+    installed hooks pin, not a local database.
     """
-    from particles.api.client import get_backend
-
-    if get_backend().remote:
-        return False
     refusal = projection_refusal(store, memory_dir, project_roots)
     if refusal is None:
         return False
@@ -666,36 +557,9 @@ async def _mine_utility(
     }
 
 
-async def _ask_exclusions(store: str, session_id: str, jsonl_text: str) -> frozenset[str]:
-    """Transcript records an agent-extraction ask and its answer span.
-
-    Read from the store's ask events for this session's entry. Every harvest
-    applies them, so neither the ask (with its copy of the span) nor the
-    agent's answer ever reaches a snapshot. Agent extraction is local-only,
-    so a remote backend has none.
-    """
-    from particles.api.client import get_backend
-
-    if get_backend().remote:
-        return frozenset()
-    # defer: lazy-init, the store and agent modules are heavy for a hook start.
-    from particles.api.cli._claude_code import ask_exclusions
-    from particles.corpus.store import get_entry_by_uri
-    from particles.db import session_scope
-    from particles.extraction.agent import ASK_MARKER
-    from particles.ingest.agent_extraction import load_session_asks
-
-    async with session_scope(store) as session:
-        entry = await get_entry_by_uri(session, f"claude-code://session/{session_id}")
-        if entry is None:
-            return frozenset()
-        asks = await load_session_asks(session, entry.entry_id)
-    return ask_exclusions(jsonl_text, asks.exclusion_spans(), ask_marker=ASK_MARKER)
-
-
-def _distilled_session(jsonl_text: str, session_id: str, exclude: frozenset[str]) -> str:
+def _distilled_session(jsonl_text: str, session_id: str) -> str:
     """The text a harvest deposits for a session: distilled, then redacted."""
-    text = distill_transcript(jsonl_text, session_id, exclude_uuids=exclude)
+    text = distill_transcript(jsonl_text, session_id)
     return redact_secrets(text) if text else ""
 
 
@@ -706,8 +570,7 @@ async def _harvest_transcript(
     from particles.api.client import get_backend
 
     jsonl_text = transcript_path.read_text(encoding="utf-8", errors="replace")
-    exclude = await _ask_exclusions(store, session_id, jsonl_text)
-    text = _distilled_session(jsonl_text, session_id, exclude)
+    text = _distilled_session(jsonl_text, session_id)
     if not text:
         return None
     tags = ["claude-code", f"session:{session_id}"]
@@ -982,7 +845,7 @@ def _run_doctor(store: str) -> bool:
     for line in _check_observer_scope(store):
         typer.echo(f"  {line}")
 
-    for line in _check_agent_extraction(store):
+    for line in _check_retired_stop_hook():
         typer.echo(f"  {line}")
 
     for line in _check_model(store):
@@ -1180,66 +1043,30 @@ def _check_model(store: str) -> list[str]:
     return lines
 
 
-def _check_agent_extraction(store: str) -> list[str]:
-    """Report agent-side extraction's wiring and recent activity.
+def _check_retired_stop_hook() -> list[str]:
+    """Warn about a Stop entry left by an install made while agent extraction was on.
 
-    Three things must line up for an ask to land: the mode, a Stop entry in
-    the user-level settings, and the store being write-enabled so the
-    ``extraction_submit`` tool is offered. The counts come from the hook log's
-    recent ``stop`` runs. Reported, never fatal.
+    The verb it runs is a retired no-op (deprecated), so the entry
+    costs a process start at the end of every turn and nothing else. Re-running
+    the installer drops it. Reported, never fatal.
     """
-    from particles.api.cli._claude_code import read_hook_log_tail
-
-    mode = get_config().claude_code.agent_extraction.mode
-    lines = [f"agent extract:  mode {mode}"]
-    if mode == "off":
-        return lines
     try:
         settings = json.loads((Path.home() / ".claude" / "settings.json").read_text("utf-8"))
     except (OSError, ValueError):
-        settings = {}
-    stop_installed = any(" hook stop " in f"{c} " for c in particles_hook_commands(settings))
-    if not stop_installed:
-        lines.append(
-            "                ⚠ no Stop hook installed; re-run `particles init claude-code`"
-        )
-    from particles.api.cli._claude_code import particles_mcp_registered
-
-    if not particles_mcp_registered(Path.cwd()):
-        lines.append(
-            "                ⚠ no Particles MCP server for sessions started here; the Stop "
-            "hook will not ask. `claude mcp add --scope user particles -- … mcp serve`"
-        )
-    if store not in get_config().mcp.write.enabled_stores:
-        lines.append(
-            f"                ⚠ store {store!r} is not in mcp.write.enabled_stores, so the "
-            "extraction_submit tool is not offered"
-        )
-    counts = {"asked": 0, "continued": 0, "skipped": 0}
-    for raw in read_hook_log_tail(2000):
-        try:
-            entry = json.loads(raw)
-        except ValueError:
-            continue
-        if entry.get("event") != "stop":
-            continue
-        for key in counts:
-            if entry.get(key):
-                counts[key] += 1
-    lines.append(
-        f"                recent stop runs: {counts['asked']} ask(s), "
-        f"{counts['continued']} continuation(s), {counts['skipped']} skipped"
-    )
-    lines.append(
-        "                submissions: `particles events list --type AGENT_EXTRACTION_SUBMITTED`"
-    )
-    return lines
+        return []
+    if not isinstance(settings, dict):
+        return []
+    if not any(" hook stop " in f"{c} " for c in particles_hook_commands(settings)):
+        return []
+    return [
+        "stop hook:      ⚠ a retired Particles Stop hook is still installed (it does nothing).",
+        "                Re-run `particles init claude-code` to remove it.",
+    ]
 
 
 #: The LLM purposes the hooks themselves depend on, and what each feeds.
 _HOOK_PURPOSES = {
     "extraction": "background extraction of harvested transcripts",
-    "semantic_lint": "agent extraction's contradiction probe",
     "use_judge": "SessionEnd utility mining",
 }
 
@@ -1293,12 +1120,73 @@ def _check_observer_scope(store: str) -> list[str]:
         rescoped = asyncio.run(_probe())
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
         return [f"observer scope: project (could not check the store: {exc})"]
-    if rescoped:
-        return ["observer scope: project (a session sees global beliefs plus its project's)"]
+    if not rescoped:
+        return [
+            "observer scope: project, but NOT in effect — this store has not been rescoped.",
+            f"                Run `particles memory rescope --store {store}` (it only adds tags).",
+        ]
     return [
-        "observer scope: project, but NOT in effect — this store has not been rescoped.",
-        f"                Run `particles memory rescope --store {store}` (it only adds tags).",
+        "observer scope: project (a session sees global beliefs plus its project's)",
+        *_observer_binding_lines(Path.cwd()),
     ]
+
+
+def _observer_binding_lines(cwd: Path) -> list[str]:
+    """Where a session's digest key and its MCP server's key can part.
+
+    A bound server keys on the directory it starts in; the hooks key on the
+    session's launch directory, and fall back to the transcript directory's
+    name when no recorded ``cwd`` reproduces it. The fallbacks are reported
+    after the fact, and so is a server key that differs from the hooks' last
+    key for this directory. Reported, never fatal.
+    """
+    from particles.api.cli._claude_code import (
+        particles_mcp_registrations,
+        read_hook_log_tail,
+        server_project_key,
+    )
+
+    pad = " " * 16
+    registrations = particles_mcp_registrations()
+    if not registrations:
+        lines = [f"{pad}MCP server: not registered at user scope"]
+    elif all(r.bound for r in registrations):
+        lines = [f"{pad}MCP server: bound to each session's project (--project-observer cwd)"]
+    else:
+        lines = [
+            f"{pad}⚠ MCP server is not bound, so its reads are store-wide; re-run "
+            "`particles init claude-code` to add --project-observer cwd"
+        ]
+    server_key = server_project_key(cwd)
+    fallbacks: dict[str, str] = {}
+    hooks_key: str | None = None
+    for raw in read_hook_log_tail(2000):
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if entry.get("event") != "session-start" or "project_resolved_from" not in entry:
+            continue
+        key = str(entry.get("project_key") or "")
+        if entry.get("project_resolved_from") != "repository" and key:
+            fallbacks[key] = str(entry["project_resolved_from"])
+        if entry.get("cwd") == str(cwd):
+            hooks_key = key
+    lines.append(f"{pad}key here: a bound server takes {server_key or '(none: unbound at /)'}")
+    if hooks_key is not None:
+        lines.append(f"{pad}          the hooks last resolved {hooks_key or '(none)'}")
+        if server_key is not None and hooks_key != server_key:
+            lines.append(
+                f"{pad}⚠ the digest and the MCP server read different projects here; "
+                "the server's key comes from the directory it really started in"
+            )
+    if fallbacks:
+        shown = ", ".join(f"{k} ({how})" for k, how in sorted(fallbacks.items())[:3])
+        lines.append(
+            f"{pad}⚠ {len(fallbacks)} recent session key(s) came from a fallback, where a "
+            f"bound server may read another project: {shown}"
+        )
+    return lines
 
 
 def _check_memory_dirs(store: str) -> list[str]:
@@ -1323,6 +1211,15 @@ def _check_memory_dirs(store: str) -> list[str]:
     lines = [f"memory dir:     {memory_dir} ({state})"]
     if claude_project_slug(cwd) != key:
         lines.append("                (a session here shares its repository's memory directory)")
+    memory_md = memory_dir / "MEMORY.md"
+    if memory_md.is_file():
+        # the index sits below the region, so an overgrown file
+        # loses its tail from every session with no error anywhere.
+        warning = memory_load_window_warning(
+            memory_md.read_text(encoding="utf-8", errors="replace")
+        )
+        if warning is not None:
+            lines.append(f"memory size:    {warning}")
     refusal = projection_refusal(store, memory_dir, (repository_root(cwd),))
     if refusal is None:
         lines.append(f"memory binding: store '{store}' is the store the installed hooks name")

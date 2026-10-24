@@ -156,6 +156,13 @@ def curate_main(
         "--format",
         help="With --precision: table (default) or json.",
     ),
+    card_key: str | None = typer.Option(
+        None,
+        "--card",
+        help="Show one open card by its key, with every belief it names, each "
+        "with its own key. A subjectless_source card previews five of its "
+        "beliefs in the queue; this lists them all.",
+    ),
     verbose: bool = typer.Option(False, "--verbose"),
     debug: bool = typer.Option(False, "--debug"),
 ) -> None:
@@ -204,6 +211,11 @@ def curate_main(
             if on:
                 raise typer.BadParameter(f"{flag} does not apply to --precision.")
         run(_show_precision(since=_parse_since(since), kind=kind_enum, format_=format_))
+        return
+    if card_key is not None:
+        if precision or refresh or no_snapshot or semantic or limit is not None or kind:
+            raise typer.BadParameter("--card takes no other option.", param_hint="--card")
+        run(_show_card(card_key))
         return
     if since is not None:
         raise typer.BadParameter("--since applies only with --precision.", param_hint="--since")
@@ -464,6 +476,19 @@ async def _show(
     typer.echo("Inspect a belief with:  particles particle show ID")
 
 
+async def _show_card(key: str) -> None:
+    from particles.operations.curation import get_curation_card
+
+    async with session_scope() as session:
+        card = await get_curation_card(session, key)
+        related = await _load_related(session, [card]) if card is not None else _Related()
+    if card is None:
+        _fail(f"No open card with key {key!r}.")
+    snooze_days = get_config().curation.snooze_days
+    for line in _render_card(1, card, related, snooze_days=snooze_days):
+        typer.echo(line)
+
+
 _WIDTH = 88
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -607,10 +632,19 @@ def _render_card(
     side_ids = {pid for pid, _ in sides} | {b.particle_id for b in _conflict_briefs(card)}
     briefs = {b.particle_id: b for b in card.particles}
     shown = [b for b in card.particles if b.particle_id not in side_ids]
-    labels = "AB" if len(shown) == 2 else "••"
+    # A pair reads as A / B; a batch card's beliefs are a list, one bullet each.
+    batch = card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE)
+    labels = "AB" if len(shown) == 2 and not batch else "•" * len(shown)
     for tag, brief in zip(labels, shown, strict=False):
         lines += _quote(tag, brief.content)
         lines.append(_INDENT + _brief_meta(brief))
+        if card.kind is CardKind.SUBJECTLESS_SOURCE:
+            # each belief can still be fixed on its own key.
+            own = f"{CardKind.NO_SUBJECT.value}:{brief.particle_id}"
+            lines.append(f"{_INDENT}key: {shlex.quote(own)}")
+    unshown = len(card.particle_ids) - len(card.particles)
+    if card.kind is CardKind.SUBJECTLESS_SOURCE and card.particles and unshown > 0:
+        lines.append(f"   … and {unshown} more: particles curate --card {shlex.quote(card.key)}")
 
     if card.verdict is not None:
         judge = f"LLM judge: {card.verdict.verdict.value}"

@@ -38,7 +38,6 @@ it is OFF by default.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections import deque
@@ -50,8 +49,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.duplicate_key import content_hash as norm_content_hash
 from particles.core.equivalence import co_evidential_components
-from particles.core.probe_verdict import prompt_hash
-from particles.core.rung_ladder import DuplicateVerdict, QuestionKind, RungStamp
 from particles.core.schema import (
     CandidateCluster,
     CoEvidentialCandidate,
@@ -69,13 +66,25 @@ from particles.core.schema import (
     UnmergeSkipReason,
     is_truth_apt,
 )
+from particles.core.schema_version import SchemaCompatibility
 from particles.core.stance import stance_holder
 from particles.core.status import Status, StatusReason
 from particles.extraction.polarity import is_non_asserted
-from particles.ingest.ladder_shell import report
-from particles.llm.breaker import PROBE_MAX_TOKENS
+from particles.ingest.duplicate_judge import (
+    DUPLICATE_VERDICT,
+    JUDGE_TOKENS_PER_PAIR,
+    judge_key,
+    judge_max_tokens,
+    judge_prompt,
+    key_index,
+    parse_verdicts,
+    run_judge,
+    tally_judge,
+)
 from particles.operations._scope import pair_scope_tier
 from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
+from particles.operations.version_guard import active_stamps, written_by_newer_minor
+from particles.store.particle_store import get_particles_by_ids
 
 if TYPE_CHECKING:
     from particles.store.event_store import OperatorEvent
@@ -100,41 +109,17 @@ class ApplyConfirmationRequired(Exception):
         )
 
 
-# The judge's reply budget, per pair and per call. A pair is keyed by its batch
-# position (``p0``, ``p1``, …), mapped back locally, so a reply entry is
-# ``"p24": "PARAPHRASE",`` whatever the tokenizer. The budget covers a reply
-# that spends one token per byte, indented and fenced, with headroom; the
-# test pins that bound. Keying by ``a8+b8`` particle-id prefixes cost
-# ``claude-haiku-5-5`` about 57 tokens an entry, so a 25-pair batch ran out of
-# a 40-per-pair budget, the truncated JSON parsed to nothing, and every pair
-# read UNSURE.
-_JUDGE_TOKENS_PER_PAIR = 48
-_JUDGE_TOKENS_BASE = 64
-_JUDGE_MIN_TOKENS = 200
-
-
-def _judge_max_tokens(pair_count: int) -> int:
-    """The output budget for one judge call over ``pair_count`` pairs.
-
-    The reply's own size, plus the room a model that thinks before it answers
-    spends first (``PROBE_MAX_TOKENS``): its thinking counts against the same
-    budget, so a budget sized to the reply alone can return no text.
-    """
-    reply = max(_JUDGE_MIN_TOKENS, _JUDGE_TOKENS_BASE + _JUDGE_TOKENS_PER_PAIR * pair_count)
-    return PROBE_MAX_TOKENS + reply
-
-
-def _judge_key(index: int) -> str:
-    """The prompt key for the pair at ``index`` in its batch."""
-    return f"p{index}"
-
-
-def _key_index(key: str) -> int | None:
-    """The batch position a reply key names, tolerating case and brackets."""
-    text = key.strip().strip("[]").strip().lower()
-    if not text.startswith("p") or not text[1:].isdigit():
-        return None
-    return int(text[1:])
+# The judge's pure half lives in ``particles.ingest.duplicate_judge`` so
+# the extraction pipeline can ask it too; these names are kept for
+# this module's callers and tests.
+_JUDGE_TOKENS_PER_PAIR = JUDGE_TOKENS_PER_PAIR
+_judge_max_tokens = judge_max_tokens
+_judge_key = judge_key
+_key_index = key_index
+_judge_prompt = judge_prompt
+_parse_verdicts = parse_verdicts
+_tally_judge = tally_judge
+_DUPLICATE_VERDICT = DUPLICATE_VERDICT
 
 
 async def suggest_co_evidential(
@@ -504,56 +489,7 @@ async def _judge_pairs(pairs: Sequence[tuple[str, str]]) -> list[JudgeVerdictKin
     """
     from particles.operations._llm import _llm_call
 
-    lines = [f"[{_judge_key(i)}]\nA: {a}\nB: {b}" for i, (a, b) in enumerate(pairs)]
-    prompt = _judge_prompt("\n\n".join(lines))
-    response = await _llm_call(prompt, max_tokens=_judge_max_tokens(len(pairs)))
-    verdicts: list[JudgeVerdictKind | None] = [None] * len(pairs)
-    for key, verdict in _parse_verdicts(response).items():
-        index = _key_index(key)
-        if index is not None and index < len(pairs) and verdicts[index] is None:
-            verdicts[index] = verdict
-    _tally_judge(verdicts)
-    return verdicts
-
-
-def _judge_prompt(pair_lines: str) -> str:
-    """The judge's prompt over its rendered pair lines."""
-    return (
-        "You are curating an epistemic knowledge base. Below are candidate "
-        "pairs of claims that may assert the SAME underlying fact (a "
-        "paraphrase) or DIFFERENT facts. For each pair, choose exactly one "
-        "verdict:\n"
-        "- PARAPHRASE: the two claims assert the same underlying fact\n"
-        "- DISTINCT: the two claims assert different facts\n"
-        "- UNSURE: you cannot tell\n\n"
-        "Return ONLY a JSON object mapping each bracketed pair key to its "
-        'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.\n\n' + pair_lines
-    )
-
-
-def duplicate_judge_stamp() -> RungStamp:
-    """The judge as the duplicate ladder's model rung, at its prompt's version."""
-    return RungStamp("duplicate_judge", prompt_hash(_judge_prompt("[p0]\nA: {a}\nB: {b}")))
-
-
-_DUPLICATE_VERDICT = {
-    JudgeVerdictKind.PARAPHRASE: DuplicateVerdict.SAME,
-    JudgeVerdictKind.DISTINCT: DuplicateVerdict.DIFFERENT,
-}
-
-
-def _tally_judge(verdicts: Sequence[JudgeVerdictKind | None]) -> None:
-    """Count the judge's verdicts as the duplicate ladder's.
-
-    ``UNSURE`` and an omitted pair are the rung's abstention; with one rung,
-    an abstention leaves no rung deciding.
-    """
-    stamp = duplicate_judge_stamp()
-    for verdict in verdicts:
-        mapped = _DUPLICATE_VERDICT.get(verdict) if verdict is not None else None
-        value = (mapped or DuplicateVerdict.ABSTAIN).value
-        report(QuestionKind.DUPLICATE, "rungs", stamp, value)
-        report(QuestionKind.DUPLICATE, "settled", stamp if mapped else None, value)
+    return await run_judge(pairs, _llm_call)
 
 
 async def judge_claim_pairs(
@@ -571,35 +507,6 @@ async def judge_claim_pairs(
         answered = await _judge_pairs(pairs[start : start + batch_size])
         verdicts.extend(v if v is not None else JudgeVerdictKind.UNSURE for v in answered)
     return verdicts
-
-
-def _parse_verdicts(response: str | None) -> dict[str, JudgeVerdictKind]:
-    """Parse the LLM's JSON verdict object, tolerating code fences / prose."""
-    if not response:
-        return {}
-    text = response.strip()
-    # Strip a ```json … ``` fence if present, then isolate the JSON object.
-    if text.startswith("```"):
-        text = text.split("```", 2)[1] if text.count("```") >= 2 else text
-        text = text.removeprefix("json").strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {}
-    try:
-        raw: Any = json.loads(text[start : end + 1])
-    except (ValueError, TypeError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-
-    out: dict[str, JudgeVerdictKind] = {}
-    for key, value in raw.items():
-        try:
-            out[str(key)] = JudgeVerdictKind(str(value).strip().upper())
-        except ValueError:
-            continue
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +719,33 @@ async def find_exact_duplicate_groups(
     return groups
 
 
+async def _groups_held_for_newer_schema(
+    session: AsyncSession, groups: Sequence[DuplicateGroup]
+) -> dict[str, DuplicateGroup]:
+    """The groups an older SDK must not merge, keyed by survivor id (D2).
+
+    A group that holds a particle written by a newer schema minor is merged
+    only by an SDK at least that new: whichever member this SDK elected, the
+    merge would retire a record carrying fields it cannot see, or fold the
+    group around a survivor chosen without them. In the normal case no ACTIVE
+    row carries a newer stamp, and one ``GROUP BY`` answers that before any
+    member is loaded.
+    """
+    if not await active_stamps(session, SchemaCompatibility.NEWER_MINOR):
+        return {}
+    members = await get_particles_by_ids(
+        session, [pid for g in groups for pid in (g.survivor_id, *g.redundant_ids)]
+    )
+    return {
+        g.survivor_id: g
+        for g in groups
+        if any(
+            (p := members.get(pid)) is not None and written_by_newer_minor(p.schema_version)
+            for pid in (g.survivor_id, *g.redundant_ids)
+        )
+    }
+
+
 async def auto_merge_exact_duplicates(
     session: AsyncSession,
     *,
@@ -841,6 +775,10 @@ async def auto_merge_exact_duplicates(
 
     Idempotent: a merged copy is no longer ACTIVE, so a second run finds
     nothing.
+
+    A group holding a particle written by a newer schema minor than this SDK's
+    is reported but never merged, and a warning counts the held groups, in a
+    dry run too; an SDK at least that new merges it (D2).
 
     Args:
         session: async DB session.
@@ -874,11 +812,24 @@ async def auto_merge_exact_duplicates(
         total_groups=len(groups),
         total_redundant=sum(len(g.redundant_ids) for g in groups),
     )
-    if dry_run or not groups:
+    if not groups:
         return report
 
-    merging = groups[: cfg.max_per_run]
-    deferred = groups[cfg.max_per_run :]
+    held = await _groups_held_for_newer_schema(session, groups)
+    report.held_newer_schema_groups = len(held)
+    if held:
+        copies = sum(len(g.redundant_ids) for g in held.values())
+        report.warnings.append(
+            f"{len(held)} group(s) / {copies} redundant "
+            "copy/copies hold a particle written by a newer schema minor than this SDK's; "
+            "left unmerged for an SDK at least that new."
+        )
+    if dry_run:
+        return report
+
+    mergeable = [g for g in groups if g.survivor_id not in held]
+    merging = mergeable[: cfg.max_per_run]
+    deferred = mergeable[cfg.max_per_run :]
     report.deferred_groups = len(deferred)
     report.deferred_redundant = sum(len(g.redundant_ids) for g in deferred)
     if deferred:
@@ -1077,8 +1028,9 @@ async def unmerge_exact_duplicates(
        this legal; the ``retired_at`` stamp is cleared
        with it (§4).
     2. Deletes the ``CO_EVIDENTIAL`` edge to the survivor **only** when it
-       carries ``created_by = EXACT_DUPLICATE`` — a link a human or the
-       judge made for the same pair is never withdrawn (§5).
+       carries the merge's own tag (``EXACT_DUPLICATE``, or
+       ``REREAD_DUPLICATE`` for a re-read merge) — a link a human
+       or the judge made for the same pair is never withdrawn (§5).
     3. Records one ``DUPLICATES_UNMERGED`` event. The merge event it reverts is
        never deleted or edited; the pair is the audit trail (§9).
 
@@ -1131,6 +1083,13 @@ async def unmerge_exact_duplicates(
         group = planned
         survivor_id = group.survivor_id
         restorable = list(group.restored_ids)
+        # a re-read merge wrote its edges under its own tag; the
+        # event's basis says which, so only this merge's own edges are dropped.
+        edge_tag = (
+            RelationCreatedBy.REREAD_DUPLICATE
+            if payload.get("basis") == "reread_judged"
+            else RelationCreatedBy.EXACT_DUPLICATE
+        )
 
         if dry_run:
             # The edge is only withdrawn alongside the copy it belongs to, so
@@ -1146,7 +1105,7 @@ async def unmerge_exact_duplicates(
                     survivor_id,
                     loser_id,
                     RelationType.CO_EVIDENTIAL,
-                    created_by=RelationCreatedBy.EXACT_DUPLICATE,
+                    created_by=edge_tag,
                     actor=actor,
                 ):
                     group.relations_deleted += 1

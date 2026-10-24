@@ -346,7 +346,12 @@ async def test_a_crashing_child_is_recorded_as_failed(tmp_path: Path) -> None:
     )
     config = tmp_path / "config.yaml"
     config.write_text(runner_mod.PINNED_CONFIG)
-    failure = await runner_mod._run_child(spec, RunPlan(), tmp_path, config)
+    # The crash is what is under test, so both host guards are off: each reads
+    # the runner's own disk and swap, and either fires MEMORY_GUARD if a poll
+    # lands before the child exits. With the 4 GiB disk default a CI runner
+    # with 3.7 GiB free did exactly that (seen twice on one runner, 2026-10-21).
+    plan = RunPlan(min_free_disk_bytes=0, swap_guard_bytes=2**62)
+    failure = await runner_mod._run_child(spec, plan, tmp_path, config)
     assert failure is not None
     assert failure.status is CellStatus.FAILED
     assert "child exited with" in (failure.error or "")

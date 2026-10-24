@@ -19,6 +19,15 @@ is not itself collapsed, and whose blob is on disk. *S* is then marked
 ``COMPLETE`` ("no extraction work is owed") and ``superseded_by_snapshot_id``
 records *S′* — the column, not the status, is what says "collapsed".
 
+An ``ABSENT`` record is a generation on the same terms: a
+pending absence collapses the older pending or failed RESPONSE snapshots of its
+entry (an edit made and then deleted before the next extraction is never
+extracted), and a newer RESPONSE collapses a pending absence (a note deleted
+and restored before the next extraction retires nothing). An absence has no
+blob by definition, so the blob-on-disk rule does not apply to it. Nothing
+here ever collapses a ``COMPLETE`` snapshot: retiring what a completed
+generation stated is what processing the absence does, through the cascade.
+
 Only ``MUTABLE`` entries are touched. ``APPEND_ONLY`` content is additive, so
 extracting an older snapshot is never wrong there, only redundant; ``STABLE``
 entries hold versions the operator deposited on purpose; ``EPHEMERAL`` entries
@@ -102,7 +111,8 @@ def plan_collapse(
     """
     superseder: GenerationRow | None = None
     for row in reversed(generations):
-        if _is_eligible_superseder(row) and row.content_hash in present_blobs:
+        # An ABSENT record has no blob, so it is exempt from the presence rule.
+        if _is_eligible_superseder(row) and (row.absent or row.content_hash in present_blobs):
             superseder = row
             break
     if superseder is None:
@@ -151,7 +161,7 @@ async def collapse_superseded_pending(
         row.content_hash
         for generations in grouped.values()
         for row in generations
-        if _is_eligible_superseder(row) and blob_path(row.content_hash).exists()
+        if _is_eligible_superseder(row) and not row.absent and blob_path(row.content_hash).exists()
     }
     planned = [
         (entry_id, snapshot_id, superseded_by)

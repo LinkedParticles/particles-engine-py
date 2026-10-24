@@ -171,6 +171,28 @@ async def _add_subject(name: str = "Test Subject") -> str:
     return subj.id
 
 
+async def _add_subject_with_aliases(name: str, aliases: list[str]) -> str:
+    from particles.db import session_scope
+    from particles.store.subject_store import insert_subject
+
+    subj = Subject(id=str(uuid.uuid4()), canonical_name=name, aliases=aliases, asserted_by="test")
+    async with session_scope() as session:
+        await insert_subject(session, subj)
+        await session.commit()
+    return subj.id
+
+
+async def _clear_alias_index() -> None:
+    from sqlalchemy import delete
+
+    from particles.db import session_scope
+    from particles.store.subject_store import SubjectAliasRow
+
+    async with session_scope() as session:
+        await session.execute(delete(SubjectAliasRow))
+        await session.commit()
+
+
 async def _add_active_particle(
     *,
     content: str = "A test claim.",
@@ -1032,6 +1054,44 @@ class TestSubjects:
         assert result.exit_code != 0
         assert "Provide a subject ID" in result.output
 
+    def test_show_by_name(self, runner: CliRunner, cli_db: Path) -> None:
+        """a name resolves where only an ID or prefix used to."""
+        sid = _run_async(_add_subject("Marie Curie"))
+        result = _invoke(runner, ["subjects", "show", "marie curie"])
+        assert result.exit_code == 0
+        assert sid in result.output
+
+    def test_search_names_the_alias_that_matched(self, runner: CliRunner, cli_db: Path) -> None:
+        """a search finds a subject by an alias and says which one."""
+        _run_async(_add_subject_with_aliases("the user", ["the speaker"]))
+        result = _invoke(runner, ["subjects", "search", "speaker"])
+        assert result.exit_code == 0
+        assert "the user  (alias: the speaker)" in result.output
+
+    def test_rebuild_aliases_check_and_repair(self, runner: CliRunner, cli_db: Path) -> None:
+        _run_async(_add_subject_with_aliases("the user", ["the speaker"]))
+        clean = _invoke(runner, ["subjects", "rebuild-aliases", "--check"])
+        assert clean.exit_code == 0
+        assert "matches the recorded aliases" in clean.output
+
+        _run_async(_clear_alias_index())
+        drifted = runner.invoke(app, ["subjects", "rebuild-aliases", "--check"])
+        assert drifted.exit_code == 1
+        assert "1 missing, 0 extra, 0 for deleted subjects" in drifted.output
+
+        rebuilt = _invoke(runner, ["subjects", "rebuild-aliases"])
+        assert rebuilt.exit_code == 0
+        assert "Alias index rebuilt: 1 row(s)." in rebuilt.output
+        assert _invoke(runner, ["subjects", "rebuild-aliases", "--check"]).exit_code == 0
+
+    def test_show_ambiguous_name_is_refused(self, runner: CliRunner, cli_db: Path) -> None:
+        _run_async(_add_subject("Prometheus"))
+        _run_async(_add_subject("Prometheus"))
+        result = runner.invoke(app, ["subjects", "show", "Prometheus"])
+        assert result.exit_code == 1
+        assert "Subject 'Prometheus' is ambiguous" in result.output
+        assert "Traceback" not in result.output
+
     def test_alias_adds_new_alias(self, runner: CliRunner, cli_db: Path) -> None:
         sid = _run_async(_add_subject("Albert Einstein"))
         result = _invoke(runner, ["subjects", "alias", sid, "A. Einstein"])
@@ -1375,6 +1435,45 @@ class TestReviewCommand:
         assert "recorded: DISCARD" in result.output
         assert self._statuses(a, b, inc) == [Status.RETRACTED] * 3
 
+    @staticmethod
+    def _demote(pid: str) -> None:
+        from particles.core.status import StatusReason
+        from particles.db import session_scope
+        from particles.store.particle_store import update_particle_status
+
+        async def _write() -> None:
+            async with session_scope() as session:
+                await update_particle_status(
+                    session, pid, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
+                )
+                await session.commit()
+
+        asyncio.run(_write())
+
+    def test_review_prefer_a_refused_when_a_has_left_active(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        # "keep A" would demote B and keep nothing.
+        a, b, inc = self._seed_conflict("x is 1", "x is 2")
+        self._demote(a)
+        result = runner.invoke(app, ["review", inc, "--action", "PREFER_A"])
+        assert result.exit_code == 1
+        assert "PREFER_A is refused" in result.output
+        assert "Traceback" not in result.output
+        assert self._statuses(a, b, inc) == [
+            Status.PROVENANCE_STALE,
+            Status.ACTIVE,
+            Status.INCONSISTENCY,
+        ]
+
+    def test_bulk_prefer_a_counts_refusals(self, runner: CliRunner, cli_db: Path) -> None:
+        a1, _, _ = self._seed_conflict("x is 1", "x is 2")
+        self._demote(a1)
+        self._seed_conflict("y is 1", "y is 2")
+        result = _invoke(runner, ["review", "--bulk", "PREFER_A"])
+        assert result.exit_code == 0
+        assert "Done: 1 resolved, 1 refused, 0 failed." in result.output
+
     def test_review_listing_offers_discard(self, runner: CliRunner, cli_db: Path) -> None:
         self._seed_conflict("x is 1", "x is 2")
         result = _invoke(runner, ["review"])
@@ -1699,6 +1798,49 @@ class TestReindexCommand:
         assert result.output.count("blob missing:") == 5
         assert "… and 2 more (see --format json)" in result.output
 
+    @staticmethod
+    def _summary(skipped_newer: int = 0) -> dict[str, object]:
+        """A live-run envelope as ``operations.reindex.reindex`` returns it."""
+        return {
+            "dry_run": False,
+            "scope": 1,
+            "succeeded": 1,
+            "failed": 0,
+            "failed_entries": [],
+            "lint_summary": {},
+            "skipped_newer_schema": skipped_newer,
+            "plan": {
+                "entries": 1,
+                "snapshots": 1,
+                "particles": 1,
+                "missing_blobs": 0,
+                "scope_description": "auto: stale schema",
+                "skipped_newer_schema": skipped_newer,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("args", "expected"), [([], False), (["--include-schema-stale"], True)]
+    )
+    def test_include_schema_stale_reaches_the_operation(
+        self, runner: CliRunner, cli_db: Path, args: list[str], expected: bool
+    ) -> None:
+        """D5: stale-schema discovery is off unless the flag is passed."""
+        op = AsyncMock(return_value=self._summary())
+        with patch("particles.operations.reindex.reindex", new=op):
+            result = _invoke(runner, ["reindex", "--no-failed", *args])
+        assert result.exit_code == 0, result.output
+        assert op.await_args is not None
+        assert op.await_args.kwargs["include_schema_stale"] is expected
+
+    def test_human_run_reports_newer_schema_skips(self, runner: CliRunner, cli_db: Path) -> None:
+        """D2: the snapshots an older SDK left alone are counted on stdout."""
+        op = AsyncMock(return_value=self._summary(skipped_newer=2))
+        with patch("particles.operations.reindex.reindex", new=op):
+            result = _invoke(runner, ["reindex"])
+        assert result.exit_code == 0, result.output
+        assert "Skipped 2 snapshot(s) holding particles a newer SDK wrote" in result.output
+
 
 class TestExportCommand:
     def test_export_unknown_format_errors(self, runner: CliRunner, cli_db: Path) -> None:
@@ -1927,6 +2069,28 @@ class TestDepositCommand:
         assert result.exit_code == 0
         assert "entry_id:" in result.output
         assert "snapshot_id:" in result.output
+
+    def test_redeposit_of_unchanged_file_says_unchanged(
+        self, runner: CliRunner, cli_db: Path, tmp_path: Path
+    ) -> None:
+        """the same bytes again echo the existing IDs and name the reindex route."""
+        doc = tmp_path / "doc.txt"
+        doc.write_text("A document deposited twice.")
+        first = _invoke(runner, ["deposit", str(doc)])
+        assert first.exit_code == 0
+        assert "unchanged:" not in first.output
+
+        second = _invoke(runner, ["deposit", str(doc)])
+        assert second.exit_code == 0
+        ids = [
+            line
+            for line in first.output.splitlines()
+            if line.startswith(("entry_id:", "snapshot_id:"))
+        ]
+        assert len(ids) == 2
+        assert all(line in second.output.splitlines() for line in ids)
+        assert "unchanged:" in second.output
+        assert "particles reindex --entry-ids" in second.output
 
     def test_deposit_missing_file_errors(self, runner: CliRunner, cli_db: Path) -> None:
         result = runner.invoke(app, ["deposit", "/nonexistent/path/file.txt"])
@@ -2354,6 +2518,14 @@ class TestExtractCommand:
         result = runner.invoke(app, ["extract", "some-entry", "--tag", "memory-file"])
         assert result.exit_code == 1
         assert "--tag filters --all-pending" in result.output
+
+    def test_extract_retry_refused_requires_all_pending(
+        self, runner: CliRunner, cli_db: Path
+    ) -> None:
+        # naming an entry always sends it, so the flag means nothing there.
+        result = runner.invoke(app, ["extract", "some-entry", "--retry-refused"])
+        assert result.exit_code == 1
+        assert "--retry-refused applies to --all-pending" in result.output
 
     def test_entry_has_tag_is_exact(self) -> None:
         from particles.api.cli.extract import entry_has_tag

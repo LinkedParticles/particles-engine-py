@@ -55,9 +55,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.duplicate_key import content_hash
 from particles.core.observer_scope import project_keys
-from particles.core.schema import ExtractionStatus, Mutability, ProvenanceRefType, WarcRecordType
+from particles.core.schema import ExtractionStatus, ProvenanceRefType, WarcRecordType
 from particles.corpus.rule_sources import RULE_SOURCE_TAG
-from particles.corpus.store import CorpusEntryRow, SnapshotRow
+from particles.corpus.store import CorpusEntryRow, SnapshotRow, get_entry_currency
 from particles.operations.query.as_of import (
     AsOfView,
     RetirementIndex,
@@ -346,10 +346,12 @@ async def stated_by(
     """Beliefs the entries stated at ``view.as_of`` → the entries that stated each.
 
     A belief counts when one of its own non-derivation provenance refs names a
-    snapshot of the entry current at that instant: for a ``MUTABLE`` entry the
-    latest extracted generation captured by then, otherwise any extracted
-    snapshot captured by it. A ref without a snapshot id counts when the entry
-    had any. An entry with no extracted snapshot by then stated nothing.
+    snapshot of the entry current at that instant: for a ``MUTABLE`` entry its
+    current generation as of then, read through ``get_entry_currency``, so an
+    entry whose current generation is an ``ABSENT`` record states nothing;
+    otherwise any extracted snapshot captured by it. A ref
+    without a snapshot id counts when the entry had any. An entry with no
+    extracted snapshot by then stated nothing.
 
     When the belief was extracted does not matter. It must be in
     force at the instant (:meth:`AsOfView.in_force`: not born retired, valid,
@@ -361,19 +363,16 @@ async def stated_by(
         return {}
     as_of = view.as_of
 
-    mutable: set[str] = set()
+    currency = await get_entry_currency(session, ids, as_of=as_of)
+    current: dict[str, set[str]] = {
+        entry_id: {c.latest_snapshot_id}
+        for entry_id, c in currency.items()
+        if c.mutable and c.latest_snapshot_id is not None and not c.absent
+    }
+    others = [entry_id for entry_id, c in currency.items() if not c.mutable]
     snapshots: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
-    for start in range(0, len(ids), _IN_CHUNK):
-        chunk = ids[start : start + _IN_CHUNK]
-        for entry_id, mutability in (
-            await session.execute(
-                select(CorpusEntryRow.entry_id, CorpusEntryRow.mutability).where(
-                    CorpusEntryRow.entry_id.in_(chunk)
-                )
-            )
-        ).all():
-            if mutability == Mutability.MUTABLE.value:
-                mutable.add(entry_id)
+    for start in range(0, len(others), _IN_CHUNK):
+        chunk = others[start : start + _IN_CHUNK]
         for entry_id, snapshot_id, captured_at in (
             await session.execute(
                 select(
@@ -390,12 +389,8 @@ async def stated_by(
             if captured <= as_of:
                 snapshots[entry_id].append((captured, snapshot_id))
 
-    current: dict[str, set[str]] = {}
     for entry_id, held in snapshots.items():
-        if entry_id in mutable:
-            current[entry_id] = {max(held)[1]}
-        else:
-            current[entry_id] = {snapshot_id for _, snapshot_id in held}
+        current[entry_id] = {snapshot_id for _, snapshot_id in held}
     if not current:
         return {}
 

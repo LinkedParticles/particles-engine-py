@@ -105,6 +105,21 @@ class TestLocatePassage:
         found = locate_passage(source, "alpha beta gamma")
         assert found is not None and found[0] == "Alpha beta gamma."
 
+    def test_a_record_reads_its_latest_run_on_a_tie(self) -> None:
+        """a transcript's newest run is its latest observation."""
+        source = "Lint run: 12 findings.\n\nLunch.\n\nLint run: 4 findings."
+        found = locate_passage(source, "The lint run reported findings.", latest=True)
+        assert found is not None and found[0] == "Lint run: 4 findings."
+        match, text, _ = derive_passage(
+            source, content="The lint run reported findings.", chunk_hash=None, record=True
+        )
+        assert match is PassageMatch.LOCATED and text == "Lint run: 4 findings."
+        # A note keeps the deterministic earliest-wins rule.
+        _, note_text, _ = derive_passage(
+            source, content="The lint run reported findings.", chunk_hash=None
+        )
+        assert note_text == "Lint run: 12 findings."
+
     def test_content_with_no_terms_locates_nothing(self) -> None:
         assert locate_passage(MEMORY_FILE, "it is so") is None
 

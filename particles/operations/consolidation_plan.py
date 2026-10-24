@@ -49,6 +49,7 @@ from particles.operations.consolidation import (
     _reanchor_estimate,
     _semantic_availability,
     _utcnow,
+    catchup_listing,
     extraction_plan_estimate,
     latest_census_event,
     latest_run_event,
@@ -181,10 +182,7 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
     ``projection_skip_reason`` is the Surface's verdict on pass 6, as
     :func:`~particles.operations.consolidation.run_consolidation` receives it.
     """
-    from particles.corpus.store import (
-        list_pending_snapshots_for_catchup,
-        list_refreshable_local_entries,
-    )
+    from particles.corpus.store import list_refreshable_local_entries
 
     config = get_config()
     cfg = config.consolidation
@@ -206,7 +204,7 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
         )
 
     # pass 1 — extract catch-up
-    pending = await list_pending_snapshots_for_catchup(session)
+    pending, _ = await catchup_listing(session)
     if not cfg.extract_pending:
         passes.append(_skipped("extract", "consolidation.extract_pending is false"))
     elif not semantic_ok:
@@ -471,6 +469,20 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
                 "projection",
                 "harvests memory files and re-renders the projection; no LLM call "
                 "(a later run's pass 1 extracts what it deposits)",
+            )
+        )
+
+    # pass 6a — the rank-lift monitor: reads only, never priced
+    if not get_config().utility.monitor.enabled:
+        passes.append(_skipped("rank_lift", "utility.monitor.enabled is false"))
+    elif not get_config().utility.enabled:
+        passes.append(_skipped("rank_lift", "utility.enabled is false (no rank-lift to judge)"))
+    else:
+        passes.append(
+            _planned(
+                "rank_lift",
+                "checks whether the configured rank-lift puts the beliefs used outside the "
+                "head into it, in every view a session reads; no LLM call",
             )
         )
 

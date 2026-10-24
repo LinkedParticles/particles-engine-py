@@ -906,6 +906,26 @@ class TestReportInvariants:
         assert "embedding_model=test-embedder" in table
         assert "extraction.similarity_threshold" in table
 
+    def test_a_replayed_run_says_so_and_an_old_report_still_loads(self) -> None:
+        """: a replayed report is disclosed in the table and JSON."""
+        from particles.benchmark.memory.schema import ReplayRecord
+
+        replayed = MemoryBenchmarkReport(
+            selection=_selection(),
+            replay=ReplayRecord(mode="replay", served=40, sent=2, recorded=2),
+        )
+        table = render_report_table(replayed)
+        assert "replayed: 40 completion(s) served from the LLM replay cache (replay)" in table
+        assert "not an independent repeat" in table
+        again = MemoryBenchmarkReport.model_validate_json(replayed.model_dump_json())
+        assert again.replay == replayed.replay
+        # A report written before the field, or by a run with no replay scope.
+        legacy = MemoryBenchmarkReport.model_validate_json(
+            MemoryBenchmarkReport(selection=_selection()).model_dump_json(exclude={"replay"})
+        )
+        assert legacy.replay is None
+        assert "replayed:" not in render_report_table(legacy)
+
     def test_unrecorded_pipeline_model_ids_render_explicitly(self) -> None:
         selection = _selection(extraction_model_id=None, embedding_model_id=None)
         table = render_report_table(MemoryBenchmarkReport(selection=selection))
@@ -3553,6 +3573,25 @@ class TestPdr0488AblationWiring:
         assert cfg.consolidation.max_update_probes > 0
 
 
+def _store(path: Path, snapshots: list[tuple[str, str, str]] | None = None) -> None:
+    """A scratch store's two corpus tables, with one snapshot per ``(uri, type, hash)``.
+
+    Appends to an existing file, so a second call adds snapshots as a re-deposit does.
+    """
+    import sqlite3
+
+    rows = snapshots if snapshots is not None else [("s-1", "RESPONSE", "a" * 64)]
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS corpus_entries (entry_id TEXT, uri_r TEXT)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS snapshots "
+            "(entry_id TEXT, warc_record_type TEXT, content_hash TEXT)"
+        )
+        for uri, kind, digest in rows:
+            conn.execute("INSERT INTO corpus_entries VALUES (?, ?)", (uri, uri))
+            conn.execute("INSERT INTO snapshots VALUES (?, ?, ?)", (uri, kind, digest))
+
+
 class TestStoreReuseManifest:
     """The manifest is what keeps store reuse from being a silent trap."""
 
@@ -3574,9 +3613,10 @@ class TestStoreReuseManifest:
     def test_round_trip(self, tmp_path: Path) -> None:
         from particles.benchmark.memory.runner import load_stores_manifest, write_stores_manifest
 
-        (tmp_path / "q1.db").touch()
+        _store(tmp_path / "q1.db")
         write_stores_manifest(tmp_path, self._write_side(), ["q1"])
-        assert load_stores_manifest(tmp_path, self._write_side(), ["q1"]) == self._write_side()
+        loaded = load_stores_manifest(tmp_path, self._write_side(), ["q1"])
+        assert loaded == {**self._write_side(), "store_snapshots_verified": "true"}
 
     def test_refuses_a_different_extraction_model(self, tmp_path: Path) -> None:
         """A store minted by another model is a different population, not a cheap arm."""
@@ -3586,7 +3626,7 @@ class TestStoreReuseManifest:
             write_stores_manifest,
         )
 
-        (tmp_path / "q1.db").touch()
+        _store(tmp_path / "q1.db")
         write_stores_manifest(tmp_path, self._write_side(), ["q1"])
         with pytest.raises(StoreReuseError, match="different write-side tuple"):
             load_stores_manifest(
@@ -3600,7 +3640,7 @@ class TestStoreReuseManifest:
             write_stores_manifest,
         )
 
-        (tmp_path / "q1.db").touch()
+        _store(tmp_path / "q1.db")
         write_stores_manifest(tmp_path, self._write_side(), ["q1"])
         with pytest.raises(StoreReuseError, match="different write-side tuple"):
             load_stores_manifest(tmp_path, self._write_side(sample_seed="99"), ["q1"])
@@ -3619,7 +3659,7 @@ class TestStoreReuseManifest:
         )
 
         for qid in ("q1", "q2", "q3"):
-            (tmp_path / f"{qid}.db").touch()
+            _store(tmp_path / f"{qid}.db")
         write_stores_manifest(tmp_path, self._write_side(), ["q1", "q2"])
 
         narrowed = self._write_side(question_limit="1", question_types="multi-session")
@@ -3639,7 +3679,7 @@ class TestStoreReuseManifest:
             write_stores_manifest,
         )
 
-        (tmp_path / "q1.db").touch()
+        _store(tmp_path / "q1.db")
         write_stores_manifest(tmp_path, self._write_side(), ["q1"])
         with pytest.raises(StoreReuseError, match="no persisted store"):
             load_stores_manifest(tmp_path, self._write_side(), ["q1", "q2"])
@@ -3649,6 +3689,46 @@ class TestStoreReuseManifest:
 
         with pytest.raises(StoreReuseError, match="not found"):
             load_stores_manifest(tmp_path, self._write_side(), ["q1"])
+
+    def test_refuses_a_store_whose_snapshots_changed(self, tmp_path: Path) -> None:
+        """a store re-deposited since the set was kept is a different population."""
+        from particles.benchmark.memory.runner import (
+            StoreReuseError,
+            load_stores_manifest,
+            write_stores_manifest,
+        )
+
+        _store(tmp_path / "q1.db")
+        _store(tmp_path / "q2.db")
+        write_stores_manifest(tmp_path, self._write_side(), ["q1", "q2"])
+        # A second rendering of one session id: same uri_r, new bytes.
+        _store(tmp_path / "q2.db", [("s-1", "RESPONSE", "b" * 64)])
+        with pytest.raises(StoreReuseError, match=r"1 persisted store.*first: q2"):
+            load_stores_manifest(tmp_path, self._write_side(), ["q1", "q2"])
+        # The unchanged store still replays alone.
+        load_stores_manifest(tmp_path, self._write_side(), ["q1"])
+
+    def test_a_manifest_without_digests_replays_unverified(self, tmp_path: Path) -> None:
+        import json
+
+        from particles.benchmark.memory.runner import STORES_MANIFEST, load_stores_manifest
+
+        _store(tmp_path / "q1.db")
+        (tmp_path / STORES_MANIFEST).write_text(
+            json.dumps({"format": 1, "write_side": self._write_side(), "question_ids": ["q1"]})
+        )
+        loaded = load_stores_manifest(tmp_path, self._write_side(), ["q1"])
+        assert loaded["store_snapshots_verified"] == "false"
+
+    def test_the_digest_reads_snapshots_only(self, tmp_path: Path) -> None:
+        from particles.benchmark.memory.runner import store_snapshot_digest
+
+        a, b = tmp_path / "a.db", tmp_path / "b.db"
+        _store(a, [("s-1", "RESPONSE", "a" * 64), ("s-2", "RESPONSE", "c" * 64)])
+        _store(b, [("s-2", "RESPONSE", "c" * 64), ("s-1", "RESPONSE", "a" * 64)])
+        assert store_snapshot_digest(a) == store_snapshot_digest(b)
+        _store(b, [("s-3", "RESPONSE", "d" * 64)])
+        assert store_snapshot_digest(a) != store_snapshot_digest(b)
 
     def test_write_side_tuple_excludes_read_side_knobs(self) -> None:
         """top_k / budget / answer model must NOT gate reuse — varying them is the point."""

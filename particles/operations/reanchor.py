@@ -92,6 +92,7 @@ from particles.operations.source_passage import (
     derive_passage,
     extractor_view_text,
 )
+from particles.operations.version_guard import written_by_newer_minor
 from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import (
     EventRefKind,
@@ -198,6 +199,10 @@ class ReanchorReport(BaseModel):
     waiting: int = 0
     candidates: int = 0
     observer_declined: int = 0
+    #: Candidates written by a newer schema minor than this SDK's, left ACTIVE
+    #: unexamined: an older SDK never replaces a record with a poorer copy of
+    #: it (D2).
+    skipped_newer_schema: int = 0
     #: Candidates the probe returned no verdict for, after one re-ask.
     unanswered: int = 0
     probes: int = 0
@@ -229,6 +234,7 @@ class ReanchorReport(BaseModel):
             "waiting": self.waiting,
             "candidates": self.candidates,
             "observer_declined": self.observer_declined,
+            "skipped_newer_schema": self.skipped_newer_schema,
             "unanswered": self.unanswered,
             "probes": self.probes,
             "readings": self.readings,
@@ -655,6 +661,12 @@ async def _candidates(
             await gate.verdict(session, retired_scope, particle) is not PairPrecondition.RECONCILE
         ):
             report.observer_declined += 1
+            continue
+        if written_by_newer_minor(particle.schema_version):
+            # The restatement would retire this record in favour of one this
+            # SDK writes, which lacks the fields it cannot see. The claim is
+            # left for an SDK at least as new (D2).
+            report.skipped_newer_schema += 1
             continue
         out.append(particle)
     return out

@@ -32,10 +32,20 @@ resolves itself. If you hit this:
 
 ## "SCHEMA_VERSION mismatch."
 
-You're running an SDK binary against a DB written by a different
-schema-major. The error message echoes the exception's own
-`operator_message`; read it before doing anything else.
-Usually the fix is `db init --force` + re-extract.
+The store holds particles written under a different major schema
+version than this SDK's. Another minor version of the same major never
+causes this error; particles of several minors share a store normally.
+The message says which way the store differs, and the fix depends on
+it:
+
+- **The store is behind the SDK** (an older major, such as a 0.3.x
+  store): rebuild it with `db init --force` and re-extract. The corpus
+  is preserved.
+- **The store is ahead of the SDK** (a newer major): upgrade the SDK.
+  Do not rebuild from the older SDK, which cannot re-create those
+  particles.
+
+`particles lint` lists each version the store holds before you act.
 
 ## Fetch failures
 

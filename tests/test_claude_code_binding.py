@@ -20,11 +20,12 @@ from pathlib import Path
 import pytest
 
 from particles.api.cli._claude_code import (
+    engine_location,
     parse_hook_binding,
     projection_refusal,
     store_location,
 )
-from tests._claude_projects import bind_hooks_to_store
+from tests._claude_projects import bind_hooks_to_engine, bind_hooks_to_store
 
 _SETTINGS = Path("/home/u/.claude/settings.json")
 
@@ -73,6 +74,32 @@ class TestParseHookBinding:
         command = f"env PARTICLES_CONFIG={config} particles hook session-end --store default"
 
         assert parse_hook_binding(command, _SETTINGS).location is None
+
+
+class TestEngineBinding:
+    """The engine a thin-client hook names."""
+
+    def test_the_engine_url_pin_wins(self) -> None:
+        command = (
+            "env PARTICLES_ENGINE_BASE_URL=http://mini:8000/ particles hook session-end "
+            "--store memory"
+        )
+        binding = parse_hook_binding(command, _SETTINGS)
+        assert (binding.handle, binding.engine_url) == ("memory", "http://mini:8000")
+
+    def test_the_pinned_config_names_the_engine(self, tmp_path: Path) -> None:
+        config = tmp_path / "client.yaml"
+        config.write_text('engine:\n  base_url: "http://mini:8000"\n')
+        command = f"env PARTICLES_CONFIG={config} particles hook session-end --store default"
+        assert parse_hook_binding(command, _SETTINGS).engine_url == "http://mini:8000"
+
+    def test_a_local_install_names_no_engine(self, tmp_path: Path) -> None:
+        command = f"env DATABASE_URL=sqlite+aiosqlite:///{tmp_path}/p.db particles hook x"
+        assert parse_hook_binding(command, _SETTINGS).engine_url is None
+
+    @pytest.mark.parametrize("url", [None, "", "  "])
+    def test_an_empty_url_has_no_location(self, url: str | None) -> None:
+        assert engine_location(url) is None
 
 
 class TestStoreLocation:
@@ -146,6 +173,54 @@ class TestProjectionRefusal:
         notes = tmp_path / "notes" / "memory"
         notes.mkdir(parents=True)
         assert projection_refusal("default", notes) is None
+
+
+class TestRemoteProjectionRefusal:
+    """A thin client's binding is the engine and the handle."""
+
+    @pytest.fixture
+    def memory_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://mini:8000")
+        path = tmp_path / ".claude" / "projects" / "-proj" / "memory"
+        path.mkdir(parents=True)
+        return path
+
+    def _config(self, tmp_path: Path, url: str) -> Path:
+        config = tmp_path / "client.yaml"
+        config.write_text(f'engine:\n  base_url: "{url}"\n')
+        return config
+
+    def test_hooks_naming_this_engine_and_store_are_served(
+        self, memory_dir: Path, tmp_path: Path
+    ) -> None:
+        bind_hooks_to_engine(tmp_path, self._config(tmp_path, "http://mini:8000/"))
+        assert projection_refusal("default", memory_dir) is None
+
+    def test_another_engine_is_refused(self, memory_dir: Path, tmp_path: Path) -> None:
+        bind_hooks_to_engine(tmp_path, self._config(tmp_path, "http://laptop:8000"))
+        reason = projection_refusal("default", memory_dir)
+        assert reason is not None
+        assert "http://mini:8000" in reason and "is not the store" in reason
+
+    def test_another_store_on_this_engine_is_refused(
+        self, memory_dir: Path, tmp_path: Path
+    ) -> None:
+        bind_hooks_to_engine(tmp_path, self._config(tmp_path, "http://mini:8000"), store="memory")
+        assert projection_refusal("default", memory_dir) is not None
+        assert projection_refusal("memory", memory_dir) is None
+
+    def test_a_local_database_pin_is_not_a_remote_binding(
+        self, memory_dir: Path, tmp_path: Path
+    ) -> None:
+        bind_hooks_to_store(tmp_path, f"sqlite+aiosqlite:///{tmp_path}/p.db")
+        reason = projection_refusal("default", memory_dir)
+        assert reason is not None
+        assert "do not pin an engine" in reason
+
+    def test_no_installed_hooks_is_refused(self, memory_dir: Path) -> None:
+        reason = projection_refusal("default", memory_dir)
+        assert reason is not None
+        assert "no Particles hook is installed" in reason
 
 
 class TestSuiteGuard:

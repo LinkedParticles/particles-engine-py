@@ -467,3 +467,229 @@ class TestAssignSubject:
                 particle_id=target.id,
                 subject_id=subject.id,
             )
+
+
+class TestOperatorSupersedeScope:
+    """The successor keeps its predecessor's own attribution (decision 3)."""
+
+    A, B = "-proj-a", "-proj-b"
+
+    async def _supersede(self, session: Any, target: Particle) -> tuple[Particle, list[str], Any]:
+        from particles.corpus.store import get_entry
+        from particles.store.observer_scope_join import load_scopes
+
+        _enable_writes()
+        result = await supersede_belief(
+            session,
+            store=DEFAULT_STORE,
+            supersedes_id=target.id,
+            content=f"Corrected: {target.content}",
+            subject_names=["X"],
+            confidence=0.6,
+            source_excerpt=f"the correction of {target.content}",
+            operator=True,
+            actor="cli:curate-apply",
+            reason="a correction",
+        )
+        new = await get_particle(session, result.asserted_particle_id or "")
+        assert new is not None
+        entry = await get_entry(session, new.provenance[0].corpus_entry_id or "")
+        assert entry is not None
+        scope = (await load_scopes(session, [new]))[new.id]
+        return new, entry.tags, (scope, result.successor_scope)
+
+    @pytest.mark.asyncio
+    async def test_a_keyed_predecessor_gives_its_own_keys_and_none_pooled(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        from particles.core.schema import RelationCreatedBy, RelationType
+        from particles.store.relation_store import create_relation
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        mine = await belief(
+            db_session,
+            "A deploys Fridays.",
+            await source(db_session, "a", project_source_tags(self.A)),
+        )
+        twin = await belief(
+            db_session,
+            "A deploys on Fridays.",
+            await source(db_session, "b", project_source_tags(self.B)),
+        )
+        await create_relation(
+            db_session,
+            mine.id,
+            twin.id,
+            RelationType.CO_EVIDENTIAL,
+            confidence=0.9,
+            created_by=RelationCreatedBy.MANUAL_CLI,
+        )
+        await rescoped(db_session)
+
+        _new, tags, (scope, described) = await self._supersede(db_session, mine)
+
+        assert f"project:{self.A}" in tags and f"project:{self.B}" not in tags
+        assert scope.keys == {self.A} and described == f"project {self.A}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["unattributed", "lapsed"])
+    async def test_a_predecessor_with_no_key_of_its_own_gives_a_marked_successor(
+        self, db_session: Any, stub_resolver: Any, state: str
+    ) -> None:
+        from particles.core.observer_scope import UNATTRIBUTED_MARKER
+        from tests._observer_scope import (
+            belief,
+            generation,
+            project_source_tags,
+            rescoped,
+            source,
+        )
+
+        if state == "unattributed":
+            target = await belief(
+                db_session, "Keyless harness claim.", await source(db_session, "h", ["claude-code"])
+            )
+        else:
+            target = await belief(
+                db_session,
+                "Dropped by its file.",
+                await generation(db_session, "g", "v1", project_source_tags(self.A)),
+            )
+            await generation(db_session, "g", "v2", project_source_tags(self.A))
+        await rescoped(db_session)
+
+        _new, tags, (scope, described) = await self._supersede(db_session, target)
+
+        assert UNATTRIBUTED_MARKER in tags
+        assert scope.unattributed and not scope.everywhere
+        assert described is not None and described.startswith("unattributed")
+
+    @pytest.mark.asyncio
+    async def test_a_predecessor_global_through_its_own_entry_stays_global(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        from tests._observer_scope import belief, rescoped, source
+
+        target = await belief(
+            db_session, "Pluto has five moons.", await source(db_session, "w", ["web"])
+        )
+        await rescoped(db_session)
+
+        _new, tags, (scope, described) = await self._supersede(db_session, target)
+
+        assert tags == [] and scope.is_global and described == "global"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_kind", ["belief", "source"])
+    async def test_a_widening_carries_over_as_a_revocable_widening(
+        self, db_session: Any, stub_resolver: Any, target_kind: str
+    ) -> None:
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        entry = await source(db_session, "a", project_source_tags(self.A))
+        target = await belief(db_session, "A deploys Fridays.", entry)
+        await rescoped(db_session)
+        if target_kind == "belief":
+            await widen(db_session, ScopeTarget.PARTICLE, target.id, actor="op")
+        else:
+            await widen(db_session, ScopeTarget.CORPUS_ENTRY, entry[0], actor="op")
+
+        new, tags, (scope, described) = await self._supersede(db_session, target)
+
+        assert f"project:{self.A}" in tags
+        assert scope.keys == {self.A} and scope.widened
+        assert described == f"project {self.A}, widened to every project"
+        events = await list_events(db_session, event_type=OperatorEventType.OBSERVER_SCOPE_WIDENED)
+        assert events[0].actor == "cli:curate-apply"
+        assert await widen(db_session, ScopeTarget.PARTICLE, new.id, actor="op", revoke=True)
+
+
+class TestSupersedeWideningIsNotCarried:
+    """Two cases where the predecessor's widening stays behind (decision 3)."""
+
+    async def _widened_target(self, session: Any) -> tuple[Particle, tuple[str, str]]:
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+        from tests._observer_scope import belief, project_source_tags, rescoped, source
+
+        entry = await source(session, "a", project_source_tags("-proj-a"))
+        target = await belief(session, "A deploys Fridays.", entry)
+        await rescoped(session)
+        await widen(session, ScopeTarget.PARTICLE, target.id, actor="op")
+        return target, entry
+
+    async def _successor_widenings(self, session: Any, successor_id: str) -> list[Any]:
+        from particles.store.event_store import EventRefKind
+
+        return await list_events(
+            session,
+            ref_kind=EventRefKind.PARTICLE,
+            ref_id=successor_id,
+            event_type=OperatorEventType.OBSERVER_SCOPE_WIDENED,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_cited_entry_decides_the_successors_scope(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        from tests._observer_scope import source
+
+        target, _ = await self._widened_target(db_session)
+        cited, _ = await source(db_session, "cited", ["web"])
+        _enable_writes()
+
+        result = await supersede_belief(
+            db_session,
+            store=DEFAULT_STORE,
+            supersedes_id=target.id,
+            content="Corrected: A deploys Thursdays.",
+            subject_names=["X"],
+            confidence=0.6,
+            corpus_entry_id=cited,
+            operator=True,
+            actor="cli:curate-apply",
+            reason="a correction",
+        )
+
+        assert await self._successor_widenings(db_session, result.asserted_particle_id or "") == []
+        assert result.successor_scope is not None
+        assert "not carried over (the cited entry decides its scope)" in result.successor_scope
+
+    @pytest.mark.asyncio
+    async def test_a_successor_held_for_review_is_not_widened(
+        self, db_session: Any, stub_resolver: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.ingest.pipeline as pipeline
+
+        target, _ = await self._widened_target(db_session)
+        _enable_writes()
+
+        async def _quarantined(session: Any, particle: Particle, *a: Any, **k: Any) -> Particle:
+            held = particle.model_copy(
+                update={
+                    "status": Status.PROVENANCE_STALE,
+                    "status_reason": StatusReason.CONFLICT_PENDING,
+                }
+            )
+            await insert_particle(session, held)
+            return held  # stands in for the INCONSISTENCY record
+
+        monkeypatch.setattr(pipeline, "reconcile_and_insert", _quarantined)
+        result = await supersede_belief(
+            db_session,
+            store=DEFAULT_STORE,
+            supersedes_id=target.id,
+            content="Corrected: A deploys Thursdays.",
+            subject_names=["X"],
+            confidence=0.6,
+            source_excerpt="the correction",
+            operator=True,
+            actor="cli:curate-apply",
+            reason="a correction",
+        )
+
+        assert await self._successor_widenings(db_session, result.asserted_particle_id or "") == []
+        assert result.successor_scope is not None
+        assert "not carried over (it is held for review)" in result.successor_scope

@@ -61,6 +61,15 @@ def reindex_cmd(
         help="Skip FAILED snapshot entries. Applies to auto-discovery only; "
         "--entry-ids resolves each entry to its latest COMPLETE snapshot.",
     ),
+    include_schema_stale: bool = typer.Option(
+        False,
+        "--include-schema-stale",
+        help="Add the snapshots whose particles carry an older minor of the "
+        "schema version to the scope. Off by default, because after a schema bump the "
+        "whole store qualifies and the sweep is a paid run; the plan line reports "
+        "how many particles the flag would add. Applies to auto-discovery only. "
+        "Particles a newer SDK wrote are never re-extracted.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -136,6 +145,7 @@ def reindex_cmd(
                 extractor_id,
                 not no_failed,
                 provider_model,
+                include_schema_stale=include_schema_stale,
                 sample_size=sample_size,
                 seed=seed,
                 yes=yes,
@@ -154,6 +164,7 @@ def reindex_cmd(
             verbose,
             output_format,
             only_changed_components,
+            include_schema_stale,
         )
     )
     if output_format is _ReindexFormat.json:
@@ -184,6 +195,7 @@ async def _reindex(
     verbose: bool,
     output_format: _ReindexFormat,
     only_changed_components: bool = False,
+    include_schema_stale: bool = False,
 ) -> dict[str, object]:
     # --verbose per-entry progress is a local stderr stream; the remote backend
     # ignores the callbacks (no HTTP streaming) but still returns the summary.
@@ -207,6 +219,7 @@ async def _reindex(
         # 0a8fb1a9…) — 3 failed" instead of the bare time-only "working".
         on_status=set_heartbeat_status,
         only_changed_components=only_changed_components,
+        include_schema_stale=include_schema_stale,
     )
 
 
@@ -236,6 +249,7 @@ async def _estimate(
     include_failed: bool,
     provider_model: str | None,
     *,
+    include_schema_stale: bool = False,
     sample_size: int | None,
     seed: int | None,
     yes: bool,
@@ -265,6 +279,7 @@ async def _estimate(
             extractor_id=extractor_id,
             include_failed=include_failed,
             provider_model=provider_model,
+            include_schema_stale=include_schema_stale,
             sample_size=sample_size,
             seed=seed,
         )
@@ -316,6 +331,8 @@ def _echo_human_summary(summary: dict[str, object], dry_run: bool) -> None:
         typer.echo(plan.format_line())
         for line in plan.format_missing_blob_lines():
             typer.echo(line)
+        for line in plan.format_absent_lines():
+            typer.echo(line)
         typer.echo("Dry run — nothing extracted.")
         return
 
@@ -323,6 +340,11 @@ def _echo_human_summary(summary: dict[str, object], dry_run: bool) -> None:
         f"Reindex complete: {summary['succeeded']} succeeded, "
         f"{summary['failed']} failed (scope: {summary['scope']} snapshot(s))."
     )
+    if plan.skipped_newer_schema:
+        typer.echo(
+            f"Skipped {plan.skipped_newer_schema} snapshot(s) holding particles a newer "
+            "SDK wrote; reindex them with that SDK."
+        )
     failed_entries = cast(list[str], summary.get("failed_entries") or [])
     if failed_entries:
         shown = ", ".join(f"{e[:8]}…" for e in failed_entries[:5])

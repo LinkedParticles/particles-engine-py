@@ -28,6 +28,7 @@ from particles.api.client.base import (
     DismissOutcome,
     ExtractOutcome,
     FollowTarget,
+    MergedSource,
     MergeOutcome,
     ParticleDetail,
     RetractOutcome,
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
+    from particles.operations.projection import DocManifest
+    from particles.operations.projection.memory_region import MemoryRegion
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
     from particles.store.session_exposure_store import SessionExposure
@@ -88,6 +91,7 @@ class LocalBackend:
         from particles.operations.deposit import deposit_url
 
         follow: list[tuple[str, str, str]] = []
+        unchanged: list[bool] = []
         async with session_scope(write=True) as session:  # writer lock
             entry_id, snapshot_id = await deposit_url(
                 session,
@@ -98,12 +102,14 @@ class LocalBackend:
                 follow_post_links=follow_post_links,
                 follow_comment_links=follow_comment_links,
                 out_follow_targets=follow,
+                out_unchanged=unchanged,
             )
             await session.commit()
         return DepositOutcome(
             entry_id=entry_id,
             snapshot_id=snapshot_id,
             follow_targets=[FollowTarget(e, s, u) for e, s, u in follow],
+            unchanged=any(unchanged),
         )
 
     async def deposit_file(
@@ -120,6 +126,7 @@ class LocalBackend:
         from particles.core.schema import FetchPolicy, Mutability
         from particles.operations.deposit import deposit_file
 
+        unchanged: list[bool] = []
         async with session_scope(write=True) as session:  # writer lock
             entry_id, snapshot_id = await deposit_file(
                 session,
@@ -130,9 +137,10 @@ class LocalBackend:
                 content_date=content_date,
                 mutability=Mutability(mutability) if mutability else None,
                 fetch_policy=FetchPolicy(fetch_policy) if fetch_policy else None,
+                out_unchanged=unchanged,
             )
             await session.commit()
-        return DepositOutcome(entry_id=entry_id, snapshot_id=snapshot_id)
+        return DepositOutcome(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(unchanged))
 
     async def deposit_file_split(
         self,
@@ -156,12 +164,13 @@ class LocalBackend:
         return [DepositOutcome(entry_id=e, snapshot_id=s) for e, s in rows]
 
     async def extract(self, entry_id: str, snapshot_id: str, *, agent_id: str) -> ExtractOutcome:
-        from particles.operations.extract import extract_snapshot
+        from particles.operations.extract import SnapshotOutcome, extract_snapshot
         from particles.operations.llm_spend import MeteredExtractRun
 
         page_stats: list[PageStat] = []
         carry_forward_ids: list[str] = []
         suppressed_ids: list[str] = []
+        snapshot_outcome = SnapshotOutcome()
         # meter the run and append its EXTRACT_RUN record.
         meter = MeteredExtractRun(actor="cli:extract", route="single")
         async with meter:
@@ -175,6 +184,7 @@ class LocalBackend:
                     page_stats_out=page_stats,
                     carry_forward_ids_out=carry_forward_ids,
                     suppressed_ids_out=suppressed_ids,
+                    outcome_out=snapshot_outcome,
                 )
                 await session.commit()
         return ExtractOutcome(
@@ -183,6 +193,8 @@ class LocalBackend:
             page_stats=page_stats,
             carry_forward_ids=carry_forward_ids,
             suppressed_ids=suppressed_ids,
+            revision_settled=snapshot_outcome.revision_settled,
+            restated=snapshot_outcome.restated,
             llm_usage=meter.llm_usage,
         )
 
@@ -273,6 +285,7 @@ class LocalBackend:
         on_plan: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         only_changed_components: bool = False,
+        include_schema_stale: bool = False,
     ) -> dict[str, object]:
         from particles.operations.llm_spend import MeteredExtractRun, reindexed_snapshots
         from particles.operations.reindex import reindex as reindex_op
@@ -291,6 +304,7 @@ class LocalBackend:
                     on_plan=on_plan,
                     on_status=on_status,
                     only_changed_components=only_changed_components,
+                    include_schema_stale=include_schema_stale,
                 )
 
         if dry_run:
@@ -337,10 +351,12 @@ class LocalBackend:
         async with session_scope() as session:
             return await search_subjects(session, query, limit=limit, offset=offset)
 
-    async def subject_show(self, subject_id: str) -> Subject | None:
-        from particles.store.subject_store import get_subject
+    async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
+        from particles.store.subject_store import get_subject, lookup_subject
 
         async with session_scope() as session:
+            if by_name:
+                return await lookup_subject(session, subject_id)
             return await get_subject(session, subject_id)
 
     async def corpus_show(self, entry_id: str) -> CorpusEntry | None:
@@ -517,11 +533,11 @@ class LocalBackend:
         from particles.store.subject_store import (
             count_particles_for_subject,
             get_particles_for_subject,
-            get_subject,
+            lookup_subject,
         )
 
         async with session_scope() as session:
-            subject = await get_subject(session, subject_id)
+            subject = await lookup_subject(session, subject_id)
             if subject is None:
                 raise ValueError(f"Subject {subject_id!r} not found.")
             particle_ids = await get_particles_for_subject(
@@ -557,6 +573,28 @@ class LocalBackend:
         from particles.operations.digest import build_digest_located
 
         return await build_digest_located(store, project)
+
+    async def memory_region(
+        self,
+        store: str,
+        *,
+        manifest: DocManifest,
+        base_dir: Path,
+        observer_project: str | None,
+        exclude_source_tags: list[str],
+        fold_targets: list[str],
+    ) -> MemoryRegion:
+        from particles.operations.projection.memory_region import render_memory_region
+
+        async with session_scope(store) as session:
+            return await render_memory_region(
+                session,
+                manifest,
+                base_dir=base_dir,
+                observer_project=observer_project,
+                exclude_source_tags=exclude_source_tags,
+                fold_targets=fold_targets,
+            )
 
     async def record_session_exposure(self, store: str, exposure: SessionExposure) -> None:
         from particles.store.session_exposure_store import record_session_exposure
@@ -629,14 +667,34 @@ class LocalBackend:
             await session.commit()
             return AliasOutcome(subject=subject, added=added)
 
-    async def subject_merge(self, source_id: str, target_id: str) -> MergeOutcome:
-        from particles.store.subject_store import merge_subjects
+    async def subject_merge(
+        self, source_ids: list[str], target_id: str, *, dry_run: bool = False
+    ) -> MergeOutcome:
+        from particles.store.subject_store import merge_subjects_many, plan_subject_merge
 
-        async with session_scope(write=True) as session:  # writer lock
-            subject, aliases_added, relinked = await merge_subjects(session, source_id, target_id)
-            await session.commit()
+        # writer lock; a preview only reads
+        async with session_scope(write=not dry_run) as session:
+            if dry_run:
+                plan = await plan_subject_merge(session, source_ids, target_id)
+                subject = plan.target
+            else:
+                subject, plan = await merge_subjects_many(session, source_ids, target_id)
+                await session.commit()
             return MergeOutcome(
-                subject=subject, aliases_added=aliases_added, particles_relinked=relinked
+                subject=subject,
+                aliases_added=list(plan.aliases_added),
+                particles_relinked=plan.particles_relinked,
+                sources=[
+                    MergedSource(
+                        subject_id=s.subject_id,
+                        canonical_name=s.canonical_name,
+                        particles_relinked=len(s.particle_ids),
+                        refs_carried=[f"{r.namespace}:{r.id}" for r in s.refs_carried],
+                        refs_withheld=[f"{r.namespace}:{r.id}" for r in s.refs_withheld],
+                    )
+                    for s in plan.sources
+                ],
+                dry_run=dry_run,
             )
 
     async def subject_split(
