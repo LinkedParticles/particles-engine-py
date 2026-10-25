@@ -14,12 +14,12 @@ expected store. It proves nothing about any model's reading.
 **The table is keyed on the data a request carries, never on its
 instructions.** Extraction is keyed on the SHA-256 of the text inside the
 request's ``source`` fence; a probe on the two claim texts every probe prompt
-ends with (``Claim A:`` / ``Claim B:``), and on whether the prompt asks for the
-update probe's ``SLOT`` line. A change to a prompt's instructions therefore
-changes nothing here. A change to the fence, to that claim-pair tail, to a
-reply grammar, or to how the notes are chunked breaks the arm, and the unit
-tier catches it: a request the table does not hold is refused, counted, and
-logged with its key, and the test requires none.
+ends with (``Claim A:`` / ``Claim B:``, read from inside their fences), and on
+whether the system turn asks for the update probe's ``SLOT`` line. A change to
+a prompt's instructions therefore changes nothing here. A change to the fence,
+to that claim-pair tail, to a reply grammar, or to how the notes are chunked
+breaks the arm, and the unit tier catches it: a request the table does not
+hold is refused, counted, and logged with its key, and the test requires none.
 """
 
 from __future__ import annotations
@@ -196,7 +196,7 @@ class ScriptedProvider:
             return json.dumps(candidates)
         claims = _CLAIMS.search(prompt)
         if claims is not None:
-            kind = "update" if _UPDATE_REQUEST in prompt else "contradiction"
+            kind = "update" if _UPDATE_REQUEST in (system or "") else "contradiction"
             pair = (unfence_claim(claims["a"]), unfence_claim(claims["b"]))
             table = self._table.update if kind == "update" else self._table.contradiction
             verdict = table.get(pair)

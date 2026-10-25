@@ -47,6 +47,7 @@ from pydantic import AnyUrl
 from particles import __version__
 from particles.db import DEFAULT_STORE
 from particles.egress import ensure_backstop
+from particles.mcp.limits import admit
 from particles.mcp.memory_compat import ops
 
 log = logging.getLogger(__name__)
@@ -526,6 +527,9 @@ def build_server(store: str | None = None) -> Server[Any, Any]:
         if name in _WRITE_TOOLS:
             try:
                 write_store = _resolve_write_store(store)
+                # Every façade write asserts through the §6.6 ladder, whose
+                # probe may call a model (security review D30).
+                admit(name)
             except ValueError as exc:
                 return _error_result(str(exc))
             async with session_scope(write_store, write=True) as session:

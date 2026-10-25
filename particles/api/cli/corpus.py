@@ -753,7 +753,7 @@ async def _corpus_refresh(
             )
             return
 
-        changed = unchanged = missing = refused = 0
+        changed = unchanged = missing = refused = outside = 0
         async for result in refresh_entries(
             session, (target_id for target_id, _uri in targets), force=force
         ):
@@ -775,8 +775,13 @@ async def _corpus_refresh(
                     typer.echo(
                         f"  {short}  changed → snapshot {(result.snapshot_id or '')[:8]} PENDING"
                     )
+                case RefreshOutcome.REFUSED:
+                    outside += 1
+                    typer.echo(f"  {short}  not read (outside the allowed roots)")
 
     refused_note = f", {refused} refused (network.egress)" if refused else ""
+    if outside:
+        refused_note += f", {outside} outside the allowed roots"
     typer.echo(
         f"\nChecked {len(targets)} {'source' if entry_id is not None else 'local source(s)'}: "
         f"{changed} changed, "
@@ -784,6 +789,11 @@ async def _corpus_refresh(
     )
     if changed:
         typer.echo("Run `particles extract --all-pending` to turn the new snapshots into beliefs.")
+    if outside:
+        typer.echo(
+            "Run `particles rules sync` from the project that holds them to record its root, "
+            "or add their directory to local_refresh.allowed_roots."
+        )
 
 
 @corpus_app.command("fsck")

@@ -19,12 +19,26 @@
 # this repo. A short-lived, upload-scoped credential is minted from the job's
 # id-token and is bound on PyPI to exactly this repository + this workflow
 # filename + the `pypi` environment — so the trusted-publisher entry on PyPI
-# must name `publish.yml` and the `pypi` environment. The environment is also
-# the manual-approval seam: require a reviewer on it to make every upload a
-# deliberate click.
+# must name `publish.yml` and the `pypi` environment. The environment carries
+# no required reviewer, by the owner's ruling of 2026-10-22; its deployment
+# policy admits only branch `main` and tags `v*`, so no other ref can run a job
+# in it (RELEASING.md § One-time setup).
+#
+# Only the `publish` job runs in that environment, and it installs nothing:
+# the build, the SBOM and the smoke test, which all resolve code from an
+# index, run in jobs with no OIDC identity, so no package an index serves can
+# run where it could mint an upload credential (security review D3).
+#
+# The files are bound to the build job by digest, not by artifact name: the
+# build job publishes the SHA-256 of every file it made as a job output, and
+# each later job downloads the build's artifact by id and checks those
+# digests before it uploads or attests anything. Code from an index runs in
+# the SBOM job between the upload and the attestation, and a job output is
+# the one thing it cannot rewrite.
 #
 # Trigger: publishing a GitHub Release (which also cuts the tag). The
-# workflow_dispatch path is a manual re-run or a TestPyPI rehearsal.
+# workflow_dispatch path is a manual re-run or a TestPyPI rehearsal, and runs
+# only from `main`.
 #
 # ORDERING: this Engine distribution pins linkedparticles-core to its own exact
 # version — the two are one source tree cut along an architectural line, and a
@@ -53,49 +67,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: build and publish
+  # Everything that resolves code from an index runs here, in a job that holds
+  # no credential: the build backend, and the core probe below. The upload job
+  # receives only the files this job built.
+  build:
+    name: build
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      # `contents: write` uploads the SBOM and the provenance bundle to the
-      # Release, and `attestations: write` records the provenance statement.
-      # They sit on the same job as the OIDC identity rather than in a
-      # separate one: splitting would keep this job read-only at the cost of
-      # an artifact round-trip, in a job that already holds an upload-scoped
-      # credential to a public index.
-      contents: write
-      id-token: write # mint the OIDC token for Trusted Publishing
-      attestations: write
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      cutoff: ${{ steps.ver.outputs.cutoff }}
+      dist-id: ${{ steps.dist.outputs.artifact-id }}
+      dist-sha256: ${{ steps.digests.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Code from an index runs in this job; leave it no token on disk.
+          persist-credentials: false
 
+      # `version` pins the uv binary that runs the build, so the tool that
+      # writes the uploaded files is a tested one rather than whatever was
+      # newest at run time.
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.11.26"
           python-version: "3.11"
           enable-cache: false
 
       # The version is stamped into pyproject.toml by the release export; read
-      # it once and reuse it for the ordering gate and the smoke test.
+      # it once and reuse it for the ordering gate and the smoke test. It is
+      # checked against a plain version shape before it becomes an output,
+      # because later steps put it in file names and commands. The cutoff is
+      # the instant this run began resolving: the SBOM closure resolves
+      # nothing newer.
       - name: Read the release version
         id: ver
         run: |
           set -euo pipefail
           v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
           [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$ ]]; then
+            echo "pyproject.toml version is not a release version" >&2
+            exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "cutoff=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Publishing linkedparticles $v"
 
       # Fail closed if the exactly-pinned core is not yet on the index. This is
       # the structural core-before-engine guarantee: no amount of mis-timed
       # triggering can ship an engine whose pinned core cannot be resolved.
+      # The upload job needs this one, so it never starts while this fails.
+      # The probe takes a wheel only: an sdist would run a build backend here,
+      # resolved from whichever index the probe reads, TestPyPI included.
       - name: Require the matching linkedparticles-core on the index
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi' }}
         run: |
           set -euo pipefail
-          index_args=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.repository }}" = "testpypi" ]; then
-            index_args="--index-url https://test.pypi.org/simple/"
+          index=https://pypi.org/simple/
+          if [ "$REHEARSAL" = "true" ]; then
+            index=https://test.pypi.org/simple/
           fi
           # The index can lag a fresh upload by several minutes (measured
           # 2026-08-25: the 1.139.0 core upload returned 200 OK and the JSON
@@ -103,19 +138,77 @@ jobs:
           # before failing closed rather than turning propagation lag into a
           # red release.
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if python -m pip download --no-deps --dest /tmp/core-check \
-              $index_args "linkedparticles-core==${{ steps.ver.outputs.version }}"; then
+            if python -m pip download --no-deps --only-binary=:all: --dest /tmp/core-check \
+              --index-url "$index" "linkedparticles-core==$VERSION"; then
               exit 0
             fi
             echo "not resolvable yet (attempt $i); retrying in 60s"
             sleep 60
           done
-          echo "linkedparticles-core==${{ steps.ver.outputs.version }} still not resolvable after 10 minutes" >&2
+          echo "linkedparticles-core==$VERSION still not resolvable after 10 minutes" >&2
           exit 1
 
+      # The build backend is pinned exactly and hash-checked: hatchling and
+      # its dependencies come from `.github/build-constraints.txt`, so a new
+      # release of any of them cannot reach the files this job writes.
       - name: Build sdist and wheel
-        run: uv build
+        run: uv build --build-constraints .github/build-constraints.txt --require-hashes
 
+      # The digests of exactly the files built above, as a job output: the
+      # publish and provenance jobs check what they download against these.
+      - name: Record the distribution digests
+        id: digests
+        run: |
+          set -euo pipefail
+          echo "sha256=$(cd dist && sha256sum -- * | base64 -w0)" >> "$GITHUB_OUTPUT"
+          (cd dist && sha256sum -- *)
+
+      - name: Hand the distributions to the upload job
+        id: dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that holds the Trusted Publishing identity. It checks nothing
+  # out, installs nothing and runs no build: it downloads the files the build
+  # job made and hands them to the upload action. Every other job is
+  # credential-free or, for the provenance job, installs nothing (security
+  # review D3).
+  publish:
+    name: publish
+    needs: build
+    # A release runs on its tag; a dispatch runs only from `main`. The
+    # environment's deployment policy says the same on the repository side.
+    if: ${{ github.event_name == 'release' || github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # The environment binds the trusted-publisher identity.
+    environment: pypi
+    permissions:
+      id-token: write # mint the OIDC token for Trusted Publishing
+    steps:
+      - name: Download the distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.dist-id }}
+          merge-multiple: true
+          path: dist/
+
+      - name: Check the distributions against the build digests
+        env:
+          DIST_SHA256: ${{ needs.build.outputs.dist-sha256 }}
+        run: |
+          set -euo pipefail
+          sums="$RUNNER_TEMP/dist.sha256"
+          printf '%s' "$DIST_SHA256" | base64 -d > "$sums"
+          (cd dist && sha256sum --check --strict "$sums")
+          diff <(cd dist && ls -A | sort) <(sed -E 's/^[0-9a-f]{64} [ *]//' "$sums" | sort)
+
+      # skip-existing makes a re-run idempotent: PyPI is immutable, so a
+      # filename that already landed is a no-op rather than a hard error, which
+      # is what makes recovering from a partial failure a plain re-run.
       - name: Publish to PyPI (Trusted Publishing)
         if: ${{ github.event_name == 'release' || inputs.repository == 'pypi' }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
@@ -136,17 +229,54 @@ jobs:
           skip-existing: true
           attestations: true
 
+  # ---- Supply-chain artifacts ------------------------------------------ #
+  # Everything below runs AFTER the upload, deliberately. The PyPI publish is
+  # irreversible and burns a version on failure; an SBOM step placed before it
+  # would turn a cosmetic tooling break into a blocked release. Each job here
+  # describes an artifact that already exists.
+  #
+  # The SBOM installs the wheel's resolved closure, which is code from an
+  # index, so it runs read-only: no OIDC identity and no write token. The
+  # job that writes to the Release holds both and installs nothing.
+  sbom:
+    name: sbom
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sbom-id: ${{ steps.sbom.outputs.artifact-id }}
+    steps:
+      # For pyproject.toml only, which names the SBOM's root component.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Code from an index runs in this job; leave it no token on disk.
+          persist-credentials: false
 
-      # ---- Supply-chain artifacts ---------------------------------------- #
-      # Everything below runs AFTER the upload, deliberately. The PyPI publish
-      # is irreversible and burns a version on failure; an SBOM step placed
-      # before it would turn a cosmetic tooling break into a blocked release.
-      # Each step here describes an artifact that already exists.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.26"
+          python-version: "3.11"
+          enable-cache: false
+
+      - name: Download the distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.dist-id }}
+          merge-multiple: true
+          path: dist/
+
+      # `UV_EXCLUDE_NEWER` holds the closure and the SBOM tool to what the
+      # index served when the build began, so a package released during the
+      # run cannot join it.
       - name: Generate the CycloneDX SBOM
-        id: sbom
+        env:
+          v: ${{ needs.build.outputs.version }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi' }}
+          UV_EXCLUDE_NEWER: ${{ needs.build.outputs.cutoff }}
         run: |
           set -euo pipefail
-          v="${{ steps.ver.outputs.version }}"
           mkdir -p sbom
           out="sbom/linkedparticles-${v}.cdx.json"
           # A clean environment holding exactly the built wheel and its
@@ -156,11 +286,21 @@ jobs:
           # of this version actually receives — the development lockfile in
           # the private upstream describes a resolution nobody installs.
           uv venv /tmp/sbom-env
-          index_args=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.repository }}" = "testpypi" ]; then
-            index_args="--extra-index-url https://test.pypi.org/simple/"
+          # The closure always resolves from PyPI alone. A TestPyPI rehearsal
+          # fetches exactly one file from TestPyPI, the pinned core wheel,
+          # with no dependencies, and hands it over as a local file. TestPyPI
+          # is open registration, so it never supplies a dependency: under
+          # `--extra-index-url` a squatted name there would outrank the real
+          # one on PyPI (security review D3).
+          core=""
+          if [ "$REHEARSAL" = "true" ]; then
+            python -m pip download --no-deps --only-binary=:all: \
+              --index-url https://test.pypi.org/simple/ --dest /tmp/rehearsal-core \
+              "linkedparticles-core==$v"
+            core="$(ls /tmp/rehearsal-core/*.whl)"
           fi
-          uv pip install --python /tmp/sbom-env/bin/python $index_args dist/*.whl
+          uv pip install --python /tmp/sbom-env/bin/python \
+            --index-url https://pypi.org/simple/ $core dist/*.whl
           # `--pyproject` names the root component from the tree's own
           # metadata, so the document is about this distribution rather than
           # about an anonymous virtualenv. `--output-reproducible` drops the
@@ -174,8 +314,61 @@ jobs:
             --output-format JSON \
             --output-reproducible \
             --output-file "$out"
-          echo "path=$out" >> "$GITHUB_OUTPUT"
           echo "Wrote $out ($(wc -c < "$out") bytes)"
+
+      - name: Hand the SBOM to the provenance job
+        id: sbom
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Sigstore identity and Release write access, so this job installs nothing:
+  # it attests and uploads files the jobs above produced, using only the
+  # pinned attest action and the runner's own `gh`.
+  provenance:
+    name: provenance and Release assets
+    needs: [build, sbom]
+    if: ${{ github.event_name == 'release' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # `contents: write` uploads the SBOM and the provenance bundle to the
+      # Release, `id-token: write` is the sigstore identity of the provenance
+      # statement, and `attestations: write` records it. None of it can
+      # publish to PyPI: the trusted publisher there names the `pypi`
+      # environment, which this job does not run in.
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # By artifact id, and then by digest: code from an index ran in the SBOM
+      # job, which this one follows, so the files are checked against what
+      # the build job recorded before anything is attested.
+      - name: Download the distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.dist-id }}
+          merge-multiple: true
+          path: dist/
+
+      - name: Check the distributions against the build digests
+        env:
+          DIST_SHA256: ${{ needs.build.outputs.dist-sha256 }}
+        run: |
+          set -euo pipefail
+          sums="$RUNNER_TEMP/dist.sha256"
+          printf '%s' "$DIST_SHA256" | base64 -d > "$sums"
+          (cd dist && sha256sum --check --strict "$sums")
+          diff <(cd dist && ls -A | sort) <(sed -E 's/^[0-9a-f]{64} [ *]//' "$sums" | sort)
+
+      - name: Download the SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sbom.outputs.sbom-id }}
+          merge-multiple: true
+          path: sbom/
 
       # A sigstore-backed SLSA provenance statement over the published files
       # and over the SBOM itself, verifiable with `gh attestation verify`.
@@ -183,26 +376,27 @@ jobs:
       # covers the Release assets, which those do not reach.
       - name: Attest build provenance (distributions + SBOM)
         id: provenance
-        if: ${{ github.event_name == 'release' }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.whl
             dist/*.tar.gz
-            ${{ steps.sbom.outputs.path }}
+            sbom/linkedparticles-${{ needs.build.outputs.version }}.cdx.json
 
       # The SBOM lives on the Release, not on PyPI, which accepts no side
       # files. It is written under `sbom/` rather than `dist/` on purpose: a
       # re-run of this workflow hands `dist/*` to the upload action, which
       # rejects anything that is not a distribution.
       - name: Attach the SBOM to the GitHub Release
-        if: ${{ github.event_name == 'release' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "${{ steps.sbom.outputs.path }}" --clobber
+          gh release upload "$TAG" \
+            "sbom/linkedparticles-$VERSION.cdx.json" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
       # The provenance bundle on the Release too, beside the files it attests.
       # The statement above lands in the attestation store, which a verifier
@@ -216,79 +410,104 @@ jobs:
       # irreversible upload, and a failure here is reported without failing
       # the run, so a missing asset can never hold back the steps after it.
       - name: Attach the provenance bundle to the GitHub Release
-        if: ${{ github.event_name == 'release' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p provenance
-          out="provenance/linkedparticles-${{ steps.ver.outputs.version }}.intoto.jsonl"
+          out="provenance/linkedparticles-$VERSION.intoto.jsonl"
           cp "$BUNDLE" "$out"
-          gh release upload "${{ github.event.release.tag_name }}" "$out" --clobber
+          gh release upload "$TAG" "$out" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
-      # Post-publish confirmation on the real index: install the just-published
-      # engine into a clean venv and assert the exact pin actually pulled the
-      # matching core. This is the one thing the private co-installability gate
-      # cannot observe, because it installs from local wheels rather than an
-      # index. (Skipped for the TestPyPI rehearsal, whose third-party closure
-      # is not on that index.)
-      #
-      # Two properties keep this step honest. The 1.151.18 run went red on a
-      # release that installs and imports cleanly, because it lacked both.
-      #
-      # 1. Index lag is waited out, then separated from real failures. The
-      #    upload returns before the index lists the new files: in that run
-      #    1.151.18 was still unlisted 109 seconds after the upload finished,
-      #    and the old 90-second loop fell through without failing. The wait
-      #    below has the same shape as this file's core gate (probe with a
-      #    no-deps download, bounded, fail closed with its own message). Once
-      #    the version is listed, the install runs exactly once, so a failure
-      #    from that point on belongs to the release and not to the index.
-      # 2. The import cannot see this checkout. This tree carries the engine
-      #    half of the `particles` package without its `__init__.py`, so a
-      #    Python started in the repository root resolves `particles` from
-      #    the checkout as a namespace package, with nothing installed. In
-      #    that run this turned a failed install into a misleading
-      #    AttributeError on `__version__`. Isolated mode (`-I`) keeps the
-      #    working directory off `sys.path`, and each module is asserted to
-      #    load from the smoke venv.
-      #
-      # A failure here fails the run, and that holds the container image
-      # back: publish-image.yml builds only after a successful Publish. The
-      # coupling is deliberate. The image is this same release installed from
-      # PyPI, so a release that does not install or import from the index
-      # would bake into an image that does not start. A lag failure can now
-      # only reach this point through an index outage longer than the wait,
-      # which the image workflow's own index gate would also hit. If the
-      # image is held back anyway, dispatching publish-image.yml by hand
-      # builds it once the cause is understood.
-      - name: Post-publish smoke — install from PyPI and import
-        if: ${{ github.event_name == 'release' || inputs.repository == 'pypi' }}
+  # Post-publish confirmation on the index: install the just-published engine
+  # into a clean venv and assert the exact pin actually pulled the matching
+  # core. This is the one thing the private co-installability gate cannot
+  # observe, because it installs from local wheels rather than an index. It
+  # runs with no credential, like every job that installs from an index.
+  #
+  # The TestPyPI rehearsal runs the same check without trusting TestPyPI for
+  # anything but the two files under test: it fetches exactly those wheels
+  # with no dependencies, then installs them with every dependency from PyPI
+  # alone (security review D3).
+  #
+  # Two properties keep this job honest. The 1.151.18 run went red on a
+  # release that installs and imports cleanly, because it lacked both.
+  #
+  # 1. Index lag is waited out, then separated from real failures. The
+  #    upload returns before the index lists the new files: in that run
+  #    1.151.18 was still unlisted 109 seconds after the upload finished,
+  #    and the old 90-second loop fell through without failing. The wait
+  #    below has the same shape as this file's core gate (probe with a
+  #    no-deps download, bounded, fail closed with its own message). Once
+  #    the version is listed, the install runs exactly once, so a failure
+  #    from that point on belongs to the release and not to the index.
+  # 2. The import cannot see a checkout. This job checks nothing out, and
+  #    isolated mode (`-I`) keeps the working directory off `sys.path`
+  #    anyway: this tree carries the engine half of the `particles` package
+  #    without its `__init__.py`, so a Python started in a checkout resolves
+  #    `particles` from it as a namespace package, with nothing installed.
+  #    In that run this turned a failed install into a misleading
+  #    AttributeError on `__version__`. Each module is also asserted to load
+  #    from the smoke venv.
+  #
+  # A failure here fails the run, and that holds the container image
+  # back: publish-image.yml builds only after a successful Publish. The
+  # coupling is deliberate. The image is this same release installed from
+  # PyPI, so a release that does not install or import from the index
+  # would bake into an image that does not start. A lag failure can now
+  # only reach this point through an index outage longer than the wait,
+  # which the image workflow's own index gate would also hit. If the
+  # image is held back anyway, dispatching publish-image.yml by hand
+  # builds it once the cause is understood.
+  smoke:
+    name: post-publish smoke
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post-publish smoke — install from the index and import
         run: |
           set -euo pipefail
+          pypi=https://pypi.org/simple/
+          if [ "$REHEARSAL" = "true" ]; then
+            index=https://test.pypi.org/simple/
+            wanted=("linkedparticles==$VERSION" "linkedparticles-core==$VERSION")
+          else
+            index="$pypi"
+            wanted=("linkedparticles==$VERSION")
+          fi
           python -m venv /tmp/smoke
           /tmp/smoke/bin/python -m pip install --upgrade pip
           # Backoff totals 525s of sleep across 11 probes, about 10 minutes
           # with probe time: the budget of the other index gates.
           listed=""
           for delay in 15 30 60 60 60 60 60 60 60 60 0; do
-            if /tmp/smoke/bin/pip download --no-deps --dest /tmp/smoke-probe \
-              "linkedparticles==$VERSION"; then
+            if /tmp/smoke/bin/pip download --no-deps --only-binary=:all: \
+              --index-url "$index" --dest /tmp/smoke-probe "${wanted[@]}"; then
               listed=1
               break
             fi
             if [ "$delay" -gt 0 ]; then
-              echo "linkedparticles==$VERSION not listed on PyPI yet; retrying in ${delay}s"
+              echo "${wanted[*]} not listed on $index yet; retrying in ${delay}s"
               sleep "$delay"
             fi
           done
           if [ -z "$listed" ]; then
-            echo "linkedparticles==$VERSION still not listed on PyPI after about 10 minutes" >&2
+            echo "${wanted[*]} still not listed on $index after about 10 minutes" >&2
             exit 1
           fi
-          /tmp/smoke/bin/pip install "linkedparticles==$VERSION"
+          if [ "$REHEARSAL" = "true" ]; then
+            # The two probed wheels as local files, everything else from PyPI.
+            /tmp/smoke/bin/pip install --index-url "$pypi" /tmp/smoke-probe/*.whl
+            /tmp/smoke/bin/pip check
+          else
+            /tmp/smoke/bin/pip install --index-url "$pypi" "linkedparticles==$VERSION"
+          fi
           /tmp/smoke/bin/python -I - <<'PY'
           import os
           import particles
@@ -303,4 +522,5 @@ jobs:
           print("smoke OK", got)
           PY
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi' }}

@@ -649,8 +649,47 @@ async def test_xxe_entity_is_not_expanded_and_no_error_escapes(tmp_path) -> None
     rendered = " ".join(c.content for c in result.candidates)
     assert "SUPERSECRETVALUE" not in rendered
     assert "SUPERSECRETVALUE" not in " ".join(result.quality_notes)
-    # The benign half of the same document still extracts.
-    assert "a benign: still here" in [c.content for c in result.candidates]
+    # Any entity declaration refuses the RDF/XML parse (security review N39),
+    # disclosed as a note rather than raised.
+    assert result.candidates == []
+    assert any("entity declaration 'xxe'" in note for note in result.quality_notes)
+
+
+async def test_rdfxml_internal_entity_is_refused() -> None:
+    """N39: an internal entity is not expanded into a literal; the document is refused."""
+    doc = b"""<?xml version="1.0"?>
+<!DOCTYPE rdf:RDF [ <!ENTITY word "EXPANDED"> ]>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:ex="http://example.org/">
+  <rdf:Description rdf:about="http://example.org/a"><ex:p>&word;</ex:p></rdf:Description>
+</rdf:RDF>"""
+    result = await _extract(doc, "/tmp/x.rdf")
+    assert result.candidates == []
+    assert "EXPANDED" not in " ".join(c.content for c in result.candidates)
+    assert any("entity declaration 'word'" in note for note in result.quality_notes)
+
+
+async def test_rdfxml_nested_entity_bomb_is_refused_at_the_first_declaration() -> None:
+    entities = "".join(f'<!ENTITY e{i} "{f"&e{i - 1};" * 10 if i else "lol"}">' for i in range(8))
+    doc = f"""<?xml version="1.0"?>
+<!DOCTYPE rdf:RDF [ {entities} ]>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:ex="http://example.org/">
+  <rdf:Description rdf:about="http://example.org/a"><ex:p>&e7;</ex:p></rdf:Description>
+</rdf:RDF>""".encode()
+    result = await _extract(doc, "/tmp/x.rdf")
+    assert result.candidates == []
+    assert any("entity declaration 'e0'" in note for note in result.quality_notes)
+
+
+async def test_rdfxml_without_a_dtd_still_parses() -> None:
+    doc = b"""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:ex="http://example.org/">
+  <rdf:Description rdf:about="http://example.org/a"><ex:p>plain</ex:p></rdf:Description>
+</rdf:RDF>"""
+    result = await _extract(doc, "/tmp/x.rdf")
+    assert [c.content for c in result.candidates] == ["a p: plain"]
 
 
 async def test_a_hostile_document_opens_no_socket(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]

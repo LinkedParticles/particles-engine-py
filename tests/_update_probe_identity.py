@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from particles.benchmark.update_gate.scripted import unfence_claim
+
 GOLDEN = Path(__file__).parent / "fixtures" / "rung_ladder" / "update_probe_parent.json"
 _PAIR_SETS = ("gate_pairs", "gate_pairs_heldout", "past_value_pairs", "past_marker_heldout")
 _CLAIMS = re.compile(r"Claim A:\s*(?P<a>.*?)\n\s*\nClaim B:\s*(?P<b>.*)\Z", re.DOTALL)
@@ -77,7 +79,9 @@ def inputs() -> list[tuple[str, str, str]]:
 
 def _reply(seed: int, purpose: str, max_tokens: int, prompt: str) -> str | None:
     m = _CLAIMS.search(prompt)
-    tail = f"{m.group('a')}\x1f{m.group('b')}" if m else prompt
+    # The claims are fenced since the update probe's F3 hardening; the reply is
+    # keyed on the claim texts, so the golden file is unchanged by the fence.
+    tail = f"{unfence_claim(m.group('a'))}\x1f{unfence_claim(m.group('b'))}" if m else prompt
     digest = hashlib.sha256(f"{seed}\x1f{purpose}\x1f{max_tokens}\x1f{tail}".encode()).digest()
     return PALETTE[digest[0] % len(PALETTE)]
 

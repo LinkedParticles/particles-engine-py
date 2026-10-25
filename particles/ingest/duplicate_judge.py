@@ -27,6 +27,7 @@ from particles.core.rung_ladder import DuplicateVerdict, QuestionKind, RungStamp
 from particles.core.schema import JudgeVerdictKind
 from particles.ingest.ladder_shell import report
 from particles.llm.breaker import PROBE_MAX_TOKENS
+from particles.llm.fencing import data_fence_instruction, fence, make_nonce
 
 __all__ = [
     "DUPLICATE_VERDICT",
@@ -36,6 +37,7 @@ __all__ = [
     "judge_key",
     "judge_max_tokens",
     "judge_prompt",
+    "judge_request",
     "key_index",
     "parse_verdicts",
     "run_judge",
@@ -56,9 +58,15 @@ _JUDGE_MIN_TOKENS = 200
 
 
 class JudgeCall(Protocol):
-    """The model call a caller hands :func:`run_judge`: prompt in, reply text out."""
+    """The model call a caller hands :func:`run_judge`: request in, reply text out.
 
-    def __call__(self, prompt: str, *, max_tokens: int) -> Awaitable[str | None]: ...
+    ``system`` carries the trusted instructions and ``prompt`` the fenced pairs
+    (security F3), so a caller's call must forward ``system`` to the model.
+    """
+
+    def __call__(
+        self, prompt: str, *, max_tokens: int, system: str | None = None
+    ) -> Awaitable[str | None]: ...
 
 
 def judge_max_tokens(pair_count: int) -> int:
@@ -85,24 +93,51 @@ def key_index(key: str) -> int | None:
     return int(text[1:])
 
 
-def judge_prompt(pair_lines: str) -> str:
-    """The judge's prompt over its rendered pair lines."""
-    return (
-        "You are curating an epistemic knowledge base. Below are candidate "
-        "pairs of claims that may assert the SAME underlying fact (a "
-        "paraphrase) or DIFFERENT facts. For each pair, choose exactly one "
-        "verdict:\n"
-        "- PARAPHRASE: the two claims assert the same underlying fact\n"
-        "- DISTINCT: the two claims assert different facts\n"
-        "- UNSURE: you cannot tell\n\n"
-        "Return ONLY a JSON object mapping each bracketed pair key to its "
-        'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.\n\n' + pair_lines
-    )
+_JUDGE_INSTRUCTIONS = (
+    "You are curating an epistemic knowledge base. The user message holds "
+    "candidate pairs of claims that may assert the SAME underlying fact (a "
+    "paraphrase) or DIFFERENT facts. Each pair has a key in brackets and its two "
+    "claims, A and B. For each pair, choose exactly one verdict:\n"
+    "- PARAPHRASE: the two claims assert the same underlying fact\n"
+    "- DISTINCT: the two claims assert different facts\n"
+    "- UNSURE: you cannot tell\n\n"
+    "Return ONLY a JSON object mapping each bracketed pair key to its "
+    'verdict, e.g. {"p0": "PARAPHRASE", "p1": "DISTINCT"}. No prose.'
+)
+
+
+def judge_request(pairs: Sequence[tuple[str, str]], *, nonce: str | None = None) -> tuple[str, str]:
+    """``(system, user)`` for one judge call over ``(claim_a, claim_b)`` pairs.
+
+    The claims are stored text, so the instructions stay in the system turn
+    and every claim is fenced (security F3). One nonce covers the call, and
+    each claim's label names its pair and side (``p0_a``, ``p0_b``, …), so a
+    claim cannot pose as another pair. ``nonce`` is fixed only by
+    :func:`duplicate_judge_stamp`; a real call mints its own.
+    """
+    nonce = nonce or make_nonce()
+    blocks = []
+    for i, (a, b) in enumerate(pairs):
+        key = judge_key(i)
+        blocks.append(
+            f"[{key}]\nA:\n{fence(a, nonce, label=f'{key}_a')}\n"
+            f"B:\n{fence(b, nonce, label=f'{key}_b')}"
+        )
+    system = f"{_JUDGE_INSTRUCTIONS}\n\n{data_fence_instruction(nonce)}"
+    return system, "\n\n".join(blocks)
+
+
+def judge_prompt(pairs: Sequence[tuple[str, str]]) -> str:
+    """The judge's whole request over ``pairs`` as one string, for sizing a call."""
+    system, user = judge_request(pairs)
+    return f"{system}\n\n{user}"
 
 
 def duplicate_judge_stamp() -> RungStamp:
     """The judge as the duplicate ladder's model rung, at its prompt's version."""
-    return RungStamp("duplicate_judge", prompt_hash(judge_prompt("[p0]\nA: {a}\nB: {b}")))
+    return RungStamp(
+        "duplicate_judge", prompt_hash(*judge_request([("{a}", "{b}")], nonce="{nonce}"))
+    )
 
 
 #: The judge's answer in the duplicate ladder's vocabulary; ``UNSURE`` abstains.
@@ -163,9 +198,8 @@ async def run_judge(
 
     A pair the model omits or answers unparseably is ``None``.
     """
-    lines = [f"[{judge_key(i)}]\nA: {a}\nB: {b}" for i, (a, b) in enumerate(pairs)]
-    prompt = judge_prompt("\n\n".join(lines))
-    response = await call(prompt, max_tokens=judge_max_tokens(len(pairs)))
+    system, prompt = judge_request(pairs)
+    response = await call(prompt, max_tokens=judge_max_tokens(len(pairs)), system=system)
     verdicts: list[JudgeVerdictKind | None] = [None] * len(pairs)
     for key, verdict in parse_verdicts(response).items():
         index = key_index(key)

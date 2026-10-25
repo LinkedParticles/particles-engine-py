@@ -123,6 +123,14 @@ def engine_serve_cmd(
     typer.echo(
         f"Starting Particles engine on {host}:{port}  (bearer auth: {auth_state}; mode: {mode})"
     )
+    from particles.config import describe_default_store
+
+    typer.echo(f"Store: {describe_default_store()}")
+    from particles.api.auth import open_reads_warning
+
+    reads_warning = open_reads_warning(host)
+    if reads_warning is not None:
+        typer.echo(f"WARNING: {reads_warning}", err=True)
 
     if daemon_on:
         # Inject the pass-6 projection tail the CLI owns: the
@@ -156,4 +164,10 @@ def engine_serve_cmd(
 
     instrument_fastapi_app(fastapi_app)
 
-    uvicorn.run(fastapi_app, host=host, port=port)
+    # The no-egress backstop is an audit hook on socket.connect, and libuv
+    # sockets raise no such event, so a refusing posture keeps uvicorn on the
+    # stdlib loop rather than letting "auto" pick uvloop (D18).
+    from particles.egress import current_policy
+
+    loop = "asyncio" if current_policy().refusing else "auto"
+    uvicorn.run(fastapi_app, host=host, port=port, loop=loop)

@@ -30,11 +30,17 @@
 #          containerized; requires VERSION and a resolvable index.
 ARG SOURCE=tree
 
+# Every base is pinned by digest, so a rebuild of the same tree starts from the
+# same bytes; Dependabot's docker entry moves the digests as a reviewable PR.
+# uv comes from its own release image by digest rather than from a `pip
+# install` that checks no hash, and is the version the publish workflows pin.
+FROM ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 AS uv
+
 # ---------------------------------------------------------------------------
 # Stage 1a — builder-tree: resolve the locked closure into a self-contained
 # venv and bake the encoder weights.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder-tree
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS builder-tree
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -43,7 +49,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     HF_HOME=/opt/huggingface
 
-RUN pip install --no-cache-dir "uv==0.9.7"
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /src
 
@@ -88,19 +94,26 @@ print('baked encoder:', EMBEDDING_MODEL_ID)"
 # encoder bake as builder-tree, but the code comes from the index — so the
 # published image carries exactly the artifacts a `pip install` user gets.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder-pypi
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS builder-pypi
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/opt/huggingface
 
-RUN pip install --no-cache-dir "uv==0.9.7"
+COPY --from=uv /uv /uvx /bin/
 
 # The exact released version, required: an unpinned install here would bake
 # whatever the index served that minute, which is not a publishable artifact.
 ARG VERSION=""
 RUN test -n "$VERSION" || { echo "builder-pypi requires --build-arg VERSION=<released version>" >&2; exit 1; }
+# The instant the released pair finished uploading, as an RFC 3339 UTC time:
+# the closure resolves nothing published after the release itself, so a
+# dependency released later cannot reach a rebuild of this version. The
+# publish-image workflow reads it from the index; it is required, like VERSION.
+ARG CLOSURE_CUTOFF=""
+RUN echo "$CLOSURE_CUTOFF" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+ || { echo "builder-pypi requires --build-arg CLOSURE_CUTOFF=<YYYY-MM-DDTHH:MM:SSZ>" >&2; exit 1; }
 # --torch-backend cpu: the index-path twin of pyproject's `[tool.uv.sources]`
 # torch routing, which a `uv pip install` of the released wheel
 # never sees. uv sends only the PyTorch-ecosystem packages (torch, triton, …)
@@ -111,6 +124,7 @@ RUN test -n "$VERSION" || { echo "builder-pypi requires --build-arg VERSION=<rel
 # carries both x86_64 and aarch64 Linux wheels, so both platforms resolve.
 RUN uv venv /opt/venv \
  && uv pip install --python /opt/venv/bin/python --torch-backend cpu \
+    --exclude-newer "${CLOSURE_CUTOFF}" \
     "linkedparticles==${VERSION}"
 
 # Same bake as builder-tree (kept in step by tests/test_publish_export.py):
@@ -128,7 +142,7 @@ FROM builder-${SOURCE} AS builder
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS runtime
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -140,7 +154,12 @@ ENV PATH=/opt/venv/bin:$PATH \
     # The baked config below. Absolute, so nothing depends on the working
     # directory — PARTICLES_CONFIG is the loader's own bootstrap override and
     # is read directly by particles/config.py.
-    PARTICLES_CONFIG=/etc/particles/config.yaml
+    PARTICLES_CONFIG=/etc/particles/config.yaml \
+    # The read routes need the bearer even when a mounted config replaces the
+    # baked one, which sets the same flag (security review 2026-10-24, N9). An
+    # environment override wins over the file; pass
+    # -e PARTICLES_API_REQUIRE_AUTH_FOR_READS=false to open them on purpose.
+    PARTICLES_API_REQUIRE_AUTH_FOR_READS=true
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/huggingface /opt/huggingface

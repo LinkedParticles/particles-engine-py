@@ -32,6 +32,7 @@ import uuid
 from pathlib import Path
 
 from particles.config import get_config
+from particles.url_safety import GIT_LOCAL_ARGS
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,24 @@ _GIT_CONTEXT_VARS = (
     "GIT_NAMESPACE",
     "GIT_PREFIX",
 )
+
+#: Settings passed on every invocation so the repository's own configuration
+#: cannot make this unattended step run a program: no hooks, no fsmonitor
+#: daemon, no pager. The memory directory may sit inside a repository the owner
+#: did not create (security review D27).
+_HARDENING_CONFIG = (
+    ("core.hooksPath", os.devnull),
+    ("core.fsmonitor", "false"),
+    ("core.pager", "cat"),
+)
+
+#: Repository settings that name a program git would run while staging or
+#: diffing the memory directory. Their presence in the repository's own config
+#: skips the commit: a filter or textconv driver cannot be disabled from the
+#: command line without knowing its name, and the history is a bonus, never
+#: worth running a stranger's command. Global and system config are the
+#: operator's own (``git lfs install`` writes its filter there) and are not read.
+_COMMAND_CONFIG_RE = r"^(filter|diff|merge)\..*\.(clean|smudge|process|textconv|command|driver)$"
 
 #: The trailing ``p-<shortid>`` handle on a rendered memory-index bullet
 #: (§4 / ``render.markdown.format_memory_bullet``). The last such
@@ -158,9 +177,13 @@ def build_commit_message(
 async def _git(
     memory_dir: Path, *args: str, config: list[tuple[str, str]] | None = None
 ) -> tuple[int, str, str]:
-    """Run ``git -C <memory_dir> [-c k=v …] <args>`` async; return (rc, stdout, stderr)."""
-    cmd = ["git", "-C", str(memory_dir)]
-    for key, value in config or []:
+    """Run ``git -C <memory_dir> [-c k=v …] <args>`` async; return (rc, stdout, stderr).
+
+    The hardening settings (:data:`_HARDENING_CONFIG`) ride every call, ahead of
+    the caller's own.
+    """
+    cmd = ["git", *GIT_LOCAL_ARGS, "-C", str(memory_dir)]
+    for key, value in (*_HARDENING_CONFIG, *(config or [])):
         cmd += ["-c", f"{key}={value}"]
     cmd += list(args)
     env = {k: v for k, v in os.environ.items() if k not in _GIT_CONTEXT_VARS}
@@ -204,6 +227,15 @@ async def commit_projection(
         if rc != 0:
             return "skipped: not-a-git-repo"
 
+        # A configured filter / textconv / merge driver is a program `add` or
+        # `diff` would run; skip rather than run it (security review D27).
+        for scope in ("--local", "--worktree"):
+            rc, out, _err = await _git(
+                memory_dir, "config", scope, "--get-regexp", _COMMAND_CONFIG_RE
+            )
+            if rc == 0 and out:
+                return "skipped: command-driver-configured"
+
         # Stage only what is under memory_dir (`.` is relative to `-C`). Never -A.
         rc, _out, err = await _git(memory_dir, "add", "--", ".")
         if rc != 0:
@@ -211,7 +243,9 @@ async def commit_projection(
             return "skipped: add-failed"
 
         # Nothing staged ⇒ no empty commit.
-        rc, _out, _err = await _git(memory_dir, "diff", "--cached", "--quiet")
+        rc, _out, _err = await _git(
+            memory_dir, "diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv"
+        )
         if rc == 0:
             return "skipped: nothing-to-commit"
 
@@ -228,7 +262,7 @@ async def commit_projection(
             commit_cfg.append(("user.name", git_cfg.author_name))
         if git_cfg.author_email:
             commit_cfg.append(("user.email", git_cfg.author_email))
-        commit_args = ["commit", "-m", message]
+        commit_args = ["commit", "--no-verify", "-m", message]
         if not git_cfg.sign:
             # Never impose this SDK's signing requirement; keep an unattended
             # hook commit from blocking on a signing agent.

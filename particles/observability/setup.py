@@ -28,12 +28,14 @@ not crash. mypy treats the optional submodules as untyped (``follow_imports =
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, Any
 
 from particles import egress
 from particles.config import get_config
 from particles.secrets import get_otel_exporter_headers_optional
+from particles.url_safety import is_cleartext_remote
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -108,7 +110,9 @@ def instrument_fastapi_app(app: FastAPI) -> None:
             from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         except ImportError:
             return
-        FastAPIInstrumentor.instrument_app(app)
+        # D19: the server span keeps the route template, never the query or
+        # the concrete ids in the path (see _scrub_server_span).
+        FastAPIInstrumentor.instrument_app(app, server_request_hook=_scrub_server_span)
         _fastapi_instrumented = True
 
 
@@ -142,10 +146,10 @@ def _install_traces(cfg: ObservabilityConfig, resource: Any) -> None:
     if cfg.exporter == "console":
         # Synchronous export so the diagnose-now CLI prints each span as it closes.
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    elif cfg.exporter == "otlp" and _otlp_allowed(cfg):
+    elif cfg.exporter == "otlp" and (kwargs := _otlp_kwargs(cfg, "traces")) is not None:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-        otlp = OTLPSpanExporter(**_otlp_kwargs(cfg, "traces"))
+        otlp = OTLPSpanExporter(**kwargs)
         provider.add_span_processor(BatchSpanProcessor(otlp))
 
     trace.set_tracer_provider(provider)
@@ -163,12 +167,10 @@ def _install_metrics(cfg: ObservabilityConfig, resource: Any) -> None:
     readers: list[Any] = []
     if cfg.exporter == "console":
         readers.append(PeriodicExportingMetricReader(ConsoleMetricExporter()))
-    elif cfg.exporter == "otlp" and _otlp_allowed(cfg):
+    elif cfg.exporter == "otlp" and (kwargs := _otlp_kwargs(cfg, "metrics")) is not None:
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 
-        readers.append(
-            PeriodicExportingMetricReader(OTLPMetricExporter(**_otlp_kwargs(cfg, "metrics")))
-        )
+        readers.append(PeriodicExportingMetricReader(OTLPMetricExporter(**kwargs)))
 
     provider = MeterProvider(resource=resource, metric_readers=readers)
     metrics.set_meter_provider(provider)
@@ -203,27 +205,29 @@ def _install_logging() -> None:
 
 
 def _scrub_httpx_url(span: Any, request: Any) -> None:
-    """Strip the query string (+ fragment + userinfo) from the httpx span URL.
+    """Reduce the httpx span URL to ``scheme://host[:port]``.
 
-    F8 (SECURITY_REVIEW_20260625-2). The httpx instrumentor's default
-    ``url.full`` / ``http.url`` span attribute is ``redact_url(str(url))``,
-    which removes embedded userinfo and a *fixed allowlist* of credential-shaped
-    params (``Signature`` / ``AWSAccessKeyId`` / ``X-Amz-*``) but leaves
-    **arbitrary** query strings intact. Our outbound subject-authority lookups
-    carry user/corpus-derived content in the query string — e.g. the Wikidata
+    F8 (SECURITY_REVIEW_20260625-2) and D19 (SECURITY_REVIEW_20261023-1). The
+    httpx instrumentor's default ``url.full`` / ``http.url`` span attribute is
+    ``redact_url(str(url))``, which removes embedded userinfo and a *fixed
+    allowlist* of credential-shaped params (``Signature`` / ``AWSAccessKeyId`` /
+    ``X-Amz-*``) but leaves the rest intact. Our outbound lookups carry
+    user/corpus-derived content in both halves of the URL: the Wikidata
     ``?action=wbsearchentities&search=<subject name>`` search
-    (``particles/ingest/authorities/wikidata.py``) and the Numista / Nomisma
-    lookups — so the raw query would ship *which entities the operator's private
-    corpus concerns* to whatever OTLP collector is configured. We overwrite the
-    attribute with ``scheme://host[:port]/path`` only.
+    (``particles/ingest/authorities/wikidata.py``) in the query, and the Numista
+    ``/types/<coin id>`` and Nomisma ``/id/<concept>.jsonld`` lookups in the
+    path. Either would ship *which entities the operator's private corpus
+    concerns* to whatever OTLP collector is configured, so only the origin is
+    kept; the span name already carries the method.
 
     The hook runs immediately after the span is created with the unscrubbed
     value (``handle_request`` / ``handle_async_request`` set the attribute at
     span start, then invoke this hook), so the overwrite wins. We reconstruct
     from the URL components rather than calling ``copy_with`` so that userinfo,
-    query, and fragment are all dropped unconditionally; both the new-semconv
-    (``url.full``) and old/default-semconv (``http.url``) keys are set so the
-    query never escapes regardless of the active OTel semantic-convention mode.
+    path, query, and fragment are all dropped unconditionally; both the
+    new-semconv (``url.full``) and old/default-semconv (``http.url``) keys are
+    set so nothing escapes regardless of the active OTel semantic-convention
+    mode.
 
     ``request`` is httpx's ``RequestInfo`` namedtuple
     ``(method, url, headers, stream, extensions)``; ``request.url`` is an
@@ -233,9 +237,36 @@ def _scrub_httpx_url(span: Any, request: Any) -> None:
     netloc = url.host or ""
     if url.port is not None:
         netloc = f"{netloc}:{url.port}"
-    safe = f"{url.scheme}://{netloc}{url.path}"
+    safe = f"{url.scheme}://{netloc}"
     span.set_attribute("url.full", safe)
     span.set_attribute("http.url", safe)
+
+
+def _scrub_server_span(span: Any, scope: dict[str, Any]) -> None:
+    """Keep the request's route template, never its query or concrete path (D19).
+
+    The ASGI instrumentor records the full target at span start: ``http.target``
+    and ``http.url`` (old semconv) or ``url.path``, ``url.query`` and
+    ``url.full`` (new), all with the query string, and the concrete path names
+    the particle, subject or corpus entry asked about. This ``server_request_hook``
+    runs right after and overwrites each with the route template the
+    instrumentor matched (``/particles/{particle_id}``), or ``""`` for a request
+    that matched no route; ``url.query`` becomes ``""``, since an attribute
+    cannot be removed.
+    """
+    attributes = getattr(span, "attributes", None) or {}
+    route = attributes.get("http.route")
+    template = route if isinstance(route, str) else ""
+    scheme = scope.get("scheme") or "http"
+    server = scope.get("server")
+    origin = ""
+    if isinstance(server, tuple | list) and len(server) == 2:
+        origin = f"{scheme}://{server[0]}:{server[1]}"
+    span.set_attribute("http.target", template)
+    span.set_attribute("url.path", template)
+    span.set_attribute("url.query", "")
+    span.set_attribute("http.url", f"{origin}{template}")
+    span.set_attribute("url.full", f"{origin}{template}")
 
 
 async def _scrub_httpx_url_async(span: Any, request: Any) -> None:
@@ -253,7 +284,7 @@ def _install_instrumentors() -> None:
     """Global library auto-instrumentation: httpx (client spans + traceparent) + SQLAlchemy."""
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-    # F8: scrub the query string out of every httpx client span (see
+    # F8 / D19: reduce every httpx client span URL to its origin (see
     # _scrub_httpx_url). Both hooks are passed; httpx.AsyncClient uses the async
     # one, httpx.Client the sync one.
     HTTPXClientInstrumentor().instrument(
@@ -282,45 +313,105 @@ def _install_instrumentors() -> None:
     SQLAlchemyInstrumentor().instrument()
 
 
-_otlp_refusal_logged = False
+_otlp_refusals_logged: set[str] = set()
+
+#: The OTLP/HTTP exporter's own default base, used when neither
+#: ``observability.endpoint`` nor an ``OTEL_EXPORTER_OTLP_*`` variable names one.
+_SDK_DEFAULT_ENDPOINT = "http://localhost:4318"
 
 
-def _otlp_allowed(cfg: ObservabilityConfig) -> bool:
-    """Whether ``network.egress`` lets the OTLP exporter reach its endpoint.
+def _warn_otlp_once(key: str, message: str, *args: Any) -> None:
+    if key in _otlp_refusals_logged:
+        return
+    _otlp_refusals_logged.add(key)
+    log.warning(message, *args)
 
-    The exporters run on their own threads over their own HTTP stack, so the
-    check is made here, where they are built: a refused endpoint gets no
-    exporter and one WARNING. With ``endpoint`` unset the OTel SDK's default,
-    ``http://localhost:4318``, is what is checked.
+
+def _otlp_endpoint(cfg: ObservabilityConfig, signal: str) -> str:
+    """The URL the ``signal`` exporter sends to, resolved the way the SDK would (D21).
+
+    ``observability.endpoint`` wins; otherwise the SDK's own order applies:
+    ``OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`` as given, then
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` plus the signal path, then the SDK default.
+    The result is both what is checked and what is passed to the exporter, so
+    the two can never disagree. The ``OTEL_*`` names are the SDK's, read here
+    only to mirror it, not as a Particles setting.
     """
-    global _otlp_refusal_logged
-    host, port = egress.host_port(cfg.endpoint or "http://localhost:4318")
-    if egress.allows(host, port):
-        return True
-    if not _otlp_refusal_logged:
-        _otlp_refusal_logged = True
-        log.warning(
+    if cfg.endpoint:
+        return f"{cfg.endpoint.rstrip('/')}/v1/{signal}"
+    per_signal = os.environ.get(f"OTEL_EXPORTER_OTLP_{signal.upper()}_ENDPOINT")
+    if per_signal:
+        return per_signal
+    base = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or _SDK_DEFAULT_ENDPOINT
+    return f"{base.rstrip('/')}/v1/{signal}"
+
+
+def _otlp_headers() -> dict[str, str]:
+    """``PARTICLES_OTEL_EXPORTER_HEADERS`` parsed into the mapping the exporter takes.
+
+    The secret is the W3C OTLP-headers string (``key=value,…``); the exporter's
+    ``headers=`` argument is a mapping, and a raw string fails its construction.
+    """
+    raw = get_otel_exporter_headers_optional()
+    if not raw:
+        return {}
+    from opentelemetry.util.re import parse_env_headers
+
+    return dict(parse_env_headers(raw, liberal=True))
+
+
+def _sdk_env_headers(signal: str) -> bool:
+    """Whether the SDK will add headers of its own from ``OTEL_EXPORTER_OTLP_*HEADERS``."""
+    return bool(
+        os.environ.get(f"OTEL_EXPORTER_OTLP_{signal.upper()}_HEADERS")
+        or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+    )
+
+
+def _otlp_kwargs(cfg: ObservabilityConfig, signal: str) -> dict[str, Any] | None:
+    """OTLP/HTTP exporter kwargs for ``signal``, or ``None`` when it must not be built.
+
+    Two checks, both on the one endpoint :func:`_otlp_endpoint` resolves and
+    passes explicitly:
+
+    * ``network.egress`` must allow it. The exporters run on
+      their own threads over their own HTTP stack, so the check is made here,
+      where they are built.
+    * Headers (the ``PARTICLES_OTEL_EXPORTER_HEADERS`` secret, or the SDK's own
+      ``OTEL_EXPORTER_OTLP_*HEADERS``) are not sent over a non-loopback
+      ``http://`` endpoint unless ``observability.allow_plaintext_headers`` is
+      set (N12; the engine token's rule).
+
+    A refusal installs no exporter for that signal and logs one WARNING.
+    """
+    endpoint = _otlp_endpoint(cfg, signal)
+    host, port = egress.host_port(endpoint)
+    if not egress.allows(host, port):
+        _warn_otlp_once(
+            f"egress:{host}:{port}",
             "network.egress refuses the OTLP endpoint %s:%s; no OTLP exporter is installed",
             host,
             port,
         )
-    return False
-
-
-def _otlp_kwargs(cfg: ObservabilityConfig, signal: str) -> dict[str, Any]:
-    """Build OTLP/HTTP exporter kwargs: per-signal endpoint + the secret headers.
-
-    ``observability.endpoint`` is the non-secret OTLP base (e.g.
-    ``http://localhost:4318``); the signal path (``/v1/traces`` or
-    ``/v1/metrics``) is appended. The auth credential is the
-    ``PARTICLES_OTEL_EXPORTER_HEADERS`` secret, passed through to the
-    exporter only when set. With ``endpoint`` unset, the SDK's own
-    ``OTEL_EXPORTER_OTLP_*`` env defaults apply.
-    """
-    kwargs: dict[str, Any] = {}
-    if cfg.endpoint:
-        kwargs["endpoint"] = f"{cfg.endpoint.rstrip('/')}/v1/{signal}"
-    headers = get_otel_exporter_headers_optional()
+        return None
+    headers = _otlp_headers()
+    if (headers or _sdk_env_headers(signal)) and is_cleartext_remote(endpoint):
+        if not cfg.allow_plaintext_headers:
+            _warn_otlp_once(
+                f"plaintext:{endpoint}",
+                "Refusing to send the OTLP exporter headers to %s over unencrypted "
+                "http://; no OTLP exporter is installed. Use https://, or a loopback "
+                "collector, or set observability.allow_plaintext_headers: true.",
+                endpoint,
+            )
+            return None
+        _warn_otlp_once(
+            f"plaintext:{endpoint}",
+            "The OTLP exporter headers are being sent over an unencrypted "
+            "connection to %s (observability.allow_plaintext_headers is set).",
+            endpoint,
+        )
+    kwargs: dict[str, Any] = {"endpoint": endpoint}
     if headers:
         kwargs["headers"] = headers
     return kwargs
@@ -338,3 +429,4 @@ def _reset_for_tests() -> None:
         _configured = False
         _fastapi_instrumented = False
         _providers.clear()
+        _otlp_refusals_logged.clear()

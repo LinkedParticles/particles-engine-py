@@ -12,13 +12,16 @@ test (`tests/test_openapi_snapshot.py`) fails CI when the committed
 schema disagrees with the live server, so drift between code and contract
 is impossible by construction.
 
-For live exploration against a running server, hit `/docs` (Swagger UI)
-or `/redoc` directly:
+A running server serves the same schema at `/openapi.json`:
 
 ```bash
 uv run uvicorn particles.api.app:app --reload
-# then open http://localhost:8000/docs
+curl http://127.0.0.1:8000/openapi.json
 ```
+
+The server does not serve the interactive `/docs` and `/redoc` pages. Those
+pages load third-party scripts on the engine's own origin, where the web UI
+keeps its bearer token, so the schema is rendered on this page instead.
 
 <!--
 ReDoc renders client-side from the local openapi.json. The file is

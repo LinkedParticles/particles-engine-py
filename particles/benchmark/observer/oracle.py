@@ -26,6 +26,7 @@ from typing import Any
 
 from particles.benchmark.observer.generator import GLOBAL_CONTESTS, SLOTS, value_pattern
 from particles.benchmark.observer.schema import MemoryLine
+from particles.benchmark.update_gate.scripted import unfence_claim
 from particles.core.schema import Snapshot, UncertaintyNature
 from particles.extraction.general import CandidateParticle, ExtractionResult
 from particles.extraction.incremental import ChunkUnit, extract_with_carry_forward
@@ -185,8 +186,8 @@ class SlotProbeProvider:
             raise CompletionError("observer-oracle: not a contradiction-probe prompt")
         # The update probe asks for the slot's kind too; every slot
         # in the table holds one value at a time and changes over time.
-        slot = "SLOT: CHANGES\n" if UPDATE_SLOT_REQUEST in prompt else ""
-        if contradicts(match["a"].strip(), match["b"].strip()):
+        slot = "SLOT: CHANGES\n" if UPDATE_SLOT_REQUEST in (system or "") else ""
+        if contradicts(unfence_claim(match["a"]), unfence_claim(match["b"])):
             return f"REASON: the claims give one attribute different values\n{slot}VERDICT: YES"
         none = "SLOT: NONE\n" if slot else ""
         return f"REASON: the claims do not disagree\n{none}VERDICT: NO"

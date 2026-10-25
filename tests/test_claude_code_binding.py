@@ -13,6 +13,7 @@ reasons. The end-to-end cases (hook, consolidation, the cycle itself) are in
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 from pathlib import Path
@@ -173,6 +174,58 @@ class TestProjectionRefusal:
         notes = tmp_path / "notes" / "memory"
         notes.mkdir(parents=True)
         assert projection_refusal("default", notes) is None
+
+    # Security review D28: a harness root is recognised by more than its name.
+    def test_a_claude_config_dir_named_otherwise_is_gated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/scratch.db")
+        config_dir = tmp_path / "claude-work"
+        memory = config_dir / "projects" / "-proj" / "memory"
+        memory.mkdir(parents=True)
+        (config_dir / "settings.json").write_text("{}")
+        reason = projection_refusal("default", memory)
+        assert reason is not None
+        assert "no Particles hook is installed" in reason
+
+    def test_the_claude_config_dir_variable_is_gated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/scratch.db")
+        config_dir = tmp_path / "alt-config"
+        memory = config_dir / "projects" / "-proj" / "memory"
+        memory.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        assert projection_refusal("default", memory) is not None
+
+    def test_hooks_beside_a_renamed_config_dir_bind_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dsn = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        monkeypatch.setenv("DATABASE_URL", dsn)
+        config_dir = tmp_path / "alt-config"
+        memory = config_dir / "projects" / "-proj" / "memory"
+        memory.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        settings = {
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f"env DATABASE_URL={dsn} particles hook session-end "
+                                    "--store default"
+                                ),
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        (config_dir / "settings.json").write_text(json.dumps(settings))
+        assert projection_refusal("default", memory) is None
 
 
 class TestRemoteProjectionRefusal:

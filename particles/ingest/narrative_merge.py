@@ -108,6 +108,14 @@ def collapse_narratives(
     return merged, notes
 
 
+_MERGE_LABEL_INSTRUCTIONS = (
+    "The numbered one-sentence labels in the user message each describe a "
+    "consecutive slice of ONE journal entry, in order. Write ONE sentence "
+    "capturing the whole entry's overall arc or theme. Return only the sentence, "
+    "with no preamble or quotation marks."
+)
+
+
 async def _merge_label(labels: list[str], notes: list[str]) -> str:
     """Synthesize one whole-entry label from the ordered per-chunk labels.
 
@@ -121,17 +129,16 @@ async def _merge_label(labels: list[str], notes: list[str]) -> str:
     if not get_config().journal_extractor.synthesize_merged_narrative:
         return first
 
-    from particles.llm import complete
+    from particles.llm import complete, fenced_prompt
 
     numbered = "\n".join(f"{i}. {label}" for i, label in enumerate(labels, start=1))
-    prompt = (
-        "These one-sentence labels each describe a consecutive slice of ONE "
-        "journal entry, in order. Write ONE sentence capturing the whole entry's "
-        "overall arc or theme. Return only the sentence, with no preamble or "
-        "quotation marks.\n\n" + numbered
-    )
+    # The labels were extracted from a journal entry, untrusted text: they are
+    # fenced and the instruction stays in the system turn (security F3).
+    system, prompt = fenced_prompt(_MERGE_LABEL_INSTRUCTIONS, numbered, label="labels")
     try:
-        raw = await complete("extraction", prompt, max_tokens=_MERGE_LABEL_MAX_TOKENS)
+        raw = await complete(
+            "extraction", prompt, max_tokens=_MERGE_LABEL_MAX_TOKENS, system=system
+        )
     except Exception as exc:
         log.warning("Narrative-label synthesis failed (%s); using first chunk's label", exc)
         notes.append("NARRATIVE_MERGE: label synthesis failed; used first chunk's label")

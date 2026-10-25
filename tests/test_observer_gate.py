@@ -377,7 +377,12 @@ class TestPrecondition:
 
         assert await relations(db_session) == []
         main = await row_for(db_session, branch("main"))
-        assert (main.status, main.status_reason) == ("PROVENANCE_STALE", "SUPERSEDED_BY_UPDATE")
+        trunk = await row_for(db_session, branch("trunk"))
+        # The pair is reconciled, not declined. An untagged hand note is not
+        # the memory file's lineage (security review N6), so the update is held
+        # for review rather than retiring the harvested claim by date.
+        assert main.status == "ACTIVE"
+        assert (trunk.status, trunk.status_reason) == ("PROVENANCE_STALE", "CONFLICT_PENDING")
 
     async def test_an_unrescoped_store_reconciles_exactly_as_before(
         self, db_session: AsyncSession, scripted_probe: None

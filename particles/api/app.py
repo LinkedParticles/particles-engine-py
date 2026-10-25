@@ -21,7 +21,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles import __version__
-from particles.api._middleware import BodySizeLimitMiddleware
+from particles.api._middleware import BodySizeLimitMiddleware, HostBoundMiddleware
 from particles.api._rate_limit import RateLimitDep, enforce_rate_limit
 from particles.api.auth import (
     AuthDep,
@@ -73,8 +73,12 @@ from particles.operations.agent_write import (
     AgentWriteResult,
     assert_belief,
     assign_subject_belief,
+    link_beliefs,
     retract_belief,
     supersede_belief,
+    tag_belief,
+    unlink_beliefs,
+    untag_belief,
 )
 from particles.operations.curation import (
     CurationCard,
@@ -113,6 +117,7 @@ from particles.operations.subject_relink import (
 )
 from particles.store.event_store import OperatorEvent
 from particles.store.session_exposure_store import SessionExposure
+from particles.url_safety import is_network_uri
 
 log = logging.getLogger(__name__)
 
@@ -155,12 +160,21 @@ app = FastAPI(
     version=__version__,
     description="Python SDK for the Particles epistemic knowledge standard: Core Loop.",
     lifespan=lifespan,
+    # No /docs or /redoc: FastAPI's pages load floating-version scripts from a
+    # CDN onto the engine's origin, where the web UI keeps its bearer (security
+    # review 2026-10-24, N7). /openapi.json stays; the docs site renders it.
+    docs_url=None,
+    redoc_url=None,
 )
 
 # Defense-in-depth: cap the request body before any handler runs (F-7).
 # The limit is read per-request from config, so this single registration
 # honours reloads and the PARTICLES_MAX_REQUEST_BODY_BYTES override.
 app.add_middleware(BodySizeLimitMiddleware)
+# Outermost (added last): refuse a disallowed Host, or a non-loopback client under
+# the dev-key skip, on every path before the body is read (security review
+# 2026-10-24, N1). The route gates repeat it; this covers /health and /app.
+app.add_middleware(HostBoundMiddleware)
 
 
 @app.middleware("http")
@@ -524,9 +538,10 @@ class CurationQueueResponse(BaseModel):
 
 @app.get("/curation", response_model=CurationQueueResponse)
 async def get_curation_queue(
+    request: Request,
     session: SessionDep,
     _auth: AuthDep,
-    limit: int | None = None,
+    limit: int | None = Query(None, ge=1),
     kind: str | None = None,
     semantic: bool | None = None,
     no_snapshot: bool = False,
@@ -536,9 +551,11 @@ async def get_curation_queue(
     Composes the existing read diagnostics (lint, links/corpus-links suggest, the
     contested digest, quality) into one leverage-ranked, snooze-filtered worklist;
     no new detection logic. ``limit`` overrides ``curation.session_size`` for
-    one call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,
+    one call and is clamped to ``storage.max_page_size``;
+    ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,
     ``contested``); ``semantic`` runs the LLM-assisted finders (defaults to
-    ``curation.semantic``). 400 on an unknown ``kind``.
+    ``curation.semantic``), and a request that runs them is rate-limited like
+    ``/query``. 400 on an unknown ``kind``.
 
     Served from the persisted collection, which the nightly
     consolidation cycle or ``POST /curation/rebuild`` writes. A store with no
@@ -558,9 +575,12 @@ async def get_curation_queue(
                 status_code=400, detail=f"Unknown kind {kind!r}. Valid: {valid}."
             ) from exc
 
+    semantic_on = get_config().curation.semantic if semantic is None else semantic
+    if semantic_on:
+        enforce_rate_limit(request)
     result = await build_curation_queue(
         session,
-        limit=limit,
+        limit=_bounded_limit(limit, default=get_config().curation.session_size),
         kind=kind_enum,
         semantic=semantic,
         source=QueueSource.LIVE if no_snapshot else QueueSource.SNAPSHOT,
@@ -570,7 +590,6 @@ async def get_curation_queue(
     # open (account-level failure), report it so the client can say so.
     # A snapshot records the breaker state at *build* time, which is the honest
     # answer for cards it is serving.
-    semantic_on = get_config().curation.semantic if semantic is None else semantic
     return CurationQueueResponse(
         cards=result.cards,
         count=result.count,
@@ -589,13 +608,18 @@ async def get_curation_queue(
 
 
 @app.get("/curation/cards/{key:path}", response_model=CurationCard, responses=_ERR404)
-async def get_curation_card_endpoint(key: str, session: SessionDep, _auth: AuthDep) -> CurationCard:
+async def get_curation_card_endpoint(
+    key: str, request: Request, session: SessionDep, _auth: AuthDep
+) -> CurationCard:
     """Return one open curation card by its key, with every belief it names briefed.
 
     The queue previews five beliefs of a ``subjectless_source`` card;
     this read lists them all, each resolvable on its own ``no_subject`` key. It
-    runs the same live checks as ``GET /curation``. 404 when no open card has
-    the key."""
+    runs the same live checks as ``GET /curation``, and is rate-limited like it
+    when ``curation.semantic`` is on, since a lookup with no snapshot collects the
+    queue with the model. 404 when no open card has the key."""
+    if get_config().curation.semantic:
+        enforce_rate_limit(request)
     card = await get_curation_card(session, key)
     if card is None:
         raise HTTPException(status_code=404, detail=f"No open card with key {key!r}.")
@@ -616,6 +640,7 @@ class CurationRebuildResponse(BaseModel):
 async def rebuild_curation_endpoint(
     session: SessionDep,
     _auth: AuthDep,
+    _rl: RateLimitDep,
     semantic: bool | None = None,
 ) -> CurationRebuildResponse:
     """Rebuild the persisted curation collection store-wide.
@@ -627,7 +652,8 @@ async def rebuild_curation_endpoint(
     loading state for it. An async 202 + poll variant waits on a resident
     process to host job state (tracked).
 
-    Requires the write bearer: it mutates the cache."""
+    Requires the write bearer: it mutates the cache. Rate-limited like
+    ``/query``, since a semantic rebuild drives paid probes store-wide."""
     result = await rebuild_curation_snapshot(session, semantic=semantic)
     return CurationRebuildResponse(
         snapshot_id=result.snapshot_id,
@@ -868,9 +894,11 @@ class DepositTextRequest(BaseModel):
     author_id: str | None = None
     uri_r: str | None = None
     mutability: str | None = None
-    # enrols the entry in the local refresh loop
-    # (``"LAZY"``). Reconciled onto an existing entry even when the content is
-    # unchanged; ``None`` leaves any stored policy alone.
+    # ``"LAZY"`` asks the engine to re-check the source later.
+    # Reconciled onto an existing entry even when the content is unchanged;
+    # ``None`` leaves any stored policy alone. Over HTTP, LAZY is refused (400)
+    # unless ``uri_r`` is http(s): the local refresh loop would read a file:// path
+    # on the engine host, which a remote caller must never choose (D2).
     fetch_policy: str | None = None
     content_published_at: datetime | None = None
 
@@ -929,13 +957,28 @@ async def corpus_deposit_url(
     return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(unchanged))
 
 
-@app.post("/corpus/deposit/text", response_model=DepositResponse, responses={**_ERR400})
+@app.post(
+    "/corpus/deposit/text",
+    response_model=DepositResponse,
+    responses={
+        **_ERR400,
+        409: {
+            "model": ErrorResponse,
+            "description": "uri_r is held by an entry this route cannot change",
+        },
+    },
+)
 async def corpus_deposit_text(
     req: DepositTextRequest, session: StoreWriteSessionDep, _auth: AuthDep
 ) -> DepositResponse:
     """Deposit raw text into the corpus (no fetch).
 
-    ``store`` selects the target store (404 on an unknown handle)."""
+    ``store`` selects the target store (404 on an unknown handle).
+    ``fetch_policy`` ``LAZY`` is refused with 400 unless ``uri_r`` is an http(s)
+    URL, because the engine would later re-read a ``file://`` path from its own
+    disk. A ``uri_r`` already held by a non-http(s) ``LAZY`` entry (a file the
+    engine refreshes from its own disk) is refused with 409, as is a deposit
+    whose ``source_type`` differs from the entry it would join."""
     if req.uri_r is not None:
         # Versioned path: stable per-source entry identity,
         # caller-chosen mutability, unchanged re-deposit skipped.
@@ -951,6 +994,46 @@ async def corpus_deposit_text(
             raise HTTPException(
                 status_code=400, detail=f"Unknown fetch_policy {req.fetch_policy!r}"
             ) from exc
+        if fetch_policy is FetchPolicy.LAZY and not is_network_uri(req.uri_r):
+            # A LAZY entry is re-read later by the engine itself. Over HTTP the
+            # caller is not on the engine host, so a file:// URI-R names the
+            # engine's files, not the caller's (security review 2026-10-23, D2).
+            # A local deposit (CLI, hook, rules sync) never comes through here.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "fetch_policy LAZY needs an http(s) uri_r over HTTP: the engine "
+                    "cannot re-read a file on the caller's host. Deposit with "
+                    "fetch_policy NEVER, or run the deposit against a local store."
+                ),
+            )
+        from particles.corpus.store import get_entry_by_uri
+
+        existing = await get_entry_by_uri(session, req.uri_r)
+        if (
+            existing is not None
+            and existing.fetch_policy is FetchPolicy.LAZY
+            and not is_network_uri(existing.uri_r or "")
+        ):
+            # The engine enrolled this file from its own disk (rules sync, the
+            # local harvest). An HTTP caller appending to it would replace the
+            # file's content until the next refresh (security review N19).
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "uri_r names a file the engine refreshes from its own disk; it "
+                    "cannot be written over HTTP."
+                ),
+            )
+        if existing is not None and existing.source_type != req.source_type:
+            # A retype would also move the entry's re-fetch floor (N19).
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"uri_r is held by a {existing.source_type} entry; a deposit over "
+                    f"HTTP cannot change it to {req.source_type}."
+                ),
+            )
         entry_id, snapshot_id, unchanged = await deposit_text_versioned(
             session,
             text=req.text,
@@ -1312,13 +1395,13 @@ class NarrativeArticleResponse(BaseModel):
     responses=_ERR404,
 )
 async def get_narrative_synthesis(
-    particle_id: str, session: SessionDep, _auth: AuthDep
+    particle_id: str, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
 ) -> NarrativeArticleResponse:
     """Render a NARRATIVE as one cited prose article.
 
     Traverses the SEQUENCE_IN chain and runs the article-synthesis engine
-    (LLM call; structured-listing fallback on failure). 404 if the particle
-    does not exist or is not a NARRATIVE."""
+    (LLM call; structured-listing fallback on failure), rate-limited like
+    ``/query``. 404 if the particle does not exist or is not a NARRATIVE."""
     from particles.operations.narrative_synthesis import synthesize_narrative
     from particles.store.particle_store import get_particle
 
@@ -1490,7 +1573,11 @@ async def run_lint_endpoint(
 
     ``fix`` defaults to ``False``; pass ``fix: true`` to
     apply structural status transitions (STALENESS, RETRACTION_CASCADE,
-    CORPUS_LINK_INTEGRITY)."""
+    CORPUS_LINK_INTEGRITY). A fixing run changes belief status with the
+    operator's authority, so it is refused (503) under the dev-key skip, even
+    from loopback; a report-only run is served as before."""
+    if req.fix:
+        require_operator_credential()
     # Rate-limit only the semantic path (security review F6): it drives the paid
     # LLM contradiction check, whereas a structural-only lint (``semantic=False``)
     # makes no model call and stays unthrottled.
@@ -1531,18 +1618,25 @@ class LinksSuggestRequest(BaseModel):
 
 @app.post("/links/suggest", response_model=SuggestReport)
 async def run_links_suggest(
-    req: LinksSuggestRequest, session: SessionDep, _auth: AuthDep
+    req: LinksSuggestRequest, request: Request, session: SessionDep, _auth: AuthDep
 ) -> SuggestReport:
     """Propose (and optionally resolve) co-evidential candidate links.
 
     Mirrors the ``particles links suggest`` CLI. Returns ``409`` when
     ``APPLY`` would link more pairs than the confirm threshold and
-    ``confirmed`` was not set."""
+    ``confirmed`` was not set. The judging modes call the model per pair, so
+    they are rate-limited like ``/query``; ``REPORT`` is not. ``APPLY`` links
+    pairs with the operator's authority, so it is refused (503) under the
+    dev-key skip, even from loopback."""
     from particles.operations.links_suggest import (
         ApplyConfirmationRequired,
         suggest_co_evidential,
     )
 
+    if req.mode is SuggestMode.APPLY:
+        require_operator_credential()
+    if req.mode != SuggestMode.REPORT:
+        enforce_rate_limit(request)
     try:
         return await suggest_co_evidential(
             session,
@@ -1575,8 +1669,8 @@ class CorpusLinksSuggestRequest(BaseModel):
     ``limit`` / ``min_sources`` default to ``citation_signal.rank_cap`` /
     ``citation_signal.min_distinct_sources`` when omitted."""
 
-    limit: int | None = None
-    min_sources: int | None = None
+    limit: int | None = Field(default=None, ge=1)
+    min_sources: int | None = Field(default=None, ge=1)
 
 
 class CorpusLinksDismissRequest(BaseModel):
@@ -1604,7 +1698,8 @@ async def run_corpus_links_suggest(
     or deposited."""
     from particles.operations.deposit_suggest import suggest_deposits
 
-    return await suggest_deposits(session, limit=req.limit, min_sources=req.min_sources)
+    limit = None if req.limit is None else _bounded_limit(req.limit)
+    return await suggest_deposits(session, limit=limit, min_sources=req.min_sources)
 
 
 @app.post("/corpus/links/dismiss", response_model=CorpusLinksDismissResponse)
@@ -1717,7 +1812,9 @@ class ReindexRequest(BaseModel):
     # minor of the SDK's schema major. Opt-in, like the CLI flag; auto-discovery
     # only, like ``include_failed``.
     include_schema_stale: bool = False
-    rate_limit_per_minute: int = 100
+    # Pace of the re-extraction loop. Bounded (security review D37): 0 used to
+    # mean unpaced, and a caller could pick any pace at all.
+    rate_limit_per_minute: int = Field(default=100, ge=1, le=600)
     # Compute and return the work plan without extracting (zero LLM calls,
     # zero writes); the response carries per-snapshot detail in ``plan``.
     dry_run: bool = False
@@ -1769,11 +1866,15 @@ class ReconcileRequest(BaseModel):
 
 @app.post("/reconcile", response_model=ReconcileResponse)
 async def run_reconcile(
-    req: ReconcileRequest, session: SessionDep, _auth: AuthDep
+    req: ReconcileRequest, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
 ) -> ReconcileResponse:
     """Run the cross-entry document-supersession sweep: demote
     superseded claims the intra-entry extract path never reconciles. v1 is
-    single-trust-order only and covers the document-supersession mode."""
+    single-trust-order only and covers the document-supersession mode. A run that
+    demotes is refused (503) under the dev-key skip, even from loopback; a
+    ``dry_run`` report is served as before."""
+    if not req.dry_run:
+        require_operator_credential()
     result = await reconcile_supersession(session, dry_run=req.dry_run)
     return ReconcileResponse.model_validate(result)
 
@@ -1950,12 +2051,13 @@ class SplitSubjectResponse(BaseModel):
     responses=_ERR404,
 )
 async def split_subject_endpoint(
-    subject_id: str, req: SplitSubjectRequest, session: WriteSessionDep, _auth: AuthDep
+    subject_id: str, req: SplitSubjectRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> SplitSubjectResponse:
     """Re-bind misjoined particles off a source Subject onto a new Subject the
     resolver canonicalises (HTTP mirror of `subjects split`). 404 if
     the source Subject is absent; 400 on an empty particle list or a bad target
-    identity."""
+    identity. Refused (503) under the dev-key skip, even from loopback: it
+    needs a real bearer."""
     from particles.ingest.subject_resolver import split_subject_resolving
     from particles.store.subject_store import get_subject
 
@@ -2391,11 +2493,16 @@ class ParticleTagsResponse(BaseModel):
 
 @app.post("/particles/{particle_id}/tags", response_model=ParticleTagsResponse)
 async def add_particle_tags_endpoint(
-    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: AuthDep
+    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> ParticleTagsResponse:
-    """Add tags to a particle (HTTP mirror of `particle tag`). Idempotent."""
+    """Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.
+
+    The operator form: it tags any belief, so it needs a real bearer (503 under
+    the dev-key skip) and 403 when belief writes are disabled. An agent
+    tags its own beliefs through `POST /particles/tag`."""
     from particles.store.taxonomy_store import add_particle_tags
 
+    _require_belief_writes_enabled()
     added = await add_particle_tags(session, particle_id, req.tags)
     await session.commit()
     return ParticleTagsResponse(particle_id=particle_id, tags=added)
@@ -2403,11 +2510,14 @@ async def add_particle_tags_endpoint(
 
 @app.delete("/particles/{particle_id}/tags", response_model=ParticleTagsResponse)
 async def remove_particle_tags_endpoint(
-    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: AuthDep
+    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> ParticleTagsResponse:
-    """Remove tags from a particle (HTTP mirror of `particle untag`). Idempotent."""
+    """Remove tags from a particle (HTTP mirror of `particle untag`). Idempotent.
+
+    The operator form, gated like `POST /particles/{particle_id}/tags`."""
     from particles.store.taxonomy_store import remove_particle_tags
 
+    _require_belief_writes_enabled()
     removed = await remove_particle_tags(session, particle_id, req.tags)
     await session.commit()
     return ParticleTagsResponse(particle_id=particle_id, tags=removed)
@@ -2434,12 +2544,17 @@ class LinkDeleteResponse(BaseModel):
 
 @app.post("/links", response_model=ParticleRelation, responses=_ERR400)
 async def create_link_endpoint(
-    req: LinkRequest, session: WriteSessionDep, _auth: AuthDep
+    req: LinkRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> ParticleRelation:
-    """Create a typed relation between two particles (HTTP mirror of `links add`)."""
+    """Create a typed relation between two particles (HTTP mirror of `links add`).
+
+    The operator form: it links any two beliefs, so it needs a real bearer (503
+    under the dev-key skip) and 403 when belief writes are disabled.
+    An agent links its own beliefs through `POST /particles/link`."""
     from particles.core.schema import RelationType
     from particles.operations.agent_write import link_particles
 
+    _require_belief_writes_enabled()
     try:
         rtype = RelationType(req.relation_type)
     except ValueError as exc:
@@ -2463,12 +2578,16 @@ async def create_link_endpoint(
 
 @app.delete("/links", response_model=LinkDeleteResponse, responses=_ERR400)
 async def delete_link_endpoint(
-    req: LinkRequest, session: WriteSessionDep, _auth: AuthDep
+    req: LinkRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> LinkDeleteResponse:
-    """Delete a typed relation between two particles (HTTP mirror of `links remove`)."""
+    """Delete a typed relation between two particles (HTTP mirror of `links remove`).
+
+    It removes a relation of any provenance, a judged one included, so it is
+    gated like `POST /links`."""
     from particles.core.schema import RelationType
     from particles.store.relation_store import delete_relation
 
+    _require_belief_writes_enabled()
     try:
         rtype = RelationType(req.relation_type)
     except ValueError as exc:
@@ -2497,9 +2616,12 @@ class SubjectAliasResponse(BaseModel):
     responses=_ERR404,
 )
 async def add_subject_aliases_endpoint(
-    subject_id: str, req: SubjectAliasRequest, session: WriteSessionDep, _auth: AuthDep
+    subject_id: str, req: SubjectAliasRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> SubjectAliasResponse:
-    """Append aliases to a subject (HTTP mirror of `subjects alias`). 404 if absent."""
+    """Append aliases to a subject (HTTP mirror of `subjects alias`). 404 if absent.
+
+    An alias steers every later resolution, so it needs a real bearer (503 under
+    the dev-key skip)."""
     from particles.store.subject_store import add_aliases, get_subject
 
     if await get_subject(session, subject_id) is None:
@@ -2597,7 +2719,11 @@ async def merge_subjects_many_endpoint(
     particles and aliases fold into the target, recorded as one operator event.
     Every source is checked before anything is written, so one bad source
     refuses the whole merge. 404 if a subject is absent or was already merged;
-    400 if a source is the target or is listed twice."""
+    400 if a source is the target or is listed twice. A real merge is refused
+    (503) under the dev-key skip, even from loopback; a `dry_run` plan is served
+    as before."""
+    if not req.dry_run:
+        require_operator_credential()
     return await _merge_subjects_response(
         session, req.source_ids, req.target_id, dry_run=req.dry_run
     )
@@ -2609,12 +2735,13 @@ async def merge_subjects_many_endpoint(
     responses={**_ERR404, **_ERR400},
 )
 async def merge_subjects_endpoint(
-    source_id: str, req: SubjectMergeRequest, session: WriteSessionDep, _auth: AuthDep
+    source_id: str, req: SubjectMergeRequest, session: WriteSessionDep, _auth: OperatorAuthDep
 ) -> SubjectMergeResponse:
     """Merge one source subject into a target (the one-source form of `POST /subjects/merge`).
 
     Irreversible: the source is deleted and its particles + aliases fold into the
-    target. 404 if either subject is absent; 400 on an invalid merge."""
+    target. 404 if either subject is absent; 400 on an invalid merge. Refused
+    (503) under the dev-key skip, even from loopback."""
     return await _merge_subjects_response(session, [source_id], req.target_id, dry_run=False)
 
 
@@ -2776,6 +2903,9 @@ class ParticleRetractRequest(BaseModel):
 
     particle_id: str
     reason: str
+    # the project a project-bound agent surface retracts as. With it,
+    # a belief not in view for that project is refused (400).
+    project_key: str | None = None
 
 
 class ParticleRetractEndpointResponse(BaseModel):
@@ -2787,7 +2917,11 @@ class ParticleRetractEndpointResponse(BaseModel):
 
 @app.post("/particles/assert", response_model=AgentWriteResult, responses=_ERR400)
 async def particle_assert_endpoint(
-    req: ParticleAssertRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
+    req: ParticleAssertRequest,
+    session: StoreSessionDep,
+    store: StoreDep,
+    _auth: AuthDep,
+    _rl: RateLimitDep,
 ) -> AgentWriteResult:
     """Assert a belief through the §6.6 ladder (HTTP mirror of MCP ``particle_assert``).
 
@@ -2796,7 +2930,9 @@ async def particle_assert_endpoint(
     operator or reviewer retired (it is held for review), and
     ``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a
     granularity / provenance violation; 403 when belief writes are disabled for
-    the store; 404 on an unknown ``store``."""
+    the store; 404 on an unknown ``store``. Rate-limited like
+    ``/query``: the reconciliation ladder's contradiction and update probes call
+    the model."""
     _require_belief_writes_enabled(store)
     try:
         result = await assert_belief(
@@ -2819,12 +2955,17 @@ async def particle_assert_endpoint(
 
 @app.post("/particles/supersede", response_model=AgentWriteResult, responses=_ERR400)
 async def particle_supersede_endpoint(
-    req: ParticleSupersedeRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
+    req: ParticleSupersedeRequest,
+    session: StoreSessionDep,
+    store: StoreDep,
+    _auth: AuthDep,
+    _rl: RateLimitDep,
 ) -> AgentWriteResult:
     """Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;
     operator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or
     granularity violation; 403 when belief writes are disabled for
-    the store; 404 on an unknown ``store``."""
+    the store; 404 on an unknown ``store``. Rate-limited like
+    ``particle_assert``, whose ladder it runs."""
     _require_belief_writes_enabled(store)
     try:
         result = await supersede_belief(
@@ -2857,11 +2998,119 @@ async def particle_retract_endpoint(
     the store; 404 on an unknown ``store``."""
     _require_belief_writes_enabled(store)
     try:
-        await retract_belief(session, store=store, particle_id=req.particle_id, reason=req.reason)
+        await retract_belief(
+            session,
+            store=store,
+            particle_id=req.particle_id,
+            reason=req.reason,
+            project_key=req.project_key,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await session.commit()
     return ParticleRetractEndpointResponse(particle_id=req.particle_id, verdict="RETRACTED")
+
+
+class AgentLinkRequest(BaseModel):
+    """An agent's link or unlink between two of its beliefs (MCP ``link_add`` /
+    ``link_remove``). Only ``CO_EVIDENTIAL`` is agent-writable."""
+
+    particle_a: str
+    particle_b: str
+    relation_type: str = "CO_EVIDENTIAL"
+    # set by a project-bound agent surface, not by the agent.
+    project_key: str | None = None
+
+
+class AgentTagRequest(BaseModel):
+    """An agent's tag or untag of one of its beliefs (MCP ``particle_tag`` /
+    ``particle_untag``)."""
+
+    particle_id: str
+    tags: list[str]
+    # set by a project-bound agent surface, not by the agent.
+    project_key: str | None = None
+
+
+@app.post("/particles/link", response_model=ParticleRelation, responses=_ERR400)
+async def agent_link_endpoint(
+    req: AgentLinkRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
+) -> ParticleRelation:
+    """Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both
+    endpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for
+    ``project_key``. 400 on a guard violation; 403 when belief writes are
+    disabled for the store; 404 on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
+    try:
+        relation = await link_beliefs(
+            session,
+            req.particle_a,
+            req.particle_b,
+            relation_type=req.relation_type,
+            project_key=req.project_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return relation
+
+
+@app.post("/particles/unlink", response_model=LinkDeleteResponse, responses=_ERR400)
+async def agent_unlink_endpoint(
+    req: AgentLinkRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
+) -> LinkDeleteResponse:
+    """Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on
+    a guard violation, including a link an agent did not write; 403 when belief
+    writes are disabled for the store; 404 on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
+    try:
+        deleted = await unlink_beliefs(
+            session,
+            req.particle_a,
+            req.particle_b,
+            relation_type=req.relation_type,
+            project_key=req.project_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return LinkDeleteResponse(deleted=deleted)
+
+
+@app.post("/particles/tag", response_model=ParticleTagsResponse, responses=_ERR400)
+async def agent_tag_endpoint(
+    req: AgentTagRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
+) -> ParticleTagsResponse:
+    """Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a
+    guard violation; 403 when belief writes are disabled for the store; 404 on
+    an unknown ``store``."""
+    _require_belief_writes_enabled(store)
+    try:
+        added = await tag_belief(
+            session, particle_id=req.particle_id, tags=req.tags, project_key=req.project_key
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return ParticleTagsResponse(particle_id=req.particle_id, tags=added)
+
+
+@app.post("/particles/untag", response_model=ParticleTagsResponse, responses=_ERR400)
+async def agent_untag_endpoint(
+    req: AgentTagRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
+) -> ParticleTagsResponse:
+    """Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on
+    a guard violation; 403 when belief writes are disabled for the store; 404
+    on an unknown ``store``."""
+    _require_belief_writes_enabled(store)
+    try:
+        removed = await untag_belief(
+            session, particle_id=req.particle_id, tags=req.tags, project_key=req.project_key
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return ParticleTagsResponse(particle_id=req.particle_id, tags=removed)
 
 
 # ---------------------------------------------------------------------------
@@ -3064,9 +3313,11 @@ async def relink_gated_endpoint(
 
 
 @app.post("/db/init", response_model=StatusResponse)
-async def db_init(_auth: AuthDep) -> StatusResponse:
+async def db_init(_auth: OperatorAuthDep) -> StatusResponse:
     """Idempotently create database tables. Safe to call on a
-    fully-initialised store; existing tables are not touched."""
+    fully-initialised store; existing tables are not touched. It migrates the
+    store, an operator step, so it is refused (503) under the dev-key skip;
+    the local CLI's `db init` runs in-process."""
     await create_tables()
     return StatusResponse(status="tables created")
 

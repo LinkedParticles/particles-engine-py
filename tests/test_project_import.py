@@ -418,3 +418,16 @@ def test_deposit_project_exported_via_operations_shim() -> None:
     from particles.operations.deposit import deposit_project as op_deposit_project
 
     assert op_deposit_project is corpus_deposit_project
+
+
+def test_project_walk_lists_no_symlinked_file(tmp_path: Path) -> None:
+    """``import project`` skips a symlinked source file (security review N24)."""
+    from particles.corpus.deposit import iter_project_files
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "real.py").write_text("x = 1\n")
+    secret = tmp_path / "secret.py"
+    secret.write_text("TOKEN = 'secret'\n")
+    (root / "planted.py").symlink_to(secret)
+    assert iter_project_files(root) == [root / "real.py"]

@@ -115,12 +115,18 @@ async def create_relation(
     relation_type: RelationType,
     created_by: RelationCreatedBy,
     confidence: float = 1.0,
+    *,
+    actor: str = "links-add",
 ) -> ParticleRelation:
     """Create a relation between two particles.
 
     The pair is canonicalised so insertion order does not matter. A relation
     between a particle and itself is rejected — a particle does not
     corroborate itself.
+
+    ``actor`` is recorded on the ``RELATION_ADDED`` event of a manual or an
+    agent link, so an MCP agent's link is credited to its asserter identity
+    rather than to the operator's `links add`.
 
     Returns the persisted ``ParticleRelation``. Raises ``ValueError`` for
     self-relations.
@@ -147,12 +153,13 @@ async def create_relation(
         )
     )
     await session.flush()
-    # only the manual `links add` operator action is logged.
-    # LLM_JUDGE / EXTRACTOR_DIRECT relations are not operator decisions.
-    if created_by == RelationCreatedBy.MANUAL_CLI:
+    # only a deliberate link (the operator's `links add`, an agent's
+    # `link_add`) is logged. LLM_JUDGE / EXTRACTOR_DIRECT relations are not
+    # decisions anyone made.
+    if created_by in (RelationCreatedBy.MANUAL_CLI, RelationCreatedBy.AGENT_ASSERTED):
         await record_event(
             session,
-            actor="links-add",
+            actor=actor,
             event_type=OperatorEventType.RELATION_ADDED,
             refs=[(EventRefKind.PARTICLE, a), (EventRefKind.PARTICLE, b)],
             payload={"relation_type": relation_type.value, "confidence": confidence},
@@ -178,6 +185,15 @@ async def record_observer_divergence(
         session, a, b, RelationType.CONTRADICTS, RelationCreatedBy.OBSERVER_DIVERGENCE
     )
     return True
+
+
+async def get_relation(
+    session: AsyncSession, particle_a: str, particle_b: str, relation_type: RelationType
+) -> ParticleRelation | None:
+    """The one stored relation of ``relation_type`` between the pair, or ``None``."""
+    a, b = _endpoints_for_write(particle_a, particle_b, relation_type)
+    row = await session.get(ParticleRelationRow, (a, b, relation_type.value))
+    return row.to_model() if row is not None else None
 
 
 async def get_relations_for_particle(

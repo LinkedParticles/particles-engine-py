@@ -3,7 +3,7 @@
   "name": "org.linkedparticles/particles",
   "title": "Particles",
   "description": "An append-only ledger of sourced, dated, confidence-scored claims your agent cites and you audit",
-  "version": "1.210.2",
+  "version": "1.214.1",
   "websiteUrl": "https://docs.linkedparticles.org/cli/#mcp-server",
   "repository": {
     "url": "https://github.com/LinkedParticles/particles-engine-py",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "linkedparticles",
-      "version": "1.210.2",
+      "version": "1.214.1",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
@@ -56,14 +56,13 @@
         },
         {
           "name": "DATABASE_URL",
-          "description": "SQLAlchemy URL of the belief store to serve. Defaults to `sqlite+aiosqlite:///./particles.db` in the working directory.",
+          "description": "SQLAlchemy URL of the belief store to serve, used as given. Without it, and without PARTICLES_CONFIG, the server serves `~/.particles/particles.db` and never a store in the directory it starts in.",
           "isRequired": false,
-          "isSecret": false,
-          "default": "sqlite+aiosqlite:///./particles.db"
+          "isSecret": false
         },
         {
           "name": "PARTICLES_CONFIG",
-          "description": "Path to a `config.yaml` holding the rest of the engine's settings — additional stores, model selection per purpose, and the `mcp.write.enabled_stores` allowlist that turns the write tools on.",
+          "description": "Path to the config file holding the rest of the server's settings: additional stores, model selection per purpose, and the `mcp.write.enabled_stores` allowlist that turns the write tools on. This is the supported way to give the server settings. Without it the server reads `~/.particles/config.yaml`, never a `config.yaml` in the directory it starts in. When you set it, also set `DATABASE_URL` to an absolute path or name one as `storage.database_url` in the file: a server started with a config file refuses to serve a store from its working directory.",
           "isRequired": false,
           "isSecret": false,
           "format": "filepath"

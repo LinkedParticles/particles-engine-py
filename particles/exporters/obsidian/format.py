@@ -22,7 +22,11 @@ from __future__ import annotations
 import re
 
 from particles.core.schema import Particle, Subject
-from particles.render.markdown import SubjectNaming
+from particles.render.markdown import (
+    SubjectNaming,
+    neutralize_inline_markdown,
+    neutralize_link_label,
+)
 
 # Sequential citation markers shown in the body. Index 0 is a dummy so
 # the table can be indexed by 1-based ordinal directly.
@@ -138,7 +142,7 @@ def _claim_for_heading(content: str) -> str:
     level. Collapse internal whitespace and strip leading ``#``-runs.
     """
     cleaned = _WHITESPACE_RUN_FOR_HEADING.sub(" ", content).strip()
-    return cleaned.lstrip("#").strip() or "(empty claim)"
+    return neutralize_inline_markdown(cleaned.lstrip("#").strip()) or "(empty claim)"
 
 
 def _render_obsidian_reference_entry(
@@ -289,7 +293,7 @@ def _render_narratives_section(narratives: list[Particle], narrative_naming: dic
         slug = narrative_naming.get(n.id)
         if slug is None:
             continue
-        links.append(f"- [[Narratives/{slug}|{n.content}]]")
+        links.append(f"- [[Narratives/{slug}|{neutralize_link_label(n.content)}]]")
     if not links:
         return ""
     return "## Narratives\n\n" + "\n".join(links) + "\n"

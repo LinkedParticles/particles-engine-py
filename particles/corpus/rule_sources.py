@@ -40,7 +40,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.observer_scope import project_tag
-from particles.core.schema import FetchPolicy, Mutability
+from particles.core.schema import CorpusEntry, FetchPolicy, Mutability
+from particles.corpus.local_read import read_local_file
+from particles.corpus.rule_roots import record_rule_source_roots
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +53,11 @@ RULE_SOURCE_TAG = "rule-file"
 #: ``source_type`` for a rule document. This is floored at 0 s, so the
 #: nightly cadence is the only rate limit on re-checking it.
 RULE_SOURCE_TYPE = "LOCAL_MARKDOWN"
+
+
+def is_rule_source(entry: CorpusEntry) -> bool:
+    """True when ``entry`` was taken in as a rule file (``AGENTS.md``, ``CLAUDE.md``, …)."""
+    return RULE_SOURCE_TAG in (entry.tags or [])
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,9 @@ class RuleSourceResolution:
     discovered: bool
     truncated: int = 0
     missing: list[Path] = field(default_factory=list)
+    escaped: list[Path] = field(default_factory=list)
+    """Rule-file names that resolve outside their root, or onto a file that is not
+    a rule file, and so were not taken in (security review D23)."""
 
 
 @dataclass
@@ -112,9 +122,19 @@ def discover_default_roots(cwd: Path | None = None) -> list[Path]:
     return roots
 
 
-def _expand(raw: str) -> Path:
+def expand_path(raw: str) -> Path:
     """``~`` and ``$VAR`` expansion, then absolutise."""
     return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+
+
+def rule_source_roots(paths: list[str] | None = None, *, cwd: Path | None = None) -> list[Path]:
+    """The roots a resolution walks: ``paths``, else ``rule_sources.paths``, else discovery.
+
+    Shared with the local refresh tier's root allowlist (``corpus/fetch.py``),
+    so a file ``rules sync`` enrols is a file the refresh will read.
+    """
+    raw = list(paths) if paths else list(get_config().rule_sources.paths)
+    return [expand_path(p) for p in raw] if raw else discover_default_roots(cwd)
 
 
 def resolve_rule_sources(
@@ -135,20 +155,20 @@ def resolve_rule_sources(
     and sorted, so the set is stable across runs and across root ordering.
     """
     cfg = get_config().rule_sources
-    raw = list(paths) if paths else list(cfg.paths)
-    discovered = not raw
-    roots = [_expand(p) for p in raw] if raw else discover_default_roots(cwd)
+    discovered = not (paths or cfg.paths)
+    roots = rule_source_roots(paths, cwd=cwd)
 
     filenames = set(cfg.filenames)
     exclude = set(cfg.exclude_dirs)
     found: set[Path] = set()
     missing: list[Path] = []
+    escaped: list[Path] = []
 
     for root in roots:
         if root.is_file():
             found.add(root)
         elif root.is_dir():
-            found.update(_walk(root, filenames, exclude, cfg.max_depth))
+            found.update(_walk(root, filenames, exclude, cfg.max_depth, escaped))
         else:
             missing.append(root)
 
@@ -164,16 +184,32 @@ def resolve_rule_sources(
         discovered=discovered,
         truncated=truncated,
         missing=missing,
+        escaped=escaped,
     )
 
 
-def _walk(root: Path, filenames: set[str], exclude: set[str], max_depth: int) -> list[Path]:
+def _walk(
+    root: Path,
+    filenames: set[str],
+    exclude: set[str],
+    max_depth: int,
+    escaped: list[Path] | None = None,
+) -> list[Path]:
     """Breadth-first walk of ``root`` collecting ``filenames``, depth-capped.
 
     Written as an explicit queue rather than ``rglob`` because the denylist has
     to prune *subtrees* — ``rglob`` would still descend into a 40k-file
     ``node_modules`` and filter afterwards.
+
+    A match is kept as its resolved path only when that path is still a rule
+    file under ``root`` (security review D23): a cloned repository's
+    ``CLAUDE.md`` symlinked to any file the user can read would otherwise be
+    deposited. ``CLAUDE.md`` linked to the same repository's ``AGENTS.md`` is
+    kept. The rule is the refresh tier's (:func:`particles.corpus.fetch.is_refresh_allowed`),
+    so an intake never takes in a file the refresh would refuse. A refused
+    match lands in ``escaped``.
     """
+    real_root = root.resolve()
     out: list[Path] = []
     queue: list[tuple[Path, int]] = [(root, 0)]
     while queue:
@@ -188,8 +224,33 @@ def _walk(root: Path, filenames: set[str], exclude: set[str], max_depth: int) ->
                 if depth < max_depth and child.name not in exclude and not child.is_symlink():
                     queue.append((child, depth + 1))
             elif child.name in filenames:
-                out.append(child.resolve())
+                target = child.resolve()
+                if target.name in filenames and target.is_relative_to(real_root):
+                    out.append(target)
+                else:
+                    log.warning(
+                        "rule_sources: %s resolves to %s, outside %s or not a rule file; skipped",
+                        child,
+                        target,
+                        root,
+                    )
+                    if escaped is not None:
+                        escaped.append(child)
     return out
+
+
+def rule_file_admitted(roots: list[Path]) -> Callable[[Path], bool]:
+    """Containment over a resolution's roots, judged on a resolved path (security review D23).
+
+    A path is admitted when it is a registered file root itself, or a file named
+    in ``rule_sources.filenames`` under a root. The sync judges the descriptor
+    it reads with this, so a name swapped after the walk is not followed out.
+    """
+    filenames = set(get_config().rule_sources.filenames)
+    real_roots = [r.resolve() for r in roots]
+    return lambda real: any(
+        real == r or (real.name in filenames and real.is_relative_to(r)) for r in real_roots
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,15 +340,25 @@ async def sync_rule_sources(
     One unreadable file does not stop the sweep; it lands in
     :attr:`RuleSyncReport.failed`. Does not commit — the caller owns the
     transaction.
+
+    Every resolved root that exists is recorded, in the same transaction, as
+    a root the local refresh may read rule files under,
+    including a path passed for this one call: the operator named it. A dry
+    run records nothing.
     """
     from particles.corpus.deposit import deposit_text_versioned
 
     resolution = resolve_rule_sources(paths, cwd=cwd)
     report = RuleSyncReport(resolution=resolution)
+    admitted = rule_file_admitted(resolution.roots)
+    max_bytes = get_config().local_files.max_bytes
 
     for path in resolution.files:
         try:
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            read = read_local_file(
+                path, follow_symlinks=True, max_bytes=max_bytes, allowed=admitted
+            )
+            raw = read.content.decode("utf-8", errors="replace")
             text = filter_text(raw)
         except OSError as exc:
             report.failed.append((path, str(exc)))
@@ -302,7 +373,7 @@ async def sync_rule_sources(
             report.deposited.append((path, ""))
             continue
         try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+            mtime = datetime.fromtimestamp(read.stat.st_mtime, tz=UTC)
             entry_id, _snapshot_id, unchanged = await deposit_text_versioned(
                 session,
                 text=text,
@@ -319,4 +390,8 @@ async def sync_rule_sources(
             continue
         (report.unchanged if unchanged else report.deposited).append((path, entry_id))
 
+    if not dry_run:
+        await record_rule_source_roots(
+            session, [root for root in resolution.roots if root.exists()], by=deposited_by
+        )
     return report

@@ -35,8 +35,12 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import subprocess
+import textwrap
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -196,19 +200,90 @@ _ALLOWLISTED_RAW_CLIENT_FILES = {
 }
 
 
+_CLIENT_VERBS = frozenset({"get", "post", "put", "patch", "delete", "stream", "request", "send"})
+
+# Callables that hand back an httpx client: the two choke-point factories and
+# httpx's own constructors (which the construction ratchet below confines to
+# particles/http.py).
+_CLIENT_FACTORIES = frozenset({"particles_client", "egress_client", "AsyncClient", "Client"})
+
+
+def _callee_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_client_annotation(node: ast.expr | None) -> bool:
+    if node is None:
+        return False
+    text = ast.unparse(node)
+    return "AsyncClient" in text or "httpx.Client" in text
+
+
+def _client_names(tree: ast.Module) -> set[str]:
+    """Names a module binds to an httpx client, whatever they are called (D44).
+
+    The literal ``client.`` regex misses ``async with egress_client(…) as api:``
+    followed by ``api.post(…)``, and a parameter annotated ``httpx.AsyncClient``
+    under any name. Both are collected here.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With | ast.AsyncWith):
+            for item in node.items:
+                expr = item.context_expr
+                if (
+                    isinstance(expr, ast.Call)
+                    and _callee_name(expr.func) in _CLIENT_FACTORIES
+                    and isinstance(item.optional_vars, ast.Name)
+                ):
+                    names.add(item.optional_vars.id)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if _callee_name(node.value.func) in _CLIENT_FACTORIES:
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            args = node.args
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+                if _is_client_annotation(arg.annotation):
+                    names.add(arg.arg)
+    return names
+
+
+def _aliased_client_call_lines(tree: ast.Module) -> list[int]:
+    """Lines calling a client verb on a name bound to a client, or on ``self.*client``."""
+    names = _client_names(tree)
+    lines = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in _CLIENT_VERBS:
+            continue
+        receiver = node.func.value
+        if (isinstance(receiver, ast.Name) and receiver.id in names) or (
+            isinstance(receiver, ast.Attribute) and receiver.attr.lower().endswith("client")
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
 def _files_with_raw_client_calls(subdirs: list[str] | None = None) -> dict[str, list[int]]:
     roots = [_PARTICLES_ROOT / d for d in subdirs] if subdirs else [_PARTICLES_ROOT]
     hits: dict[str, list[int]] = {}
     for root in roots:
         for path in root.rglob("*.py"):
             rel = path.relative_to(_PARTICLES_ROOT).as_posix()
-            lines = [
+            text = path.read_text()
+            lines = {
                 i
-                for i, line in enumerate(path.read_text().splitlines(), start=1)
+                for i, line in enumerate(text.splitlines(), start=1)
                 if _RAW_CLIENT_CALL.search(line)
-            ]
+            }
+            lines.update(_aliased_client_call_lines(ast.parse(text)))
             if lines:
-                hits[rel] = lines
+                hits[rel] = sorted(lines)
     return hits
 
 
@@ -255,6 +330,27 @@ class TestEgressChokePointEnforced:
         present = set(_files_with_raw_client_calls().keys())
         stale = _ALLOWLISTED_RAW_CLIENT_FILES - present
         assert stale == set(), f"Allow-list entries no longer issue raw client calls: {stale}"
+
+    def test_detector_follows_a_client_under_any_name(self) -> None:
+        """D44: the ratchet reads the binding, not the literal spelling ``client.``."""
+        source = textwrap.dedent(
+            """
+            async def a():
+                async with egress_client(purpose="x") as api:
+                    await api.post("https://example.invalid")
+
+            async def b(http: httpx.AsyncClient) -> None:
+                await http.get("https://example.invalid")
+
+            class C:
+                async def c(self) -> None:
+                    await self._http_client.send(request)
+
+            async def d(resp):
+                resp.json()  # a response read is not a call
+            """
+        )
+        assert sorted(_aliased_client_call_lines(ast.parse(source))) == [4, 7, 11]
 
 
 # ---------------------------------------------------------------------------
@@ -345,35 +441,104 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
 }
 
 
-def _spawn_binary(call: ast.Call) -> str | None:
-    """Return the argv head of a subprocess spawn, or None if not a spawn call."""
-    func = call.func
-    if not isinstance(func, ast.Attribute):
-        return None
-    is_spawn = func.attr in _ASYNCIO_SPAWNS or (
-        func.attr in _SUBPROCESS_SPAWNS
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "subprocess"
-    )
-    if not is_spawn:
+# ``os`` / ``pty`` spawns, keyed to the position of the program argument
+# (``os.system`` and ``os.popen`` take a shell string, whose first word is
+# read; ``os.spawn*`` takes a mode first).
+_OS_SPAWNS: dict[str, int] = {
+    "system": 0,
+    "popen": 0,
+    **{name: 0 for name in ("execl", "execle", "execlp", "execlpe")},
+    **{name: 0 for name in ("execv", "execve", "execvp", "execvpe")},
+    **{name: 1 for name in ("spawnl", "spawnle", "spawnlp", "spawnlpe")},
+    **{name: 1 for name in ("spawnv", "spawnve", "spawnvp", "spawnvpe")},
+    "posix_spawn": 0,
+    "posix_spawnp": 0,
+}
+
+
+class _SpawnImports:
+    """How a module spells the spawn seams, so an alias cannot hide one (D44).
+
+    ``import subprocess as sp`` / ``from subprocess import run`` /
+    ``from asyncio import create_subprocess_exec`` / ``import os as _os`` /
+    ``from os import system`` are all followed; a literal ``subprocess.``
+    receiver is no longer required.
+    """
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.subprocess_modules = {"subprocess"}
+        self.os_modules = {"os", "pty"}
+        # local name -> (seam family, attribute)
+        self.direct: dict[str, tuple[str, str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    if alias.name == "subprocess":
+                        self.subprocess_modules.add(local)
+                    elif alias.name in ("os", "pty"):
+                        self.os_modules.add(local)
+            elif isinstance(node, ast.ImportFrom) and node.module in (
+                "subprocess",
+                "asyncio",
+                "os",
+                "pty",
+            ):
+                for alias in node.names:
+                    self.direct[alias.asname or alias.name] = (node.module, alias.name)
+
+    def seam(self, func: ast.expr) -> tuple[str, str] | None:
+        """``(family, attribute)`` when ``func`` names a spawn seam, else None."""
+        if isinstance(func, ast.Attribute):
+            if func.attr in _ASYNCIO_SPAWNS:
+                return ("asyncio", func.attr)
+            if isinstance(func.value, ast.Name):
+                if func.value.id in self.subprocess_modules and func.attr in _SUBPROCESS_SPAWNS:
+                    return ("subprocess", func.attr)
+                if func.value.id in self.os_modules and (
+                    func.attr in _OS_SPAWNS or func.attr == "spawn"
+                ):
+                    return ("os", func.attr)
+            return None
+        if isinstance(func, ast.Name) and func.id in self.direct:
+            family, attr = self.direct[func.id]
+            if family == "asyncio" and attr in _ASYNCIO_SPAWNS:
+                return ("asyncio", attr)
+            if family == "subprocess" and attr in _SUBPROCESS_SPAWNS:
+                return ("subprocess", attr)
+            if family in ("os", "pty") and (attr in _OS_SPAWNS or attr == "spawn"):
+                return ("os", attr)
         return None
 
-    if not call.args:
-        return _DYNAMIC
-    head = call.args[0]
-    # ``subprocess.run(["git", …])`` passes a list; the async form passes the
-    # program as the first positional.
-    if isinstance(head, ast.List | ast.Tuple):
-        head = head.elts[0] if head.elts else head
-    if isinstance(head, ast.Constant) and isinstance(head.value, str):
-        return Path(head.value).name
+
+def _literal_program(node: ast.expr, *, shell_string: bool) -> str:
+    if isinstance(node, ast.List | ast.Tuple):
+        node = node.elts[0] if node.elts else node
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        text = node.value.split()[0] if shell_string and node.value.split() else node.value
+        return Path(text).name
     return _DYNAMIC
+
+
+def _spawn_binary(call: ast.Call, imports: _SpawnImports | None = None) -> str | None:
+    """Return the argv head of a subprocess spawn, or None if not a spawn call."""
+    seam = (imports or _SpawnImports(ast.Module(body=[], type_ignores=[]))).seam(call.func)
+    if seam is None:
+        return None
+    family, attr = seam
+    position = _OS_SPAWNS.get(attr, 0) if family == "os" else 0
+    if len(call.args) <= position:
+        return _DYNAMIC
+    return _literal_program(
+        call.args[position], shell_string=family == "os" and attr in ("system", "popen")
+    )
 
 
 class _SpawnVisitor(ast.NodeVisitor):
     """Collect (enclosing function, argv head) for every subprocess spawn."""
 
-    def __init__(self) -> None:
+    def __init__(self, imports: _SpawnImports | None = None) -> None:
+        self.imports = imports
         self.stack: list[str] = []
         self.found: list[tuple[str, str]] = []
 
@@ -386,24 +551,42 @@ class _SpawnVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = _visit_func  # noqa: N815
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        binary = _spawn_binary(node)
+        binary = _spawn_binary(node, self.imports)
         if binary is not None:
             self.found.append((self.stack[-1] if self.stack else "<module>", binary))
         self.generic_visit(node)
+
+
+def _spawn_sites_in(tree: ast.Module) -> list[tuple[str, str]]:
+    visitor = _SpawnVisitor(_SpawnImports(tree))
+    visitor.visit(tree)
+    return visitor.found
 
 
 def _network_subprocess_sites() -> dict[tuple[str, str, str], int]:
     """Every network-capable subprocess spawn in particles/, with its call count."""
     sites: dict[tuple[str, str, str], int] = {}
     for path in _PARTICLES_ROOT.rglob("*.py"):
-        visitor = _SpawnVisitor()
-        visitor.visit(ast.parse(path.read_text()))
-        for func_name, binary in visitor.found:
+        for func_name, binary in _spawn_sites_in(ast.parse(path.read_text())):
             if binary not in _NETWORK_BINARIES and binary != _DYNAMIC:
                 continue
             key = (path.relative_to(_PARTICLES_ROOT).as_posix(), func_name, binary)
             sites[key] = sites.get(key, 0) + 1
     return sites
+
+
+def _git_spawning_files() -> set[str]:
+    """Files that spawn git: a literal ``git`` argv head, or a dynamic spawn beside a ``"git"``."""
+    files: set[str] = set()
+    for path in _PARTICLES_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        heads = {binary for _func, binary in _spawn_sites_in(tree)}
+        names_git = any(
+            isinstance(node, ast.Constant) and node.value == "git" for node in ast.walk(tree)
+        )
+        if "git" in heads or (_DYNAMIC in heads and names_git):
+            files.add(path.relative_to(_PARTICLES_ROOT).as_posix())
+    return files
 
 
 class TestSubprocessEgressInventory:
@@ -452,6 +635,55 @@ class TestSubprocessEgressInventory:
             assert "resolve_and_pin" in _SUBPROCESS_EGRESS_ALLOWLIST[key][1]
             source = (_PARTICLES_ROOT / key[0]).read_text()
             assert "resolve_and_pin" in source, f"{key[0]} no longer pins its egress"
+
+    def test_detector_follows_spawn_aliases(self) -> None:
+        """D44: an aliased module, a from-import or an ``os`` spawn is still a spawn."""
+        source = textwrap.dedent(
+            """
+            import os as _os
+            import subprocess as sp
+            from asyncio import create_subprocess_exec as spawn
+            from subprocess import Popen
+
+            def a():
+                sp.run(["git", "status"])
+                Popen(["curl", "https://example.invalid"])
+                _os.system("wget https://example.invalid")
+                _os.execvp("ssh", ["ssh", "host"])
+                _os.spawnlp(_os.P_WAIT, "rsync", "rsync")
+
+            async def b(cmd):
+                await spawn(*cmd)
+            """
+        )
+        assert _spawn_sites_in(ast.parse(source)) == [
+            ("a", "git"),
+            ("a", "curl"),
+            ("a", "wget"),
+            ("a", "ssh"),
+            ("a", "rsync"),
+            ("b", _DYNAMIC),
+        ]
+
+    def test_every_git_spawn_runs_no_program_a_config_names(self) -> None:
+        """N13 / D22: a git child must not run a filter, fsmonitor or driver it is handed.
+
+        The allow-list above classifies the git process; it cannot see the
+        programs git itself starts from a repository's or the user's config. A
+        local-only site passes ``url_safety.GIT_LOCAL_ARGS``; a site over a
+        fetched repository runs under ``url_safety.isolated_git_env``.
+        """
+        files = _git_spawning_files()
+        assert "ingest/importers/github.py" in files
+        unhardened = sorted(
+            rel
+            for rel in files
+            if not {"GIT_LOCAL_ARGS", "isolated_git_env"}
+            & set(re.findall(r"\w+", (_PARTICLES_ROOT / rel).read_text()))
+        )
+        assert unhardened == [], (
+            f"git subprocess without url_safety.GIT_LOCAL_ARGS or isolated_git_env: {unhardened}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -504,3 +736,170 @@ class TestClientConstructionRatchet:
                 f"{rel}:{line} builds anthropic.Anthropic without http_client=; pass "
                 "anthropic.DefaultHttpxClient(event_hooks={'request': [egress_request_hook(...)]})"
             )
+
+
+# ---------------------------------------------------------------------------
+# The programs git starts by itself (N13, SECURITY_REVIEW_20261024-1; D22,
+# SECURITY_REVIEW_20261023-1). Real git over local repositories only.
+# ---------------------------------------------------------------------------
+
+
+def _run_git(*args: str, env: dict[str, str] | None = None) -> None:
+    subprocess.run(["git", *args], check=True, capture_output=True, env=env)
+
+
+def _marker_script(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    """A script that touches a marker file (and passes stdin through, as a filter does)."""
+    marker = tmp_path / f"{name}.ran"
+    script = tmp_path / f"{name}.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script, marker
+
+
+@pytest.fixture
+def planted_fsmonitor(tmp_path: Path) -> tuple[Path, Path]:
+    """A checkout whose own ``.git/config`` names a program as ``core.fsmonitor``."""
+    repo = tmp_path / "checkout"
+    _run_git("init", "-q", str(repo))
+    (repo / "tracked.txt").write_text("x\n", encoding="utf-8")
+    _run_git("-C", str(repo), "add", "tracked.txt")
+    monitor, marker = _marker_script(tmp_path, "fsmonitor")
+    _run_git("-C", str(repo), "config", "core.fsmonitor", str(monitor))
+    # The plant is live: an unhardened listing runs it.
+    _run_git("-C", str(repo), "ls-files")
+    assert marker.exists()
+    marker.unlink()
+    return repo, marker
+
+
+class TestLocalGitRunsNoRepositoryProgram:
+    """D22: a "local-only" git query must not run the checkout's ``core.fsmonitor``."""
+
+    def test_subjects_fold_listing(self, planted_fsmonitor: tuple[Path, Path]) -> None:
+        from particles.api.cli.subjects import _checkout_files
+
+        repo, marker = planted_fsmonitor
+        _key, files = _checkout_files(repo)
+        assert files == ["tracked.txt"]
+        assert not marker.exists()
+
+    def test_hook_doctor_query(self, planted_fsmonitor: tuple[Path, Path]) -> None:
+        from particles.api.cli.hook import _git
+
+        repo, marker = planted_fsmonitor
+        assert _git(repo, "ls-files") == "tracked.txt"
+        assert not marker.exists()
+
+    def test_projection_commit(self, planted_fsmonitor: tuple[Path, Path]) -> None:
+        import asyncio
+
+        from particles.api.cli._projection_git import commit_projection
+
+        repo, marker = planted_fsmonitor
+        _run_git("-C", str(repo), "config", "user.name", "Test Operator")
+        _run_git("-C", str(repo), "config", "user.email", "op@example.test")
+        _run_git("-C", str(repo), "config", "commit.gpgsign", "false")
+        memory = repo / "memory"
+        memory.mkdir()
+        (memory / "MEMORY.md").write_text("- a belief `p-aaaa11`\n", encoding="utf-8")
+        status = asyncio.run(
+            commit_projection(
+                memory,
+                store="default",
+                outcome="created",
+                body="- a belief `p-aaaa11`\n",
+                snapshot=None,
+                run_id="deadbeef",
+            )
+        )
+        assert status.startswith("committed")
+        assert not marker.exists()
+
+
+class TestGistCloneRunsNoConfiguredFilter:
+    """N13: a filter driver from the user's config never runs for a fetched tree."""
+
+    def test_isolated_env_neutralises_a_global_filter_driver(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.url_safety import isolated_git_env
+
+        # The importing host's own config defines a smudge driver, as a stock
+        # `git lfs install` defines filter.lfs.* globally.
+        home = tmp_path / "home"
+        home.mkdir()
+        smudge, marker = _marker_script(tmp_path, "smudge")
+        (home / ".gitconfig").write_text(
+            f'[filter "planted"]\n\tsmudge = {smudge}\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+
+        # The fetched repository assigns that driver to its files.
+        src = tmp_path / "gist"
+        _run_git("init", "-q", str(src))
+        (src / ".gitattributes").write_text("*.md filter=planted\n", encoding="utf-8")
+        (src / "notes.md").write_text("hello\n", encoding="utf-8")
+        _run_git("-C", str(src), "add", ".")
+        _run_git(
+            "-C",
+            str(src),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "init",
+        )
+
+        # Under the user's config the driver runs: the plant is live.
+        _run_git("clone", "-q", f"file://{src}", str(tmp_path / "plain"))
+        assert marker.exists()
+        marker.unlink()
+
+        # Under the isolated env it does not, and the file still checks out.
+        empty_home = tmp_path / "empty-home"
+        empty_home.mkdir()
+        env = isolated_git_env(os.environ, home=str(empty_home))
+        env["GIT_ALLOW_PROTOCOL"] = "file"  # the test clones a local path
+        _run_git("clone", "-q", f"file://{src}", str(tmp_path / "isolated"), env=env)
+        assert not marker.exists()
+        assert (tmp_path / "isolated" / "notes.md").read_text(encoding="utf-8") == "hello\n"
+
+    def test_clone_spawns_git_under_the_isolated_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import asyncio
+        import ipaddress
+
+        from particles.ingest.importers import github
+
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'filter.x.smudge=evil'")
+        monkeypatch.setenv("GIT_SSL_NO_VERIFY", "1")
+        seen: list[dict[str, str]] = []
+
+        async def fake_exec(*_argv: str, env: dict[str, str], **_kw: Any) -> Any:
+            seen.append(env)
+            proc = MagicMock()
+            proc.returncode = 128
+            proc.communicate = AsyncMock(return_value=(b"", b"stopped by the test"))
+            return proc
+
+        monkeypatch.setattr(github.asyncio, "create_subprocess_exec", fake_exec)
+        with pytest.raises(ValueError, match="stopped by the test"):
+            asyncio.run(
+                github._clone_gist_files(
+                    "abc123", resolve=lambda _h: [ipaddress.ip_address("140.82.112.3")]
+                )
+            )
+        (env,) = seen
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert env["GIT_LFS_SKIP_SMUDGE"] == "1"
+        assert env["GIT_ALLOW_PROTOCOL"] == "https"
+        assert env["HOME"] != os.environ.get("HOME")
+        assert "GIT_CONFIG_PARAMETERS" not in env
+        assert "GIT_SSL_NO_VERIFY" not in env

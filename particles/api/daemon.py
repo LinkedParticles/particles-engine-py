@@ -115,7 +115,10 @@ class DaemonTaskStatus(BaseModel):
     last_finished_at: datetime | None = None
     #: Short human summary of the last iteration (e.g. ``"skipped: not due…"``).
     last_outcome: str | None = None
-    #: ``"ExcType: message"`` of the most recent failure; cleared on success.
+    #: The exception type of the most recent failure (``"OperationalError"``);
+    #: cleared on success. Never its message: ``/health`` is unauthenticated, and
+    #: a database or fetch error's text carries statements, bound parameters and
+    #: URLs (security review 2026-10-24, N8). The message is in the engine log.
     last_error: str | None = None
 
 
@@ -196,7 +199,7 @@ async def _poll_loop(status: DaemonTaskStatus, interval: IntervalFn, work: Work)
             raise
         except Exception as exc:  # noqa: BLE001 — a failing tick must not kill the task
             status.failures += 1
-            status.last_error = f"{type(exc).__name__}: {exc}"
+            status.last_error = _error_label(exc)
             status.last_outcome = "failed"
             log.exception("daemon task %r failed; continuing on its schedule", status.name)
         else:
@@ -210,6 +213,11 @@ async def _poll_loop(status: DaemonTaskStatus, interval: IntervalFn, work: Work)
         except asyncio.CancelledError:
             status.state = "stopped"
             raise
+
+
+def _error_label(exc: BaseException) -> str:
+    """What ``/health`` says about a failure: the exception type, never its text."""
+    return f"{type(exc).__name__} (message in the engine log)"
 
 
 def _on_task_done(status: DaemonTaskStatus, task: asyncio.Task[None]) -> None:
@@ -226,8 +234,8 @@ def _on_task_done(status: DaemonTaskStatus, task: asyncio.Task[None]) -> None:
         log.error("daemon task %r exited unexpectedly", status.name)
         return
     status.state = "crashed"
-    status.last_error = f"{type(exc).__name__}: {exc}"
-    log.error("daemon task %r crashed: %s", status.name, status.last_error, exc_info=exc)
+    status.last_error = _error_label(exc)
+    log.error("daemon task %r crashed: %s", status.name, exc, exc_info=exc)
 
 
 # ---------------------------------------------------------------------------

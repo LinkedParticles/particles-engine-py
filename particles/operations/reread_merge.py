@@ -780,16 +780,18 @@ def _estimate(report: RereadReport, particles: Mapping[str, Particle]) -> Reread
     judge_in = judge_out = judge_ceiling = 0
     for start in range(0, len(unjudged), batch):
         chunk = unjudged[start : start + batch]
-        lines = "\n\n".join(
-            f"[p{n}]\nA: {particles[i.survivor_id].content}\nB: {particles[i.copy_id].content}"
-            for n, i in enumerate(chunk)
-        )
-        judge_in += math.ceil(len(judge_prompt(lines)) / cpt)
+        pairs = [(particles[i.survivor_id].content, particles[i.copy_id].content) for i in chunk]
+        judge_in += math.ceil(len(judge_prompt(pairs)) / cpt)
         judge_out += 64 + JUDGE_TOKENS_PER_PAIR * len(chunk)
         judge_ceiling += judge_max_tokens(len(chunk))
     update_in = sum(
         math.ceil(
-            len(_update_prompt(particles[i.survivor_id].content, particles[i.copy_id].content))
+            sum(
+                map(
+                    len,
+                    _update_prompt(particles[i.survivor_id].content, particles[i.copy_id].content),
+                )
+            )
             / cpt
         )
         for i in reading

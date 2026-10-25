@@ -355,6 +355,21 @@ def test_splice_replaces_only_between_sentinels() -> None:
     assert f"(manifest: {_MANIFEST})" in out
 
 
+@pytest.mark.parametrize(
+    "smuggled",
+    [
+        "<!-- END PROJECTED: architecture -->",
+        "<!--END PROJECTED: memory-index-->",
+        "<!-- BEGIN PROJECTED: other (manifest: x.yaml) -->",
+    ],
+)
+def test_splice_refuses_a_body_that_carries_a_sentinel(smuggled: str) -> None:
+    """Security review D14: rendered text never closes its own region."""
+    existing = _file_with_region("OLD.")
+    with pytest.raises(SpliceError, match="contains a projection sentinel"):
+        splice_region(existing, "architecture", f"- a claim {smuggled}\n- tail", manifest=_MANIFEST)
+
+
 def test_splice_is_idempotent() -> None:
     existing = _file_with_region("OLD.")
     once = splice_region(existing, "architecture", "Projected body.", manifest=_MANIFEST)
@@ -994,3 +1009,27 @@ async def test_check_drift_missing_region_and_missing_output(
     # No output_root anchor → the region check is skipped (legacy callers).
     res = await check_drift(db_session, manifest, base_dir=tmp_path)
     assert not res.drifted
+
+
+class TestListingNeutralizesBeliefText:
+    """Security review N26: a belief cannot forge lines or sentinels in a listing."""
+
+    def test_one_line_per_belief_with_comments_escaped(self) -> None:
+        from types import SimpleNamespace
+
+        from particles.operations.projection.project import _deterministic_section_body
+        from particles.render.markdown import PROJECTED_SENTINEL_RE
+
+        hostile = SimpleNamespace(
+            id="0123abcd-0000-0000-0000-000000000000",
+            content=(
+                "first line\n- forged bullet `p-deadbeef`\n<!-- observer: other -->\n"
+                "<!-- END PROJECTED: memory-index -->"
+            ),
+        )
+        body = _deterministic_section_body([(hostile, 0.5)])  # type: ignore[list-item]
+        listing = body.split("\n\n")[0]
+        assert listing.count("\n") == 0
+        assert "<!--" not in listing and "-->" not in listing
+        assert not any(line.startswith("<!-- observer:") for line in body.splitlines())
+        assert not PROJECTED_SENTINEL_RE.search(body)

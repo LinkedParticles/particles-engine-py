@@ -299,6 +299,7 @@ async def test_failing_iteration_is_logged_recorded_and_survived(
     assert status.runs >= 2
     # The failure is in the log …
     assert "boom" in caplog.text
+    assert status.failures == 1
     # … and the task recovered on the next iteration.
     assert status.last_outcome == "ok"
     assert status.last_error is None
@@ -324,7 +325,10 @@ async def test_a_dead_task_is_marked_crashed_and_makes_the_daemon_unhealthy(
     status = daemon_status()
     assert status.healthy is False
     assert status.tasks[0].state == "crashed"
-    assert status.tasks[0].last_error == "_Fatal: out of file descriptors"
+    # /health is unauthenticated, so it names the type and keeps the message in
+    # the log (security review 2026-10-24, N8).
+    assert status.tasks[0].last_error == "_Fatal (message in the engine log)"
+    assert "file descriptors" not in status.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -346,7 +350,7 @@ async def test_stop_daemon_cancels_and_resets(monkeypatch: pytest.MonkeyPatch) -
 def test_health_omits_the_daemon_block_when_off() -> None:
     from particles.api.app import app
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
         body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["daemon"] is None
@@ -362,7 +366,7 @@ def test_health_reports_degraded_when_a_task_crashed() -> None:
         state="crashed",
         last_error="RuntimeError: boom",
     )
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)) as client:
         body = client.get("/health").json()
     # Still a 200 — the API must not take itself down because a tick died — but
     # the disclosure is machine-readable.
@@ -411,3 +415,20 @@ class _FakeSessionScope:
 
 def _fake_session_scope(_store: str = "default") -> _FakeSessionScope:
     return _FakeSessionScope()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tick_reports_its_type_but_not_its_message() -> None:
+    """A tick's exception text can carry SQL parameters and URLs; /health is open (N8)."""
+
+    async def _leaky() -> str:
+        raise RuntimeError("UPDATE particles SET content='secret belief'")
+
+    status = DaemonTaskStatus(name="leaky", interval_seconds=0.0)
+    task = asyncio.create_task(_poll_loop(status, lambda: 3600.0, _leaky))
+    while status.failures < 1:
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert status.last_error == "RuntimeError (message in the engine log)"
+    assert "secret belief" not in status.model_dump_json()

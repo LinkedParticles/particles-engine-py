@@ -170,6 +170,13 @@ raise `ValueError`. `particles.render.markdown.atomic_write_text` is the
 shared write-then-rename helper; use it for files a user may have open
 (a vault note) so a crash never leaves a half-written file.
 
+Claim text comes from deposited documents and is untrusted. A Markdown
+exporter passes it through `particles.render.markdown.neutralize_inline_markdown`
+before writing it into a note, so HTML, embeds, remote images, inline links and
+Logseq macros in a claim render as text and the claim stays on one line. Text
+used as the visible label of a link the exporter writes goes through
+`neutralize_link_label` instead.
+
 ## API-target exporters & credentials
 
 If your exporter writes to an external HTTP API (it has `output=None`)

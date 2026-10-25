@@ -482,3 +482,16 @@ def test_deposit_web_clipper_exported_via_operations_shim() -> None:
     from particles.operations.deposit import deposit_web_clipper as op_fn
 
     assert op_fn is corpus_fn
+
+
+def test_clipper_walk_lists_no_symlinked_capture(tmp_path: Path) -> None:
+    """The captures scan (and the daemon watcher that runs it) skips links (security review N24)."""
+    from particles.corpus.deposit import _iter_clipper_markdown
+
+    root = tmp_path / "captures"
+    root.mkdir()
+    (root / "real.md").write_text("---\nsource: https://example.com/a\n---\nbody\n")
+    secret = tmp_path / "secret.md"
+    secret.write_text("SECRET\n")
+    (root / "planted.md").symlink_to(secret)
+    assert _iter_clipper_markdown(root) == [root / "real.md"]

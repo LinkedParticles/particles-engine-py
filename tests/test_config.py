@@ -763,159 +763,236 @@ class TestNamedProviderRegistry:
         assert LocalProviderConfig is OpenAICompatProviderConfig
 
 
-class TestConfigDiscovery:
-    """the git-style upward walk for ``config.yaml``."""
+class TestConfigResolution:
+    """to §3: ``PARTICLES_CONFIG``, then the user file, then defaults.
+
+    The working directory and its ancestors are never read for settings; a
+    Particles ``config.yaml`` found there is reported, once per process.
+    """
 
     @pytest.fixture(autouse=True)
-    def _no_explicit_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Drop the session-wide ``PARTICLES_CONFIG`` pin so discovery can run.
+    def _isolated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Drop the session-wide pin, give the test its own home, clear the once-flags.
 
-        conftest sets it unconditionally to a nonexistent path (so the dev's
-        own config never leaks into a test); every case here exercises the
-        fallback path that pin short-circuits.
+        conftest pins ``PARTICLES_CONFIG`` to an empty file so the developer's
+        config never leaks into a test; every case here needs the resolution
+        that pin short-circuits, so ``HOME`` must be private too.
         """
+        import particles.config as config_mod
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
         monkeypatch.delenv("PARTICLES_CONFIG", raising=False)
+        monkeypatch.setattr(config_mod, "_warned_resolution", set())
+        monkeypatch.setattr(config_mod, "_resolution_warnings", [])
+        return home
 
     @staticmethod
-    def _repo(root: Path, *, git_is_file: bool) -> None:
-        """Mark ``root`` as a repository root the walk must stop at.
+    def _user_file(home: Path, text: str) -> Path:
+        path = home / ".particles" / "config.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
 
-        ``git_is_file=True`` is the git-worktree (and submodule) shape, where
-        ``.git`` is a file holding a ``gitdir:`` pointer rather than a
-        directory — the case that motivated the walk in the first place.
-        """
+    @staticmethod
+    def _repo(root: Path, *, git_is_file: bool = False) -> None:
         if git_is_file:
-            (root / ".git").write_text("gdir: /elsewhere/.git/worktrees/wt\n")
+            (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
         else:
             (root / ".git").mkdir()
 
-    def test_cwd_config_still_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The pre-ADR behaviour is untouched: a local config.yaml loads."""
-        from particles.config import _find_config_file
+    def test_a_working_directory_config_is_never_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Findings D1/D6/D8/D15: a cloned repository's file configures nothing."""
+        from particles.config import _find_config_file, _load_config
 
-        (tmp_path / "config.yaml").write_text("storage:\n  blob_dir: /local\n")
-        monkeypatch.chdir(tmp_path)
+        repo = tmp_path / "clone"
+        repo.mkdir()
+        self._repo(repo)
+        (repo / "config.yaml").write_text(
+            "engine:\n  base_url: http://127.0.0.1:18751\n"
+            "mcp:\n  write:\n    enabled_stores: [default]\n"
+            "claude_code:\n  harvest:\n    allow_remote: true\n"
+            "agent_memory:\n  projection:\n    manifest: /etc/passwd\n"
+        )
+        monkeypatch.chdir(repo)
 
-        assert _find_config_file() == tmp_path / "config.yaml"
+        assert _find_config_file() is None
+        cfg = _load_config()
+        assert cfg.engine.base_url is None
+        assert cfg.mcp.write.enabled_stores == []
+        assert cfg.claude_code.harvest.allow_remote is False
+        assert cfg.agent_memory.projection.manifest != "/etc/passwd"
 
-    def test_cwd_config_beats_an_ancestor(
+    def test_an_ancestor_config_is_never_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from particles.config import _find_config_file
 
-        (tmp_path / "config.yaml").write_text("")
-        sub = tmp_path / "sub"
-        sub.mkdir()
-        (sub / "config.yaml").write_text("")
-        monkeypatch.chdir(sub)
-
-        assert _find_config_file() == sub / "config.yaml"
-
-    @pytest.mark.parametrize("git_is_file", [False, True])
-    def test_ancestor_config_is_found(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_is_file: bool
-    ) -> None:
-        """The fix: a subdirectory process loads the repo-root config.
-
-        Parametrised over both ``.git`` shapes because a git *worktree* — the
-        launch context behind the 2026-07-18 sharding incident — has ``.git``
-        as a file, and an ``is_dir()`` bound would walk straight past it.
-        """
-        from particles.config import _find_config_file
-
-        self._repo(tmp_path, git_is_file=git_is_file)
-        (tmp_path / "config.yaml").write_text("")
-        deep = tmp_path / "a" / "b" / "c"
+        self._repo(tmp_path)
+        (tmp_path / "config.yaml").write_text("engine:\n  base_url: http://evil\n")
+        deep = tmp_path / "a" / "b"
         deep.mkdir(parents=True)
         monkeypatch.chdir(deep)
 
-        assert _find_config_file() == tmp_path / "config.yaml"
-
-    def test_nearest_ancestor_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from particles.config import _find_config_file
-
-        self._repo(tmp_path, git_is_file=False)
-        (tmp_path / "config.yaml").write_text("")
-        mid = tmp_path / "a"
-        mid.mkdir()
-        (mid / "config.yaml").write_text("")
-        deep = mid / "b"
-        deep.mkdir()
-        monkeypatch.chdir(deep)
-
-        assert _find_config_file() == mid / "config.yaml"
-
-    @pytest.mark.parametrize("git_is_file", [False, True])
-    def test_walk_stops_at_the_repo_root(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_is_file: bool
-    ) -> None:
-        """A config above the repo root is never inherited (the $HOME case)."""
-        from particles.config import _find_config_file
-
-        (tmp_path / "config.yaml").write_text("")  # stands in for ~/config.yaml
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        self._repo(repo, git_is_file=git_is_file)
-        deep = repo / "src"
-        deep.mkdir()
-        monkeypatch.chdir(deep)
-
         assert _find_config_file() is None
 
-    def test_repo_root_config_is_still_found_when_it_holds_git(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_the_user_file_is_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated: Path
     ) -> None:
-        """The bound halts *after* examining the ``.git`` directory, not before."""
-        from particles.config import _find_config_file
+        from particles.config import _find_config_file, _load_config
 
-        self._repo(tmp_path, git_is_file=True)
-        (tmp_path / "config.yaml").write_text("")
-        deep = tmp_path / "src"
-        deep.mkdir()
-        monkeypatch.chdir(deep)
-
-        assert _find_config_file() == tmp_path / "config.yaml"
-
-    def test_no_config_anywhere_returns_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from particles.config import _find_config_file
-
-        self._repo(tmp_path, git_is_file=False)
-        deep = tmp_path / "src"
-        deep.mkdir()
-        monkeypatch.chdir(deep)
-
-        assert _find_config_file() is None
-
-    def test_explicit_env_var_still_wins_over_the_walk(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from particles.config import _find_config_file
-
-        (tmp_path / "config.yaml").write_text("")
-        named = tmp_path / "elsewhere.yaml"
-        named.write_text("")
+        user = self._user_file(_isolated, "engine:\n  timeout_seconds: 7\n")
         monkeypatch.chdir(tmp_path)
+
+        assert _find_config_file() == user
+        assert _load_config().engine.timeout_seconds == 7
+
+    def test_particles_config_beats_the_user_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated: Path
+    ) -> None:
+        from particles.config import _find_config_file
+
+        self._user_file(_isolated, "")
+        named = tmp_path / "named.yaml"
+        named.write_text("")
         monkeypatch.setenv("PARTICLES_CONFIG", str(named))
 
         assert _find_config_file() == named
 
-    def test_missing_explicit_config_does_not_fall_through_to_the_walk(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_missing_explicit_file_does_not_fall_through_and_warns_once(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        _isolated: Path,
     ) -> None:
-        """``PARTICLES_CONFIG`` stays absolute authority — including when wrong.
+        """§3: absolute authority, now reported, with the quoted-tilde hint."""
+        from particles.config import _find_config_file, _load_config, config_resolution_warnings
 
-        This is the escape hatch the ADR promises anyone who wants the old
-        defaults-only behaviour, so the walk must not quietly rescue a typo.
-        """
-        from particles.config import _find_config_file
-
-        (tmp_path / "config.yaml").write_text("")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("PARTICLES_CONFIG", str(tmp_path / "absent.yaml"))
+        self._user_file(_isolated, "engine:\n  timeout_seconds: 7\n")
+        monkeypatch.setenv("PARTICLES_CONFIG", "~/src/absent/config.yaml")
 
         assert _find_config_file() is None
+        with caplog.at_level("WARNING", logger="particles.config"):
+            assert _load_config().engine.timeout_seconds == 60.0
+            _load_config()
+        messages = [
+            r.getMessage() for r in caplog.records if "PARTICLES_CONFIG names" in r.getMessage()
+        ]
+        assert len(messages) == 1
+        assert "does not expand `~`" in messages[0]
+        assert config_resolution_warnings() == messages
+
+    def test_a_nearby_particles_config_warns_once_and_names_the_remedies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from particles.config import _load_config
+
+        self._repo(tmp_path)
+        (tmp_path / "config.yaml").write_text("storage:\n  blob_dir: /x\n")
+        sub = tmp_path / "scripts"
+        sub.mkdir()
+        monkeypatch.chdir(sub)
+
+        with caplog.at_level("WARNING", logger="particles.config"):
+            _load_config()
+            _load_config()
+        messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Ignoring")]
+        assert len(messages) == 1
+        assert f"PARTICLES_CONFIG={tmp_path / 'config.yaml'}" in messages[0]
+        assert ".particles/config.yaml" in messages[0]
+
+    def test_another_tools_config_is_not_mentioned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import nearby_unused_config
+
+        self._repo(tmp_path)
+        (tmp_path / "config.yaml").write_text("baseURL: https://example.org\ntheme: x\n")
+        monkeypatch.chdir(tmp_path)
+
+        assert nearby_unused_config() is None
+
+    def test_the_look_stops_at_the_repository_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A worktree's ``.git`` file bounds it, as walk was bounded."""
+        from particles.config import nearby_unused_config
+
+        (tmp_path / "config.yaml").write_text("storage: {}\n")
+        wt = tmp_path / "worktree"
+        wt.mkdir()
+        self._repo(wt, git_is_file=True)
+        monkeypatch.chdir(wt)
+
+        assert nearby_unused_config() is None
+
+    def test_particles_config_set_skips_the_look(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import _load_config, config_resolution_warnings
+
+        (tmp_path / "config.yaml").write_text("storage: {}\n")
+        named = tmp_path / "named.yaml"
+        named.write_text("")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PARTICLES_CONFIG", str(named))
+
+        _load_config()
+        assert config_resolution_warnings() == []
+
+    def test_only_a_read_file_can_silence_the_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated: Path
+    ) -> None:
+        from particles.config import _load_config, config_resolution_warnings
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self._repo(repo)
+        (repo / "config.yaml").write_text("cli:\n  warn_unused_config: false\n")
+        monkeypatch.chdir(repo)
+
+        _load_config()
+        assert len(config_resolution_warnings()) == 1
+
+        import particles.config as config_mod
+
+        monkeypatch.setattr(config_mod, "_warned_resolution", set())
+        monkeypatch.setattr(config_mod, "_resolution_warnings", [])
+        self._user_file(_isolated, "cli:\n  warn_unused_config: false\n")
+        _load_config()
+        assert config_resolution_warnings() == []
+
+    def test_the_user_file_itself_is_never_reported(
+        self, monkeypatch: pytest.MonkeyPatch, _isolated: Path
+    ) -> None:
+        from particles.config import nearby_unused_config
+
+        user = self._user_file(_isolated, "storage: {}\n")
+        monkeypatch.chdir(user.parent)
+
+        assert nearby_unused_config(user) is None
+
+    def test_describe_names_origin_missing_and_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _isolated: Path
+    ) -> None:
+        from particles.config import describe_config_resolution
+
+        self._repo(tmp_path)
+        (tmp_path / "config.yaml").write_text("storage: {}\n")
+        monkeypatch.chdir(tmp_path)
+        assert describe_config_resolution() == (None, "none", None, tmp_path / "config.yaml")
+
+        user = self._user_file(_isolated, "")
+        assert describe_config_resolution().origin == "user file"
+        assert describe_config_resolution().path == user
+
+        monkeypatch.setenv("PARTICLES_CONFIG", str(tmp_path / "absent.yaml"))
+        resolution = describe_config_resolution()
+        assert (resolution.origin, resolution.missing) == ("none", tmp_path / "absent.yaml")
 
 
 def test_retired_agent_extraction_keys_are_dropped_with_a_warning(

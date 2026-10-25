@@ -30,7 +30,9 @@ Also home to the synthesis prompt constants
 ``_SYNTHESIS_PROMPT_STRICT_LAYER_B``) and the helpers that interpolate
 particles + misalignments into them. The orchestrator
 (:mod:`orchestrate`) calls :func:`_build_synthesis_prompt` to produce
-each attempt's user message.
+each attempt's ``(system, user)`` pair: the instructions in the system turn,
+the subject name, the particle listing and any judge reasons in the user turn
+behind one per-call nonce fence (security review N31).
 
 This module is filesystem-blind — it returns Markdown strings; the
 exporter writes them.
@@ -332,15 +334,10 @@ Style:
   in the References section. Emitting your own definition produces a
   duplicate, and markdown footnote parsers silently drop the link.
 
-Output: the article body in Markdown, starting with the `# {title}` H1
-heading. No frontmatter; no preamble before the H1; no closing remarks
-after the last paragraph.
-
-----
-SUBJECT: {subject}
-PARTICLE LIST (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+Output: the article body in Markdown, starting with an H1 heading that is
+`# ` followed by the SUBJECT from the user message. No frontmatter; no
+preamble before the H1; no closing remarks after the last paragraph.
+"""
 
 
 # Flowing-prose first-attempt variant. Mirrors
@@ -394,15 +391,10 @@ Style:
   in the References section. Emitting your own definition produces a
   duplicate, and markdown footnote parsers silently drop the link.
 
-Output: the article body in Markdown, starting with the `# {title}` H1
-heading. No frontmatter; no preamble before the H1; no closing remarks
-after the last paragraph.
-
-----
-SUBJECT: {subject}
-PARTICLE LIST (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+Output: the article body in Markdown, starting with an H1 heading that is
+`# ` followed by the SUBJECT from the user message. No frontmatter; no
+preamble before the H1; no closing remarks after the last paragraph.
+"""
 
 
 _SYNTHESIS_PROMPT_STRICT = """\
@@ -432,21 +424,17 @@ Emit footnote *references* only (`[^p-xxxxxxxx]` inline). Do NOT emit any
 `[^p-xxxxxxxx]: …` *definition* lines — the exporter appends those.
 
 Style: short encyclopedic article, third person, under 400 words.
-Start with `# {title}`. No frontmatter; no closing References section.
+Start with `# ` followed by the SUBJECT from the user message. No frontmatter;
+no closing References section.
 
-----
-SUBJECT: {subject}
-ALLOWED CITATION PREFIXES: {allowed_ids}
-PARTICLE LIST (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+ALLOWED CITATION PREFIXES: {allowed_ids}"""
 
 
 _SYNTHESIS_PROMPT_STRICT_LAYER_B = """\
 PRIOR ATTEMPT FAILED SEMANTIC-ALIGNMENT VALIDATION.
 
-A judge reviewed your article and ruled that the following
-(claim, citation) pairs were misaligned — the cited particle either
+A judge reviewed your article and ruled that the (claim, citation) pairs
+listed in the user message were misaligned — the cited particle either
 contradicts the claim, or the particle isn't a necessary input to the
 claim and the citation looks ornamental.
 
@@ -475,17 +463,10 @@ Emit footnote *references* only (`[^p-xxxxxxxx]` inline). Do NOT emit any
 `[^p-xxxxxxxx]: …` *definition* lines — the exporter appends those.
 
 Style: short encyclopedic article, third person, under 400 words.
-Start with `# {title}`. No frontmatter; no closing References section.
+Start with `# ` followed by the SUBJECT from the user message. No frontmatter;
+no closing References section.
 
-MISALIGNED PAIRS FROM PRIOR ATTEMPT:
-{misalignments}
-
-----
-SUBJECT: {subject}
-ALLOWED CITATION PREFIXES: {allowed_ids}
-PARTICLE LIST (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+ALLOWED CITATION PREFIXES: {allowed_ids}"""
 
 
 _SYNTHESIS_PROMPT_NARRATIVE = """\
@@ -534,14 +515,10 @@ Style:
 - Emit footnote *references* only (`[^p-xxxxxxxx]` inline). Do NOT emit footnote
   *definition* lines (`[^p-xxxxxxxx]: …`).
 
-Output: the narrative body in Markdown, starting with the `# {title}` H1 heading.
+Output: the narrative body in Markdown, starting with an H1 heading that is
+`# ` followed by the NARRATIVE title from the user message.
 No frontmatter; no preamble before the H1; no closing remarks.
-
-----
-NARRATIVE: {subject}
-PARTICLE LIST IN ORDER (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+"""
 
 
 def _format_particles_for_prompt(particles: list[Particle], eff: dict[str, float]) -> str:
@@ -598,6 +575,38 @@ def _direction_block(direction: str | None) -> str:
     return f"\n{direction.strip()}\n"
 
 
+def _synthesis_user_turn(
+    *,
+    nonce: str,
+    subject: SynthesisTopic,
+    particle_block: str,
+    misalignments: list[dict[str, Any]] | None = None,
+    sequence_mode: bool = False,
+) -> str:
+    """The fenced user turn: subject name, particle listing, any judge reasons.
+
+    Each segment is stored or model-written text (an extracted subject name, the
+    claims, the Layer B judge's reasons), so each rides its own fence under the
+    one nonce the system turn names (security review N31).
+    """
+    from particles.llm import fence
+
+    parts: list[str] = []
+    if misalignments is not None:
+        parts.append(
+            "MISALIGNED PAIRS FROM PRIOR ATTEMPT:\n"
+            + fence(_format_misalignments_for_prompt(misalignments), nonce, label="misalignments")
+        )
+    heading = "NARRATIVE" if sequence_mode else "SUBJECT"
+    listing = "PARTICLE LIST IN ORDER" if sequence_mode else "PARTICLE LIST"
+    parts.append(f"{heading}:\n" + fence(subject.canonical_name, nonce, label="subject"))
+    parts.append(
+        f"{listing} (id_prefix, modality, effective_confidence, content):\n"
+        + fence(particle_block, nonce, label="particles")
+    )
+    return "\n\n".join(parts)
+
+
 def _build_synthesis_prompt(
     *,
     subject: SynthesisTopic,
@@ -609,8 +618,12 @@ def _build_synthesis_prompt(
     flowing: bool = False,
     direction: str | None = None,
     framing: str | None = None,
-) -> str:
-    """Render the user-message string for one subject's synthesis call.
+) -> tuple[str, str]:
+    """Render ``(system, user)`` for one subject's synthesis call.
+
+    The template's instructions, plus :func:`~particles.llm.data_fence_instruction`,
+    form the system turn; :func:`_synthesis_user_turn` builds the fenced user
+    turn under the same per-call nonce (security review N31).
 
     ``strict=False`` returns the standard first-attempt prompt.
     ``strict=True`` returns the retry prompt. When ``layer_b_misalignments``
@@ -633,52 +646,37 @@ def _build_synthesis_prompt(
     ``sequence_mode``, all three are first-attempt-only — strict retries reuse
     the citation-focused prompts, whose job is to fix citations.
     """
-    if strict and layer_b_misalignments is not None:
+    from particles.llm import data_fence_instruction, make_nonce
+
+    misalignments = layer_b_misalignments if strict else None
+    narrative = sequence_mode and not strict
+    if misalignments is not None:
         template = _SYNTHESIS_PROMPT_STRICT_LAYER_B
-        particle_block = _format_particles_for_prompt(particles, eff)
-        return template.format(
-            title=subject.canonical_name,
-            subject=subject.canonical_name,
-            allowed_ids=", ".join(_short_id(p.id) for p in particles),
-            particles=particle_block,
-            misalignments=_format_misalignments_for_prompt(layer_b_misalignments),
-        )
-
-    if sequence_mode and not strict:
-        particle_block = _format_particles_for_prompt(particles, eff)
-        return _SYNTHESIS_PROMPT_NARRATIVE.format(
-            title=subject.canonical_name,
-            subject=subject.canonical_name,
-            allowed_ids=", ".join(_short_id(p.id) for p in particles),
-            particles=particle_block,
-        )
-
-    if flowing and not strict:
-        particle_block = _format_particles_for_prompt(particles, eff)
-        return _SYNTHESIS_PROMPT_FLOWING.format(
-            title=subject.canonical_name,
-            subject=subject.canonical_name,
-            allowed_ids=", ".join(_short_id(p.id) for p in particles),
-            particles=particle_block,
-            framing=_framing_block(framing),
-            direction=_direction_block(direction),
-        )
-
-    template = _SYNTHESIS_PROMPT_STRICT if strict else _SYNTHESIS_PROMPT_STANDARD
-    particle_block = _format_particles_for_prompt(particles, eff)
-    # The strict templates carry no ``{framing}`` / ``{direction}`` placeholders
-    # (heading suppression and authoring briefs are first-attempt concerns); only
-    # the standard first-attempt prompt interpolates them. Passing the extra
-    # kwargs to ``str.format`` on the strict template is harmless — unused format
-    # kwargs are ignored — so the single call below serves both.
-    return template.format(
-        title=subject.canonical_name,
-        subject=subject.canonical_name,
+    elif narrative:
+        template = _SYNTHESIS_PROMPT_NARRATIVE
+    elif flowing and not strict:
+        template = _SYNTHESIS_PROMPT_FLOWING
+    else:
+        # The strict templates carry no ``{framing}`` / ``{direction}``
+        # placeholders (heading suppression and authoring briefs are
+        # first-attempt concerns); unused ``str.format`` kwargs are ignored, so
+        # the one call below serves every template.
+        template = _SYNTHESIS_PROMPT_STRICT if strict else _SYNTHESIS_PROMPT_STANDARD
+    instructions = template.format(
         allowed_ids=", ".join(_short_id(p.id) for p in particles),
-        particles=particle_block,
         framing=_framing_block(framing),
         direction=_direction_block(direction),
     )
+    nonce = make_nonce()
+    system = f"{instructions.rstrip()}\n\n{data_fence_instruction(nonce)}"
+    user = _synthesis_user_turn(
+        nonce=nonce,
+        subject=subject,
+        particle_block=_format_particles_for_prompt(particles, eff),
+        misalignments=misalignments,
+        sequence_mode=narrative,
+    )
+    return system, user
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from typing import Any
 
 from particles.core.schema import AudienceHint, QueryRequest, StructuralGroupBy, TimeWindow
 from particles.core.validity import window_end_of_day, window_for_day
+from particles.mcp.limits import admit
 from particles.mcp.observer import observer_for, scope_disclosure
 
 
@@ -201,6 +202,8 @@ async def query(
         observer_project=observer_for(all_projects),
         grounded=grounded,
     )
+    if question:
+        admit("query")  # the NL response is a model call (security review D30)
     backend = get_backend()
     resp = await backend.query(req)
     # mark each returned ACTIVE belief contested when an open

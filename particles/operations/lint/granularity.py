@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import LintFinding
 from particles.llm.breaker import PROBE_MAX_TOKENS
+from particles.llm.fencing import fenced_prompt
 from particles.operations._llm import _llm_call
 from particles.store.particle_store import get_active_particles
 
@@ -84,17 +85,21 @@ async def _check_granularity_violations(session: AsyncSession) -> list[LintFindi
     return findings
 
 
+_GRANULARITY_INSTRUCTIONS = (
+    "Does the text in the user message contain multiple independent, "
+    "separately-falsifiable claims? Answer with exactly one of:\n"
+    "- 'YES: <list the separate claims briefly>' if it contains multiple\n"
+    "- 'NO' if it contains a single atomic claim"
+)
+
+
 async def _llm_check_granularity(content: str) -> str | None:
     """Return a description of the violation or None if the particle is atomic."""
-    prompt = (
-        "Does this text contain multiple independent, separately-falsifiable claims? "
-        "Answer with exactly one of:\n"
-        "- 'YES: <list the separate claims briefly>' if it contains multiple\n"
-        "- 'NO' if it contains a single atomic claim\n\n"
-        f"Text: {content}"
-    )
+    # The particle's content is stored text: fenced, with the instruction in
+    # the system turn (security F3).
+    system, prompt = fenced_prompt(_GRANULARITY_INSTRUCTIONS, content, label="text")
     # Room for a model that thinks before it answers (see PROBE_MAX_TOKENS).
-    response = await _llm_call(prompt, max_tokens=PROBE_MAX_TOKENS)
+    response = await _llm_call(prompt, max_tokens=PROBE_MAX_TOKENS, system=system)
     if response and response.upper().startswith("YES"):
         return response[4:].strip()
     return None

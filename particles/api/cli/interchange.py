@@ -21,6 +21,7 @@ a non-empty target so it can never become a UUID-smuggling cross-store merge.
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import typer
@@ -33,21 +34,62 @@ class BundleEscapeError(Exception):
     """A bundle member resolves outside its bundle directory (security review F28)."""
 
 
-def _read_bundle_members(bundle: Path) -> dict[str, str]:
-    """Read a bundle directory's regular-file members, refusing escapes (F28).
+class BundleReadError(Exception):
+    """A bundle member is over the byte cap or is not UTF-8 text (security review D26)."""
 
-    Each member is resolved and asserted to be contained within the bundle root
-    before it is read: a member that is a symlink pointing outside the bundle
-    directory could otherwise redirect the read to an arbitrary local file
-    (security review F28). Mirrors the F1 containment idiom in
-    ``particles/render/markdown.py`` (``is_within_directory``). Raises
-    :class:`BundleEscapeError` on a member that escapes; the caller translates it
-    to a clean CLI error.
+
+#: Suffixes of the files a bundle can carry: the manifest, the particles and
+#: subjects members in either container, and a restore's ``*.corpus.jsonl``.
+_MEMBER_SUFFIXES = (".json", ".jsonl", ".yaml", ".yml")
+
+
+def _read_member_file(path: Path, root: Path | None) -> str:
+    """Read one bundle member through the size cap and, in a directory, containment.
+
+    The cap is the readers' own per-member cap (``read_jsonl`` / ``read_yaml_ld``),
+    checked here on the file's size before a byte is buffered (security review
+    N20, D26).
+    """
+    from particles.corpus.local_read import LocalReadRefused, read_local_file, within
+    from particles.interchange import jsonl
+
+    try:
+        read = read_local_file(
+            path,
+            follow_symlinks=True,
+            max_bytes=jsonl._MAX_BUNDLE_BYTES,
+            allowed=within(root) if root is not None else None,
+        )
+    except LocalReadRefused as exc:
+        if exc.errno == errno.EACCES:
+            raise BundleEscapeError(
+                f"bundle member {path.name!r} resolves outside the bundle "
+                f"directory {str(root)!r}; refusing to read (security review F28)."
+            ) from exc
+        raise BundleReadError(f"bundle member {path.name!r}: {exc.strerror}") from exc
+    try:
+        return read.content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BundleReadError(f"bundle member {path.name!r} is not UTF-8 text") from exc
+
+
+def _read_bundle_members(bundle: Path) -> dict[str, str]:
+    """Read a bundle directory's members, refusing escapes (F28) and oversized members.
+
+    Only a regular file with a member suffix (``.json``, ``.jsonl``, ``.yaml``,
+    ``.yml``) is read; anything else in the directory is left alone (security
+    review N20). Each member is read through one descriptor whose resolved path
+    must lie within the bundle root, so a member that is a symlink pointing
+    outside the bundle directory cannot redirect the read to an arbitrary local
+    file (security review F28), and a member over the per-member byte cap is
+    refused before it is buffered (D26). Raises :class:`BundleEscapeError` on a
+    member that escapes and :class:`BundleReadError` on one that is too large
+    or not text; the caller translates both to a clean CLI error.
     """
     root = bundle.resolve()
     files: dict[str, str] = {}
     for member in bundle.iterdir():
-        if not member.is_file():
+        if member.suffix.lower() not in _MEMBER_SUFFIXES or not member.is_file():
             continue
         try:
             contained = member.resolve().is_relative_to(root)
@@ -60,7 +102,7 @@ def _read_bundle_members(bundle: Path) -> dict[str, str]:
                 f"bundle member {member.name!r} resolves outside the bundle "
                 f"directory {str(bundle)!r}; refusing to read (security review F28)."
             )
-        files[member.name] = member.read_text(encoding="utf-8")
+        files[member.name] = _read_member_file(member, root)
     return files
 
 
@@ -131,7 +173,7 @@ async def _import(bundle: Path, store: str) -> None:
 
     try:
         files = _read_bundle_members(bundle)
-    except BundleEscapeError as exc:
+    except (BundleEscapeError, BundleReadError) as exc:
         typer.echo(f"Import failed: {exc}", err=True)
         raise typer.Exit(1) from exc
     async with session_scope(store) as session:
@@ -175,8 +217,8 @@ async def _restore(bundle: Path, store: str) -> None:
         if bundle.is_dir():
             files = _read_bundle_members(bundle)
         else:
-            files = {bundle.name: bundle.read_text(encoding="utf-8")}
-    except BundleEscapeError as exc:
+            files = {bundle.name: _read_member_file(bundle, None)}
+    except (BundleEscapeError, BundleReadError) as exc:
         typer.echo(f"Restore failed: {exc}", err=True)
         raise typer.Exit(1) from exc
 

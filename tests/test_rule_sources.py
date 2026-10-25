@@ -283,7 +283,7 @@ class TestByteIdentityPrecondition:
 
     @pytest.mark.asyncio
     async def test_the_refresh_would_archive_the_rendered_output(
-        self, db_session: Any, tmp_path: Path
+        self, db_session: Any, tmp_path: Path, monkeypatch: Any
     ) -> None:
         """Why §5a matters: with LAZY forced on, the sweep archives the raw file.
 
@@ -301,6 +301,8 @@ class TestByteIdentityPrecondition:
         )
 
         rendered = "- **0.70** A belief this store itself rendered.\n"
+        # An argument path derives no refresh root (security review D2).
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path)])
         rules = tmp_path / "CLAUDE.md"
         rules.write_text(f"# Rules\n\nhand-authored\n\n{rendered}")
 
@@ -623,7 +625,7 @@ class TestEndToEndLoop:
 
     @pytest.mark.asyncio
     async def test_editing_the_file_supersedes_the_prior_rule(
-        self, db_session: Any, tmp_path: Path
+        self, db_session: Any, tmp_path: Path, monkeypatch: Any
     ) -> None:
         """The half: the refreshed generation retires the one it replaced.
 
@@ -638,6 +640,8 @@ class TestEndToEndLoop:
         from particles.llm import set_client
         from particles.store.particle_store import get_particle
 
+        # An argument path derives no refresh root (security review D2).
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path)])
         rules = tmp_path / "AGENTS.md"
         rules.write_text(f"# Working agreements\n\n- {_RULE}\n")
 
@@ -862,3 +866,57 @@ class TestUninstallRemainsClean:
 
         asyncio.run(_deposit())
         assert self._is_empty() is False
+
+
+# --------------------------------------------------------------------------
+# Symlinked rule files (security review D23)
+# --------------------------------------------------------------------------
+
+
+class TestRuleFileSymlinks:
+    """A cloned repository's rule-file symlink cannot deposit a file outside it."""
+
+    def _clone(self, tmp_path: Path) -> tuple[Path, Path]:
+        repo = tmp_path / "clone"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "AGENTS.md").write_text("# repo rules\n")
+        secret = tmp_path / "outside-secret.txt"
+        secret.write_text("PRIVATE\n")
+        (repo / "CLAUDE.md").symlink_to(secret)
+        return repo, secret
+
+    def test_intake_stays_inside_the_repository(self, tmp_path: Path) -> None:
+        repo, secret = self._clone(tmp_path)
+        resolution = resolve_rule_sources([str(repo)])
+        assert secret.resolve() not in resolution.files
+        assert resolution.files == [(repo / "AGENTS.md").resolve()]
+        assert resolution.escaped == [repo / "CLAUDE.md"]
+
+    def test_a_link_to_a_rule_file_in_the_same_repository_is_kept(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "AGENTS.md").write_text("# rules\n")
+        (repo / "CLAUDE.md").symlink_to(repo / "AGENTS.md")
+        resolution = resolve_rule_sources([str(repo)])
+        assert resolution.files == [(repo / "AGENTS.md").resolve()]
+        assert resolution.escaped == []
+
+    def test_a_link_to_a_non_rule_file_inside_the_repository_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".env").write_text("TOKEN=x\n")
+        (repo / "AGENTS.md").symlink_to(repo / ".env")
+        assert resolve_rule_sources([str(repo)]).files == []
+
+    async def test_sync_deposits_nothing_from_outside(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        from particles.corpus.store import get_entry_by_uri
+
+        repo, secret = self._clone(tmp_path)
+        report = await sync_rule_sources(db_session, [str(repo)])
+        await db_session.commit()
+        assert [p for p, _ in report.deposited] == [(repo / "AGENTS.md").resolve()]
+        assert await get_entry_by_uri(db_session, secret.resolve().as_uri()) is None

@@ -870,3 +870,73 @@ def test_deposit_vault_exported_via_operations_shim() -> None:
 
 # Silence unused-import flake on optional helpers above.
 _ = (Any, AsyncMock, MagicMock)
+
+
+class TestVaultSymlinks:
+    """A note symlinked out of the vault is never deposited (security review D25, N24)."""
+
+    def _vault(self, tmp_path: Path) -> tuple[Path, Path]:
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "real.md").write_text("# Real\n\nA real note.\n")
+        secret = tmp_path / "secret.md"
+        secret.write_text("SECRET-OUTSIDE-THE-VAULT\n")
+        (vault / "planted.md").symlink_to(secret)
+        return vault, secret
+
+    def test_walk_lists_no_symlinked_note(self, tmp_path: Path) -> None:
+        from particles.corpus.deposit import walk_vault
+
+        vault, _secret = self._vault(tmp_path)
+        walk = walk_vault(vault)
+        assert walk.files == [vault / "real.md"]
+        assert walk.complete
+
+    @pytest.mark.asyncio
+    async def test_deposit_records_no_entry_outside_the_vault(
+        self, tmp_path: Path, db_session: object
+    ) -> None:
+        from sqlalchemy import select
+
+        from particles.corpus.deposit import deposit_vault
+        from particles.corpus.store import CorpusEntryRow
+
+        vault, secret = self._vault(tmp_path)
+        results = await deposit_vault(db_session, vault, deposited_by="tester")  # type: ignore[arg-type]
+        assert len(results) == 1
+        uris = {
+            row.uri_r
+            for row in (await db_session.execute(select(CorpusEntryRow))).scalars()  # type: ignore[union-attr]
+        }
+        assert uris == {(vault / "real.md").resolve().as_uri()}
+        assert secret.resolve().as_uri() not in uris
+
+    @pytest.mark.asyncio
+    async def test_a_parent_swapped_after_the_walk_is_unreadable(
+        self, tmp_path: Path, db_session: object
+    ) -> None:
+        """The walk listed a real note; its folder became a link before the read."""
+        import shutil
+
+        from particles.corpus.deposit import deposit_vault, walk_vault
+
+        vault = tmp_path / "vault"
+        (vault / "topic").mkdir(parents=True)
+        (vault / "topic" / "note.md").write_text("inside\n")
+        files = walk_vault(vault).files
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "note.md").write_text("OUTSIDE\n")
+        shutil.rmtree(vault / "topic")
+        (vault / "topic").symlink_to(elsewhere, target_is_directory=True)
+
+        unreadable: list[Path] = []
+        results = await deposit_vault(
+            db_session,  # type: ignore[arg-type]
+            vault,
+            deposited_by="tester",
+            files=files,
+            unreadable=unreadable,
+        )
+        assert results == []
+        assert unreadable == [vault / "topic" / "note.md"]

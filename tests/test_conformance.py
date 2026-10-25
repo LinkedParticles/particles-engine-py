@@ -948,3 +948,47 @@ class TestRecordJudgement:
         incompatible = validate_particle(doc)
         assert not incompatible.conforms
         assert "not judgeable" in incompatible.violations[0]
+
+
+class TestShaclDereferencesNothing:
+    """D43 (SECURITY_REVIEW_20261023-1): a caller's ``@context`` URL is never fetched."""
+
+    def test_remote_context_is_refused_not_fetched(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        pytest.importorskip("pyshacl")
+        from particles.conformance.shacl import validate_subject
+
+        requests: list[str] = []
+
+        class _Context(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 — the stdlib's spelling
+                requests.append(self.path)
+                body = b'{"@context": {"name": "http://schema.org/name"}}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/ld+json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Context)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            doc = {
+                "@context": f"http://127.0.0.1:{port}/ctx.jsonld",
+                "@id": "urn:example:s",
+                "name": "x",
+            }
+            result = validate_subject(doc)
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert requests == []
+        assert result.conforms is False
+        assert "refused" in result.report_text

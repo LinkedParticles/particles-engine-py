@@ -290,7 +290,9 @@ class TestFoldArtifactsCLI:
         (repo / ".git").mkdir(parents=True)
 
         def fake_run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
-            assert argv[:2] == ["git", "-C"] and argv[3:] == ["ls-files", "-z"]
+            # D22: the listing runs no fsmonitor the checkout's config names.
+            assert argv[:5] == ["git", "-c", "core.fsmonitor=false", "-C", str(repo)]
+            assert argv[5:] == ["ls-files", "-z"]
             return subprocess.CompletedProcess(argv, 0, "\0".join(files).encode(), b"")
 
         monkeypatch.setattr(subprocess, "run", fake_run)

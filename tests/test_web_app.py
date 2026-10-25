@@ -79,7 +79,9 @@ def test_mounted_bundle_served_under_dev_key(
     monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
     bundle = tmp_path / "dist"
     _write_bundle(bundle)
-    client = TestClient(_app_with_mount(bundle), client=("127.0.0.1", 50000))
+    client = TestClient(
+        _app_with_mount(bundle), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
 
     resp = client.get(f"{WEB_APP_MOUNT}/index.html")
     assert resp.status_code == 200
@@ -102,7 +104,9 @@ def test_mounted_bundle_served_unauthenticated_with_a_real_key(
     monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
     bundle = tmp_path / "dist"
     _write_bundle(bundle)
-    client = TestClient(_app_with_mount(bundle), client=("127.0.0.1", 50000))
+    client = TestClient(
+        _app_with_mount(bundle), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
 
     unauth = client.get(f"{WEB_APP_MOUNT}/index.html")
     assert unauth.status_code == 200
@@ -125,7 +129,9 @@ def test_mount_does_not_inspect_credentials_at_all(
     monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
     bundle = tmp_path / "dist"
     _write_bundle(bundle)
-    client = TestClient(_app_with_mount(bundle), client=("127.0.0.1", 50000))
+    client = TestClient(
+        _app_with_mount(bundle), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
 
     resp = client.get(
         f"{WEB_APP_MOUNT}/index.html",
@@ -142,9 +148,75 @@ def test_mount_serves_nothing_outside_the_bundle(
     bundle = tmp_path / "dist"
     _write_bundle(bundle)
     (tmp_path / "secret.txt").write_text("not part of the bundle", encoding="utf-8")
-    client = TestClient(_app_with_mount(bundle), client=("127.0.0.1", 50000))
+    client = TestClient(
+        _app_with_mount(bundle), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
 
     for attempt in ("/../secret.txt", "/%2e%2e/secret.txt", "/..%2fsecret.txt"):
         resp = client.get(f"{WEB_APP_MOUNT}{attempt}")
         assert resp.status_code in (307, 404), attempt
         assert "not part of the bundle" not in resp.text
+
+
+def test_bundle_served_with_a_script_policy(tmp_path: Path) -> None:
+    """The shell holds the bearer, so only its own scripts may run (security review N7)."""
+    import base64
+    import hashlib
+
+    bundle = tmp_path / "dist"
+    _write_bundle(bundle)
+    inline = "\n  document.title = 'x';\n"
+    (bundle / "index.html").write_text(
+        f"<!doctype html><script>{inline}</script><script type=module src=app.js></script>",
+        encoding="utf-8",
+    )
+    client = TestClient(
+        _app_with_mount(bundle), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000)
+    )
+    digest = base64.b64encode(hashlib.sha256(inline.encode()).digest()).decode()
+    for path in ("/", "/app.js"):
+        csp = client.get(f"{WEB_APP_MOUNT}{path}").headers["content-security-policy"]
+        assert csp.startswith(f"script-src 'self' 'sha256-{digest}';")
+        assert "frame-ancestors 'none'" in csp
+        assert "unsafe-inline" not in csp
+
+
+def test_committed_bundle_inline_scripts_are_all_hashed() -> None:
+    """Every inline block in the committed bundle is allowed, so the theme stamp still runs."""
+    import re
+
+    from particles.api.web_app import _default_bundle_dir, content_security_policy
+
+    index = _default_bundle_dir() / "index.html"
+    if not index.is_file():
+        pytest.skip("no committed web-UI bundle in this tree")
+    blocks = re.findall(r"<script>(.*?)</script>", index.read_text(encoding="utf-8"), re.DOTALL)
+    assert blocks, "the bundle's theme stamp is an inline script"
+    assert content_security_policy(index.parent).count("'sha256-") == len(blocks)
+
+
+def test_every_data_href_sink_is_scheme_checked() -> None:
+    """A URL from the store becomes an href only behind an http(s) test (security review N37).
+
+    A ``javascript:`` URL in an href runs on the engine's origin, which holds the
+    bearer. The route-hash links the app builds itself are not store data.
+    """
+    import re
+
+    src = Path(__file__).resolve().parents[1] / "clients" / "web-ui" / "src"
+    if not src.is_dir():
+        pytest.skip("no web-UI source in this tree")
+    sinks = 0
+    for path in sorted(src.glob("*.ts")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines):
+            match = re.search(r"\.href\s*=\s*([\w.]+);", line)
+            if match is None or "routeHash" in line:
+                continue
+            sinks += 1
+            value = re.escape(match.group(1))
+            window = "\n".join(lines[max(0, number - 6) : number])
+            assert re.search(r"\^https\?:.*\.test\(" + value + r"\)", window), (
+                f"{path.name}:{number + 1} assigns {match.group(1)} to an href unchecked"
+            )
+    assert sinks >= 3

@@ -104,6 +104,11 @@ def _print_resolution_notes(resolution: RuleSourceResolution) -> None:
         narrate(f"rule_sources.paths is empty — discovered roots: {roots}")
     for missing in resolution.missing:
         narrate(f"Warning: registered path does not exist: {missing}")
+    for escaped in resolution.escaped:
+        narrate(
+            f"Warning: skipped {escaped}: it links outside its root or to a file that is "
+            "not a rule file. Register the target in rule_sources.paths to track it."
+        )
     if resolution.truncated:
         narrate(
             f"Warning: {resolution.truncated} more file(s) matched than "
@@ -127,6 +132,7 @@ async def _report(store: str) -> None:
             "No rule sources resolved. Register paths in `rule_sources.paths`, or "
             "run `particles rules sync <path>` to track one now."
         )
+        await _report_refresh_roots(store)
         return
 
     tracked = enrolled = exempt = 0
@@ -175,6 +181,32 @@ async def _report(store: str) -> None:
             f"{tracked - enrolled} file(s) carry a projected region, so their deposited "
             "body differs from their bytes; re-run `particles rules sync` to refresh those."
         )
+    await _report_refresh_roots(store)
+
+
+async def _report_refresh_roots(store: str) -> None:
+    """The recorded refresh roots and what the refresh would refuse (§4).
+
+    The refresh reads rule files only under roots ``rules sync`` and
+    ``init claude-code`` recorded, never under the directory it runs from, so
+    this is where an operator sees which roots those are and whether any
+    enrolled source lies outside all of them.
+    """
+    from particles.corpus.fetch import count_refused_local_entries
+    from particles.corpus.rule_roots import list_rule_source_roots
+
+    async with session_scope(store) as session:
+        roots = await list_rule_source_roots(session)
+        refused = await count_refused_local_entries(session)
+    typer.echo()
+    typer.echo("Recorded refresh roots:" if roots else "No refresh root recorded yet.")
+    for root in roots:
+        typer.echo(f"  {root}{'' if root.exists() else '  (missing)'}")
+    if refused:
+        typer.echo(
+            f"{refused} LAZY local source(s) outside every allowed root are not refreshed; "
+            "run `particles rules sync` from the project that holds them."
+        )
 
 
 def _enabled_or_report() -> bool:
@@ -203,14 +235,19 @@ def projected_region_filter() -> Callable[[str], str]:
     It lives on this side of the seam because the region snapshots live in the
     CLI state directory: a direct reach from ``particles.corpus`` would close a
     ``store → corpus → render → store`` subpackage cycle.
+
+    Credential shapes are masked too (:func:`redact_secrets`, security review
+    N28). A file with one masked is deposited ``NEVER`` rather than ``LAZY``
+    (``refresh_policy_for``), so the byte-level refresh loop cannot re-deposit
+    its raw bytes; ``rules sync`` and the harvest keep it current instead.
     """
-    from particles.api.cli._claude_code import load_projection_snapshots
+    from particles.api.cli._claude_code import load_projection_snapshots, redact_secrets
     from particles.render.markdown import strip_projected_regions_for_deposit
 
     snapshots = load_projection_snapshots()
 
     def strip(text: str) -> str:
-        return strip_projected_regions_for_deposit(text, snapshots)
+        return redact_secrets(strip_projected_regions_for_deposit(text, snapshots))
 
     return strip
 

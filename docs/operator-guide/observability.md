@@ -71,10 +71,24 @@ from the environment; never put it in `config.yaml`:
 export PARTICLES_OTEL_EXPORTER_HEADERS="authorization=Bearer <token>"
 ```
 
+Headers are never sent over `http://` to a collector that is not loopback.
+For such an endpoint no OTLP exporter is installed and one warning names the
+reason. Use `https://` or a loopback collector, or set
+`observability.allow_plaintext_headers: true` for a network you trust end to
+end. The same rule covers headers set through the SDK's own
+`OTEL_EXPORTER_OTLP_HEADERS`.
+
+With `endpoint` unset, the exporter sends where the OpenTelemetry SDK would:
+`OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`,
+then `http://localhost:4318`. That resolved URL is the one `network.egress`
+checks and the one the exporter is given.
+
 ## What you get
 
-- **Traces**: auto-instrumented FastAPI (server spans), httpx (client spans +
-  `traceparent` propagation), and SQLAlchemy/aiosqlite (DB spans, including the
+- **Traces**: auto-instrumented FastAPI (server spans, which record the route
+  template such as `/particles/{particle_id}` and never the concrete path or
+  query string), httpx (client spans, which record only the destination's
+  scheme, host and port, plus `traceparent` propagation), and SQLAlchemy/aiosqlite (DB spans, including the
   write-lock wait), plus hand-rolled `extract.snapshot` → `embed.batch` /
   `llm.complete` spans on the extraction path.
 - **Metrics**: LLM- and embed-call duration histograms, the

@@ -28,6 +28,12 @@ class RefreshOutcome(StrEnum):
     """A REVISIT was written: the body was read and its hash matched."""
     CHANGED = "changed"
     """A new RESPONSE snapshot landed PENDING."""
+    REFUSED = "refused"
+    """Not read: the local source lies outside every allowed root.
+
+    Decided by the refresh loop before the ladder runs, never by
+    :func:`classify_refresh`.
+    """
 
 
 def classify_refresh(before_id: str | None, snap: Snapshot | None) -> RefreshOutcome:

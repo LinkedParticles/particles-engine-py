@@ -26,6 +26,7 @@ from particles.llm.adapters import openai_compat as oc_mod
 from particles.llm.adapters.openai_compat import (
     OpenAICompatCompletionError,
     OpenAICompatProvider,
+    PlaintextKeyRefused,
     _extract_text,
     _post_with_retry,
     _scrub_response_body,
@@ -224,6 +225,63 @@ def test_named_key_convention_reaches_the_header(monkeypatch: pytest.MonkeyPatch
         OpenAICompatProvider(name="openai", model="gpt-5.6-luna").complete("p", max_tokens=8)
     )
     assert client.post.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-luna"
+
+
+# ---------------------------------------------------------------------------
+# N12 (SECURITY_REVIEW_20261024-1): no provider key over cleartext to a remote host
+# ---------------------------------------------------------------------------
+
+
+def test_key_is_refused_over_cleartext_to_a_non_loopback_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure(monkeypatch, name="lan", base_url="http://models.example.invalid:8000/v1")
+    client = _mock_client([_ok_response("ok")])
+    _install_client(monkeypatch, client)
+    monkeypatch.setenv("PARTICLES_LLM_API_KEY_LAN", "sk-lan")
+    with pytest.raises(PlaintextKeyRefused, match="allow_plaintext_key"):
+        asyncio.run(OpenAICompatProvider(name="lan", model="m").complete("p", max_tokens=8))
+    client.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://models.example.invalid/v1", "http://127.0.0.1:11434/v1", "http://localhost:8080/v1"],
+)
+def test_key_is_sent_over_https_or_loopback(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
+    _configure(monkeypatch, name="lan", base_url=base_url)
+    client = _mock_client([_ok_response("ok")])
+    _install_client(monkeypatch, client)
+    monkeypatch.setenv("PARTICLES_LLM_API_KEY_LAN", "sk-lan")
+    asyncio.run(OpenAICompatProvider(name="lan", model="m").complete("p", max_tokens=8))
+    assert client.post.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-lan"
+
+
+def test_cleartext_without_a_key_is_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch, name="lan", base_url="http://models.example.invalid:8000/v1")
+    client = _mock_client([_ok_response("ok")])
+    _install_client(monkeypatch, client)
+    asyncio.run(OpenAICompatProvider(name="lan", model="m").complete("p", max_tokens=8))
+    assert "Authorization" not in client.post.call_args.kwargs["headers"]
+
+
+def test_allow_plaintext_key_sends_it_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    oc_mod._warn_plaintext_key_once.cache_clear()
+    _configure(
+        monkeypatch,
+        name="lan",
+        base_url="http://models.example.invalid:8000/v1",
+        allow_plaintext_key=True,
+    )
+    client = _mock_client([_ok_response("ok")])
+    _install_client(monkeypatch, client)
+    monkeypatch.setenv("PARTICLES_LLM_API_KEY_LAN", "sk-lan")
+    with caplog.at_level("WARNING", logger=oc_mod.__name__):
+        asyncio.run(OpenAICompatProvider(name="lan", model="m").complete("p", max_tokens=8))
+    assert client.post.call_args.kwargs["headers"]["Authorization"] == "Bearer sk-lan"
+    assert "unencrypted" in caplog.text
 
 
 # ---------------------------------------------------------------------------

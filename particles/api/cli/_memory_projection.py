@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from particles.api.cli._claude_code import (
     ARCHIVE_POINTER_PREFIX,
     MEMORY_REGION,
+    append_private_text,
     index_entry_target,
     load_projection_snapshots,
     memory_archive_path,
@@ -42,6 +43,7 @@ from particles.api.cli._claude_code import (
     projection_enabled,
     projection_refusal,
     resolve_session_project,
+    write_private_text,
 )
 from particles.config import get_config
 from particles.render.markdown import (
@@ -263,10 +265,8 @@ def _append_to_archive(memory_dir: Path, lines: list[str], source_name: str) -> 
     new = [line for line in dict.fromkeys(lines) if line not in existing]
     if not new:
         return 0
-    path.parent.mkdir(parents=True, exist_ok=True)
     block = f"\n<!-- folded from {source_name} -->\n" + "\n".join(new) + "\n"
-    with path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    append_private_text(path, block)
     return len(new)
 
 
@@ -425,9 +425,7 @@ async def run_projection_cycle(
             log.warning("memory projection splice refused: %s", exc)
             return {"skipped": "splice-error", "error": str(exc)}
 
-        backup = memory_backup_path(memory_dir)
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        backup.write_text(current, encoding="utf-8")
+        write_private_text(memory_backup_path(memory_dir), current)
         if folded:
             _append_to_archive(memory_dir, folded, memory_md.name)
         atomic_write_text(memory_md, spliced)
@@ -460,9 +458,7 @@ def _observer_line(body: str) -> str | None:
 
 def _write_snapshot(memory_dir: Path, body: str) -> None:
     """Persist the body just spliced into ``memory_dir`` — its §6 drift/pristine reference."""
-    path = memory_snapshot_path(memory_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body.strip("\n") + "\n", encoding="utf-8")
+    write_private_text(memory_snapshot_path(memory_dir), body.strip("\n") + "\n")
 
 
 async def _maybe_commit(

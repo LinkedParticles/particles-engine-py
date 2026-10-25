@@ -20,7 +20,7 @@ import json
 
 import typer
 
-from particles.api.cli import app, require_store_directory
+from particles.api.cli import app, prepare_stdio_server_store
 from particles.db import DEFAULT_STORE
 
 mcp_app = typer.Typer(
@@ -76,7 +76,7 @@ def mcp_serve_cmd(
             bind_project(key)
     # Named stores are reached per tool call and fail there with the same one-line
     # message; the default store is the one a fresh install's DATABASE_URL names.
-    require_store_directory(DEFAULT_STORE)
+    prepare_stdio_server_store(DEFAULT_STORE)
     serve_main()
 
 

@@ -216,3 +216,55 @@ def test_only_memory_dir_is_staged_never_git_add_all(tmp_path: Path) -> None:
     tracked = _git(repo, "ls-files").split()
     assert "memory/MEMORY.md" in tracked
     assert "operator_notes.txt" not in tracked  # never swept into our commit
+
+
+# ---------------------------------------------------------------------------
+# Security review D27: the enclosing repository's config runs nothing
+# ---------------------------------------------------------------------------
+
+
+def test_repository_hooks_never_run(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "hook-ran"
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    for name in ("pre-commit", "commit-msg", "post-commit"):
+        hook = hooks / name
+        hook.write_text(f"#!/bin/sh\necho {name} >> {marker}\n", encoding="utf-8")
+        hook.chmod(0o755)
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None).startswith("committed ")
+    assert not marker.exists()
+
+
+def test_a_planted_hooks_path_is_overridden(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "hook-ran"
+    planted = tmp_path / "planted-hooks"
+    planted.mkdir()
+    hook = planted / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _git(repo, "config", "core.hooksPath", str(planted))
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None).startswith("committed ")
+    assert not marker.exists()
+
+
+def test_a_repository_filter_driver_skips_the_commit(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "filter-ran"
+    _git(repo, "config", "filter.planted.clean", f"sh -c 'touch {marker}; cat'")
+    (repo / ".gitattributes").write_text("*.md filter=planted\n", encoding="utf-8")
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None) == "skipped: command-driver-configured"
+    assert not marker.exists()

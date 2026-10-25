@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import ipaddress
 import json
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1626,8 +1629,10 @@ class TestGistCloneConnectPin:
         )
         # The pin is added beneath the pre-existing protocol pin, not instead
         # of it — the second invocation is the local `git log`, which is not
-        # egress and carries no pin (class 3).
-        assert clone_argv[clone_argv.index("-c") + 2 :][:1] == ["clone"]
+        # egress and carries no pin (class 3). Every `-c` is a
+        # clone option, so all of them precede the subcommand.
+        last_option = max(i for i, arg in enumerate(clone_argv) if arg == "-c")
+        assert clone_argv[last_option + 2] == "clone"
         assert "-c" not in captured[1]
 
     @pytest.mark.asyncio
@@ -1706,6 +1711,135 @@ class TestGistCloneConnectPin:
         assert not spawned
 
 
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _repo_with_outward_symlink(tmp_path: Path) -> tuple[Path, Path]:
+    """A local git repository whose tree holds a symlink to a file outside it."""
+    secret = tmp_path / "outside" / "secret.txt"
+    secret.parent.mkdir()
+    secret.write_text("TOP-SECRET-LOCAL-FILE\n")
+    repo = tmp_path / "gist"
+    repo.mkdir()
+    _git("init", "--quiet", cwd=repo)
+    (repo / "notes.md").write_text("# a gist file\n")
+    (repo / "leak.txt").symlink_to(secret)
+    _git("add", "notes.md", "leak.txt", cwd=repo)
+    _git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "gist", cwd=repo)
+    return repo, secret
+
+
+class TestGistCloneSymlinks:
+    """D7 (SECURITY_REVIEW_20261023-1): a cloned gist never reads outside its tree.
+
+    A gist is a git repository, so it can carry a mode-120000 symlink entry.
+    Followed, that entry pulled any file the process could read into the
+    corpus. Every test here runs git on a local repository only.
+    """
+
+    def test_reader_skips_a_symlink_out_of_the_tree(self, tmp_path: Path) -> None:
+        from particles.ingest.importers.github import _read_clone_files
+
+        repo, _ = _repo_with_outward_symlink(tmp_path)
+        assert (repo / "leak.txt").is_symlink()  # checked out as a real link
+
+        files = _read_clone_files(repo, max_bytes=1024 * 1024)
+
+        assert files == {"notes.md": {"content": "# a gist file\n"}}
+
+    def test_reader_skips_a_symlinked_directory(self, tmp_path: Path) -> None:
+        from particles.ingest.importers.github import _read_clone_files
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "id_rsa").write_text("KEY")
+        root = tmp_path / "clone"
+        root.mkdir()
+        (root / "dir").symlink_to(outside, target_is_directory=True)
+
+        assert _read_clone_files(root, max_bytes=1024) == {}
+
+    def test_reader_caps_one_file_at_max_bytes(self, tmp_path: Path) -> None:
+        from particles.ingest.importers.github import _read_clone_files
+
+        (tmp_path / "big.txt").write_bytes(b"x" * 11)
+
+        with pytest.raises(ValueError, match="10-byte cap"):
+            _read_clone_files(tmp_path, max_bytes=10)
+
+    def test_reader_caps_the_total_at_max_bytes(self, tmp_path: Path) -> None:
+        from particles.ingest.importers.github import _read_clone_files
+
+        (tmp_path / "a.txt").write_bytes(b"x" * 6)
+        (tmp_path / "b.txt").write_bytes(b"x" * 6)
+
+        with pytest.raises(ValueError, match="10-byte cap"):
+            _read_clone_files(tmp_path, max_bytes=10)
+        assert _read_clone_files(tmp_path, max_bytes=12) == {
+            "a.txt": {"content": "xxxxxx"},
+            "b.txt": {"content": "xxxxxx"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_clone_argv_disables_symlinks_and_redirects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.ingest.importers.github import _clone_gist_files
+
+        captured: list[list[str]] = []
+
+        async def fake_exec(*argv: str, **kwargs: object) -> MagicMock:
+            captured.append(list(argv))
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            return proc
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        await _clone_gist_files("abc123", resolve=_stub_resolver(_PUBLIC_ADDR))
+
+        clone_argv = captured[0]
+        options = [clone_argv[i + 1] for i, arg in enumerate(clone_argv) if arg == "-c"]
+        assert "core.symlinks=false" in options
+        assert "http.followRedirects=false" in options
+
+    @pytest.mark.asyncio
+    async def test_a_real_clone_of_a_symlink_gist_reads_no_local_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The audit's reproduction: the real clone path, with only the clone
+        # source swapped for a local repository (and the transport allowed to
+        # read it), so no request leaves the machine.
+        from particles.ingest.importers.github import _clone_gist_files
+
+        repo, secret = _repo_with_outward_symlink(tmp_path)
+        real_exec = asyncio.create_subprocess_exec
+
+        async def local_exec(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+            args = [str(repo) if a.startswith("https://gist.github.com/") else a for a in argv]
+            env = dict(kwargs.pop("env"))
+            env["GIT_ALLOW_PROTOCOL"] = "file"
+            return await real_exec(*args, env=env, **kwargs)
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", local_exec)
+        files, last_commit_iso = await _clone_gist_files(
+            "abc123", resolve=_stub_resolver(_PUBLIC_ADDR)
+        )
+
+        assert last_commit_iso
+        assert files["notes.md"] == {"content": "# a gist file\n"}
+        # Checked out with core.symlinks=false, the link is a plain file that
+        # holds its target path, never the target's bytes.
+        assert files["leak.txt"] == {"content": str(secret)}
+        assert all("TOP-SECRET" not in f["content"] for f in files.values())
+
+
 class TestRegistryIntegration:
     def test_three_github_extractors_in_registry(self) -> None:
         from particles.extraction.registry import get_extractors
@@ -1732,3 +1866,57 @@ class TestRegistryIntegration:
 
         types = {type(d).__name__ for d in get_importers()}
         assert "GitHubImporter" in types
+
+
+class TestGistCommentPaginationStaysOnTheApiHost:
+    """D45 (SECURITY_REVIEW_20261023-1): a next link never takes the bearer off-host."""
+
+    @staticmethod
+    def _page(link: str | None) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Link": link} if link else {}
+        resp.json = MagicMock(return_value=[{"user": {"login": "u"}, "body": "b"}])
+        return resp
+
+    @pytest.mark.parametrize(
+        "next_url",
+        [
+            "https://collector.example.invalid/gists/abc123/comments?page=2",
+            "http://api.github.com/gists/abc123/comments?page=2",
+            "https://api.github.com:8443/gists/abc123/comments?page=2",
+            "https://api.github.com.example.invalid/gists/abc123/comments?page=2",
+        ],
+    )
+    async def test_off_host_next_link_is_not_followed(
+        self, monkeypatch: pytest.MonkeyPatch, next_url: str
+    ) -> None:
+        from particles.ingest.importers import github
+
+        fetched: list[str] = []
+        pages = [self._page(f'<{next_url}>; rel="next"'), self._page(None)]
+
+        async def fake_get(_client: object, url: str, **_kw: object) -> MagicMock:
+            fetched.append(url)
+            return pages.pop(0)
+
+        monkeypatch.setattr(github, "_github_get", fake_get)
+        comments = await github._fetch_gist_comments(MagicMock(), "abc123")
+        assert fetched == ["https://api.github.com/gists/abc123/comments?per_page=100"]
+        assert len(comments) == 1
+
+    async def test_same_host_next_link_is_followed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from particles.ingest.importers import github
+
+        fetched: list[str] = []
+        page2 = "https://api.github.com/gists/abc123/comments?per_page=100&page=2"
+        pages = [self._page(f'<{page2}>; rel="next"'), self._page(None)]
+
+        async def fake_get(_client: object, url: str, **_kw: object) -> MagicMock:
+            fetched.append(url)
+            return pages.pop(0)
+
+        monkeypatch.setattr(github, "_github_get", fake_get)
+        comments = await github._fetch_gist_comments(MagicMock(), "abc123")
+        assert fetched[1] == page2
+        assert len(comments) == 2

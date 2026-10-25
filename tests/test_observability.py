@@ -90,17 +90,194 @@ def test_instrument_fastapi_app_noop_when_disabled() -> None:
 
 
 def test_otlp_kwargs_appends_signal_path_and_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector:4318/")
-    monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok")
+    monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "https://collector:4318/")
+    monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok,x-team=a")
     reset_config()
     kwargs = obs._otlp_kwargs(get_config().observability, "traces")
-    assert kwargs["endpoint"] == "http://collector:4318/v1/traces"
-    assert kwargs["headers"] == "authorization=Bearer tok"
+    assert kwargs is not None
+    assert kwargs["endpoint"] == "https://collector:4318/v1/traces"
+    # The exporter takes a mapping; the W3C string is parsed (a raw string
+    # fails OTLPSpanExporter's construction).
+    assert kwargs["headers"] == {"authorization": "Bearer tok", "x-team": "a"}
 
 
-def test_otlp_kwargs_empty_without_endpoint_or_headers() -> None:
-    # Default config: no endpoint, no secret headers → empty kwargs (SDK defaults).
-    assert obs._otlp_kwargs(get_config().observability, "metrics") == {}
+def test_otlp_kwargs_name_the_sdk_default_without_endpoint_or_headers() -> None:
+    # Default config: the SDK's own default, passed explicitly; no headers.
+    assert obs._otlp_kwargs(get_config().observability, "metrics") == {
+        "endpoint": "http://localhost:4318/v1/metrics"
+    }
+
+
+class TestOtlpEndpointIsTheCheckedOne:
+    """D21 (SECURITY_REVIEW_20261023-1): what is egress-checked is what is sent to."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_otel_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_per_signal_env_endpoint_is_checked_and_passed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import EgressAllowEntry, NetworkConfig
+
+        monkeypatch.setenv(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.invalid/v1/traces"
+        )
+        cfg = get_config()
+        # An allowlist that admits only the SDK default the old check assumed.
+        monkeypatch.setattr(
+            cfg,
+            "network",
+            NetworkConfig(
+                egress="allowlist", allow=[EgressAllowEntry(host="localhost", port=4318)]
+            ),
+        )
+        assert obs._otlp_kwargs(cfg.observability, "traces") is None
+        # The metrics signal has no override, so it is the default and allowed.
+        assert obs._otlp_kwargs(cfg.observability, "metrics") == {
+            "endpoint": "http://localhost:4318/v1/metrics"
+        }
+
+    def test_general_env_endpoint_gets_the_signal_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.invalid/")
+        kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert kwargs == {"endpoint": "https://collector.example.invalid/v1/traces"}
+
+    def test_config_endpoint_wins_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.invalid")
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://127.0.0.1:4318")
+        reset_config()
+        kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert kwargs == {"endpoint": "http://127.0.0.1:4318/v1/traces"}
+
+
+class TestOtlpHeadersOverCleartext:
+    """N12 (SECURITY_REVIEW_20261024-1): exporter headers never cross the network in clear."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_otel_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in ("OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_secret_headers_to_a_remote_http_endpoint_are_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
+        monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok")
+        reset_config()
+        assert obs._otlp_kwargs(get_config().observability, "traces") is None
+
+    def test_sdk_env_headers_count_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer tok")
+        reset_config()
+        assert obs._otlp_kwargs(get_config().observability, "traces") is None
+
+    @pytest.mark.parametrize(
+        "endpoint", ["https://collector.example.invalid", "http://127.0.0.1:4318"]
+    )
+    def test_https_or_loopback_carries_them(
+        self, monkeypatch: pytest.MonkeyPatch, endpoint: str
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", endpoint)
+        monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok")
+        reset_config()
+        kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert kwargs is not None
+        assert kwargs["headers"] == {"authorization": "Bearer tok"}
+
+    def test_allow_plaintext_headers_opts_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
+        monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok")
+        reset_config()
+        cfg = get_config().observability.model_copy(update={"allow_plaintext_headers": True})
+        kwargs = obs._otlp_kwargs(cfg, "traces")
+        assert kwargs is not None
+        assert kwargs["headers"] == {"authorization": "Bearer tok"}
+
+    def test_no_headers_no_refusal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
+        reset_config()
+        kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert kwargs == {"endpoint": "http://collector.example.invalid/v1/traces"}
+
+
+class _FakeSpan:
+    def __init__(self, attributes: dict[str, object] | None = None) -> None:
+        self.attributes = dict(attributes or {})
+
+    def set_attribute(self, key: str, value: object) -> None:
+        self.attributes[key] = value
+
+
+class TestSpanUrlsCarryNoCorpusIdentifier:
+    """D19 (SECURITY_REVIEW_20261023-1)."""
+
+    def test_client_span_keeps_only_the_origin(self) -> None:
+        import httpx
+
+        request = httpx.Request("GET", "https://api.numista.com/v3/types/SENTINEL42?lang=en")
+        span = _FakeSpan()
+        obs._scrub_httpx_url(span, request)
+        assert span.attributes["url.full"] == "https://api.numista.com"
+        assert span.attributes["http.url"] == "https://api.numista.com"
+
+    def test_server_span_keeps_the_route_template(self) -> None:
+        span = _FakeSpan(
+            {
+                "http.route": "/particles/{particle_id}",
+                "http.target": "/particles/SENTINEL42?q=private",
+                "url.path": "/particles/SENTINEL42",
+                "url.query": "q=private",
+                "http.url": "http://127.0.0.1:8000/particles/SENTINEL42?q=private",
+                "url.full": "http://127.0.0.1:8000/particles/SENTINEL42?q=private",
+            }
+        )
+        scope = {"type": "http", "scheme": "http", "server": ("127.0.0.1", 8000)}
+        obs._scrub_server_span(span, scope)
+        assert span.attributes["http.target"] == "/particles/{particle_id}"
+        assert span.attributes["url.path"] == "/particles/{particle_id}"
+        assert span.attributes["url.query"] == ""
+        assert span.attributes["url.full"] == "http://127.0.0.1:8000/particles/{particle_id}"
+        assert not any("SENTINEL42" in str(v) for v in span.attributes.values())
+        assert not any("private" in str(v) for v in span.attributes.values())
+
+    def test_unrouted_server_span_keeps_no_path(self) -> None:
+        span = _FakeSpan({"http.target": "/nowhere/SENTINEL42"})
+        obs._scrub_server_span(span, {"scheme": "http", "server": ("127.0.0.1", 8000)})
+        assert span.attributes["http.target"] == ""
+        assert span.attributes["url.full"] == "http://127.0.0.1:8000"
+
+    def test_fastapi_instrumentation_wires_the_server_hook(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import types
+
+        fastapi = pytest.importorskip("fastapi")
+        calls: list[dict[str, object]] = []
+
+        class _Instrumentor:
+            @staticmethod
+            def instrument_app(_app: object, **kwargs: object) -> None:
+                calls.append(kwargs)
+
+        module = types.ModuleType("opentelemetry.instrumentation.fastapi")
+        module.FastAPIInstrumentor = _Instrumentor  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.fastapi", module)
+        monkeypatch.setattr(obs, "setup_observability", lambda: None)
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENABLED", "true")
+        reset_config()
+        instrument_fastapi_app(fastapi.FastAPI())
+        assert calls == [{"server_request_hook": obs._scrub_server_span}]
 
 
 def test_console_exporter_emits_span_in_subprocess() -> None:
@@ -210,9 +387,9 @@ def test_httpx_span_url_has_no_query_string_in_subprocess() -> None:
     # url.full/http.url is redact_url(str(url)), which leaves arbitrary query
     # params intact — so a Wikidata-shaped ?search=<subject name> lookup would
     # ship corpus-derived content to the OTLP collector. setup_observability()
-    # wires a request hook that overwrites the attribute with scheme://host/path.
+    # wires a request hook that overwrites the attribute with scheme://host[:port].
     # We instrument, fire a real GET at a localhost server, and assert the
-    # exported span carries the path but neither the query string nor its
+    # exported span carries the origin but neither the path, the query string nor its
     # user-content value. Subprocess-isolated (write-once OTel globals); skips
     # when the `otel` extra is absent.
     pytest.importorskip("opentelemetry.instrumentation.httpx")
@@ -263,11 +440,12 @@ def test_httpx_span_url_has_no_query_string_in_subprocess() -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    # The client span was exported with the host/path (proves the hook ran on a
+    # The client span was exported with its origin (proves the hook ran on a
     # real instrumented request, not that the span was simply absent)...
-    assert "/w/api.php" in result.stdout
-    # ...but the query string — including the user/corpus-derived search term —
-    # is gone from every exported attribute.
+    assert "http://127.0.0.1:" in result.stdout
+    # ...but the path and the query string, including the user/corpus-derived
+    # search term, are gone from every exported attribute (F8, D19).
+    assert "/w/api.php" not in result.stdout
     assert "SENTINELSUBJECTXYZ" not in result.stdout
     assert "wbsearchentities" not in result.stdout
 

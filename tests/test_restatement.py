@@ -206,7 +206,7 @@ def test_notes_disclose_every_outcome() -> None:
 
 
 def _judge_reply(*answers: str) -> Any:
-    async def call(prompt: str, *, max_tokens: int) -> str:
+    async def call(prompt: str, *, max_tokens: int, system: str | None = None) -> str:
         return json.dumps({f"p{i}": a for i, a in enumerate(answers)})
 
     return AsyncMock(side_effect=call)
@@ -379,7 +379,7 @@ def scripted() -> Generator[dict[str, Any], None, None]:
         "guard": _QUIET,
     }
 
-    async def judge(prompt: str, *, max_tokens: int) -> str:
+    async def judge(prompt: str, *, max_tokens: int, system: str | None = None) -> str:
         return json.dumps({"p0": script["judge"]})
 
     async def slot(earlier: str, later: str) -> UpdateGuard:

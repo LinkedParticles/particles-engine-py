@@ -33,7 +33,7 @@ from typing import Any
 
 import yaml
 
-from particles.config import StorageConfig, get_config, sqlite_file_path
+from particles.config import StorageConfig, get_config, sqlite_file_path, user_config_path
 from particles.render.markdown import find_projected_regions
 
 log = logging.getLogger(__name__)
@@ -93,6 +93,10 @@ class SessionProject:
     #: that exists; ``"transcript-dir"`` when the transcript's own directory was
     #: used, which is the older behaviour.
     resolved_from: str
+    #: The repository root the key was derived from, when it was resolved from
+    #: the launch directory (``resolved_from == "repository"``); ``None`` for a
+    #: key read off a directory name, whose path is not known.
+    root: Path | None = None
 
 
 def claude_project_slug(path: Path | str) -> str:
@@ -218,11 +222,13 @@ def resolve_session_project(payload: Mapping[str, Any]) -> SessionProject:
             memory_dir=project_dir / "memory",
             resolved_from="transcript-dir",
         )
-    key = claude_project_slug(repository_root(launch))
+    root = repository_root(launch)
+    key = claude_project_slug(root)
     return SessionProject(
         key=key,
         memory_dir=project_dir.parent / key / "memory",
         resolved_from="repository",
+        root=root,
     )
 
 
@@ -499,6 +505,49 @@ def state_dir() -> Path:
     return Path(get_config().claude_code.state_dir).expanduser()
 
 
+def make_private_dir(path: Path) -> None:
+    """Create ``path`` and any missing parents owner-only (``0o700``).
+
+    Only directories this call creates get the mode, so an existing directory
+    the owner chose (their home, a configured log folder) is never changed.
+    The state directory and everything below it hold harvested memory, render
+    backups and hook telemetry, which another account on the machine must not
+    read (security review D46).
+    """
+    missing: list[Path] = []
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            break
+        missing.append(candidate)
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        os.chmod(directory, 0o700)  # mkdir's mode is filtered by the umask
+
+
+def _open_private(path: Path, flags: int) -> int:
+    make_private_dir(path.parent)
+    fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)  # an existing file written by an older version
+    return fd
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` owner-only (``0o600``), never through a symlink."""
+    fd = _open_private(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def append_private_text(path: Path, text: str) -> None:
+    """Append ``text`` to ``path`` owner-only (``0o600``), never through a symlink."""
+    fd = _open_private(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(text)
+
+
 def hook_log_path() -> Path:
     """Resolved hook-log path: ``claude_code.hook_log_path`` or ``<state_dir>/hooks.jsonl``."""
     configured = get_config().claude_code.hook_log_path
@@ -518,11 +567,9 @@ def append_hook_log(record: dict[str, Any]) -> None:
     """
     try:
         path = hook_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > _HOOK_LOG_MAX_BYTES:
             path.unlink()
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        append_private_text(path, json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception:  # noqa: BLE001 — the log must never break a hook
         log.debug("hook log write failed", exc_info=True)
 
@@ -922,14 +969,28 @@ def particles_mcp_registrations(home: Path | None = None) -> list[McpRegistratio
 
 
 def plan_mcp_registration(
-    existing: Sequence[McpRegistration], *, executable: str, env: Mapping[str, str]
+    existing: Sequence[McpRegistration],
+    *,
+    executable: str,
+    env: Mapping[str, str],
+    replace_config_pin: bool = False,
 ) -> tuple[McpRegistration, McpRegistration | None] | None:
     """What ``init claude-code`` registers, as ``(wanted, replaced)``; ``None`` if unchanged.
 
     With no Particles server, a new ``particles`` entry runs this install's
-    executable with the hooks' env pins. An existing one keeps its name,
-    executable and env, and only gains ``--project-observer cwd``;
-    one already bound is left alone.
+    executable with the hooks' env pins. An existing one keeps its name and
+    executable, gains ``--project-observer cwd`` when it lacks it,
+    gains the ``PARTICLES_CONFIG`` pin when it has none,
+    and gains the wanted ``DATABASE_URL`` when it has none and pins the wanted
+    config, whether or not that pin is new. A server with no config pin read
+    whatever config its starting directory offered (finding D8), and one with
+    no ``DATABASE_URL`` serves the ``default`` store from ``./particles.db`` in
+    each session's directory unless its config names an absolute one
+    (security review N3, N17). A ``DATABASE_URL`` already present is kept. A
+    config pin naming a different file is kept with its env as found, since
+    the installer cannot tell a stale pin from a deliberate one, unless
+    ``replace_config_pin`` (an explicit ``--config``) says to replace it; see
+    :func:`foreign_config_pin`.
     """
     if not existing:
         return (
@@ -942,17 +1003,39 @@ def plan_mcp_registration(
             None,
         )
     current = existing[0]
-    if current.bound:
+    new_env = dict(current.env)
+    wanted_config = env.get("PARTICLES_CONFIG")
+    have_config = new_env.get("PARTICLES_CONFIG")
+    if wanted_config is not None and (
+        have_config is None or (replace_config_pin and have_config != wanted_config)
+    ):
+        new_env["PARTICLES_CONFIG"] = wanted_config
+    if (
+        "DATABASE_URL" in env
+        and "DATABASE_URL" not in new_env
+        and new_env.get("PARTICLES_CONFIG") == wanted_config
+    ):
+        new_env["DATABASE_URL"] = env["DATABASE_URL"]
+    args = current.args if current.bound else (*current.args, *PROJECT_OBSERVER_ARGS)
+    if args == current.args and new_env == current.env:
         return None
     return (
-        McpRegistration(
-            name=current.name,
-            command=current.command,
-            args=(*current.args, *PROJECT_OBSERVER_ARGS),
-            env=dict(current.env),
-        ),
+        McpRegistration(name=current.name, command=current.command, args=args, env=new_env),
         current,
     )
+
+
+def foreign_config_pin(existing: Sequence[McpRegistration], env: Mapping[str, str]) -> str | None:
+    """The ``PARTICLES_CONFIG`` an existing registration pins, when it is not the one wanted.
+
+    :func:`plan_mcp_registration` leaves such a pin in place; the installer
+    reports it so the operator can replace it with ``--config``.
+    """
+    if not existing:
+        return None
+    have = existing[0].env.get("PARTICLES_CONFIG")
+    wanted = env.get("PARTICLES_CONFIG")
+    return have if have is not None and wanted is not None and have != wanted else None
 
 
 def particles_mcp_executables(home: Path | None = None) -> list[str]:
@@ -1113,15 +1196,39 @@ _REDACTIONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "[REDACTED API KEY]"),
     # AWS access key IDs.
     (re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"), "[REDACTED AWS KEY]"),
+    # GitHub tokens: classic (ghp_, gho_, ghu_, ghs_, ghr_) and fine-grained.
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}"), "[REDACTED GITHUB TOKEN]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"), "[REDACTED GITHUB TOKEN]"),
+    # Slack tokens (xoxb-, xoxp-, xoxa-, xoxr-, xoxs-, xoxe-).
+    (re.compile(r"\bxox[abeprs]-[A-Za-z0-9-]{10,}"), "[REDACTED SLACK TOKEN]"),
+    # Google API keys.
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), "[REDACTED GOOGLE KEY]"),
+    # JSON Web Tokens: three base64url segments, the first two JSON objects.
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+        "[REDACTED JWT]",
+    ),
+    # Secret-named assignments (password=…, api_key: …, "token": "…"), value only.
+    (
+        re.compile(
+            r"(?i)(?P<key>\b(?:password|passwd|pwd|secret|client_secret|api[_-]?key|"
+            r"access[_-]?token|auth[_-]?token|refresh[_-]?token|token)\b[\"']?\s*[:=]\s*)"
+            r"(?P<quote>[\"']?)(?P<value>[^\s\"',;]{6,})(?P=quote)"
+        ),
+        r"\g<key>\g<quote>[REDACTED]\g<quote>",
+    ),
 ]
 
 
 def redact_secrets(text: str) -> str:
     """Mask common credential shapes.
 
-    Deterministic pattern pass over the distilled transcript before it reaches
-    the corpus: ``sk-…`` keys, AWS access key IDs, ``Bearer`` headers, PEM
-    blocks. Best-effort defence in depth — stated as such in the docs.
+    Deterministic pattern pass over harvested text before it reaches the
+    corpus (distilled transcripts, memory files, rule files): ``sk-…`` keys,
+    AWS access key IDs, GitHub, Slack and Google tokens, JWTs, ``Bearer``
+    headers, PEM blocks, and the value of a secret-named ``key=value`` or
+    ``key: value`` assignment. Best-effort defence in depth — stated as such
+    in the docs.
     """
     for pattern, replacement in _REDACTIONS:
         text = pattern.sub(replacement, text)
@@ -1165,6 +1272,59 @@ def project_state_dir(memory_dir: Path) -> Path:
     overwritten by every other project's cycle.
     """
     return state_dir() / "projects" / memory_dir.parent.name
+
+
+# ---------------------------------------------------------------------------
+# Project-key collisions
+# ---------------------------------------------------------------------------
+
+#: A key :func:`claude_project_slug` can produce, so it is safe as a directory name.
+_PROJECT_KEY_RE = re.compile(r"[A-Za-z0-9-]+")
+
+
+def project_roots_path(key: str) -> Path:
+    """Where the repository roots seen for one project key are recorded."""
+    return state_dir() / "projects" / key / "roots.json"
+
+
+def recorded_project_roots(key: str) -> list[str]:
+    """The repository roots recorded for ``key``, sorted; ``[]`` when none or unreadable."""
+    if not _PROJECT_KEY_RE.fullmatch(key):
+        return []
+    try:
+        data = json.loads(project_roots_path(key).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return sorted({item for item in data if isinstance(item, str)})
+
+
+def record_project_root(key: str, root: Path) -> list[str]:
+    """Add ``root`` to the roots recorded for ``key``; return the whole set, sorted.
+
+    A set union, never a removal: a repository that has since
+    moved stays listed, because the beliefs harvested from it still carry the
+    key. Two or more roots mean two repositories whose paths differ only in
+    punctuation share one key, and so one observer scope. The file is written
+    owner-only: it names the operator's repositories.
+    """
+    if not _PROJECT_KEY_RE.fullmatch(key):
+        return []
+    known = recorded_project_roots(key)
+    roots = sorted({*known, str(root)})
+    if roots != known:
+        write_private_text(project_roots_path(key), json.dumps(roots, indent=2) + "\n")
+    return roots
+
+
+def project_key_collision_note(key: str, roots: Sequence[str]) -> str:
+    """The one-sentence disclosure for a key seen from more than one root."""
+    return (
+        f"project key {key} is shared by {len(roots)} repositories ({', '.join(roots)}): "
+        "their beliefs share one project scope, because Claude Code keeps one memory "
+        "directory for paths that differ only in punctuation"
+    )
 
 
 def memory_snapshot_path(memory_dir: Path | None = None) -> Path:
@@ -1301,17 +1461,32 @@ def _pinned_config_dsn(config_path: Path, handle: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
-    """Reduce one installed hook command to the store it names.
+def pinned_default_dsn(env: Mapping[str, str]) -> str:
+    """The DSN the ``default`` store resolves to in a process started with ``env``'s pins.
 
-    The command is ``[env KEY=VALUE …] <particles> hook <verb> --store <handle>``.
-    The ``default`` store is pinned by ``DATABASE_URL``; a named store by the
-    ``storage.stores`` entry of the pinned ``PARTICLES_CONFIG``.
+    ``DATABASE_URL`` wins; otherwise the ``storage.database_url`` of the config
+    the process reads (its ``PARTICLES_CONFIG`` pin, else the user file),
+    falling back to the compiled ``./particles.db``. ``hook doctor`` uses it to
+    flag an entry whose ``default`` store depends on its working directory
+    (security review N17).
     """
+    if "DATABASE_URL" in env:
+        return env["DATABASE_URL"]
+    pin = env.get("PARTICLES_CONFIG")
+    dsn = _pinned_config_dsn(Path(pin) if pin else user_config_path(), "default")
+    return dsn if dsn is not None else StorageConfig().database_url
+
+
+def _command_tokens(command: str) -> list[str]:
     try:
-        tokens = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
-        tokens = command.split()
+        return command.split()
+
+
+def command_env_pins(command: str) -> dict[str, str]:
+    """The ``env KEY=VALUE …`` pins leading an installed hook command."""
+    tokens = _command_tokens(command)
     env: dict[str, str] = {}
     if tokens and tokens[0] == "env":
         for token in tokens[1:]:
@@ -1319,6 +1494,18 @@ def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
             if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 break
             env[key] = value
+    return env
+
+
+def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
+    """Reduce one installed hook command to the store it names.
+
+    The command is ``[env KEY=VALUE …] <particles> hook <verb> --store <handle>``.
+    The ``default`` store is pinned by ``DATABASE_URL``; a named store by the
+    ``storage.stores`` entry of the pinned ``PARTICLES_CONFIG``.
+    """
+    tokens = _command_tokens(command)
+    env = command_env_pins(command)
     handle = "default"
     for i, token in enumerate(tokens[:-1]):
         if token == "--store":
@@ -1340,19 +1527,50 @@ def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
     )
 
 
+#: Files Claude Code keeps in its configuration directory beside ``projects/``.
+#: Any one of them marks a directory as a harness root whatever it is named.
+_CLAUDE_CONFIG_MARKERS = ("settings.json", "settings.local.json", "history.jsonl", ".claude.json")
+
+
 def _claude_projects_root_of(memory_dir: Path) -> Path | None:
-    """The ``<config>/.claude/projects`` root holding ``memory_dir``, or ``None``.
+    """The ``<config>/projects`` root holding ``memory_dir``, or ``None``.
 
     Decided by shape, not by ``$HOME``: a test or script that swapped ``HOME``
-    and still reached the real directory is caught the same way.
+    and still reached the real directory is caught the same way. The
+    configuration directory is recognised by more than its name, since Claude
+    Code can keep it elsewhere (``CLAUDE_CONFIG_DIR``): a ``.claude`` directory,
+    the directory that variable names, or one holding a Claude Code
+    configuration file. A guard that recognised only the literal ``.claude``
+    name failed open for every other location (security review D28).
     """
     try:
         resolved = memory_dir.resolve()
     except OSError:
         return None
     projects = resolved.parent.parent
-    is_harness_dir = resolved.name == "memory" and projects.name == "projects"
-    return projects if is_harness_dir and projects.parent.name == ".claude" else None
+    if resolved.name != "memory" or projects.name != "projects":
+        return None
+    config_dir = projects.parent
+    if config_dir.name == ".claude" or _is_configured_claude_dir(config_dir):
+        return projects
+    if any((config_dir / marker).is_file() for marker in _CLAUDE_CONFIG_MARKERS):
+        return projects
+    return None
+
+
+def _is_configured_claude_dir(path: Path) -> bool:
+    """Whether ``path`` is the directory ``CLAUDE_CONFIG_DIR`` names.
+
+    The variable is Claude Code's, not a Particles setting: it says where the
+    harness this module guards keeps its files, the way ``HOME`` does.
+    """
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not configured:
+        return False
+    try:
+        return Path(configured).expanduser().resolve() == path
+    except OSError:
+        return False
 
 
 def _settings_bindings(path: Path) -> list[HookBinding]:
@@ -1654,7 +1872,10 @@ def filter_memory_file_for_deposit(
 
     The fold-and-archive pointer line is dropped too — it is
     machine-generated, like the sentinels, and the archive file it points at
-    is harvested in full anyway.
+    is harvested in full anyway. Credential shapes are masked last
+    (:func:`redact_secrets`), as for transcripts; a file with one masked is no
+    longer its own bytes, so the caller's ``refresh_policy_for`` keeps it out
+    of the byte-level refresh loop, which would deposit it raw.
 
     ``source_dir`` is the folder the file itself sits in. When given, its
     memory-index entries are dropped as well (:func:`drop_index_entries`):
@@ -1679,7 +1900,7 @@ def filter_memory_file_for_deposit(
         stripped = "\n".join(kept) + ("\n" if stripped.endswith("\n") else "")
     if source_dir is not None:
         stripped = drop_index_entries(stripped, source_dir)
-    return stripped
+    return redact_secrets(stripped)
 
 
 # ---------------------------------------------------------------------------
@@ -1973,6 +2194,20 @@ def _add_enabled_store_item(lines: list[str], write_idx: int, handle: str) -> li
     item = _child_indent(lines, key_idx, len(indent) + 2)
     return _insert_after(
         lines, _block_end(lines, key_idx) - 1, [f"{' ' * item}- {handle}  {_INIT_MARKER_COMMENT}"]
+    )
+
+
+def minimal_config_text() -> str:
+    """The config file ``init claude-code`` writes when there is none to pin.
+
+    A comment header and no settings: the installer pins a file that exists, so
+    the hooks name their config rather than relying on resolution, and an
+    operator who later adds a setting edits the file the hooks already read.
+    """
+    return (
+        "# Created by `particles init claude-code`.\n"
+        "# Particles reads this file when PARTICLES_CONFIG is unset, so a setting here\n"
+        "# applies to every Particles process run without its own PARTICLES_CONFIG.\n"
     )
 
 

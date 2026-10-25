@@ -23,6 +23,7 @@ beyond what save_blob does into PARTICLES_BLOB_DIR (conftest points it at
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from particles.config import get_config
 from particles.core.schema import (
     CorpusEntry,
     ExtractionStatus,
@@ -45,6 +47,7 @@ from particles.corpus.fetch import (
     RefetchUnsupported,
     _floor_seconds,
     _parse_last_modified,
+    is_refresh_allowed,
     maybe_refetch,
     path_from_file_uri,
 )
@@ -131,6 +134,7 @@ async def _add_entry(
     uri_r: str | None = "https://example.com/x",
     fetch_policy: FetchPolicy = FetchPolicy.LAZY,
     mutability: Mutability = Mutability.MUTABLE,
+    deposited_by: str = "test",
 ) -> CorpusEntry:
     entry = CorpusEntry(
         entry_id=str(uuid.uuid4()),
@@ -138,7 +142,7 @@ async def _add_entry(
         uri_r=uri_r,
         fetch_policy=fetch_policy,
         mutability=mutability,
-        deposited_by="test",
+        deposited_by=deposited_by,
     )
     session.add(CorpusEntryRow.from_model(entry))
     await session.flush()
@@ -564,6 +568,14 @@ class TestPathFromFileUri:
         assert path_from_file_uri(f"file://localhost{f.resolve()}") == f.resolve()
 
 
+@pytest.fixture
+def allow_tmp_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Admit ``tmp_path`` to the local refresh roots (security review D2)."""
+    monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path)])
+    return tmp_path
+
+
+@pytest.mark.usefixtures("allow_tmp_root")
 class TestLocalTier:
     @pytest.mark.asyncio
     async def test_unchanged_mtime_short_circuits_without_reading(
@@ -756,3 +768,259 @@ class TestLocalTier:
 
         assert snap is not None
         client.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# The local tier's root allowlist (security review D2)
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshAllowlist:
+    """The local tier reads only under the roots its legitimate depositors use.
+
+    An entry's ``file://`` URI-R is not proof the operator chose that file: an
+    HTTP caller could once enrol any engine-host path as ``LAZY`` and read it
+    back from ``/corpus/blob``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        # Discovery adds ~/.claude; keep the real one out of every decision.
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    @pytest.mark.asyncio
+    async def test_outside_root_is_refused_without_touching_the_file(
+        self, db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        secret = tmp_path / "elsewhere" / "id_ed25519"
+        secret.parent.mkdir()
+        secret.write_text("PRIVATE KEY")
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(allowed)])
+
+        entry = await _add_entry(db_session, **_local_entry_kwargs(secret))
+        await db_session.commit()
+
+        # Only the refused file is off limits: resolving the roots may stat
+        # them (``Path.resolve()`` does on Python 3.11).
+        real_stat = Path.stat
+
+        def _stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if os.path.realpath(self) == os.path.realpath(secret):
+                raise AssertionError("stat the file")
+            return real_stat(self, *args, **kwargs)
+
+        with (
+            patch.object(Path, "read_bytes", side_effect=AssertionError("read the file")),
+            patch.object(Path, "stat", _stat),
+        ):
+            assert await maybe_refetch(db_session, entry.entry_id, force=True) is None
+        assert await list_snapshots_for_entry(db_session, entry.entry_id) == []
+
+    @pytest.mark.asyncio
+    async def test_inside_root_is_refreshed(
+        self, db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        f = notes / "plan.md"
+        f.write_text("v2")
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(notes)])
+
+        entry = await _add_entry(db_session, **_local_entry_kwargs(f))
+        await _add_snapshot(db_session, entry, content_hash="old-hash")
+        await db_session.commit()
+
+        snap = await maybe_refetch(db_session, entry.entry_id)
+        assert snap is not None
+        assert snap.content_hash == sha256(b"v2")
+        assert snap.warc_record_type is WarcRecordType.RESPONSE
+
+    def test_dotdot_cannot_step_out_of_a_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path / "a")])
+        assert not is_refresh_allowed(tmp_path / "a" / ".." / "b" / "x.md")
+
+    def test_rule_source_root_admits_rule_filenames_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = tmp_path / "repo"
+        (repo / "docs").mkdir(parents=True)
+        monkeypatch.setattr(get_config().rule_sources, "paths", [str(repo)])
+
+        assert is_refresh_allowed(repo / "docs" / "AGENTS.md")
+        assert not is_refresh_allowed(repo / ".env")
+
+    def test_registered_rule_file_is_admitted_by_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rules = tmp_path / "house-rules.txt"
+        rules.write_text("x")
+        monkeypatch.setattr(get_config().rule_sources, "paths", [str(rules)])
+        assert is_refresh_allowed(rules)
+        assert not is_refresh_allowed(tmp_path / "other.txt")
+
+    def test_recorded_root_and_user_claude(self, tmp_path: Path, _isolated_home: Path) -> None:
+        repo = (tmp_path / "repo").resolve()
+        (repo / ".git").mkdir(parents=True)
+        (repo / "sub").mkdir()
+        (_isolated_home / ".claude").mkdir()
+
+        assert is_refresh_allowed(repo / "sub" / "CLAUDE.md", recorded_roots=[repo])
+        assert is_refresh_allowed(_isolated_home / ".claude" / "CLAUDE.md")
+        assert not is_refresh_allowed(_isolated_home / ".claude" / ".credentials.json")
+        # A root nobody recorded is not derived, whatever the working directory.
+        assert not is_refresh_allowed(repo / "AGENTS.md")
+
+    def test_refresh_allowlist_does_not_depend_on_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review N38: the same entry, the same answer, anywhere."""
+        project = (tmp_path / "project").resolve()
+        (project / ".git").mkdir(parents=True)
+        clone = (tmp_path / "clone").resolve()
+        (clone / ".git").mkdir(parents=True)
+        neutral = tmp_path / "neutral"
+        neutral.mkdir()
+
+        for cwd in (project, clone, neutral):
+            monkeypatch.chdir(cwd)
+            assert is_refresh_allowed(project / "AGENTS.md", recorded_roots=[project])
+            assert not is_refresh_allowed(clone / "AGENTS.md", recorded_roots=[project])
+
+    def test_a_recorded_worktree_root_also_admits_the_main_checkout(self, tmp_path: Path) -> None:
+        main = (tmp_path / "main").resolve()
+        worktree = main / ".claude" / "worktrees" / "wt"
+        (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
+
+        assert is_refresh_allowed(main / "AGENTS.md", recorded_roots=[worktree])
+        assert is_refresh_allowed(worktree / "AGENTS.md", recorded_roots=[worktree])
+
+    def test_claude_code_memory_files_are_admitted(
+        self, tmp_path: Path, _isolated_home: Path
+    ) -> None:
+        memory = _isolated_home / ".claude" / "projects" / "-repo" / "memory"
+        memory.mkdir(parents=True)
+        assert is_refresh_allowed(memory / "feedback.md")
+        assert not is_refresh_allowed(memory.parent / "session.jsonl")
+
+
+class TestLocalRefreshProvenanceAndSwap:
+    """The refresh reads only what a local depositor enrolled, through one checked descriptor.
+
+    Security review 2026-10-24: N21 (a LAZY ``file://`` entry the HTTP route
+    enrolled before 1.210.4 still refreshed inside the derived roots) and N22
+    (the root check resolved the path, then the read re-walked the name, so a
+    parent swapped in between was followed).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    def _memory_file(self, home: Path) -> Path:
+        memory = home / ".claude" / "projects" / "-other-project" / "memory"
+        memory.mkdir(parents=True)
+        note = memory / "note.md"
+        note.write_text("another project's memory")
+        return note
+
+    @pytest.mark.asyncio
+    async def test_an_http_enrolled_entry_is_not_refreshed(
+        self, db_session: Any, _isolated_home: Path
+    ) -> None:
+        note = self._memory_file(_isolated_home)
+        entry = await _add_entry(db_session, **_local_entry_kwargs(note), deposited_by="api-user")
+        await db_session.commit()
+
+        assert await maybe_refetch(db_session, entry.entry_id, force=True) is None
+        assert await list_snapshots_for_entry(db_session, entry.entry_id) == []
+
+    @pytest.mark.asyncio
+    async def test_the_harvest_hooks_entry_still_refreshes(
+        self, db_session: Any, _isolated_home: Path
+    ) -> None:
+        note = self._memory_file(_isolated_home)
+        entry = await _add_entry(
+            db_session, **_local_entry_kwargs(note), deposited_by="claude-code-hook"
+        )
+        await db_session.commit()
+
+        snap = await maybe_refetch(db_session, entry.entry_id, force=True)
+        assert snap is not None
+        assert snap.content_hash == sha256(b"another project's memory")
+
+    @pytest.mark.asyncio
+    async def test_an_allowed_root_admits_any_depositor(
+        self, db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        f = notes / "plan.md"
+        f.write_text("mine")
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(notes)])
+        entry = await _add_entry(db_session, **_local_entry_kwargs(f), deposited_by="api-user")
+        await db_session.commit()
+
+        assert await maybe_refetch(db_session, entry.entry_id, force=True) is not None
+
+    def test_every_local_lazy_depositor_is_admitted(self) -> None:
+        """The ids the local enrolment paths record are the ones the derived roots admit."""
+        import inspect
+
+        from particles.corpus.fetch import LOCAL_LAZY_DEPOSITORS
+        from particles.corpus.rule_sources import sync_rule_sources
+
+        default = inspect.signature(sync_rule_sources).parameters["deposited_by"].default
+        assert {default, "init", "claude-code-hook", "operator"} <= LOCAL_LAZY_DEPOSITORS
+        hook = Path(inspect.getfile(sync_rule_sources)).parents[1] / "api" / "cli" / "hook.py"
+        assert 'deposited_by="claude-code-hook"' in hook.read_text(encoding="utf-8")
+        init = hook.with_name("init.py").read_text(encoding="utf-8")
+        assert 'deposited_by="init"' in init
+
+    @pytest.mark.asyncio
+    async def test_a_parent_swapped_after_the_root_check_is_not_read(
+        self, db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import shutil
+
+        from particles.corpus import fetch as fetch_mod
+
+        notes = tmp_path / "notes"
+        (notes / "sub").mkdir(parents=True)
+        f = notes / "sub" / "plan.md"
+        f.write_text("inside")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "plan.md").write_text("OUTSIDE THE ROOT")
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(notes)])
+
+        entry = await _add_entry(db_session, **_local_entry_kwargs(f), deposited_by="operator")
+        await db_session.commit()
+
+        real_check = fetch_mod.is_refresh_allowed
+        calls: list[Path] = []
+
+        def _check_then_swap(path: Path, **kwargs: Any) -> bool:
+            verdict = real_check(path, **kwargs)
+            calls.append(path)
+            if len(calls) == 1:
+                shutil.rmtree(notes / "sub")
+                (notes / "sub").symlink_to(outside, target_is_directory=True)
+            return verdict
+
+        monkeypatch.setattr(fetch_mod, "is_refresh_allowed", _check_then_swap)
+        assert await maybe_refetch(db_session, entry.entry_id, force=True) is None
+        assert await list_snapshots_for_entry(db_session, entry.entry_id) == []

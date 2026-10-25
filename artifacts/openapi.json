@@ -1,6 +1,74 @@
 {
   "components": {
     "schemas": {
+      "AgentLinkRequest": {
+        "description": "An agent's link or unlink between two of its beliefs (MCP ``link_add`` /\n``link_remove``). Only ``CO_EVIDENTIAL`` is agent-writable.",
+        "properties": {
+          "particle_a": {
+            "title": "Particle A",
+            "type": "string"
+          },
+          "particle_b": {
+            "title": "Particle B",
+            "type": "string"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "relation_type": {
+            "default": "CO_EVIDENTIAL",
+            "title": "Relation Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "particle_a",
+          "particle_b"
+        ],
+        "title": "AgentLinkRequest",
+        "type": "object"
+      },
+      "AgentTagRequest": {
+        "description": "An agent's tag or untag of one of its beliefs (MCP ``particle_tag`` /\n``particle_untag``).",
+        "properties": {
+          "particle_id": {
+            "title": "Particle Id",
+            "type": "string"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "particle_id",
+          "tags"
+        ],
+        "title": "AgentTagRequest",
+        "type": "object"
+      },
       "AgentWriteResult": {
         "description": "The \u00a76.6 verdict of a belief write: a first-class result, not an error.\n\n``asserted_particle_id`` is always the *agent's* belief id (the constructed\ncandidate), never the INCONSISTENCY meta-particle's id; on a conflict that\nbelief is the quarantined ``CONFLICT_PENDING`` particle and\n``inconsistency_id`` names the separate INCONSISTENCY record. It is ``None``\nonly on a lower-trust drop (unreachable on a consensus write store).",
         "properties": {
@@ -885,6 +953,7 @@
           "limit": {
             "anyOf": [
               {
+                "minimum": 1.0,
                 "type": "integer"
               },
               {
@@ -896,6 +965,7 @@
           "min_sources": {
             "anyOf": [
               {
+                "minimum": 1.0,
                 "type": "integer"
               },
               {
@@ -4121,6 +4191,17 @@
             "title": "Particle Id",
             "type": "string"
           },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -5275,6 +5356,8 @@
           },
           "rate_limit_per_minute": {
             "default": 100,
+            "maximum": 600.0,
+            "minimum": 1.0,
             "title": "Rate Limit Per Minute",
             "type": "integer"
           }
@@ -5352,7 +5435,8 @@
           "LLM_JUDGE",
           "EXACT_DUPLICATE",
           "REREAD_DUPLICATE",
-          "OBSERVER_DIVERGENCE"
+          "OBSERVER_DIVERGENCE",
+          "AGENT_ASSERTED"
         ],
         "title": "RelationCreatedBy",
         "type": "string"
@@ -7624,7 +7708,7 @@
     },
     "/corpus/deposit/text": {
       "post": {
-        "description": "Deposit raw text into the corpus (no fetch).\n\n``store`` selects the target store (404 on an unknown handle).",
+        "description": "Deposit raw text into the corpus (no fetch).\n\n``store`` selects the target store (404 on an unknown handle).\n``fetch_policy`` ``LAZY`` is refused with 400 unless ``uri_r`` is an http(s)\nURL, because the engine would later re-read a ``file://`` path from its own\ndisk. A ``uri_r`` already held by a non-http(s) ``LAZY`` entry (a file the\nengine refreshes from its own disk) is refused with 409, as is a deposit\nwhose ``source_type`` differs from the entry it would join.",
         "operationId": "corpus_deposit_text_corpus_deposit_text_post",
         "parameters": [
           {
@@ -7669,6 +7753,16 @@
               }
             },
             "description": "Invalid input"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "uri_r is held by an entry this route cannot change"
           },
           "422": {
             "content": {
@@ -7963,7 +8057,7 @@
     },
     "/curation": {
       "get": {
-        "description": "Return the curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist;\nno new detection logic. ``limit`` overrides ``curation.session_size`` for\none call; ``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``). 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** (correct, but as slow as it was before\nthe persisted-collection cutover) and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
+        "description": "Return the curation queue (HTTP mirror of `curate`).\n\nComposes the existing read diagnostics (lint, links/corpus-links suggest, the\ncontested digest, quality) into one leverage-ranked, snooze-filtered worklist;\nno new detection logic. ``limit`` overrides ``curation.session_size`` for\none call and is clamped to ``storage.max_page_size``;\n``kind`` restricts to a single ``CardKind`` (e.g. ``stale``,\n``contested``); ``semantic`` runs the LLM-assisted finders (defaults to\n``curation.semantic``), and a request that runs them is rate-limited like\n``/query``. 400 on an unknown ``kind``.\n\nServed from the persisted collection, which the nightly\nconsolidation cycle or ``POST /curation/rebuild`` writes. A store with no\ncollection yet is served **live** (correct, but as slow as it was before\nthe persisted-collection cutover) and labelled ``source:\nlive``; this route never writes the cache, so a GET stays a read.\n``no_snapshot=true`` forces that live path\nfor one request. The response carries the staleness stamp; see\n``CurationQueueResponse``.",
         "operationId": "get_curation_queue_curation_get",
         "parameters": [
           {
@@ -7973,6 +8067,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -8111,7 +8206,7 @@
     },
     "/curation/cards/{key}": {
       "get": {
-        "description": "Return one open curation card by its key, with every belief it names briefed.\n\nThe queue previews five beliefs of a ``subjectless_source`` card;\nthis read lists them all, each resolvable on its own ``no_subject`` key. It\nruns the same live checks as ``GET /curation``. 404 when no open card has\nthe key.",
+        "description": "Return one open curation card by its key, with every belief it names briefed.\n\nThe queue previews five beliefs of a ``subjectless_source`` card;\nthis read lists them all, each resolvable on its own ``no_subject`` key. It\nruns the same live checks as ``GET /curation``, and is rate-limited like it\nwhen ``curation.semantic`` is on, since a lookup with no snapshot collects the\nqueue with the model. 404 when no open card has the key.",
         "operationId": "get_curation_card_endpoint_curation_cards__key__get",
         "parameters": [
           {
@@ -8166,7 +8261,7 @@
     },
     "/curation/rebuild": {
       "post": {
-        "description": "Rebuild the persisted curation collection store-wide.\n\n**Synchronous and slow by design**: it runs every finder over the whole\nstore (minutes on a large one). It is not how the queue becomes fast; the\nnightly consolidation cycle is. This is the operator's escape hatch when they\nneed the queue to reflect right now, and the web UI already has an honest\nloading state for it. An async 202 + poll variant waits on a resident\nprocess to host job state (tracked).\n\nRequires the write bearer: it mutates the cache.",
+        "description": "Rebuild the persisted curation collection store-wide.\n\n**Synchronous and slow by design**: it runs every finder over the whole\nstore (minutes on a large one). It is not how the queue becomes fast; the\nnightly consolidation cycle is. This is the operator's escape hatch when they\nneed the queue to reflect right now, and the web UI already has an honest\nloading state for it. An async 202 + poll variant waits on a resident\nprocess to host job state (tracked).\n\nRequires the write bearer: it mutates the cache. Rate-limited like\n``/query``, since a semantic rebuild drives paid probes store-wide.",
         "operationId": "rebuild_curation_endpoint_curation_rebuild_post",
         "parameters": [
           {
@@ -8272,7 +8367,7 @@
     },
     "/db/init": {
       "post": {
-        "description": "Idempotently create database tables. Safe to call on a\nfully-initialised store; existing tables are not touched.",
+        "description": "Idempotently create database tables. Safe to call on a\nfully-initialised store; existing tables are not touched. It migrates the\nstore, an operator step, so it is refused (503) under the dev-key skip;\nthe local CLI's `db init` runs in-process.",
         "operationId": "db_init_db_init_post",
         "responses": {
           "200": {
@@ -8844,7 +8939,7 @@
     },
     "/links": {
       "delete": {
-        "description": "Delete a typed relation between two particles (HTTP mirror of `links remove`).",
+        "description": "Delete a typed relation between two particles (HTTP mirror of `links remove`).\n\nIt removes a relation of any provenance, a judged one included, so it is\ngated like `POST /links`.",
         "operationId": "delete_link_endpoint_links_delete",
         "requestBody": {
           "content": {
@@ -8896,7 +8991,7 @@
         "summary": "Delete Link Endpoint"
       },
       "post": {
-        "description": "Create a typed relation between two particles (HTTP mirror of `links add`).",
+        "description": "Create a typed relation between two particles (HTTP mirror of `links add`).\n\nThe operator form: it links any two beliefs, so it needs a real bearer (503\nunder the dev-key skip) and 403 when belief writes are disabled.\nAn agent links its own beliefs through `POST /particles/link`.",
         "operationId": "create_link_endpoint_links_post",
         "requestBody": {
           "content": {
@@ -8950,7 +9045,7 @@
     },
     "/links/suggest": {
       "post": {
-        "description": "Propose (and optionally resolve) co-evidential candidate links.\n\nMirrors the ``particles links suggest`` CLI. Returns ``409`` when\n``APPLY`` would link more pairs than the confirm threshold and\n``confirmed`` was not set.",
+        "description": "Propose (and optionally resolve) co-evidential candidate links.\n\nMirrors the ``particles links suggest`` CLI. Returns ``409`` when\n``APPLY`` would link more pairs than the confirm threshold and\n``confirmed`` was not set. The judging modes call the model per pair, so\nthey are rate-limited like ``/query``; ``REPORT`` is not. ``APPLY`` links\npairs with the operator's authority, so it is refused (503) under the\ndev-key skip, even from loopback.",
         "operationId": "run_links_suggest_links_suggest_post",
         "requestBody": {
           "content": {
@@ -8994,7 +9089,7 @@
     },
     "/lint": {
       "post": {
-        "description": "Run the lint pipeline. Returns the structured findings report.\n\n``fix`` defaults to ``False``; pass ``fix: true`` to\napply structural status transitions (STALENESS, RETRACTION_CASCADE,\nCORPUS_LINK_INTEGRITY).",
+        "description": "Run the lint pipeline. Returns the structured findings report.\n\n``fix`` defaults to ``False``; pass ``fix: true`` to\napply structural status transitions (STALENESS, RETRACTION_CASCADE,\nCORPUS_LINK_INTEGRITY). A fixing run changes belief status with the\noperator's authority, so it is refused (503) under the dev-key skip, even\nfrom loopback; a report-only run is served as before.",
         "operationId": "run_lint_endpoint_lint_post",
         "requestBody": {
           "content": {
@@ -9298,7 +9393,7 @@
     },
     "/particles/assert": {
       "post": {
-        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode), a first-class result, not an error; so does re-asserting a claim an\noperator or reviewer retired (it is held for review), and\n``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a\ngranularity / provenance violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
+        "description": "Assert a belief through the \u00a76.6 ladder (HTTP mirror of MCP ``particle_assert``).\n\nA confirmed contradiction returns ``verdict=INCONSISTENCY_RAISED`` (consensus\nmode), a first-class result, not an error; so does re-asserting a claim an\noperator or reviewer retired (it is held for review), and\n``HELD_FOR_REVIEW`` when the claim is already on an open hold. 400 on a\ngranularity / provenance violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``. Rate-limited like\n``/query``: the reconciliation ladder's contradiction and update probes call\nthe model.",
         "operationId": "particle_assert_endpoint_particles_assert_post",
         "parameters": [
           {
@@ -9437,6 +9532,73 @@
           }
         ],
         "summary": "Particle Contested Badges"
+      }
+    },
+    "/particles/link": {
+      "post": {
+        "description": "Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both\nendpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for\n``project_key``. 400 on a guard violation; 403 when belief writes are\ndisabled for the store; 404 on an unknown ``store``.",
+        "operationId": "agent_link_endpoint_particles_link_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParticleRelation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Agent Link Endpoint"
       }
     },
     "/particles/retract": {
@@ -9591,7 +9753,7 @@
     },
     "/particles/supersede": {
       "post": {
-        "description": "Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or\ngranularity violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
+        "description": "Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard or\ngranularity violation; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``. Rate-limited like\n``particle_assert``, whose ladder it runs.",
         "operationId": "particle_supersede_endpoint_particles_supersede_post",
         "parameters": [
           {
@@ -9654,6 +9816,207 @@
           }
         ],
         "summary": "Particle Supersede Endpoint"
+      }
+    },
+    "/particles/tag": {
+      "post": {
+        "description": "Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a\nguard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``.",
+        "operationId": "agent_tag_endpoint_particles_tag_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTagRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParticleTagsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Agent Tag Endpoint"
+      }
+    },
+    "/particles/unlink": {
+      "post": {
+        "description": "Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on\na guard violation, including a link an agent did not write; 403 when belief\nwrites are disabled for the store; 404 on an unknown ``store``.",
+        "operationId": "agent_unlink_endpoint_particles_unlink_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Agent Unlink Endpoint"
+      }
+    },
+    "/particles/untag": {
+      "post": {
+        "description": "Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on\na guard violation; 403 when belief writes are disabled for the store; 404\non an unknown ``store``.",
+        "operationId": "agent_untag_endpoint_particles_untag_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTagRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParticleTagsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Agent Untag Endpoint"
       }
     },
     "/particles/{particle_id}": {
@@ -9768,7 +10131,7 @@
     },
     "/particles/{particle_id}/narrative/synthesis": {
       "get": {
-        "description": "Render a NARRATIVE as one cited prose article.\n\nTraverses the SEQUENCE_IN chain and runs the article-synthesis engine\n(LLM call; structured-listing fallback on failure). 404 if the particle\ndoes not exist or is not a NARRATIVE.",
+        "description": "Render a NARRATIVE as one cited prose article.\n\nTraverses the SEQUENCE_IN chain and runs the article-synthesis engine\n(LLM call; structured-listing fallback on failure), rate-limited like\n``/query``. 404 if the particle does not exist or is not a NARRATIVE.",
         "operationId": "get_narrative_synthesis_particles__particle_id__narrative_synthesis_get",
         "parameters": [
           {
@@ -10132,7 +10495,7 @@
     },
     "/particles/{particle_id}/tags": {
       "delete": {
-        "description": "Remove tags from a particle (HTTP mirror of `particle untag`). Idempotent.",
+        "description": "Remove tags from a particle (HTTP mirror of `particle untag`). Idempotent.\n\nThe operator form, gated like `POST /particles/{particle_id}/tags`.",
         "operationId": "remove_particle_tags_endpoint_particles__particle_id__tags_delete",
         "parameters": [
           {
@@ -10185,7 +10548,7 @@
         "summary": "Remove Particle Tags Endpoint"
       },
       "post": {
-        "description": "Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.",
+        "description": "Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.\n\nThe operator form: it tags any belief, so it needs a real bearer (503 under\nthe dev-key skip) and 403 when belief writes are disabled. An agent\ntags its own beliefs through `POST /particles/tag`.",
         "operationId": "add_particle_tags_endpoint_particles__particle_id__tags_post",
         "parameters": [
           {
@@ -10308,7 +10671,7 @@
     },
     "/reconcile": {
       "post": {
-        "description": "Run the cross-entry document-supersession sweep: demote\nsuperseded claims the intra-entry extract path never reconciles. v1 is\nsingle-trust-order only and covers the document-supersession mode.",
+        "description": "Run the cross-entry document-supersession sweep: demote\nsuperseded claims the intra-entry extract path never reconciles. v1 is\nsingle-trust-order only and covers the document-supersession mode. A run that\ndemotes is refused (503) under the dev-key skip, even from loopback; a\n``dry_run`` report is served as before.",
         "operationId": "run_reconcile_reconcile_post",
         "requestBody": {
           "content": {
@@ -10680,7 +11043,7 @@
     },
     "/subjects/merge": {
       "post": {
-        "description": "Merge several source subjects into one target (HTTP mirror of `subjects merge`).\n\nIrreversible unless `dry_run` is set: every source is deleted and its\nparticles and aliases fold into the target, recorded as one operator event.\nEvery source is checked before anything is written, so one bad source\nrefuses the whole merge. 404 if a subject is absent or was already merged;\n400 if a source is the target or is listed twice.",
+        "description": "Merge several source subjects into one target (HTTP mirror of `subjects merge`).\n\nIrreversible unless `dry_run` is set: every source is deleted and its\nparticles and aliases fold into the target, recorded as one operator event.\nEvery source is checked before anything is written, so one bad source\nrefuses the whole merge. 404 if a subject is absent or was already merged;\n400 if a source is the target or is listed twice. A real merge is refused\n(503) under the dev-key skip, even from loopback; a `dry_run` plan is served\nas before.",
         "operationId": "merge_subjects_many_endpoint_subjects_merge_post",
         "requestBody": {
           "content": {
@@ -10877,7 +11240,7 @@
     },
     "/subjects/{source_id}/merge": {
       "post": {
-        "description": "Merge one source subject into a target (the one-source form of `POST /subjects/merge`).\n\nIrreversible: the source is deleted and its particles + aliases fold into the\ntarget. 404 if either subject is absent; 400 on an invalid merge.",
+        "description": "Merge one source subject into a target (the one-source form of `POST /subjects/merge`).\n\nIrreversible: the source is deleted and its particles + aliases fold into the\ntarget. 404 if either subject is absent; 400 on an invalid merge. Refused\n(503) under the dev-key skip, even from loopback.",
         "operationId": "merge_subjects_endpoint_subjects__source_id__merge_post",
         "parameters": [
           {
@@ -11007,7 +11370,7 @@
     },
     "/subjects/{subject_id}/aliases": {
       "post": {
-        "description": "Append aliases to a subject (HTTP mirror of `subjects alias`). 404 if absent.",
+        "description": "Append aliases to a subject (HTTP mirror of `subjects alias`). 404 if absent.\n\nAn alias steers every later resolution, so it needs a real bearer (503 under\nthe dev-key skip).",
         "operationId": "add_subject_aliases_endpoint_subjects__subject_id__aliases_post",
         "parameters": [
           {
@@ -11211,7 +11574,7 @@
     },
     "/subjects/{subject_id}/split": {
       "post": {
-        "description": "Re-bind misjoined particles off a source Subject onto a new Subject the\nresolver canonicalises (HTTP mirror of `subjects split`). 404 if\nthe source Subject is absent; 400 on an empty particle list or a bad target\nidentity.",
+        "description": "Re-bind misjoined particles off a source Subject onto a new Subject the\nresolver canonicalises (HTTP mirror of `subjects split`). 404 if\nthe source Subject is absent; 400 on an empty particle list or a bad target\nidentity. Refused (503) under the dev-key skip, even from loopback: it\nneeds a real bearer.",
         "operationId": "split_subject_endpoint_subjects__subject_id__split_post",
         "parameters": [
           {

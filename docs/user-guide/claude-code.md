@@ -80,9 +80,25 @@ That one command:
    one store, that's the one. Several → pass `--store <handle>`. **None (fresh
    install) → `init` creates and enables a `memory` store**: it initialises
    the store database (default `~/.particles/memory.db`) and appends
-   `storage.stores.memory` + `mcp.write.enabled_stores` to your `config.yaml`
+   `storage.stores.memory` + `mcp.write.enabled_stores` to your config file
    under the same never-clobber discipline (parse, preserve everything else,
    comments included, append, verify).
+   **Pins the config file.** Every hook command and the MCP server
+   registration carry an absolute `PARTICLES_CONFIG`, so each states its
+   config instead of depending on where a session starts. The file
+   is `--config <path>` if you pass it, else `PARTICLES_CONFIG`, else
+   `~/.particles/config.yaml`, which `init` creates (a comment header, plus
+   the `memory` store entries when it creates that store) if it is missing.
+   A `config.yaml` in the working directory is never pinned unless you name
+   it with `--config`. An existing MCP registration with no pin gains one; a
+   registration pinned to a different file is left alone and reported, and
+   `--config` replaces it. The MCP read tools read the `default` store, so
+   when the pinned config names no absolute `storage.database_url` the
+   registration also pins `DATABASE_URL` to the installed store; without it
+   the server would open `./particles.db` in whatever directory a session
+   starts in. A registration pinned to the same config gains that pin on a
+   re-run, and a server started with a config pin refuses a store in its
+   working directory.
 3. **Provisions the state directory** `~/.particles/claude-code/` (the hook
    log, the projection manifest `memory.yaml`, and under
    `projects/<project>/` each project's render snapshot, one-deep
@@ -113,6 +129,7 @@ what steps 3 and 5 read (see
 [One store serves every project](#one-store-serves-every-project)) ·
 `--dry-run` prints every file it would write ·
 `--command <path>` overrides the hook executable for non-standard installs ·
+`--config <path>` names the config file to pin ·
 `--json` prints a machine-readable result instead of prose.
 
 ### Running from a source checkout
@@ -217,10 +234,13 @@ project**. It sees:
 - **beliefs observed in this project**: those with at least one source that was
   harvested here. A belief seen in two projects is in view for both.
 
-It does not see another project's beliefs, and it does not see harvested
-material that could not be attributed to any project. Nothing is stored on the
-belief to make this work: a belief's projects are read from the `project:` tag
-on the sources it came from, each time it is read. That makes it a reading
+Its digest, its `MEMORY.md` region and its searches leave out another
+project's beliefs and harvested material that could not be attributed to any
+project. Reads by id, the store-wide listings (subjects, events, corpus
+entries) and any tool called with `all_projects` still reach the whole store.
+Nothing is stored on the belief to make this work: a belief's projects are
+read from the `project:` tag on the sources it came from, each time it is
+read. That makes it a reading
 lens, not a partition. Storage is shared, maintenance (`lint`, `review`, `curate`,
 the nightly consolidation) still sees everything, and switching back is the
 same one line. The digest header says which view it is and how many beliefs
@@ -310,8 +330,8 @@ lens consults. There is deliberately no way for the agent to do this itself.
 is not specific to Claude Code. `particles init claude-code` registers it at
 user scope with `--project-observer cwd`, so it is bound to the project of the
 directory each session starts in; an existing Particles registration keeps its
-executable and env pins and only gains the flag, `--dry-run` shows the
-command, and `--remove` puts the registration back as it was. Without the
+executable and env pins and gains the flag plus any missing pin described
+above, `--dry-run` shows the command, and `--remove` puts the registration back as it was. Without the
 `claude` CLI on your path, `init` prints the command instead:
 
 ```bash
@@ -327,6 +347,16 @@ those agree except for a session that moved between checkouts, where the
 hooks fall back to the transcript directory's name. `particles hook doctor`
 lists such sessions, and flags this directory when the two keys differ.
 
+A project's key is its path with every punctuation character turned into a
+dash, the name Claude Code gives its memory directory, so two repositories
+whose paths differ only in punctuation (`/src/a-b` and `/src/a/b`) share one
+key and see each other's beliefs. Claude Code already gives them one memory
+directory, so Particles keeps the key and says so instead: each session end
+records the repository it came from, a session that finds its key already
+seen from another repository logs `project_key_collision`, and
+`particles hook doctor` names both repositories. Moving one of them to a path
+with a different key is the only way to separate them.
+
 Its `query`, `particles_list`, `particle_search` and `graph_view` then return
 that project's view, and say so in an `observer` field. Passing
 `all_projects: true` to any of them reads the whole store for that one call,
@@ -340,6 +370,12 @@ are already in view for exactly the same projects. Linking two beliefs pools
 their sources, so a link across scopes would move a belief into another
 project's view, or into every project's when the partner is global. The server
 refuses such a link; an operator can still make it with `particles links add`.
+Every server shares one agent identity, so a bound server also changes only
+beliefs in view for its project: retracting, superseding, tagging, untagging or
+linking a belief another project sees is refused, and a server bound to that
+project, or the operator, can make the change. Project scope stays a relevance
+default rather than access control; the refusal keeps one project's session
+from rewriting another project's memory by accident.
 Leave the flag off and the server behaves exactly as before.
 
 **Two projects that disagree both keep their answer.** Once the store has
@@ -440,7 +476,10 @@ material. This is *harvest, don't ask*; the agent took no action to be remembere
   pass keeps user/assistant turns verbatim, elides each tool call to one line
   (`[tool: Bash — git status]`), and **drops tool results** (where payloads
   and secrets concentrate). A redaction pass then masks common credential
-  shapes (`sk-…` keys, AWS access key IDs, `Bearer` headers, PEM blocks). The
+  shapes (`sk-…` keys, AWS access key IDs, GitHub, Slack and Google tokens,
+  JSON Web Tokens, `Bearer` headers, PEM blocks, and the value of a
+  secret-named assignment such as `password=`); memory files and rule files
+  get the same pass. The
   result lands as **one corpus entry per session**
   (`claude-code://session/<id>`, `CONVERSATION`, `APPEND_ONLY`); a grown
   transcript appends a snapshot, and extraction reads only the turns it adds,
@@ -631,7 +670,11 @@ signing agent; set `git.sign: true` to respect your own `commit.gpgsign`, and
 `git.author_name` / `git.author_email` to stamp a specific identity. Only files
 under the memory directory are staged (never `git add -A`), and the internal
 backup / snapshot / archive live outside it, so they never end up in your
-history. See `config.yaml.sample` (or the operator guide's [Agent-memory
+history. The commit runs no program the repository names: git hooks and the
+fsmonitor are switched off for it, and a repository whose own config sets a
+filter, textconv or merge driver is skipped (`skipped:
+command-driver-configured`); a driver in your global git config, such as Git
+LFS, does not count. See `config.yaml.sample` (or the operator guide's [Agent-memory
 projection](../operator-guide/configuration.md#agent-memory-projection)
 section) for the full knob set.
 

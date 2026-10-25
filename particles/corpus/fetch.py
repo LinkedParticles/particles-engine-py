@@ -27,11 +27,16 @@ tier 2 decides.
 
 The local tier has **no network**: no DNS, no redirects, no ``particles_client``
 and no SSRF guard, because that entire surface is absent rather than bypassed.
+What it has instead is a root allowlist (:func:`is_refresh_allowed`): the tier
+reads only files under the roots its legitimate depositors write from, because
+an entry's ``file://`` URI-R is not proof the operator chose that file
+(security review D2).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,9 +53,13 @@ from particles.core.schema import (
     WarcRecordType,
 )
 from particles.corpus.deposit import save_blob, sha256
+from particles.corpus.local_read import read_local_file
+from particles.corpus.rule_roots import list_rule_source_roots
+from particles.corpus.rule_sources import expand_path
 from particles.corpus.store import (
     CorpusEntryRow,
     SnapshotRow,
+    list_refreshable_local_entries,
     list_snapshots_for_entry,
 )
 from particles.http import get_capped, particles_client
@@ -104,6 +113,104 @@ def path_from_file_uri(uri_r: str) -> Path:
     if parsed.netloc not in ("", "localhost"):
         raise ValueError(f"Refusing non-local file URI with authority {parsed.netloc!r}: {uri_r}")
     return Path(unquote(parsed.path))
+
+
+def _main_checkout(root: Path) -> Path | None:
+    """The main checkout of a git worktree rooted at ``root``, else ``None``.
+
+    A worktree's ``.git`` is a file reading ``gitdir: <main>/.git/worktrees/<name>``.
+    A submodule's ``.git`` file points under ``.git/modules`` instead and is not
+    a worktree, so it yields ``None``.
+    """
+    dot_git = root / ".git"
+    if not dot_git.is_file():
+        return None
+    try:
+        text = dot_git.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    gitdir = Path(text[len("gitdir:") :].strip())
+    gitdir = (gitdir if gitdir.is_absolute() else root / gitdir).resolve()
+    if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+        return gitdir.parent.parent.parent
+    return None
+
+
+#: The depositors that enrol a ``LAZY`` ``file://`` entry from the engine's own
+#: disk: ``rules sync`` (``rule-sync``), ``init claude-code`` (``init``), the
+#: SessionEnd harvest (``claude-code-hook``) and ``particles deposit FILE``
+#: (``operator``). A derived root admits only their entries (security review
+#: N21): before 1.210.4 the HTTP route could enrol any engine path as ``LAZY``
+#: (its default identity is ``api-user``), and nothing else tells such an entry
+#: from a local one. A new local depositor of ``LAZY`` entries joins this set.
+LOCAL_LAZY_DEPOSITORS = frozenset({"rule-sync", "init", "claude-code-hook", "operator"})
+
+
+def rule_file_roots(recorded_roots: Sequence[Path]) -> list[Path]:
+    """The roots under which the local tier admits rule files.
+
+    ``rule_sources.paths``, the roots ``rules sync`` and ``init claude-code``
+    recorded, the main checkout of each recorded worktree root (read from the
+    root's own ``.git`` file), and ``~/.claude``. The refreshing process's
+    working directory is never consulted, so a refresh admits the same files
+    whichever directory runs it (security review N38).
+    """
+    roots = [expand_path(p) for p in get_config().rule_sources.paths]
+    roots += [Path(r) for r in recorded_roots]
+    roots += [main for r in recorded_roots if (main := _main_checkout(Path(r))) is not None]
+    roots.append((Path.home() / ".claude").resolve())
+    return roots
+
+
+def is_refresh_allowed(
+    path: Path, *, recorded_roots: Sequence[Path] = (), deposited_by: str | None = None
+) -> bool:
+    """Whether the local tier may read ``path`` (security review D2).
+
+    The resolved path must sit under one of three kinds of root, each the
+    reach of one legitimate depositor of a ``LAZY`` ``file://`` entry:
+
+    * ``local_refresh.allowed_roots`` admits any file under it: the operator's
+      own ``particles deposit FILE --fetch-policy LAZY`` opt-ins.
+    * The rule-file roots (:func:`rule_file_roots`) admit files named in
+      ``rule_sources.filenames`` (or a root that is itself a registered file):
+      what ``rules sync`` and ``init claude-code`` enrol. ``recorded_roots`` is
+      what those verbs recorded (:func:`list_rule_source_roots`); a caller
+      with a session passes it, and none means only the configured and
+      user-level roots.
+    * ``~/.claude/projects`` admits ``*.md``: the Claude Code memory files the
+      SessionEnd harvest enrols.
+
+    Every comparison is on resolved paths, so ``..`` and a symlinked component
+    cannot step out of a root.
+
+    ``deposited_by``, when given, is the entry's recorded depositor. The two
+    derived roots then admit it only when it is one of
+    :data:`LOCAL_LAZY_DEPOSITORS`; ``local_refresh.allowed_roots`` admits any
+    depositor, since the operator named that directory (security review N21).
+    """
+    cfg = get_config()
+    # ``os.path.realpath`` rather than ``Path.resolve()``: on Python 3.11
+    # ``resolve()`` also stats the result, and a refused entry is never
+    # touched. Both walk the same symlinks.
+    resolved = Path(os.path.realpath(path))
+    if any(resolved.is_relative_to(expand_path(r)) for r in cfg.local_refresh.allowed_roots):
+        return True
+    if deposited_by is not None and deposited_by not in LOCAL_LAZY_DEPOSITORS:
+        return False
+
+    projects = (Path.home() / ".claude" / "projects").resolve()
+    if resolved.suffix == ".md" and resolved.is_relative_to(projects):
+        return True
+
+    roots = rule_file_roots(recorded_roots)
+    filenames = set(cfg.rule_sources.filenames)
+    return any(
+        resolved == root or (resolved.name in filenames and resolved.is_relative_to(root))
+        for root in roots
+    )
 
 
 async def maybe_refetch(
@@ -205,19 +312,43 @@ async def _do_local_refresh(
 ) -> Snapshot | None:
     """The local tier: ``stat`` mtime, then content hash. No network.
 
-    Returns the resulting snapshot, or ``None`` when the file no longer exists
-    or cannot be read. A vanished rule file is an *outcome*, not an error: it
-    must not crash the nightly cycle, and — deliberately — it must not retire
-    its beliefs either. "The file is gone" is not "the claims are false", and a
-    stat taken mid-``git``-operation is not evidence of deletion. Retiring on
-    absence is decay, not this ladder's job.
+    Returns the resulting snapshot, or ``None`` when the file no longer exists,
+    cannot be read, or lies outside the root allowlist (:func:`is_refresh_allowed`;
+    a refused path is never opened or stat'ed). A vanished rule file is an
+    *outcome*, not an error: it must not crash the nightly cycle, and
+    (deliberately) it must not retire its beliefs either. "The file is gone"
+    is not "the claims are false", and a stat taken mid-``git``-operation is
+    not evidence of deletion. Retiring on absence is decay, not
+    this ladder's job.
     """
     uri_r = entry_row.uri_r
     assert uri_r is not None
 
     try:
         path = path_from_file_uri(uri_r)
-        follow = get_config().local_refresh.follow_symlinks
+    except ValueError as exc:
+        log.info("Entry %s: local source unavailable (%s)", entry_row.entry_id[:8], exc)
+        return None
+    depositor = entry_row.deposited_by
+    recorded = await list_rule_source_roots(session)
+
+    def _allowed(candidate: Path) -> bool:
+        return is_refresh_allowed(candidate, recorded_roots=recorded, deposited_by=depositor)
+
+    if not _allowed(path):
+        # One warning per run, with the count, comes from the refresh loop
+        # (operations/corpus_refresh.py); this line is per entry.
+        log.info(
+            "Entry %s: %s is outside the local refresh roots for depositor %r; not read.",
+            entry_row.entry_id[:8],
+            path,
+            depositor,
+        )
+        return None
+
+    cfg = get_config()
+    try:
+        follow = cfg.local_refresh.follow_symlinks
         if not follow and path.is_symlink():
             raise ValueError(f"symlinked source and local_refresh.follow_symlinks is off: {path}")
         if not path.is_file():
@@ -246,11 +377,21 @@ async def _do_local_refresh(
         log.debug("Entry %s: mtime unchanged; no read", entry_row.entry_id[:8])
         return prior
 
+    # The bytes come from one descriptor, and that descriptor's own path is
+    # judged again: the check above resolved the name, and a parent swapped for
+    # a symlink since then would otherwise be followed here (security review N22).
     try:
-        content = path.read_bytes()
+        read = read_local_file(
+            path,
+            follow_symlinks=follow,
+            max_bytes=cfg.local_files.max_bytes,
+            allowed=_allowed,
+        )
     except OSError as exc:
         log.info("Entry %s: local source unreadable (%s)", entry_row.entry_id[:8], exc)
         return None
+    content = read.content
+    mtime = datetime.fromtimestamp(read.stat.st_mtime, tz=UTC)
 
     now = datetime.now(UTC)
     content_hash = sha256(content)
@@ -437,3 +578,37 @@ def _parse_last_modified(value: str | None) -> datetime | None:
         return parsedate_to_datetime(value)
     except Exception:
         return None
+
+
+def is_entry_refused(row: CorpusEntryRow, recorded_roots: Sequence[Path]) -> bool:
+    """Whether the local tier refuses this entry's ``file://`` source.
+
+    The same judgement :func:`_do_local_refresh` makes, over the entry's own
+    path and depositor, so the refresh loop can count a refusal before the
+    ladder runs. An entry that is not ``file://``, or whose URI-R does not
+    parse, is not refused here; the ladder reports it.
+    """
+    if row.uri_r is None or not row.uri_r.startswith("file://"):
+        return False
+    try:
+        path = path_from_file_uri(row.uri_r)
+    except ValueError:
+        return False
+    return not is_refresh_allowed(
+        path, recorded_roots=recorded_roots, deposited_by=row.deposited_by
+    )
+
+
+async def count_refused_local_entries(session: AsyncSession) -> int:
+    """How many ``LAZY`` ``file://`` entries the local tier would refuse to read.
+
+    ``particles rules`` and ``hook doctor`` report it, so the window between an
+    upgrade and the first ``rules sync`` is never silent.
+    """
+    recorded = await list_rule_source_roots(session)
+    refused = 0
+    for entry_id, _uri_r in await list_refreshable_local_entries(session):
+        row = await session.get(CorpusEntryRow, entry_id)
+        if row is not None and is_entry_refused(row, recorded):
+            refused += 1
+    return refused

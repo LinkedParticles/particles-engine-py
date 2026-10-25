@@ -13,7 +13,8 @@ data:
   # Mounted over the image's baked /etc/particles/config.yaml. Keep the
   # absolute /data pins (storage.database_url, storage.blob_dir,
   # claude_code.state_dir) — dropping them re-opens the cwd-relative trap the
-  # baked config exists to close. Secrets never belong here.
+  # baked config exists to close. Keep api.require_auth_for_reads: true too,
+  # or the read routes open to the Service. Secrets never belong here.
   config.yaml: |
 {{ .Values.config.content | indent 4 }}
 {{- end }}

@@ -653,6 +653,13 @@ class TestObsidianBlockRefConversion:
         # Empty / whitespace-only content falls back to placeholder.
         assert _claim_for_heading("   ") == "(empty claim)"
 
+    def test_claim_for_heading_neutralizes_markup(self) -> None:
+        """Security review D36: HTML, embeds and links in a claim stay text."""
+        from particles.exporters.obsidian import _claim_for_heading
+
+        heading = _claim_for_heading('<img src="https://x.test/t"> ![[Secret]] [a](https://x)')
+        assert heading == '\\<img src="https://x.test/t"> \\![[Secret]] [a]\\(https://x)'
+
 
 class TestRenderParticleAuditCallouts:
     """Shared per-particle audit-trail renderer. Used by

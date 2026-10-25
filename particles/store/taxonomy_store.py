@@ -274,9 +274,13 @@ async def set_particle_tags(session: AsyncSession, particle_id: str, tags: list[
 
 
 async def add_particle_tags(
-    session: AsyncSession, particle_id: str, new_tags: list[str]
+    session: AsyncSession, particle_id: str, new_tags: list[str], *, actor: str = "particle-tag"
 ) -> list[str]:
-    """Add tags to a particle, idempotent on existing tags. Returns added tags."""
+    """Add tags to a particle, idempotent on existing tags. Returns added tags.
+
+    ``actor`` is recorded on the ``PARTICLE_TAGGED`` event; an MCP agent's tag
+    passes its asserter identity.
+    """
     from particles.store.particle_store import ParticleRow
 
     row = await session.get(ParticleRow, particle_id)
@@ -295,7 +299,7 @@ async def add_particle_tags(
     await session.flush()
     await record_event(
         session,
-        actor="particle-tag",
+        actor=actor,
         event_type=OperatorEventType.PARTICLE_TAGGED,
         refs=[(EventRefKind.PARTICLE, particle_id)],
         payload={"added": added},
@@ -304,9 +308,13 @@ async def add_particle_tags(
 
 
 async def remove_particle_tags(
-    session: AsyncSession, particle_id: str, tags: list[str]
+    session: AsyncSession, particle_id: str, tags: list[str], *, actor: str = "particle-untag"
 ) -> list[str]:
-    """Remove tags from a particle, idempotent on missing tags. Returns removed tags."""
+    """Remove tags from a particle, idempotent on missing tags. Returns removed tags.
+
+    ``actor`` is recorded on the ``PARTICLE_UNTAGGED`` event; an MCP agent's
+    untag passes its asserter identity.
+    """
     from particles.store.particle_store import ParticleRow
 
     row = await session.get(ParticleRow, particle_id)
@@ -329,7 +337,7 @@ async def remove_particle_tags(
     removed = sorted(to_remove)
     await record_event(
         session,
-        actor="particle-untag",
+        actor=actor,
         event_type=OperatorEventType.PARTICLE_UNTAGGED,
         refs=[(EventRefKind.PARTICLE, particle_id)],
         payload={"removed": removed},

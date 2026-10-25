@@ -85,6 +85,10 @@ env: {}
 # Mount your own config.yaml over the image's baked one. Set
 # `config.create: true` and put the file body in `config.content`, or point
 # `config.existingConfigMap` at a ConfigMap whose `config.yaml` key holds it.
+# Your file replaces the baked one entirely, so keep its floor: the absolute
+# /data pins and `api: {require_auth_for_reads: true}` (without that line every
+# read route, raw corpus bytes included, is open to anything that reaches the
+# Service).
 config:
   create: false
   existingConfigMap: ""
