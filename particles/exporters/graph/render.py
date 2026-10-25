@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from datetime import datetime
 
 from particles.core.schema import GraphData
@@ -526,6 +527,11 @@ cy.on("tap", function (ev) {
 """
 
 
+_PLACEHOLDER = re.compile(
+    r"__(CY_VERSION|GENERATED_AT|TITLE|META|LEGEND|CYTOSCAPE_JS|DESIGN_TOKENS|GRAPH_DATA_JSON)__"
+)
+
+
 def render_html(data: GraphData, *, generated_at: datetime) -> str:
     """Assemble the single self-contained HTML artifact for one render."""
     if data.scope_type == "subject":
@@ -551,15 +557,19 @@ def render_html(data: GraphData, *, generated_at: datetime) -> str:
         data.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")
     ).replace("</", "<\\/")
 
-    return (
-        _TEMPLATE.replace("__CY_VERSION__", CYTOSCAPE_VERSION)
-        .replace("__GENERATED_AT__", generated_at.isoformat(timespec="seconds"))
-        .replace("__TITLE__", html.escape(title))
-        .replace("__META__", html.escape(" · ".join(meta_bits)))
-        .replace("__LEGEND__", legend)
-        .replace("__CYTOSCAPE_JS__", cytoscape_js())
+    values = {
+        "CY_VERSION": CYTOSCAPE_VERSION,
+        "GENERATED_AT": generated_at.isoformat(timespec="seconds"),
+        "TITLE": html.escape(title),
+        "META": html.escape(" · ".join(meta_bits)),
+        "LEGEND": legend,
+        "CYTOSCAPE_JS": cytoscape_js(),
         # `</` cannot occur in a stylesheet of custom properties, but guard the
         # element boundary anyway — same discipline as the JSON payload.
-        .replace("__DESIGN_TOKENS__", design_tokens_css().replace("</", "<\\/"))
-        .replace("__GRAPH_DATA_JSON__", payload)
-    )
+        "DESIGN_TOKENS": design_tokens_css().replace("</", "<\\/"),
+        "GRAPH_DATA_JSON": payload,
+    }
+    # One pass over the template: a value is never rescanned, so a subject
+    # label holding a placeholder name cannot pull a later value into markup
+    # (security review D33).
+    return _PLACEHOLDER.sub(lambda m: values[m.group(1)], _TEMPLATE)

@@ -204,6 +204,20 @@ class TestSubjectPage:
         assert "  - The obverse depicts the GDR national emblem." in page
         assert f"    id:: {p.id}" in page
 
+    def test_a_description_block_neutralizes_markup(self) -> None:
+        """Security review D36: claim text renders as text, on one block line."""
+        p = _make_particle(
+            '<img src="https://x.test/t.png"> ![](https://x.test/b.png) '
+            "[bank](https://x.test/login) {{embed ((uuid))}}\nnext line"
+        )
+        subj = Subject(id="subj-1", canonical_name="GDR", asserted_by="test")
+        page = render_subject_page(
+            subj, particles=[p], eligible_ids={"GDR"}, subject_map={"subj-1": subj}, eff_conf={}
+        )
+        line = next(ln for ln in page.splitlines() if "x.test/t.png" in ln)
+        assert "\\<img" in line and "\\![]\\(" in line and "[bank]\\(https" in line
+        assert "\\{\\{embed" in line and "next line" in line
+
     def test_phantom_wikilink_collapses_to_bare_name(self) -> None:
         # ``[[NotASubject]]`` references a subject that didn't make
         # eligible_ids — should render as ``NotASubject`` not as a link.

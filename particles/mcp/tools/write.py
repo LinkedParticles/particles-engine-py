@@ -23,9 +23,12 @@ point both transports reach); this module is the thin tool layer:
   error.
 
 Trust-, status-, and identity-bearing fields are constructed server-side (§4a) —
-the caller never supplies them. Mutating another principal's beliefs
-(supersede/retract) is own-beliefs-only unless ``mcp.write.allow_cross_asserter``;
-operator-asserted (``HUMAN_REVIEW``) particles are never agent-mutable.
+the caller never supplies them. Mutating another principal's beliefs (supersede,
+retract, tag, untag, link, unlink) is own-beliefs-only unless
+``mcp.write.allow_cross_asserter``; operator-asserted (``HUMAN_REVIEW``)
+particles are never agent-mutable; on a project-bound server the target must be
+in view for that project; and every write lands in the store its resolved
+handle names.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from particles.config import get_config
+from particles.mcp.limits import admit
 from particles.mcp.observer import bound_project
 
 if TYPE_CHECKING:
@@ -111,8 +115,9 @@ async def particle_assert(
         source_excerpt: The conversational excerpt establishing the belief,
             deposited as its CONVERSATION provenance. Required unless
             ``corpus_entry_id`` is given.
-        corpus_entry_id: Reuse an existing corpus entry as provenance instead of
-            depositing a new excerpt (N beliefs, one entry).
+        corpus_entry_id: Reuse a corpus entry this server deposited as provenance
+            instead of depositing a new excerpt (N beliefs, one entry). Another
+            principal's entry is refused; quote it as ``source_excerpt``.
         uncertainty_nature: "EPISTEMIC" (default) or "ALEATORY".
         tags: Optional tags.
         store: Target store handle; required only when several are write-enabled.
@@ -128,6 +133,7 @@ async def particle_assert(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
+    admit("particle_assert")  # the §6.6 probe may call a model (security review D30)
     result = await get_backend().particle_assert(
         content=content,
         subject_names=subject_names,
@@ -170,7 +176,8 @@ async def particle_supersede(
             ``mcp.write.max_asserted_confidence``.
         source_excerpt: Conversational excerpt establishing the successor,
             deposited as its provenance. Required unless ``corpus_entry_id`` is given.
-        corpus_entry_id: Reuse an existing corpus entry as provenance instead.
+        corpus_entry_id: Reuse a corpus entry this server deposited as provenance
+            instead; another principal's entry is refused.
         uncertainty_nature: "EPISTEMIC" (default) or "ALEATORY".
         tags: Optional tags on the successor.
         store: Target store handle; required only when several are write-enabled.
@@ -182,6 +189,7 @@ async def particle_supersede(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
+    admit("particle_supersede")  # the §6.6 probe may call a model (security review D30)
     result = await get_backend().particle_supersede(
         supersedes_id=supersedes_id,
         content=content,
@@ -220,7 +228,9 @@ async def particle_retract(
     if not reason.strip():
         raise ValueError("particle_retract requires a non-empty reason.")
     handle = _resolve_store(store)
-    await get_backend().particle_retract(particle_id=particle_id, reason=reason, store=handle)
+    await get_backend().particle_retract(
+        particle_id=particle_id, reason=reason, store=handle, project_key=bound_project()
+    )
     return {"particle_id": particle_id, "store": handle, "verdict": "RETRACTED"}
 
 
@@ -271,12 +281,13 @@ async def link_add(
     relation_type: str = "CO_EVIDENTIAL",
     store: str | None = None,
 ) -> dict[str, Any]:
-    """Link two particles with a typed relation (CO_EVIDENTIAL today).
+    """Link two of your beliefs with a typed relation (CO_EVIDENTIAL today).
 
-    A thin mirror of ``particles links add``; particles are addressed by full id.
-    On a project-bound server the two beliefs must already have the same
-    observer scope: a link between different scopes would change which projects
-    see them, which is the operator's act (``particles links add``).
+    Particles are addressed by full id. Both must be your own ACTIVE beliefs
+    (own-beliefs-only, as for supersede and retract). On a project-bound server
+    both must be in view for the project and have the same observer scope: a
+    link between different scopes would change which projects see them, which
+    is the operator's act (``particles links add``).
 
     Args:
         particle_a: Full id of the first particle.
@@ -288,8 +299,12 @@ async def link_add(
 
     handle = _resolve_store(store)
     rt = _parse_relation(relation_type)
-    rel = await get_backend().links_add(
-        particle_a, particle_b, relation_type=rt.value, confidence=1.0, project_key=bound_project()
+    rel = await get_backend().agent_links_add(
+        particle_a,
+        particle_b,
+        relation_type=rt.value,
+        store=handle,
+        project_key=bound_project(),
     )
     return {
         "store": handle,
@@ -306,7 +321,10 @@ async def link_remove(
     relation_type: str = "CO_EVIDENTIAL",
     store: str | None = None,
 ) -> dict[str, Any]:
-    """Remove a typed relation between two particles. Mirror of ``particles links remove``.
+    """Remove a typed relation an agent wrote between two of your beliefs.
+
+    A link the operator, the judge or an extractor wrote is refused; the
+    operator removes it with ``particles links remove``.
 
     Args:
         particle_a: Full id of the first particle.
@@ -318,7 +336,13 @@ async def link_remove(
 
     handle = _resolve_store(store)
     rt = _parse_relation(relation_type)
-    removed = await get_backend().links_remove(particle_a, particle_b, relation_type=rt.value)
+    removed = await get_backend().agent_links_remove(
+        particle_a,
+        particle_b,
+        relation_type=rt.value,
+        store=handle,
+        project_key=bound_project(),
+    )
     return {
         "store": handle,
         "removed": removed,
@@ -331,7 +355,7 @@ async def particle_tag(
     tags: list[str],
     store: str | None = None,
 ) -> dict[str, Any]:
-    """Add tags to a particle (idempotent). Mirror of ``particles particle tag``.
+    """Add tags to one of your beliefs (idempotent). Own-beliefs-only, like retract.
 
     Args:
         particle_id: Full id of the particle to tag.
@@ -341,7 +365,9 @@ async def particle_tag(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
-    added = await get_backend().particle_tag(particle_id, list(tags))
+    added = await get_backend().agent_particle_tag(
+        particle_id, list(tags), store=handle, project_key=bound_project()
+    )
     return {"store": handle, "particle_id": particle_id, "added": added}
 
 
@@ -350,7 +376,7 @@ async def particle_untag(
     tags: list[str],
     store: str | None = None,
 ) -> dict[str, Any]:
-    """Remove tags from a particle (idempotent). Mirror of ``particles particle untag``.
+    """Remove tags from one of your beliefs (idempotent). Own-beliefs-only, like retract.
 
     Args:
         particle_id: Full id of the particle to untag.
@@ -360,5 +386,7 @@ async def particle_untag(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
-    removed = await get_backend().particle_untag(particle_id, list(tags))
+    removed = await get_backend().agent_particle_untag(
+        particle_id, list(tags), store=handle, project_key=bound_project()
+    )
     return {"store": handle, "particle_id": particle_id, "removed": removed}

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
 from sqlalchemy.orm.attributes import flag_modified
 
+from particles.core.observer_scope import UNATTRIBUTED_MARKER, project_keys
 from particles.core.schema import (
     ContributorRef,
     CorpusEntry,
@@ -479,6 +480,43 @@ async def get_entry_by_content_hash(session: AsyncSession, content_hash: str) ->
     if entry_id is None:
         return None
     return await get_entry(session, entry_id)
+
+
+async def get_own_entry_by_content_hash(
+    session: AsyncSession,
+    content_hash: str,
+    *,
+    deposited_by: str,
+    scope_tags: Collection[str],
+) -> CorpusEntry | None:
+    """Return ``deposited_by``'s own entry holding ``content_hash`` under the same scope.
+
+    The content-hash match for an agent deposit (security review 2026-10-24,
+    N29). Another principal's entry never matches, so an agent's excerpt that
+    reproduces an operator's bytes does not take that entry's attribution and
+    trust. The entry must also carry the same observer-scope tags (the same
+    project keys, and the unattributed marker or not), so a re-deposit never
+    adds a key to an entry another project's binding wrote. ``RESPONSE`` rows
+    only, as in :func:`get_entry_by_content_hash`.
+    """
+    wanted = (project_keys(scope_tags), UNATTRIBUTED_MARKER in scope_tags)
+    result = await session.execute(
+        select(SnapshotRow.entry_id)
+        .join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id)
+        .where(
+            SnapshotRow.content_hash == content_hash,
+            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
+            CorpusEntryRow.deposited_by == deposited_by,
+        )
+        .distinct()
+    )
+    for entry_id in result.scalars():
+        entry = await get_entry(session, entry_id)
+        if entry is None:
+            continue
+        if (project_keys(entry.tags), UNATTRIBUTED_MARKER in entry.tags) == wanted:
+            return entry
+    return None
 
 
 async def list_entry_ids_with_extraction_status(

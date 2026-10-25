@@ -643,6 +643,10 @@ def import_mcp_memory_cmd(
     confidence values. Raise them with ``particles trust set`` once you vouch
     for the source, not by editing the import floor.
 
+    An export larger than ``migration.max_bytes`` is refused. One that maps to
+    more records than ``migration.max_candidates`` imports the first of them and
+    says how many it left out.
+
     Run it with ``--dry-run`` first. That parses the export and runs the same
     mapping the import runs, then prints what it would produce: entities to
     Subjects, records to particles, everything the mapping drops (including
@@ -662,15 +666,14 @@ def import_mcp_memory_cmd(
         typer.echo("Error: --json applies to the --dry-run report.", err=True)
         raise typer.Exit(2)
     configure_logging(False, debug)
+    export_bytes = _read_export(export_path)
     if dry_run:
         # Before the remote-mode refusal on purpose: the report is computed from
         # the client's file by Client-layer code and reaches no store, local or
         # remote, so there is nothing for remote mode to get wrong.
         from particles.extraction.mcp_memory import preview_memory_export
 
-        preview = preview_memory_export(
-            export_path.read_bytes(), deposited_by=deposited_by, sample_size=sample
-        )
+        preview = preview_memory_export(export_bytes, deposited_by=deposited_by, sample_size=sample)
         if json_out:
             typer.echo(json.dumps(preview.to_dict(), indent=2, ensure_ascii=False))
         else:
@@ -688,7 +691,7 @@ def import_mcp_memory_cmd(
     # leaves behind, and the user should learn that before relying on the
     # migrated graph. The parser is Client-side and store-free, so
     # reading the export twice costs nothing.
-    for line in _unmigrated_entity_lines(export_path):
+    for line in _unmigrated_entity_lines(export_bytes):
         typer.echo(line)
     typer.echo(
         "Migrated beliefs are second-hand: they carry calibration source IMPORTED and a low "
@@ -749,7 +752,32 @@ def _name_list(names: list[str], limit: int = 10) -> str:
     return shown if len(names) <= limit else f"{shown}, and {len(names) - limit} more"
 
 
-def _unmigrated_entity_lines(export_path: Path) -> list[str]:
+def _read_export(export_path: Path) -> bytes:
+    """Read the export once, refusing one over ``migration.max_bytes`` before reading it.
+
+    The extractor refuses the same export (security review N23); refusing at the
+    door spares a deposit that would extract to nothing.
+    """
+    from particles.config import get_config
+    from particles.corpus.local_read import read_local_file
+    from particles.extraction.mcp_memory import export_size_note
+
+    try:
+        return read_local_file(
+            export_path, follow_symlinks=True, max_bytes=get_config().migration.max_bytes
+        ).content
+    except OSError as exc:
+        try:
+            note = export_size_note(export_path.stat().st_size)
+        except OSError:
+            note = None
+        typer.echo(
+            f"Error: {note or f'cannot read {export_path}: {exc.strerror or exc}'}", err=True
+        )
+        raise typer.Exit(1) from exc
+
+
+def _unmigrated_entity_lines(export_bytes: bytes) -> list[str]:
     """The export's observation-less entities, as the lines the verb prints."""
     from particles.extraction.mcp_memory import (
         empty_entity_notes,
@@ -757,7 +785,7 @@ def _unmigrated_entity_lines(export_path: Path) -> list[str]:
         parse_memory_jsonl,
     )
 
-    report = empty_entity_report(parse_memory_jsonl(export_path.read_bytes()))
+    report = empty_entity_report(parse_memory_jsonl(export_bytes))
     lines = [f"Note: {note}" for note in empty_entity_notes(report)]
     if report.dropped:
         lines.append(

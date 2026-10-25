@@ -2,7 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""ASGI middleware for the FastAPI app — request body-size limiting.
+"""ASGI middleware for the FastAPI app: the Host bound and request body-size limiting.
+
+``HostBoundMiddleware`` refuses a request whose ``Host`` the engine does not
+answer on, and under the dev-key skip one from a non-loopback client, before
+any route runs (security review 2026-10-24, N1). The route gates apply the same
+check (``particles.api.auth.request_bound_refusal``); this covers the paths that
+carry no gate: ``/health``, ``/openapi.json`` and the ``/app`` bundle.
 
 Defense-in-depth for the HTTP surface (security review F-7): uvicorn and
 Starlette impose no default request-body limit, so an unbounded upload can
@@ -25,9 +31,28 @@ from __future__ import annotations
 
 import json
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from particles.api.auth import request_bound_refusal
 from particles.config import get_config
+
+
+class HostBoundMiddleware:
+    """Refuse a request with a disallowed ``Host``, or a non-loopback dev-key client."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            refusal = request_bound_refusal(Request(scope))
+            if refusal is not None:
+                code, detail = refusal
+                await JSONResponse({"detail": detail}, status_code=code)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class _BodyTooLarge(Exception):

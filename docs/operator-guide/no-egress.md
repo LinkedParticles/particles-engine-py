@@ -92,7 +92,12 @@ The check sits at the transports, so a code path cannot forget it: the shared
 fetch client, the subprocess pin that `curl` and `git` connect through, the
 clients for LLM endpoints and the remote engine, the encoder load, and the
 telemetry exporter. Under `none` and `allowlist` a process-wide backstop also
-refuses any other connection or name lookup the policy does not admit.
+refuses any other connection or name lookup the policy does not admit, in the
+CLI, the Claude Code hooks, the engine and the MCP servers. The backstop sees
+connections made through Python's socket layer, which uvloop's are not, so
+`particles engine serve` runs the standard event loop under a refusing
+posture; start a raw `uvicorn` launch with `--loop asyncio` for the same
+cover.
 
 The setting is an in-process control. For a guarantee that holds even against a
 path Particles does not know about, also enforce it at the operating system, as

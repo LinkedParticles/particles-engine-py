@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
-from particles.api.cli import app, require_store_directory, run
+from particles.api.cli import app, prepare_stdio_server_store, run
 from particles.api.cli._output import (
     DEBUG_OPTION,
     PROGRESS_OPTION,
@@ -1521,7 +1521,7 @@ def memory_serve_cmd(
     """
     from particles.mcp.memory_compat import main as serve_main
 
-    require_store_directory(store or DEFAULT_STORE)
+    prepare_stdio_server_store(store or DEFAULT_STORE)
     serve_main(store)
 
 

@@ -857,3 +857,54 @@ class TestImportMcpMemoryDryRun:
         finally:
             monkeypatch.delenv("PARTICLES_ENGINE_BASE_URL", raising=False)
             reset_config()
+
+
+# ---------------------------------------------------------------------------
+# Bounds on one export (security review N23, C9)
+# ---------------------------------------------------------------------------
+
+
+def _wide_export(observations: int, relations: int = 0) -> bytes:
+    lines = [
+        json.dumps(
+            {
+                "type": "entity",
+                "name": "Wide",
+                "entityType": "thing",
+                "observations": [f"fact {i}" for i in range(observations)],
+            }
+        )
+    ]
+    lines += [
+        json.dumps({"type": "relation", "from": "Wide", "to": f"T{i}", "relationType": "knows"})
+        for i in range(relations)
+    ]
+    return "\n".join(lines).encode()
+
+
+async def test_candidates_stop_at_the_cap_with_a_note(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from particles.config import get_config
+
+    monkeypatch.setattr(get_config().migration, "max_candidates", 5)
+    result = await _extract(_wide_export(4, relations=3))
+    assert len(result.candidates) == 5
+    # Observations first, then relations, until the cap.
+    assert [c.content for c in result.candidates[:4]] == [f"fact {i}" for i in range(4)]
+    assert any("max_candidates" in note and "2 were not" in note for note in result.quality_notes)
+
+
+async def test_an_export_over_the_byte_cap_is_not_parsed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from particles.config import get_config
+
+    monkeypatch.setattr(get_config().migration, "max_bytes", 64)
+    result = await _extract(_wide_export(50))
+    assert result.candidates == []
+    assert any("migration.max_bytes" in note for note in result.quality_notes)
+
+
+def test_the_default_caps_are_set() -> None:
+    from particles.config import get_config
+
+    cfg = get_config().migration
+    assert cfg.max_candidates == 10_000
+    assert cfg.max_bytes == 32 * 1024 * 1024

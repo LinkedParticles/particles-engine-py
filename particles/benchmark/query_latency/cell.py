@@ -92,6 +92,7 @@ def environment() -> Environment:
     import sqlalchemy
 
     from particles import __file__ as package_file
+    from particles.url_safety import GIT_LOCAL_ARGS
 
     try:
         from importlib.metadata import version
@@ -100,7 +101,9 @@ def environment() -> Environment:
     except Exception:  # noqa: BLE001 — an uninstalled tree still measures
         package_version = "unknown"
     return Environment(
-        git_sha=_cmd("git", "-C", str(Path(package_file).parent), "rev-parse", "HEAD"),
+        git_sha=_cmd(
+            "git", *GIT_LOCAL_ARGS, "-C", str(Path(package_file).parent), "rev-parse", "HEAD"
+        ),
         package_version=package_version,
         python=platform.python_version(),
         numpy=numpy.__version__,

@@ -13,6 +13,7 @@ property the PDR asked for: a foreign note survives two consecutive exports.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -158,7 +159,11 @@ class TestLedgerWriteAndFinish:
         ledger.finish()
         assert ideas.read_text() == "export body\n"
         manifest = json.loads((tmp_path / EXPORT_MANIFEST_NAME).read_text())
-        assert manifest == {"exporter": "obsidian", "version": 1, "files": ["Ideas.md"]}
+        assert manifest == {
+            "exporter": "obsidian",
+            "version": 2,
+            "files": {"Ideas.md": hashlib.sha256(b"export body\n").hexdigest()},
+        }
 
     def test_finish_prunes_only_owned_files_and_saves_the_manifest(self, tmp_path: Path) -> None:
         ideas, journal = _seed_users_notes(tmp_path)
@@ -185,11 +190,67 @@ class TestLedgerWriteAndFinish:
         )
         first.write(tmp_path / "Half.md", "written before the crash\n")
         # No finish(): the process died. The journal survives it.
-        assert (tmp_path / EXPORT_JOURNAL_NAME).read_text() == "Half.md\n"
+        digest = hashlib.sha256(b"written before the crash\n").hexdigest()
+        assert (tmp_path / EXPORT_JOURNAL_NAME).read_text() == f"Half.md\t{digest}\n"
 
         second = MarkdownExportLedger.claim(tmp_path, exporter="obsidian", recursive=True)
         assert (tmp_path / "Half.md").resolve() in second.owned
         assert second.write(tmp_path / "Half.md", "rewritten\n") is True
+
+
+class TestPlantedLedger:
+    """Security review D34: a manifest someone else wrote cannot delete a note."""
+
+    @pytest.mark.parametrize(
+        "files",
+        [["Ideas.md", "Journal/2026-10-01.md"], {"Ideas.md": "0" * 64}],
+    )
+    def test_a_planted_manifest_does_not_make_the_users_notes_prunable(
+        self, tmp_path: Path, files: object
+    ) -> None:
+        ideas, journal = _seed_users_notes(tmp_path)
+        (tmp_path / EXPORT_MANIFEST_NAME).write_text(
+            json.dumps({"exporter": "obsidian", "version": 2, "files": files})
+        )
+        ledger = MarkdownExportLedger.claim(tmp_path, exporter="obsidian", recursive=True)
+        ledger.write(tmp_path / "Coin.md", "coin\n")
+        assert ledger.finish() == 0
+        assert ideas.read_text() == "my ideas\n" and journal.read_text() == "today\n"
+
+    def test_a_planted_journal_does_not_make_the_users_notes_prunable(self, tmp_path: Path) -> None:
+        ideas, _ = _seed_users_notes(tmp_path)
+        (tmp_path / EXPORT_JOURNAL_NAME).write_text("Ideas.md\n")
+        ledger = MarkdownExportLedger.claim(tmp_path, exporter="obsidian", recursive=True)
+        assert ledger.finish() == 0
+        assert ideas.exists()
+
+    def test_a_note_edited_after_the_export_is_kept(self, tmp_path: Path) -> None:
+        first = MarkdownExportLedger.claim(tmp_path, exporter="obsidian", recursive=True)
+        first.write(tmp_path / "Gone.md", "exported\n")
+        first.finish()
+        (tmp_path / "Gone.md").write_text("exported\nplus the user's own lines\n")
+        second = MarkdownExportLedger.claim(tmp_path, exporter="obsidian", recursive=True)
+        assert second.finish() == 0
+        assert (tmp_path / "Gone.md").exists()
+
+    def test_a_version_1_entry_is_pruned_only_when_the_marker_recognises_it(
+        self, tmp_path: Path
+    ) -> None:
+        ours = tmp_path / "Old.md"
+        ours.write_text("particles/subject\n")
+        theirs = tmp_path / "Mine.md"
+        theirs.write_text("my note\n")
+        (tmp_path / EXPORT_MANIFEST_NAME).write_text(
+            json.dumps({"exporter": "obsidian", "version": 1, "files": ["Old.md", "Mine.md"]})
+        )
+        ledger = MarkdownExportLedger.claim(
+            tmp_path,
+            exporter="obsidian",
+            recursive=True,
+            legacy_marker=lambda text: "particles/" in text,
+        )
+        assert ledger.finish() == 1
+        assert not ours.exists() and theirs.exists()
 
 
 # ---------------------------------------------------------------------------

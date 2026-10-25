@@ -52,6 +52,9 @@ def engine(cli_db: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[list[str]
 
     reset_config()
     get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+    # The in-process engine runs under the dev-key skip, which serves only
+    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app
 

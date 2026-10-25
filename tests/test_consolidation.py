@@ -2164,6 +2164,7 @@ class TestRefreshPass:
         # fixture's fake key, and the snapshot stayed PENDING only because that
         # call failed. Refresh is the pass under test, so extract is a seam here.
         monkeypatch.setattr(consolidation_mod, "_pass_extract", AsyncMock(return_value=0))
+        from particles.config import get_config
         from particles.core.schema import (
             CorpusEntry,
             ExtractionStatus,
@@ -2179,6 +2180,8 @@ class TestRefreshPass:
             list_snapshots_for_entry,
         )
 
+        # The refresh reads only under allowed roots (security review D2).
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path)])
         rules = tmp_path / "AGENTS.md"
         rules.write_text("the old rule")
         entry = CorpusEntry(

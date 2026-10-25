@@ -736,6 +736,22 @@ class TestHtmlArtifact:
         stamp = datetime(2026, 7, 23, tzinfo=UTC)
         assert render_html(data1, generated_at=stamp) == render_html(data2, generated_at=stamp)
 
+    async def test_a_subject_label_cannot_splice_the_payload_into_markup(
+        self, db_session: Any
+    ) -> None:
+        """Security review D33: a placeholder name in a label stays literal text."""
+        from particles.exporters.graph.render import render_html
+
+        a, _b, _c, _ = await _seed_neighbourhood(db_session)
+        data = await build_graph_data(db_session, subject_id=a.id)
+        anchor = next(n for n in data.nodes if n.subject_id == a.id)
+        anchor.label = "__GRAPH_DATA_JSON__ __CYTOSCAPE_JS__"
+        page = render_html(data, generated_at=datetime(2026, 7, 23, tzinfo=UTC))
+        title = page.split("<title>", 1)[1].split("</title>", 1)[0]
+        assert "__GRAPH_DATA_JSON__" in title and "{" not in title
+        heading = page.split("<h1>", 1)[1].split("</h1>", 1)[0]
+        assert "__CYTOSCAPE_JS__" in heading and "{" not in heading
+
     async def test_exporter_requires_output_and_scope(
         self, db_session: Any, tmp_path: Path
     ) -> None:

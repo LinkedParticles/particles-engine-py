@@ -347,14 +347,16 @@ class TestOracle:
         from particles.ingest.pipeline import _contradiction_prompt, _contradiction_verdict
 
         provider = OracleProbeProvider(generate_world(42))
-        prompt = _contradiction_prompt(
+        system, prompt = _contradiction_prompt(
             "The user's home city is Boston.", "The user's home city is Denver."
         )
-        assert _contradiction_verdict(await provider.complete(prompt, max_tokens=10)) is True
-        same = _contradiction_prompt(
+        reply = await provider.complete(prompt, max_tokens=10, system=system)
+        assert _contradiction_verdict(reply) is True
+        system, same = _contradiction_prompt(
             "The user's home city is Boston.", "The user's home city is Boston."
         )
-        assert _contradiction_verdict(await provider.complete(same, max_tokens=10)) is False
+        reply = await provider.complete(same, max_tokens=10, system=system)
+        assert _contradiction_verdict(reply) is False
 
     async def test_probe_provider_parses_the_update_prompt(self) -> None:
         # rung 2.5 asks a second question before it retires anything.
@@ -366,13 +368,15 @@ class TestOracle:
         from particles.ingest.pipeline import _slot_verdict, _update_prompt
 
         provider = OracleProbeProvider(generate_world(42))
-        prompt = _update_prompt(
+        system, prompt = _update_prompt(
             "The user's home city is Boston.", "The user's home city is Denver."
         )
-        reply = await provider.complete(prompt, max_tokens=10)
+        reply = await provider.complete(prompt, max_tokens=10, system=system)
         assert _slot_verdict(reply) is SlotVerdict.CHANGES
-        other = _update_prompt("The user's home city is Boston.", "The user's car is Volvo.")
-        reply = await provider.complete(other, max_tokens=10)
+        system, other = _update_prompt(
+            "The user's home city is Boston.", "The user's car is Volvo."
+        )
+        reply = await provider.complete(other, max_tokens=10, system=system)
         assert _slot_verdict(reply) is SlotVerdict.DIFFERENT
 
     async def test_extractor_unregistered_text_is_a_note_not_an_error(self) -> None:
@@ -442,6 +446,46 @@ class TestExtractionCache:
 
         self._cache(tmp_path, "m").flush()  # extracted nothing — must not truncate
         assert self._cache(tmp_path, "m").get("world 42") is not None
+
+    def test_loading_the_cache_runs_no_code_from_the_file(self, tmp_path: Path) -> None:
+        """Security review C6: a file planted in the cache directory is data only."""
+        import os
+        import pickle
+
+        marker = tmp_path / "ran"
+
+        class _Planted:
+            def __reduce__(self) -> Any:
+                return (os.system, (f"touch {marker}",))
+
+        cache = self._cache(tmp_path, "m")
+        cache.path.write_bytes(pickle.dumps({"stamp": "x", "entries": _Planted()}))
+        (tmp_path / "rot-extraction.pickle").write_bytes(pickle.dumps(_Planted()))
+        reader = self._cache(tmp_path, "m")
+        assert reader.get("anything") is None
+        assert not marker.exists()
+
+    def test_a_populated_result_round_trips(self, tmp_path: Path) -> None:
+        from datetime import UTC, datetime
+
+        from particles.core.schema import ContributorRef, UncertaintyNature
+        from particles.extraction.general import CandidateParticle
+
+        at = datetime(2026, 10, 1, tzinfo=UTC)
+        candidate = CandidateParticle(
+            content="The user lives in Boston.",
+            confidence_value=0.9,
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            subjects=["user"],
+            valid_until=at,
+            contributors=[ContributorRef(id="u", role="author", at=at)],
+        )
+        writer = self._cache(tmp_path, "m")
+        writer.put("a session", ExtractionResult(candidates=[candidate]))
+        writer.flush()
+        got = self._cache(tmp_path, "m").get("a session")
+        assert got is not None and got.candidates[0].valid_until == at
+        assert got.candidates[0].contributors[0].id == "u"
 
 
 class TestEstimate:

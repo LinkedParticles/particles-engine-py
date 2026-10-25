@@ -1099,13 +1099,15 @@ $ particles config [OPTIONS] COMMAND [ARGS]...
 
 **Commands**:
 
-* `validate`: Load and validate config.yaml (+ env...
+* `validate`: Load and validate the config file (+ env...
 
 ### `particles config validate`
 
-Load and validate config.yaml (+ env overrides); report errors readably.
+Load and validate the config file (+ env overrides); report errors readably.
 
-Resolves the same config the rest of the SDK would load, runs the Pydantic
+Resolves the same config the rest of the SDK would load
+(``PARTICLES_CONFIG``, else ``~/.particles/config.yaml``), names where it
+came from and any nearby ``config.yaml`` it does not read, runs the Pydantic
 validation, and prints a human-readable summary. Exits non-zero on the first
 invalid field or an unparseable file, so it is safe to gate a deploy on
 ``particles config validate``.
@@ -2382,6 +2384,10 @@ the incumbent's own scores are preserved as tags rather than becoming
 confidence values. Raise them with ``particles trust set`` once you vouch
 for the source, not by editing the import floor.
 
+An export larger than ``migration.max_bytes`` is refused. One that maps to
+more records than ``migration.max_candidates`` imports the first of them and
+says how many it left out.
+
 Run it with ``--dry-run`` first. That parses the export and runs the same
 mapping the import runs, then prints what it would produce: entities to
 Subjects, records to particles, everything the mapping drops (including
@@ -2522,6 +2528,7 @@ $ particles init claude-code [OPTIONS]
 * `--project`: Install into the current repo's .claude/settings.local.json (gitignored) instead of the user-level ~/.claude/settings.json.
 * `--remove`: Remove exactly the Particles-owned hook entries (and revert the store auto-create while the store is still empty).
 * `--dry-run`: Print the resulting files without writing anything.
+* `--config <path>`: The config file to pin into the hooks and the MCP registration. Default: PARTICLES_CONFIG, else ~/.particles/config.yaml (written when missing). A config.yaml in the working directory is never pinned unless named here. Given explicitly, it also replaces an MCP registration's pin to another file.
 * `--command <str>`: Override the hook command base (default: the absolute path of the running `particles` console script).
 * `--no-audit`: Skip the first-run memory-audit hand-off.
 * `--skills / --no-skills`: Install the shipped agent-onboarding skill files too, into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on: an agent that has the tools but not the guidance is the gap these close.  [default: skills]

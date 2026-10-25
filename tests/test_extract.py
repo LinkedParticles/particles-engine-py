@@ -870,13 +870,20 @@ class TestContradictionSignalGate:
         """claude-haiku-4-5 cut a 120-token reply, claude-haiku-5-5 thought through 250."""
         from particles.ingest import pipeline
 
-        prompt = pipeline._contradiction_prompt("A.", "B.")
-        assert prompt.index("REASON:") < prompt.index("VERDICT: YES")
-        assert prompt.endswith("Claim A: A.\n\nClaim B: B.")
+        system, user = pipeline._contradiction_prompt("A.", "B.", nonce="n0")
+        assert system.index("REASON:") < system.index("VERDICT: YES")
+        assert user == (
+            'Claim A:\n<claim_a nonce="n0">\nA.\n</claim_a nonce="n0">\n\n'
+            'Claim B:\n<claim_b nonce="n0">\nB.\n</claim_b nonce="n0">'
+        )
         complete = AsyncMock(return_value="REASON: port differs.\nVERDICT: YES")
         with patch("particles.llm.complete", complete):
             assert await pipeline._llm_confirms_contradiction("A.", "B.") is True
         assert complete.await_args.kwargs["max_tokens"] == pipeline._CONTRADICTION_PROBE_MAX_TOKENS
+        # Security F3 (D32): the instructions ride the system turn, the claims a fence.
+        sent_system = complete.await_args.kwargs["system"]
+        assert "VERDICT: YES or VERDICT: NO" in sent_system and "SECURITY:" in sent_system
+        assert "VERDICT" not in complete.await_args.args[1]
         assert pipeline._CONTRADICTION_PROBE_MAX_TOKENS >= 4096
         complete.return_value = "REASON: The first claim says the port is 8080 while"
         with patch("particles.llm.complete", complete):

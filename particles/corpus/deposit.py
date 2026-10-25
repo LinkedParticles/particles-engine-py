@@ -37,6 +37,7 @@ from particles.core.schema import (
     SourceType,
     WarcRecordType,
 )
+from particles.corpus.local_read import read_local_file, within
 from particles.corpus.store import (
     CorpusEntryRow,
     SnapshotRow,
@@ -44,6 +45,7 @@ from particles.corpus.store import (
     get_entry_by_content_hash,
     get_entry_by_uri,
     get_latest_snapshot,
+    get_own_entry_by_content_hash,
     get_snapshot,
     list_snapshots_for_entry,
 )
@@ -383,15 +385,19 @@ def _resolve_content_published_at(
     """
     if override is not None:
         return override
+    # A date the file states about itself, or its mtime, is the file author's
+    # to set. Neither may claim a moment after the deposit: a future date would
+    # order the file after every later observation (security review N6).
+    now = datetime.now(UTC)
     leading = _detect_leading_date(content)
     if leading is not None:
-        return leading
+        return min(leading, now)
     if get_config().deposit_date.mtime_fallback:
         try:
             mtime = path.stat().st_mtime
         except OSError:
             return None
-        return datetime.fromtimestamp(mtime, tz=UTC)
+        return min(datetime.fromtimestamp(mtime, tz=UTC), now)
     return None
 
 
@@ -407,6 +413,7 @@ async def deposit_file(
     content_date: datetime | None = None,
     out_unchanged: list[bool] | None = None,
     identify_by_path: bool = False,
+    walked_root: Path | None = None,
 ) -> tuple[str, str]:
     """Deposit a local file into the corpus.
 
@@ -433,11 +440,25 @@ async def deposit_file(
             it to another path's entry by content hash. The vault walk passes
             it, so two notes with identical bytes are two sources;
             every other caller keeps content-hash dedup.
+        walked_root: The folder a directory walk found ``path`` in. Given, the
+            file is read without following a symlink and must resolve under
+            this root, so a link planted in a vault or captures folder, or a
+            parent swapped after the walk, deposits nothing (security review
+            N24). An operator naming one file leaves it ``None``, and a link
+            they name is followed.
+
+    The read refuses a pipe, a device, and a file over ``local_files.max_bytes``
+    with :class:`~particles.corpus.local_read.LocalReadRefused`, an ``OSError``.
 
     Returns:
         Tuple of (entry_id, snapshot_id).
     """
-    content = path.read_bytes()
+    content = read_local_file(
+        path,
+        follow_symlinks=walked_root is None,
+        max_bytes=get_config().local_files.max_bytes,
+        allowed=within(walked_root) if walked_root is not None else None,
+    ).content
     content_hash = sha256(content)
     archive_path = save_blob(content, content_hash)
     content_published_at = _resolve_content_published_at(path, content, content_date)
@@ -603,9 +624,16 @@ def _iter_tree(
     (skip ``_``/``.`` components) and ``deposit_project``'s source-tree rule
     (skip dot-dirs + configured build/cache dirs, but **keep** underscore module
     files like ``__init__.py`` / ``_shared.py``).
+
+    A symlinked file is skipped and logged, never followed (security review
+    N24): a link in the tree would otherwise deposit any file the user can
+    read, and a target inside the tree is walked at its own path anyway.
     """
     results: list[Path] = []
     for path in root.rglob("*"):
+        if path.is_symlink():
+            log.warning("Skipping symlink %s: a walk does not follow links", path)
+            continue
         if not path.is_file():
             continue
         if path.suffix.lower() not in suffixes:
@@ -654,8 +682,10 @@ def walk_vault(vault_dir: Path) -> VaultWalk:
     (Obsidian's ``.obsidian/`` settings dir, ``.trash/``, ``_attachments/``),
     and every directory holding the export ledger, so a vault that contains a
     ``particles export obsidian`` folder never deposits the store's rendering of
-    itself as the owner's notes. Symlinked directories are not
-    followed, as ``rglob`` does not follow them.
+    itself as the owner's notes. Symlinks are not followed: a
+    symlinked directory is not entered, and a symlinked note is skipped and
+    logged (security review D25), since it would deposit whatever it points at.
+    A note linked from inside the vault is still walked at its own path.
 
     Unlike ``Path.rglob``, which silently skips a subdirectory it may not read,
     every OS error is recorded: a walk that missed part of the vault must not
@@ -682,6 +712,9 @@ def walk_vault(vault_dir: Path) -> VaultWalk:
         for name in filenames:
             path = here / name
             if vault_part_ignored(name) or path.suffix.lower() not in VAULT_SUFFIXES:
+                continue
+            if path.is_symlink():
+                log.warning("import vault: skipping symlink %s; a walk does not follow links", path)
                 continue
             if not path.is_file():
                 continue
@@ -796,24 +829,25 @@ async def deposit_vault(
             except ValueError:
                 rel = path
             progress(f"[{i}/{total}] depositing {rel}")
-        if unreadable is not None:
-            try:
-                path.read_bytes()
-            except OSError as exc:
-                log.warning("import vault: cannot read %s (%s); skipped", path, exc)
-                unreadable.append(path)
-                continue
-        entry_id, snapshot_id = await deposit_file(
-            session,
-            path,
-            deposited_by=deposited_by,
-            source_type=SourceType.LOCAL_MARKDOWN,
-            mutability=mutability,
-            fetch_policy=FetchPolicy.NEVER,
-            tags=tags or [],
-            out_unchanged=out_unchanged,
-            identify_by_path=True,
-        )
+        try:
+            entry_id, snapshot_id = await deposit_file(
+                session,
+                path,
+                deposited_by=deposited_by,
+                source_type=SourceType.LOCAL_MARKDOWN,
+                mutability=mutability,
+                fetch_policy=FetchPolicy.NEVER,
+                tags=tags or [],
+                out_unchanged=out_unchanged,
+                identify_by_path=True,
+                walked_root=vault_dir,
+            )
+        except OSError as exc:
+            if unreadable is None:
+                raise
+            log.warning("import vault: cannot read %s (%s); skipped", path, exc)
+            unreadable.append(path)
+            continue
         results.append((entry_id, snapshot_id))
     return results
 
@@ -1026,13 +1060,23 @@ async def deposit_web_clipper(
                 rel = path
             progress(f"[{i}/{total}] depositing {rel}")
 
+        raw = read_local_file(
+            path,
+            max_bytes=get_config().local_files.max_bytes,
+            allowed=within(captures_dir),
+        ).content
         try:
-            text = path.read_bytes().decode("utf-8")
+            text = raw.decode("utf-8")
         except UnicodeDecodeError:
             # A non-UTF-8 capture cannot carry frontmatter; deposit it verbatim
             # through the ordinary local-file path so the scan never aborts.
             entry_id, snapshot_id = await deposit_file(
-                session, path, deposited_by=deposited_by, tags=run_tags, content_date=content_date
+                session,
+                path,
+                deposited_by=deposited_by,
+                tags=run_tags,
+                content_date=content_date,
+                walked_root=captures_dir,
             )
             results.append((entry_id, snapshot_id))
             continue
@@ -1052,6 +1096,7 @@ async def deposit_web_clipper(
                 source_type=SourceType.LOCAL_MARKDOWN,
                 tags=run_tags,
                 content_date=content_date,
+                walked_root=captures_dir,
             )
             results.append((entry_id, snapshot_id))
             continue
@@ -1178,6 +1223,7 @@ async def deposit_project(
             source_type=SourceType.PYTHON_SOURCE,
             tags=tags or [],
             out_unchanged=out_unchanged,
+            walked_root=project_dir,
         )
         results.append((entry_id, snapshot_id))
     return results
@@ -1500,6 +1546,7 @@ async def deposit_text(
     tags: list[str] | None = None,
     author_id: str | None = None,
     out_unchanged: list[bool] | None = None,
+    own_entries_only: bool = False,
 ) -> tuple[str, str]:
     """Deposit raw text (e.g. a conversation transcript).
 
@@ -1510,6 +1557,12 @@ async def deposit_text(
     same text deposited twice returns the first deposit's IDs and writes nothing;
     ``out_unchanged`` receives ``True`` in that case. Returns
     (entry_id, snapshot_id).
+
+    ``own_entries_only`` restricts that match to an entry ``deposited_by``
+    deposited under the same scope tags. Every agent deposit passes it, so an
+    agent's text that reproduces another principal's bytes gets an entry of its
+    own rather than that entry's attribution and trust (security review
+    2026-10-24, N29).
     """
     content = text.encode("utf-8")
     content_hash = sha256(content)
@@ -1529,6 +1582,7 @@ async def deposit_text(
         warc_record_type=WarcRecordType.RESPONSE,
         author_id=author_id,
         out_unchanged=out_unchanged,
+        own_entries_only=own_entries_only,
     )
 
 
@@ -1773,6 +1827,7 @@ async def write_entry_and_snapshot(
     content_date_explicit: bool = False,
     out_unchanged: list[bool] | None = None,
     identified_by_uri: bool = False,
+    own_entries_only: bool = False,
 ) -> tuple[str, str]:
     """Core deposit logic: check for existing entry, create/update, return IDs.
 
@@ -1796,6 +1851,11 @@ async def write_entry_and_snapshot(
 
     ``identified_by_uri``: match the entry by ``uri_r`` alone and never by
     content hash (the vault walk's path identity).
+
+    ``own_entries_only``: match by content hash only an entry ``deposited_by``
+    deposited under the same scope tags (an agent deposit; see
+    :func:`deposit_text`). The matched entry's tags then already equal the
+    incoming ones, so no project key is reconciled onto it.
     """
     # Check for existing entry: URI-R first, then content hash (deduplicates same
     # file deposited from different paths or re-deposited after a move) — except
@@ -1806,7 +1866,12 @@ async def write_entry_and_snapshot(
     if existing is None and not _identified_by_uri_alone(
         mutability, tags, by_path=identified_by_uri
     ):
-        existing = await get_entry_by_content_hash(session, content_hash)
+        if own_entries_only:
+            existing = await get_own_entry_by_content_hash(
+                session, content_hash, deposited_by=deposited_by, scope_tags=tags
+            )
+        else:
+            existing = await get_entry_by_content_hash(session, content_hash)
         if existing is not None and _keyed_deposit_onto_global_entry(existing, tags):
             # A project's deposit must not ride an operator's global entry into
             # view for every project just because the bytes match:

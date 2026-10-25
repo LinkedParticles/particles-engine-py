@@ -803,9 +803,10 @@ class TestMcpRegistration:
         assert tail[1:] == ["mcp", "serve", "--project-observer", "cwd"]
         assert f"PARTICLES_CONFIG={init_env['config'].resolve()}" in add
 
-    def test_an_existing_registration_keeps_its_executable_and_env(
+    def test_an_existing_registration_keeps_its_executable_and_gains_the_config_pin(
         self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
     ) -> None:
+        """an unpinned registration read its starting directory (finding D8)."""
         _write_user_config(
             init_env["home"],
             {
@@ -830,6 +831,8 @@ class TestMcpRegistration:
             "user",
             "-e",
             "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
+            "-e",
+            f"PARTICLES_CONFIG={init_env['config'].resolve()}",
             "particles",
             "--",
             "/opt/pinned/.venv/bin/particles",
@@ -838,16 +841,29 @@ class TestMcpRegistration:
             "--project-observer",
             "cwd",
         ]
+        assert "Pinned its config" in result.output
 
-        # --remove restores the registration as it was, and nothing more.
+        # --remove restores the registration exactly as it was, and nothing more.
         no_real_claude_cli.clear()
         removed = runner.invoke(app, ["init", "claude-code", "--remove"])
         assert removed.exit_code == 0, removed.output
         restore_remove, restore_add = no_real_claude_cli
         assert restore_remove == ["mcp", "remove", "--scope", "user", "particles"]
-        assert restore_add[-3:] == ["/opt/pinned/.venv/bin/particles", "mcp", "serve"]
+        assert restore_add == [
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "-e",
+            "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
+            "particles",
+            "--",
+            "/opt/pinned/.venv/bin/particles",
+            "mcp",
+            "serve",
+        ]
 
-    def test_a_bound_registration_is_left_alone(
+    def test_a_bound_registration_with_no_pin_gains_it(
         self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
     ) -> None:
         _write_user_config(
@@ -861,7 +877,105 @@ class TestMcpRegistration:
         )
 
         assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
+        _remove, add = no_real_claude_cli
+        assert f"PARTICLES_CONFIG={init_env['config'].resolve()}" in add
+        assert add[-5:] == ["/opt/p/bin/particles", "mcp", "serve", "--project-observer", "cwd"]
+
+    def test_a_bound_registration_pinned_to_the_same_file_gains_only_the_store_pin(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        """Security review N17: the config names no absolute default store, so pin one."""
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": "/opt/p/bin/particles",
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                    "env": {"PARTICLES_CONFIG": str(init_env["config"].resolve())},
+                }
+            },
+        )
+
+        assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
+        remove, add = no_real_claude_cli
+        assert remove == ["mcp", "remove", "--scope", "user", "particles"]
+        memory_db = (init_env["home"] / ".particles" / "memory.db").resolve()
+        assert f"DATABASE_URL=sqlite+aiosqlite:///{memory_db}" in add
+        assert f"PARTICLES_CONFIG={init_env['config'].resolve()}" in add
+
+    def test_a_bound_registration_whose_config_names_its_store_is_left_alone(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        init_env["config"].write_text(
+            "storage:\n  database_url: sqlite+aiosqlite:////srv/operator.db\n"
+        )
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": "/opt/p/bin/particles",
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                    "env": {"PARTICLES_CONFIG": str(init_env["config"].resolve())},
+                }
+            },
+        )
+
+        assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
         assert no_real_claude_cli == []
+
+    def test_a_pin_to_another_file_is_kept_and_reported(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        no_real_claude_cli: list[list[str]],
+        tmp_path: Path,
+    ) -> None:
+        """The installer cannot tell a stale pin from a deliberate one."""
+        other = tmp_path / "operator.yaml"
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": "/opt/p/bin/particles",
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                    "env": {"PARTICLES_CONFIG": str(other)},
+                }
+            },
+        )
+
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit", "--json"])
+        assert result.exit_code == 0, result.output
+        assert no_real_claude_cli == []
+        payload = json.loads(result.stdout)
+        assert any(str(other) in step and "--config" in step for step in payload["next_steps"])
+
+    def test_an_explicit_config_replaces_a_pin_to_another_file(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        no_real_claude_cli: list[list[str]],
+        tmp_path: Path,
+    ) -> None:
+        other = tmp_path / "operator.yaml"
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": "/opt/p/bin/particles",
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                    "env": {"PARTICLES_CONFIG": str(other)},
+                }
+            },
+        )
+        chosen = tmp_path / "chosen.yaml"
+
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit", "--config", str(chosen)])
+        assert result.exit_code == 0, result.output
+        _remove, add = no_real_claude_cli
+        assert f"PARTICLES_CONFIG={chosen.resolve()}" in add
+        assert chosen.exists()
+        hook = _commands(_settings(init_env), "SessionStart")[0]
+        assert _env_from_command(hook)["PARTICLES_CONFIG"] == str(chosen.resolve())
 
     def test_dry_run_registers_nothing_and_remove_takes_back_what_it_added(
         self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
@@ -978,3 +1092,119 @@ class TestObserverScopeDefault:
         steps = json.loads(result.stdout)["next_steps"]
         assert any("observer_scope: store" in s for s in steps) is named
         assert f"observer_scope: {configured}" in init_env["config"].read_text()
+
+
+# ---------------------------------------------------------------------------
+# Security review N25: a clone's settings file cannot choose what --remove deletes
+# ---------------------------------------------------------------------------
+
+
+def _foreign_sqlite(path: Path) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE ledger (amount INTEGER)")
+    conn.execute("INSERT INTO ledger VALUES (42)")
+    conn.commit()
+    conn.close()
+
+
+class TestRemoveRefusesARepositorysPin:
+    def _plant(self, clone: Path) -> Path:
+        """A clone shipping a settings.local.json whose hook pins its own config."""
+        (clone / ".claude").mkdir(parents=True)
+        victim = clone / "app.db"
+        _foreign_sqlite(victim)
+        evil = clone / "evil.yaml"
+        evil.write_text(
+            "storage:\n  stores:\n    memory: sqlite+aiosqlite:///./app.db\n"
+            "mcp:\n  write:\n    enabled_stores: [memory]\n",
+            encoding="utf-8",
+        )
+        commands = build_hook_commands(
+            "/opt/venv/bin/particles", "memory", {"PARTICLES_CONFIG": str(evil)}
+        )
+        settings = merge_particles_hook_entries({}, commands)
+        (clone / ".claude" / "settings.local.json").write_text(json.dumps(settings))
+        return victim
+
+    def test_project_remove_ignores_the_clone_pin(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone = tmp_path / "clone"
+        victim = self._plant(clone)
+        monkeypatch.chdir(clone)
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 0, result.output
+        assert "Ignoring the config pin" in result.output
+        assert victim.is_file()
+        import sqlite3
+
+        assert sqlite3.connect(victim).execute("SELECT amount FROM ledger").fetchone() == (42,)
+
+    def test_explicit_config_beats_a_hook_pin(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone = tmp_path / "clone"
+        victim = self._plant(clone)
+        monkeypatch.chdir(clone)
+        result = runner.invoke(
+            app,
+            ["init", "claude-code", "--project", "--remove", "--config", str(init_env["config"])],
+        )
+        assert result.exit_code == 0, result.output
+        assert victim.is_file()
+
+    def test_a_foreign_database_is_never_judged_empty(
+        self, init_env: dict[str, Path], tmp_path: Path
+    ) -> None:
+        import asyncio
+
+        from particles.api.cli.init import _store_is_empty
+        from particles.config import reset_config
+
+        victim = tmp_path / "foreign.db"
+        _foreign_sqlite(victim)
+        init_env["config"].write_text(
+            f"storage:\n  stores:\n    memory: sqlite+aiosqlite:///{victim}\n", encoding="utf-8"
+        )
+        reset_config()
+        assert asyncio.run(_store_is_empty("memory")) is False
+
+    def test_a_database_with_no_tables_is_empty(
+        self, init_env: dict[str, Path], tmp_path: Path
+    ) -> None:
+        import asyncio
+        import sqlite3
+
+        from particles.api.cli.init import _store_is_empty
+        from particles.config import reset_config
+
+        bare = tmp_path / "bare.db"
+        sqlite3.connect(bare).close()
+        init_env["config"].write_text(
+            f"storage:\n  stores:\n    memory: sqlite+aiosqlite:///{bare}\n", encoding="utf-8"
+        )
+        reset_config()
+        assert asyncio.run(_store_is_empty("memory")) is True
+
+
+class TestStateDirIsPrivate:
+    """Security review D46: the state directory is owner-only."""
+
+    def test_install_makes_the_state_dir_owner_only(
+        self, runner: CliRunner, init_env: dict[str, Path]
+    ) -> None:
+        state = init_env["home"] / ".particles" / "claude-code"
+        state.mkdir(parents=True, mode=0o755)
+        state.chmod(0o755)
+        assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
+        assert state.stat().st_mode & 0o777 == 0o700

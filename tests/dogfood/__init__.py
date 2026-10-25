@@ -231,7 +231,11 @@ async def persist_corpus(session: Any, subjects: list[DogfoodSubject]) -> None:
 # ---------------------------------------------------------------------------
 
 
-_SUBJECT_LINE_RE = re.compile(r"^SUBJECT:\s*(.+?)\s*$", re.MULTILINE)
+# The subject name follows ``SUBJECT:`` on the same line (prompts recorded
+# before security review N31) or on the next, inside its nonce fence.
+_SUBJECT_LINE_RE = re.compile(
+    r'^SUBJECT:[ \t]*(?:\n<subject nonce="[0-9a-f]+">\n)?(.+?)\s*$', re.MULTILINE
+)
 _JUDGE_PAIR_PARTICLE_RE = re.compile(r"particle\s*\[([0-9a-fA-F]{8})\]", re.MULTILINE)
 
 

@@ -57,10 +57,12 @@ from particles.render.markdown import (
     PROJECTED_BEGIN_TMPL,
     PROJECTED_END_RE_TMPL,
     PROJECTED_END_TMPL,
+    PROJECTED_SENTINEL_RE,
     SOURCES_TRAILER_RE,
     find_projected_regions,
     format_memory_bullet,
     format_sources_trailer,
+    neutralize_comment_delimiters,
 )
 from particles.store.particle_store import (
     get_active_particle_by_id_or_prefix,
@@ -360,9 +362,15 @@ def _deterministic_section_body(particles: list[Selected]) -> str:
     selected particle (in rank order) carrying its content, short-id, and
     effective confidence — all deterministic given the store — plus the sources
     trailer. This is the gate's selection-and-structure fingerprint.
+
+    Each belief is flattened to one line and its HTML comment delimiters are
+    escaped, as the ``bullets`` render does: a multi-line belief would otherwise
+    forge bullet lines, a sources trailer or an observer line, and a sentinel in
+    it would stop the region updating (security review N26).
     """
     lines = [
-        f"- {particle.content} `p-{_short_id(particle.id)}` _(confidence {eff:.2f})_"
+        f"- {neutralize_comment_delimiters(' '.join(particle.content.split()))} "
+        f"`p-{_short_id(particle.id)}` _(confidence {eff:.2f})_"
         for particle, eff in particles
     ]
     short_ids = [_short_id(particle.id) for particle, _eff in particles]
@@ -596,6 +604,9 @@ async def _synthesised_section_body(
 
     _fm, _h1, prose, _refs = split_rendered_article(rendered)
     clean, cited = _clean_prose(prose)
+    # Model output is spliced into a sentinel region: it must not be able to
+    # open or close an HTML comment there (security review N26).
+    clean = neutralize_comment_delimiters(clean)
     trailer = _sources_trailer(cited)
     body = clean + ("\n\n" + trailer if trailer else "\n")
     return body, True
@@ -660,8 +671,16 @@ def splice_region(existing: str, region: str, new_body: str, *, manifest: str) -
 
     Raises :class:`SpliceError` when the region is missing, when a BEGIN has no
     matching END, or when ``region`` appears more than once (each is a target-file
-    authoring mistake, not a recoverable case).
+    authoring mistake, not a recoverable case). Also raises, before anything is
+    written, when ``new_body`` itself carries a BEGIN or END sentinel: rendered
+    text that closed its own region would leave its tail outside it, where the
+    harvest reads it as authored (security review D14).
     """
+    if PROJECTED_SENTINEL_RE.search(new_body):
+        raise SpliceError(
+            f"the rendered body for projection region {region!r} contains a projection "
+            "sentinel; refusing to splice it."
+        )
     begin_re = re.compile(_SPLICE_BEGIN_RE_TMPL.format(region=re.escape(region)))
     end_re = re.compile(_SPLICE_END_RE_TMPL.format(region=re.escape(region)))
 

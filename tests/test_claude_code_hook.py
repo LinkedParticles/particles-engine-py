@@ -29,11 +29,12 @@ from typer.testing import CliRunner
 from particles.api.cli import app
 from particles.api.cli._claude_code import (
     distill_transcript,
+    filter_memory_file_for_deposit,
     redact_secrets,
     transcript_started_at,
     truncate_on_line_boundary,
 )
-from tests._claude_projects import bind_hooks_to_store
+from tests._claude_projects import bind_hooks_to_store, isolate_claude_code
 
 # ---------------------------------------------------------------------------
 # fixtures + helpers
@@ -241,6 +242,62 @@ class TestRedaction:
         text = "nothing secret here, just a skeleton key mention"
         assert redact_secrets(text) == text
 
+    # Security review N28. The fixtures are assembled at run time so no
+    # token-shaped literal sits in the tree for a secret scanner to flag.
+    @pytest.mark.parametrize(
+        ("secret", "label"),
+        [
+            ("ghp" + "_" + "A1b2C3d4" * 5, "[REDACTED GITHUB TOKEN]"),
+            ("github" + "_pat_" + "11ABCDEFG0" * 5, "[REDACTED GITHUB TOKEN]"),
+            ("xox" + "b-" + "1234567890-abcdefghijkl", "[REDACTED SLACK TOKEN]"),
+            ("AI" + "za" + "Sy" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q", "[REDACTED GOOGLE KEY]"),
+            (
+                "ey"
+                + "JhbGciOiJIUzI1NiJ9"
+                + ".ey"
+                + "JzdWIiOiIxMjM0NTY3ODkwIn0"
+                + ".dozjgNryP4J3jVmNHl0w5N",
+                "[REDACTED JWT]",
+            ),
+        ],
+    )
+    def test_common_token_shapes(self, secret: str, label: str) -> None:
+        out = redact_secrets(f"the credential {secret} was pasted here")
+        assert secret not in out
+        assert label in out
+
+    @pytest.mark.parametrize(
+        "assignment",
+        [
+            "password=hunter2hunter2",
+            'api_key: "abcdef123456"',
+            "TOKEN = 'zyxwvu987654'",
+            '"client_secret": "s3cr3t-value"',
+        ],
+    )
+    def test_secret_named_assignments_keep_the_key(self, assignment: str) -> None:
+        out = redact_secrets(assignment)
+        assert "[REDACTED]" in out
+        key = assignment.split("=")[0].split(":")[0].strip().strip('"')
+        assert key in out
+        assert not any(v in out for v in ("hunter2", "abcdef123456", "zyxwvu", "s3cr3t"))
+
+    def test_memory_file_intake_redacts(self, tmp_path: Path) -> None:
+        secret = "ghp" + "_" + "Z9y8X7w6" * 5
+        text = f"# Note\n\nThe deploy token is {secret}.\n"
+        out = filter_memory_file_for_deposit(text, snapshot_bodies={})
+        assert secret not in out
+        assert "[REDACTED GITHUB TOKEN]" in out
+
+    def test_rule_file_intake_redacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli.rules import projected_region_filter
+
+        isolate_claude_code(monkeypatch, tmp_path)
+        secret = "sk-" + "ant-api03-" + "q" * 24
+        assert secret not in projected_region_filter()(f"Use key {secret} for staging.\n")
+
 
 # ---------------------------------------------------------------------------
 # Digest byte budget (§2)
@@ -335,6 +392,32 @@ class TestSessionStart:
 
 
 class TestSessionEnd:
+    def test_a_project_key_two_repositories_share_is_logged(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        """the second repository behind one key is named in the hook log."""
+        from particles.api.cli._claude_code import claude_project_slug
+        from tests._claude_projects import make_repo
+
+        first = make_repo(tmp_path / "src" / "a-b")
+        second = make_repo(tmp_path / "src" / "a" / "b")
+        key = claude_project_slug(first)
+        project_dir = tmp_path / ".claude" / "projects" / key
+        project_dir.mkdir(parents=True)
+        for repo, session in ((first, "sess-1"), (second, "sess-2")):
+            transcript = project_dir / f"{session}.jsonl"
+            _write_transcript(transcript, ("user", f"working in {repo.name}"))
+            payload = json.loads(_session_end_payload(transcript, session))
+            payload["cwd"] = str(repo)
+            result = runner.invoke(
+                app, ["hook", "session-end", "--store", "default"], input=json.dumps(payload)
+            )
+            assert result.exit_code == 0
+
+        ends = [e for e in _hook_log_lines(hook_home) if e.get("event") == "session-end"]
+        assert "project_key_collision" not in ends[0]
+        assert ends[1]["project_key_collision"] == sorted([str(first), str(second)])
+
     def test_harvests_transcript_as_conversation_append_only(
         self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
     ) -> None:
@@ -608,6 +691,60 @@ class TestHookLog:
         result = runner.invoke(app, ["hook", "log", "--tail", "5"])
         assert result.exit_code == 0
         assert "No hook log entries yet" in result.stdout
+
+    def test_log_is_owner_only(self, hook_home: Path) -> None:
+        """Security review D46: the hook log and the directory it creates are private."""
+        from particles.api.cli._claude_code import append_hook_log, hook_log_path
+
+        append_hook_log({"event": "probe"})
+        path = hook_log_path()
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+class TestPrivateWrites:
+    """Security review D46: state files are owner-only and never written through a link."""
+
+    def test_write_creates_owner_only_file_and_dirs(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import write_private_text
+
+        target = tmp_path / "state" / "projects" / "-p" / "f.md"
+        write_private_text(target, "x\n")
+        assert target.read_text() == "x\n"
+        assert target.stat().st_mode & 0o777 == 0o600
+        for directory in (target.parent, target.parent.parent, tmp_path / "state"):
+            assert directory.stat().st_mode & 0o777 == 0o700
+
+    def test_existing_dirs_keep_their_mode(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import append_private_text
+
+        tmp_path.chmod(0o755)
+        append_private_text(tmp_path / "log.jsonl", "a\n")
+        append_private_text(tmp_path / "log.jsonl", "b\n")
+        assert (tmp_path / "log.jsonl").read_text() == "a\nb\n"
+        assert tmp_path.stat().st_mode & 0o777 == 0o755
+
+    def test_an_older_world_readable_file_is_tightened(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import write_private_text
+
+        target = tmp_path / "snapshot.md"
+        target.write_text("old")
+        target.chmod(0o644)
+        write_private_text(target, "new")
+        assert target.stat().st_mode & 0o777 == 0o600
+
+    def test_never_writes_through_a_symlink(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import append_private_text, write_private_text
+
+        victim = tmp_path / "victim"
+        victim.write_text("owner data")
+        link = tmp_path / "link"
+        link.symlink_to(victim)
+        with pytest.raises(OSError):
+            write_private_text(link, "clobbered")
+        with pytest.raises(OSError):
+            append_private_text(link, "clobbered")
+        assert victim.read_text() == "owner data"
 
 
 # ---------------------------------------------------------------------------
@@ -1116,3 +1253,41 @@ class TestRetiredStopHook:
         assert any("retired" in line for line in hook._check_retired_stop_hook())
         settings.write_text(json.dumps({"hooks": {}}))
         assert hook._check_retired_stop_hook() == []
+
+
+# ---------------------------------------------------------------------------
+# D18 (SECURITY_REVIEW_20261023-1): a hook runs under the no-egress backstop
+# ---------------------------------------------------------------------------
+
+
+def test_hook_body_runs_with_the_no_egress_backstop_armed(
+    hook_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_run_hook`` drives its own ``asyncio.run``, so it must arm the backstop itself."""
+    import io
+    import socket
+
+    from particles import egress
+    from particles.api.cli.hook import _run_hook
+    from particles.config import NetworkConfig, get_config
+
+    monkeypatch.setattr(get_config(), "network", NetworkConfig(egress="none"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    seen: list[str] = []
+
+    async def impl(_store: str, _payload: dict[str, Any], _record: dict[str, Any]) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            try:
+                sock.connect(("127.0.0.1", 9))
+            except egress.EgressRefused:
+                seen.append("refused")
+            except OSError:
+                seen.append("reached the OS")
+        return None
+
+    try:
+        _run_hook("SessionStart", "default", impl)
+    finally:
+        egress.disarm_backstop()
+    assert seen == ["refused"]

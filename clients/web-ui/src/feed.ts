@@ -361,12 +361,19 @@ export class CurationFeed {
     }
     if (card.corpus_url) {
       if (nodes.length) nodes.push(document.createElement("br"));
-      const a = document.createElement("a");
-      a.href = card.corpus_url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = card.corpus_url;
-      nodes.push(a);
+      // Only an http(s) URL becomes a link, as at the source line below: a
+      // javascript: URL in an href runs on this origin, which holds the bearer
+      // (security review 2026-10-24, N37). Anything else is shown as text.
+      if (/^https?:\/\//.test(card.corpus_url)) {
+        const a = document.createElement("a");
+        a.href = card.corpus_url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = card.corpus_url;
+        nodes.push(a);
+      } else {
+        nodes.push(document.createTextNode(card.corpus_url));
+      }
     }
     return nodes;
   }

@@ -1,7 +1,12 @@
 # particles/config.yaml.sample
 #
-# Copy this file to config.yaml and edit as needed.
-# config.yaml is gitignored and will never be committed.
+# Copy this file to ~/.particles/config.yaml (the user file), or anywhere you
+# like and name it with PARTICLES_CONFIG, then edit as needed. Particles reads
+# PARTICLES_CONFIG if it is set, else ~/.particles/config.yaml, else compiled
+# defaults. It never reads a config.yaml from the working directory
+# or its parents, so a cloned repository cannot configure it; a Particles
+# config.yaml found there is reported once per command and ignored.
+# `particles config validate` names the file in use.
 #
 # Secrets (ANTHROPIC_API_KEY, NUMISTA_API_KEY) must be set as environment
 # variables — they are intentionally absent from this file.
@@ -62,13 +67,18 @@ storage:  # [client]
     # Lockfile path; unset ⇒ "<database file>.writelock" beside the store DB.
     # path: ./particles.db.writelock
 
-cli:  # [engine]
+cli:  # [client]
   # Seconds of silence after which a long-running verb prints a liveness line
   # ("… extract: working (2m14s elapsed)") to stderr, so a slow command is never
   # mistaken for a hung one. Written to stderr and erased on completion, and
   # automatically suppressed whenever stderr is not a TTY (pipes, CI), so piped
   # and machine-read output is unaffected. Set to 0 to disable entirely.
   heartbeat_seconds: 20.0
+  # Warn once per command when a Particles config.yaml sits in the working
+  # directory (or a parent, up to the repository root) and is not read, with
+  # the two ways to use it. Only a file Particles reads can turn
+  # this off, so a file it ignores never can.
+  warn_unused_config: true
 
 http:  # [client]
   # User-Agent sent on all outbound HTTP requests. Defaults to
@@ -153,6 +163,25 @@ api:  # [engine]
   # operator audit log) and /digest (the belief digest) — always require the
   # bearer (the dev-key loopback skip keeps them open for local dev).
   require_auth_for_reads: false
+  # Browser origins (scheme://host[:port]) whose cross-site requests the engine
+  # serves without a verified bearer. Every gated route refuses a request a web
+  # page on another site sends (Sec-Fetch-Site cross-site/same-site, or an
+  # Origin that is not the engine's own), so an open browser tab cannot deposit
+  # into or spend through a loopback dev-key engine. The web UI at /app is
+  # same-origin and needs no entry; the CLI and MCP send no Origin. Default
+  # empty. Example:
+  #   allowed_origins: ["https://notes.example.org"]
+  allowed_origins: []
+  # Host header names (no port) the engine answers on, beside the loopback names
+  # (localhost, 127.0.0.0/8, ::1), which are always allowed. Checked on every
+  # path, /health and /app included; this is what refuses a DNS-rebinding page,
+  # which reaches the engine's address under its own hostname. Under the
+  # dev-key skip only loopback names and these entries are served. With a real
+  # PARTICLES_API_KEY and an empty list (the default) no Host is refused: set it
+  # on a non-loopback deployment whose reads are open, including the name your
+  # health probe sends. A "*." prefix matches any subdomain. Example:
+  #   allowed_hosts: ["engine.example.org", "*.tailnet.example"]
+  allowed_hosts: []
 
 # Provenance of the artifact this process runs from — normally NOT set by hand.
 # The container image stamps it (deploy/Dockerfile takes --build-arg BUILD_DATE
@@ -175,6 +204,11 @@ build:  # [engine]
 engine:  # [engine]
   # base_url: "http://mac-mini.local:8000"   # unset = local-direct (default)
   timeout_seconds: 60.0
+  # The engine token (PARTICLES_ENGINE_TOKEN) is refused over a non-loopback
+  # http:// base_url: use https://, or an SSH / Tailscale forward to
+  # http://127.0.0.1. Set true to send it anyway, with a warning, on a network
+  # you trust end to end.
+  allow_plaintext_token: false
 
 # OpenTelemetry observability. Off by default. Turning it on ALSO
 # requires the optional runtime: `pip install particles[otel]` (the base install
@@ -204,6 +238,10 @@ observability:  # [engine]
   # endpoint: "http://localhost:4318"   # OTLP target when exporter: otlp.
   #                                      # See TRUST BOUNDARY note above before
   #                                      # using a non-local endpoint.
+  # Exporter headers (PARTICLES_OTEL_EXPORTER_HEADERS) are refused over a
+  # non-loopback http:// endpoint: no OTLP exporter is installed. Set true to
+  # send them anyway, with a warning, on a network you trust end to end.
+  allow_plaintext_headers: false
   traces: true
   metrics: true
   logs: true
@@ -228,6 +266,10 @@ embeddings:  # [client]
 # Read-write MCP surface. Default-deny: with enabled_stores empty the
 # MCP server accepts no writes — only the read tools are exposed.
 mcp:  # [engine]
+  # Per server process: tool calls that can drive a paid model call (a query
+  # with a question, particle_assert / particle_supersede, and every write of
+  # the memory-server facade) allowed per minute, as one token bucket. 0 = off.
+  rate_limit_per_minute: 60
   write:
     # Allowlist of store handles writable over MCP. EMPTY = no MCP writes at all.
     # A listed store must reconcile in 'multi' (see reconciliation.per_store).
@@ -235,7 +277,8 @@ mcp:  # [engine]
     # Seeded AUTHOR-scoped trust_rank for a new asserter identity (§6/§6a) — so
     # agent-asserted beliefs enter effective confidence below operator content.
     agent_trust_rank: 0.8
-    # Whether retract/supersede may target another identity's particles.
+    # Whether retract / supersede / tag / untag / link may target another
+    # identity's particles, and link_remove another writer's link.
     allow_cross_asserter: false
     # The server-bound asserting principal, stamped onto asserted_by / author_id
     # / the event actor. NOT a per-call client argument (§4a).
@@ -477,6 +520,9 @@ llm:  # [client]
   #     timeout_seconds: 120              # local models can be slow on modest hardware
   #     max_retries: 2                    # bounded retry on connection error / 429 / 5xx
   #     retry_backoff_seconds: 1.0        # exponential: backoff * 2**attempt
+  #     allow_plaintext_key: false        # the entry's key is refused over a
+  #                                       # non-loopback http:// base_url; true
+  #                                       # sends it anyway, with a warning
   #     # JSON-schema structured output. "auto"
   #     # (default): when a call site supplies a response schema, send
   #     # OpenAI-style response_format {type: json_schema, strict: true};
@@ -1120,6 +1166,12 @@ migration:  # [client]
   # `particles trust set` against the export's source type — revisable,
   # auditable, demotion-only — where this number is frozen at creation.
   import_confidence: 0.35
+  # Bounds on one export. A larger export is not parsed; the mapping stops at
+  # max_candidates and says what it left out. Each candidate costs an embedding
+  # and a reconciliation, and an HTTP text deposit of this type reaches the
+  # same extractor, so the export is not trusted to be small.
+  max_bytes: 33554432  # 32 MiB
+  max_candidates: 10000
 
 trust:  # [client]
   # Minimum trust score difference required for automatic trust-based demotion
@@ -2850,6 +2902,27 @@ local_refresh:  # [engine]
   # change of identity rather than content, and an unattended pass should not
   # silently ingest the new target.
   follow_symlinks: false
+  # Extra directories (or files) the refresh may read. The refresh reads a
+  # file only when it sits under an allowed root, so an entry that names some
+  # other file on the engine host is skipped (logged, never read). The derived
+  # roots need no entry here:
+  #   - the rule-file roots (`rule_sources.paths`, the roots `particles rules
+  #     sync` and `init claude-code` recorded, the main checkout of a recorded
+  #     worktree, and ~/.claude), for files named in `rule_sources.filenames`
+  #     only. The directory the refresh runs from is never a root;
+  #   - *.md under ~/.claude/projects (the Claude Code memory files).
+  # A file you opt in with `particles deposit FILE --fetch-policy LAZY` outside
+  # those needs its directory listed. `~` and $VAR are expanded.
+  allowed_roots: []
+  #   - ~/notes
+
+local_files:  # [engine]
+  # The largest local file the corpus reads itself: a file deposit, a vault,
+  # web-clipper or project walk, a rule-file intake, and the refresh above.
+  # A larger file is refused before it is read and reported as unreadable.
+  # Every such read also refuses a symlink planted in a walked folder, a pipe
+  # or device, and a file that resolves outside the folder being walked.
+  max_bytes: 268435456  # 256 MiB
 
 # ---------------------------------------------------------------------------
 # Rule sources — WHICH local documents the store tracks.

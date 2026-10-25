@@ -67,7 +67,7 @@ app prompts for the bearer, which it then sends on every call.
 
 Without a key the engine still serves the queue and every read, but the
 curation gestures (affirm, snooze, dismiss, resolve, edit, retract, assign
-subject, relink, whole-source retract) are refused with a 503: they are
+subject, relink, whole-source retract, merge) are refused with a 503: they are
 operator writes, which never ride the dev-key loopback skip. To
 curate, start the engine with `PARTICLES_API_KEY` set and paste the same value
 into settings.

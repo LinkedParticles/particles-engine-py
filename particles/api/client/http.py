@@ -20,7 +20,6 @@ degradation whose extras the local backend still populates.
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -28,7 +27,7 @@ from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote
 
 import httpx
 
@@ -51,6 +50,7 @@ from particles.config import get_config
 from particles.core.schema import (
     ContestedBadge,
     CorpusEntry,
+    FetchPolicy,
     GraphData,
     LintReport,
     Particle,
@@ -68,6 +68,7 @@ from particles.core.schema import (
 )
 from particles.http import egress_client
 from particles.secrets import get_engine_token_optional
+from particles.url_safety import is_cleartext_remote, is_network_uri
 
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
@@ -80,27 +81,6 @@ if TYPE_CHECKING:
     from particles.store.session_exposure_store import SessionExposure
 
 log = logging.getLogger(__name__)
-
-
-def _host_is_loopback(host: str | None) -> bool:
-    """True iff ``host`` is loopback (``127.0.0.0/8`` / ``::1`` / ``localhost``).
-
-    Fail-closed like ``particles.api.auth._is_loopback_host``: a non-IP
-    hostname (other than the literal ``localhost``) is treated as non-loopback,
-    so the F18 warning fires for it. We do not resolve DNS — a custom hostname
-    aliasing loopback warns, the safe direction for a security notice.
-    """
-    if not host:
-        return False
-    h = host.strip().lower()
-    if h == "localhost":
-        return True
-    h = h.removeprefix("[").removesuffix("]")
-    h = h.split("%", 1)[0]
-    try:
-        return ipaddress.ip_address(h).is_loopback
-    except ValueError:
-        return False
 
 
 @cache
@@ -122,21 +102,28 @@ def _warn_plaintext_token_once(base_url: str) -> None:
     )
 
 
-def _maybe_warn_plaintext_token(base_url: str, *, has_token: bool) -> None:
-    """Warn when a bearer token rides an unencrypted, non-loopback ``http://`` URL (F18).
+def _check_plaintext_token(base_url: str, *, has_token: bool, allow: bool) -> None:
+    """Refuse to send a bearer over an unencrypted, non-loopback ``http://`` URL (F18).
 
     No-op unless a token is present, the scheme is not ``https``, and the host
-    is not loopback. Never raises — the documented loopback/tunnel deployments
-    legitimately use ``http://`` and must keep working silently.
+    is not loopback: the documented loopback and tunnel deployments use
+    ``http://`` to ``127.0.0.1`` and stay silent. Otherwise it raises
+    :class:`PlaintextTokenRefused` before any request is made, unless the
+    operator set ``engine.allow_plaintext_token``, in which case it warns once
+    and lets the token through (the June review's F18 fix only
+    warned).
     """
-    if not has_token:
+    if not has_token or not is_cleartext_remote(base_url):
         return
-    parsed = urlparse(base_url)
-    if parsed.scheme == "https":
+    if allow:
+        _warn_plaintext_token_once(base_url)
         return
-    if _host_is_loopback(parsed.hostname):
-        return
-    _warn_plaintext_token_once(base_url)
+    raise PlaintextTokenRefused(
+        f"Refusing to send the engine token to {base_url} over unencrypted http://. "
+        "Use https://, or reach the engine through a loopback hop (an SSH or "
+        "Tailscale forward to http://127.0.0.1). To send it anyway on a network "
+        "you trust end to end, set engine.allow_plaintext_token: true."
+    )
 
 
 def _detail(response: httpx.Response) -> str:
@@ -154,6 +141,15 @@ class EngineHttpError(RuntimeError):
     """A non-2xx response from the remote engine, carrying the engine's detail."""
 
 
+class PlaintextTokenRefused(EngineHttpError):
+    """The client refused to send the engine bearer over non-loopback ``http://``.
+
+    Raised before any request. A subclass of
+    :class:`EngineHttpError` so the CLI's one ``except EngineHttpError`` prints
+    it as an operator-facing error rather than a traceback.
+    """
+
+
 class EngineUnreachableError(EngineHttpError):
     """The remote engine could not be reached at all — no response was received.
 
@@ -167,6 +163,20 @@ class EngineUnreachableError(EngineHttpError):
     ``run()`` helper and the ``links`` verb) covers both "couldn't talk to the
     engine" cases uniformly.
     """
+
+
+def _seg(value: str) -> str:
+    """One caller-supplied id as a single, percent-encoded URL path segment.
+
+    An id reaches a request path from an MCP tool argument or a CLI argument, so
+    it is untrusted: unencoded, ``/`` and ``#`` re-shape the path, and httpx
+    resolves ``..`` before sending, so ``../corpus/<id>/retract#`` would aim an
+    agent's tag at an operator route. ``quote(..., safe="")`` encodes every
+    reserved character; the dot segments it leaves alone are refused outright.
+    """
+    if value in ("", ".", ".."):
+        raise ValueError(f"Not a valid id: {value!r}")
+    return quote(value, safe="")
 
 
 class HttpBackend:
@@ -187,7 +197,9 @@ class HttpBackend:
             raise RuntimeError("HttpBackend requires engine.base_url to be configured.")
         token = get_engine_token_optional()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        _maybe_warn_plaintext_token(engine.base_url, has_token=bool(token))
+        _check_plaintext_token(
+            engine.base_url, has_token=bool(token), allow=engine.allow_plaintext_token
+        )
         async with egress_client(
             purpose="remote engine",
             base_url=engine.base_url,
@@ -425,7 +437,7 @@ class HttpBackend:
         note: str | None,
     ) -> ReviewParticle:
         body = await self._post(
-            f"/review/{particle_id}",
+            f"/review/{_seg(particle_id)}",
             {
                 "action": action.value,
                 "reviewer_id": reviewer_id,
@@ -484,7 +496,7 @@ class HttpBackend:
     # ------------------------------------------------------------------
 
     async def particle_show(self, particle_id: str) -> Particle | None:
-        body = await self._get_optional(f"/particles/{particle_id}")
+        body = await self._get_optional(f"/particles/{_seg(particle_id)}")
         return Particle.model_validate(body) if body is not None else None
 
     async def subjects_list(
@@ -517,15 +529,15 @@ class HttpBackend:
     async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
         # The engine route resolves IDs and prefixes only, so ``by_name`` has no
         # remote analogue and a name misses as not found.
-        body = await self._get_optional(f"/subjects/{subject_id}")
+        body = await self._get_optional(f"/subjects/{_seg(subject_id)}")
         return Subject.model_validate(body) if body is not None else None
 
     async def corpus_show(self, entry_id: str) -> CorpusEntry | None:
-        body = await self._get_optional(f"/corpus/{entry_id}")
+        body = await self._get_optional(f"/corpus/{_seg(entry_id)}")
         return CorpusEntry.model_validate(body) if body is not None else None
 
     async def corpus_blob(self, selector: str) -> BlobResult | None:
-        resp = await self._request("GET", f"/corpus/blob/{selector}")
+        resp = await self._request("GET", f"/corpus/blob/{_seg(selector)}")
         if resp.status_code == 404:
             return None
         if resp.status_code == 400:
@@ -545,7 +557,7 @@ class HttpBackend:
     async def particle_source(self, particle_id: str) -> SourcePassage | None:
         from particles.operations.source_passage import SourcePassage
 
-        body = await self._get_optional(f"/particles/{particle_id}/source")
+        body = await self._get_optional(f"/particles/{_seg(particle_id)}/source")
         return SourcePassage.model_validate(body) if body is not None else None
 
     # ------------------------------------------------------------------
@@ -566,7 +578,7 @@ class HttpBackend:
         return [badges.get(pid) for pid in particle_ids]
 
     async def particle_detail(self, particle_id: str) -> ParticleDetail:
-        body = await self._get_optional(f"/particles/{particle_id}")
+        body = await self._get_optional(f"/particles/{_seg(particle_id)}")
         if body is None:
             raise ValueError(f"Particle {particle_id!r} not found.")
         particle = Particle.model_validate(body)
@@ -613,11 +625,11 @@ class HttpBackend:
         return [Particle.model_validate(p) for p in body]
 
     async def subject_detail(self, subject_id: str, *, particle_id_limit: int) -> SubjectDetail:
-        subject_body = await self._get_optional(f"/subjects/{subject_id}")
+        subject_body = await self._get_optional(f"/subjects/{_seg(subject_id)}")
         if subject_body is None:
             raise ValueError(f"Subject {subject_id!r} not found.")
         ids_body = await self._get(
-            f"/subjects/{subject_id}/particle-ids", params={"limit": particle_id_limit}
+            f"/subjects/{_seg(subject_id)}/particle-ids", params={"limit": particle_id_limit}
         )
         return SubjectDetail(
             subject=Subject.model_validate(subject_body),
@@ -646,14 +658,14 @@ class HttpBackend:
     async def digest(self, store: str, project: str | None = None) -> str:
         # The engine evaluates the observer against ITS entry tags.
         params = {"project": project} if project is not None else None
-        body = await self._get(f"/digest/{store}", params=params)
+        body = await self._get(f"/digest/{_seg(store)}", params=params)
         return str(body["markdown"])
 
     async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
         from particles.operations.digest import RenderedDigest
 
         params = {"project": project} if project is not None else None
-        body = await self._get(f"/digest/{store}", params=params)
+        body = await self._get(f"/digest/{_seg(store)}", params=params)
         # An engine that predates the line ids sends no ``lines``; the model defaults them.
         return RenderedDigest.model_validate(body)
 
@@ -684,7 +696,7 @@ class HttpBackend:
                 "the memory manifest includes a file section, which a remote engine cannot read"
             )
         body = await self._post(
-            f"/memory/projection/{store}",
+            f"/memory/projection/{_seg(store)}",
             {
                 "manifest": manifest.model_dump(mode="json"),
                 "observer_project": observer_project,
@@ -735,7 +747,7 @@ class HttpBackend:
     async def event_show(self, event_id: str) -> OperatorEvent | None:
         from particles.store.event_store import OperatorEvent
 
-        body = await self._get_optional(f"/events/{event_id}")
+        body = await self._get_optional(f"/events/{_seg(event_id)}")
         return OperatorEvent.model_validate(body) if body is not None else None
 
     async def trust_set(
@@ -772,7 +784,7 @@ class HttpBackend:
         return int(body["cascade_resolved"])
 
     async def subject_alias(self, subject_id: str, aliases: list[str]) -> AliasOutcome:
-        body = await self._post(f"/subjects/{subject_id}/aliases", {"aliases": aliases})
+        body = await self._post(f"/subjects/{_seg(subject_id)}/aliases", {"aliases": aliases})
         return AliasOutcome(
             subject=Subject.model_validate(body["subject"]), added=list(body["added"])
         )
@@ -820,7 +832,7 @@ class HttpBackend:
                 "perform the split."
             )
         body = await self._post(
-            f"/subjects/{source_id}/split",
+            f"/subjects/{_seg(source_id)}/split",
             {
                 "particle_ids": particle_ids,
                 "new_name": new_name,
@@ -840,17 +852,16 @@ class HttpBackend:
         *,
         relation_type: str,
         confidence: float,
-        project_key: str | None = None,
     ) -> ParticleRelation:
-        payload: dict[str, Any] = {
-            "particle_a": particle_a,
-            "particle_b": particle_b,
-            "relation_type": relation_type,
-            "confidence": confidence,
-        }
-        if project_key is not None:
-            payload["project_key"] = project_key
-        body = await self._post("/links", payload)
+        body = await self._post(
+            "/links",
+            {
+                "particle_a": particle_a,
+                "particle_b": particle_b,
+                "relation_type": relation_type,
+                "confidence": confidence,
+            },
+        )
         return ParticleRelation.model_validate(body)
 
     async def links_remove(self, particle_a: str, particle_b: str, *, relation_type: str) -> bool:
@@ -861,18 +872,18 @@ class HttpBackend:
         return bool(body["deleted"])
 
     async def particle_tag(self, particle_id: str, tags: list[str]) -> list[str]:
-        body = await self._post(f"/particles/{particle_id}/tags", {"tags": tags})
+        body = await self._post(f"/particles/{_seg(particle_id)}/tags", {"tags": tags})
         return list(body["tags"])
 
     async def particle_untag(self, particle_id: str, tags: list[str]) -> list[str]:
-        body = await self._delete(f"/particles/{particle_id}/tags", {"tags": tags})
+        body = await self._delete(f"/particles/{_seg(particle_id)}/tags", {"tags": tags})
         return list(body["tags"])
 
     async def corpus_retract(
         self, entry_id: str, *, reason: str | None, dry_run: bool
     ) -> RetractOutcome:
         body = await self._post(
-            f"/corpus/{entry_id}/retract", {"reason": reason, "dry_run": dry_run}
+            f"/corpus/{_seg(entry_id)}/retract", {"reason": reason, "dry_run": dry_run}
         )
         return RetractOutcome(
             entry_id=body["entry_id"],
@@ -990,12 +1001,76 @@ class HttpBackend:
         )
         return AgentWriteResult.model_validate(body)
 
-    async def particle_retract(self, *, particle_id: str, reason: str, store: str) -> None:
+    async def particle_retract(
+        self, *, particle_id: str, reason: str, store: str, project_key: str | None = None
+    ) -> None:
         await self._post(
             "/particles/retract",
-            {"particle_id": particle_id, "reason": reason},
+            {"particle_id": particle_id, "reason": reason, "project_key": project_key},
             params={"store": store},
         )
+
+    async def agent_links_add(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> ParticleRelation:
+        body = await self._post(
+            "/particles/link",
+            {
+                "particle_a": particle_a,
+                "particle_b": particle_b,
+                "relation_type": relation_type,
+                "project_key": project_key,
+            },
+            params={"store": store},
+        )
+        return ParticleRelation.model_validate(body)
+
+    async def agent_links_remove(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> bool:
+        body = await self._post(
+            "/particles/unlink",
+            {
+                "particle_a": particle_a,
+                "particle_b": particle_b,
+                "relation_type": relation_type,
+                "project_key": project_key,
+            },
+            params={"store": store},
+        )
+        return bool(body["deleted"])
+
+    async def agent_particle_tag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        body = await self._post(
+            "/particles/tag",
+            {"particle_id": particle_id, "tags": tags, "project_key": project_key},
+            params={"store": store},
+        )
+        return list(body["tags"])
+
+    async def agent_particle_untag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        body = await self._post(
+            "/particles/untag",
+            {"particle_id": particle_id, "tags": tags, "project_key": project_key},
+            params={"store": store},
+        )
+        return list(body["tags"])
 
     async def deposit_text(
         self,
@@ -1050,6 +1125,13 @@ class HttpBackend:
         # The harvest deposit rides the same generic corpus deposit
         # endpoint; ``uri_r`` switches the engine handler onto the versioned
         # path (one entry per logical source, unchanged re-deposit skipped).
+        #
+        # A remote engine cannot re-read a file on this host, and refuses LAZY on
+        # a non-http(s) URI-R (security review 2026-10-23, D2). The harvest's
+        # own SessionEnd re-deposit keeps such a file current, so send NEVER,
+        # which also withdraws an enrolment an older client made.
+        if fetch_policy == FetchPolicy.LAZY.value and not is_network_uri(uri_r):
+            fetch_policy = FetchPolicy.NEVER.value
         body = await self._post(
             "/corpus/deposit/text",
             {

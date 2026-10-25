@@ -22,7 +22,11 @@ import re
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, TypeVar
 
-from particles.render.markdown import sanitize_filename
+from particles.render.markdown import (
+    neutralize_inline_markdown,
+    neutralize_link_label,
+    sanitize_filename,
+)
 
 if TYPE_CHECKING:
     from particles.core.schema import Particle, Subject
@@ -184,7 +188,7 @@ def render_subject_page(
             # The particle content might contain raw newlines — collapse
             # to spaces so the block stays a single Logseq line.
             content = _suppress_dead_wikilinks(p.content, eligible_ids=eligible_ids)
-            content = content.replace("\n", " ").strip()
+            content = neutralize_inline_markdown(content)
             lines.append(render_block(f"{content}{render_inline_tags(p.tags)}", depth=1))
             lines.append(render_property("id", p.id, depth=1))
             lines.append(
@@ -215,7 +219,7 @@ def render_narratives_block(narratives: list[Particle], narrative_naming: dict[s
             continue
         # Labels are sentences; keep them on one line — Logseq treats a
         # newline inside a block as a block boundary.
-        label = " ".join(n.content.split())
+        label = neutralize_link_label(n.content)
         links.append(f"{_INDENT}- [{label}]([[Narratives/{slug}]])")
     if not links:
         return ""

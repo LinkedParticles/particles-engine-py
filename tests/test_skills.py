@@ -14,11 +14,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from particles.api.cli import app
 from particles.api.cli.skills import (
     OWNED_SUBDIR,
+    SkillsPathError,
     default_skills_dir,
     install_skills,
     remove_skills,
@@ -127,3 +129,66 @@ class TestSkillsCli:
         )
         assert result.exit_code == 0
         assert "Nothing to remove" in _clean(result.output)
+
+
+class TestSymlinkRefusal:
+    """A clone can ship `.claude/skills`; nothing is written or deleted through a link (N27)."""
+
+    def test_install_refuses_a_symlinked_skill_file(self, tmp_path: Path) -> None:
+        victim = tmp_path / "victim.txt"
+        victim.write_text("owner data\n", encoding="utf-8")
+        owned = tmp_path / "skills" / OWNED_SUBDIR
+        owned.mkdir(parents=True)
+        (owned / SKILL_FILENAMES[0]).symlink_to(victim)
+        with pytest.raises(OSError):
+            install_skills(tmp_path / "skills")
+        assert victim.read_text(encoding="utf-8") == "owner data\n"
+
+    def test_install_refuses_a_symlinked_owned_directory(self, tmp_path: Path) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills" / OWNED_SUBDIR).symlink_to(elsewhere)
+        with pytest.raises(SkillsPathError):
+            install_skills(tmp_path / "skills")
+        assert list(elsewhere.iterdir()) == []
+
+    def test_project_install_refuses_a_symlinked_parent(self, tmp_path: Path) -> None:
+        clone = tmp_path / "clone"
+        (clone / ".claude").mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (clone / ".claude" / "skills").symlink_to(elsewhere)
+        with pytest.raises(SkillsPathError):
+            install_skills(clone / ".claude" / "skills", root=clone)
+        assert list(elsewhere.iterdir()) == []
+
+    def test_project_remove_never_deletes_through_a_symlinked_parent(self, tmp_path: Path) -> None:
+        clone = tmp_path / "clone"
+        (clone / ".claude").mkdir(parents=True)
+        real = tmp_path / "real-skills"
+        (real / OWNED_SUBDIR).mkdir(parents=True)
+        (real / OWNED_SUBDIR / "keep.md").write_text("keep\n", encoding="utf-8")
+        (clone / ".claude" / "skills").symlink_to(real)
+        with pytest.raises(SkillsPathError):
+            remove_skills(clone / ".claude" / "skills", root=clone)
+        assert (real / OWNED_SUBDIR / "keep.md").is_file()
+
+    def test_remove_never_deletes_through_a_symlinked_owned_directory(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "keep.md").write_text("keep\n", encoding="utf-8")
+        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills" / OWNED_SUBDIR).symlink_to(real)
+        with pytest.raises(SkillsPathError):
+            remove_skills(tmp_path / "skills")
+        assert (real / "keep.md").is_file()
+
+    def test_cli_reports_the_refusal(self, tmp_path: Path) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_path / "skills").mkdir()
+        (tmp_path / "skills" / OWNED_SUBDIR).symlink_to(elsewhere)
+        result = CliRunner().invoke(app, ["skills", "install", "--dir", str(tmp_path / "skills")])
+        assert result.exit_code == 1
+        assert "symlink" in _clean(result.output)

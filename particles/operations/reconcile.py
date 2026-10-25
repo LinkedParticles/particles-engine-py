@@ -130,9 +130,8 @@ async def _has_contradiction_signal(content_a: str, content_b: str) -> bool | No
     """
     if _is_attribution_paraphrase(content_a, content_b):
         return False
-    response = await _llm_call(
-        _contradiction_prompt(content_a, content_b), max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS
-    )
+    system, prompt = _contradiction_prompt(content_a, content_b)
+    response = await _llm_call(prompt, max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS, system=system)
     if response is None:
         return None
     verdict = _contradiction_verdict(response)

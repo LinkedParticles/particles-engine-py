@@ -17,6 +17,17 @@
 # of the registered env overrides (DATABASE_URL, PARTICLES_BLOB_DIR, …). This
 # file is a floor, not a ceiling.
 
+api:
+  # The image binds 0.0.0.0, so the read routes are as reachable as the writes.
+  # Require the bearer on them too (security review D4): without this, any
+  # client that reached the port could list the store and read the raw
+  # deposited bytes (GET /corpus/blob/{selector}, GET /particles/{id}/source)
+  # with no credential. Every client that talks to the engine already sends the
+  # bearer: the CLI's remote backend, the web UI, the Obsidian plugin. /health
+  # stays open for the probes. A mounted config replaces this file, so keep
+  # this line in yours unless the network itself is your read-access control.
+  require_auth_for_reads: true
+
 storage:
   # Four slashes = an absolute path (sqlite+aiosqlite:////data/particles.db).
   database_url: sqlite+aiosqlite:////data/particles.db

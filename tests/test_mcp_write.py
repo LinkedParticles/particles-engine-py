@@ -520,3 +520,159 @@ class TestConsensusAndFailClosed:
             "Claim one, restated differently.", ["X"], 0.8, source_excerpt="two"
         )
         assert b["verdict"] == "INCONSISTENCY_RAISED"
+
+
+async def _insert_own(identity: str, content: str, *, store: str = DEFAULT_STORE) -> str:
+    """An ACTIVE agent belief asserted by ``identity`` in ``store``, bypassing §6.6."""
+    p = Particle(
+        content=content,
+        confidence=Confidence(value=0.7, calibration_source=CalibrationSource.AGENT_ASSERTED),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        asserted_by=identity,
+        provenance=[
+            ProvenanceRef(type=ProvenanceRefType.SOURCE, corpus_entry_id="e1", snapshot_id="s1")
+        ],
+    )
+    async with session_scope(store) as s:
+        await insert_particle(s, p)
+        await s.commit()
+    return p.id
+
+
+class TestLinkAndTagGuards:
+    """The link and tag verbs take the §6 guards supersede and retract do (review D10)."""
+
+    AGENT = "mcp:test-agent"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["particle_tag", "particle_untag"])
+    async def test_tagging_another_asserters_belief_is_refused(
+        self, db_session: Any, tool: str
+    ) -> None:
+        from particles.mcp.tools import write
+
+        _enable_writes(asserter_identity=self.AGENT, allow_cross_asserter=False)
+        other = await _insert_foreign(
+            db_session, asserted_by="extractor", calib=CalibrationSource.EXTRACTOR_DIRECT
+        )
+        with pytest.raises(ValueError, match="cross-asserter"):
+            await getattr(write, tool)(other, ["x"])
+
+    @pytest.mark.asyncio
+    async def test_tagging_an_operator_belief_is_refused(self, db_session: Any) -> None:
+        from particles.mcp.tools.write import particle_tag
+
+        _enable_writes(asserter_identity=self.AGENT, allow_cross_asserter=True)
+        op_id = await _insert_foreign(
+            db_session, asserted_by="operator", calib=CalibrationSource.HUMAN_REVIEW
+        )
+        with pytest.raises(ValueError, match="HUMAN_REVIEW"):
+            await particle_tag(op_id, ["x"])
+
+    @pytest.mark.asyncio
+    async def test_linking_another_asserters_belief_is_refused(self, db_session: Any) -> None:
+        from particles.mcp.tools.write import link_add
+        from particles.store.relation_store import get_relations_for_particle
+
+        _enable_writes(asserter_identity=self.AGENT, allow_cross_asserter=False)
+        mine = await _insert_own(self.AGENT, "Mine.")
+        other = await _insert_foreign(
+            db_session, asserted_by="extractor", calib=CalibrationSource.EXTRACTOR_DIRECT
+        )
+        with pytest.raises(ValueError, match="cross-asserter"):
+            await link_add(mine, other)
+        async with session_scope(DEFAULT_STORE) as s:
+            assert await get_relations_for_particle(s, mine) == []
+
+    @pytest.mark.asyncio
+    async def test_an_operator_link_is_not_agent_removable(self, db_session: Any) -> None:
+        from particles.core.schema import RelationCreatedBy, RelationType
+        from particles.mcp.tools.write import link_remove
+        from particles.store.relation_store import create_relation
+
+        _enable_writes(asserter_identity=self.AGENT, allow_cross_asserter=False)
+        a = await _insert_own(self.AGENT, "A.")
+        b = await _insert_own(self.AGENT, "B.")
+        async with session_scope(DEFAULT_STORE) as s:
+            await create_relation(s, a, b, RelationType.CO_EVIDENTIAL, RelationCreatedBy.MANUAL_CLI)
+            await s.commit()
+        with pytest.raises(ValueError, match="not by an agent"):
+            await link_remove(a, b)
+
+        get_config().mcp.write.allow_cross_asserter = True
+        assert (await link_remove(a, b))["removed"] is True
+
+    @pytest.mark.asyncio
+    async def test_agent_writes_are_credited_to_the_agent(self, db_session: Any) -> None:
+        from particles.core.schema import RelationCreatedBy, RelationType
+        from particles.mcp.tools.write import link_add, link_remove, particle_tag, particle_untag
+        from particles.store.event_store import OperatorEventType, list_events
+        from particles.store.relation_store import get_relation
+
+        _enable_writes(asserter_identity=self.AGENT)
+        a = await _insert_own(self.AGENT, "A.")
+        b = await _insert_own(self.AGENT, "B.")
+        assert (await link_add(a, b))["verdict"] == "LINKED"
+        async with session_scope(DEFAULT_STORE) as s:
+            rel = await get_relation(s, a, b, RelationType.CO_EVIDENTIAL)
+        assert rel is not None and rel.created_by is RelationCreatedBy.AGENT_ASSERTED
+        assert (await link_remove(a, b))["removed"] is True
+        await particle_tag(a, ["x"])
+        await particle_untag(a, ["x"])
+
+        async with session_scope(DEFAULT_STORE) as s:
+            for event_type in (
+                OperatorEventType.RELATION_ADDED,
+                OperatorEventType.RELATION_REMOVED,
+                OperatorEventType.PARTICLE_TAGGED,
+                OperatorEventType.PARTICLE_UNTAGGED,
+            ):
+                events = await list_events(s, event_type=event_type)
+                assert [e.actor for e in events] == [self.AGENT], event_type
+
+
+class TestNamedStoreRouting:
+    """Link and tag writes land in the store their handle names (review D9)."""
+
+    AGENT = "mcp:test-agent"
+
+    @pytest.fixture
+    async def scratch(self, db_session: Any, tmp_path: Any) -> Any:
+        from particles.db import Base, get_engine
+
+        get_config().storage.stores = {"scratch": f"sqlite+aiosqlite:///{tmp_path / 's.db'}"}
+        async with get_engine("scratch").begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield "scratch"
+        await get_engine("scratch").dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_write_to_the_enabled_store_never_touches_the_default(
+        self, scratch: str
+    ) -> None:
+        from particles.core.schema import RelationType
+        from particles.mcp.tools.write import link_add, link_remove, particle_tag
+        from particles.store.relation_store import get_relation
+
+        w = get_config().mcp.write
+        w.enabled_stores = [scratch]  # the default store is not write-enabled
+        w.asserter_identity = self.AGENT
+        in_default = await _insert_own(self.AGENT, "Default belief.")
+        a = await _insert_own(self.AGENT, "Scratch A.", store=scratch)
+        b = await _insert_own(self.AGENT, "Scratch B.", store=scratch)
+
+        # The handle is honoured: the default store's belief is not found in scratch.
+        with pytest.raises(ValueError, match="not found"):
+            await particle_tag(in_default, ["pwned"], store=scratch)
+        assert (await particle_tag(a, ["kept"], store=scratch))["added"] == ["kept"]
+        assert (await link_add(a, b, store=scratch))["verdict"] == "LINKED"
+
+        async with session_scope(scratch) as s:
+            tagged = await get_particle(s, a)
+            assert tagged is not None and tagged.tags == ["kept"]
+            assert await get_relation(s, a, b, RelationType.CO_EVIDENTIAL) is not None
+        async with session_scope(DEFAULT_STORE) as s:
+            untouched = await get_particle(s, in_default)
+        assert untouched is not None and not untouched.tags
+
+        assert (await link_remove(a, b, store=scratch))["removed"] is True

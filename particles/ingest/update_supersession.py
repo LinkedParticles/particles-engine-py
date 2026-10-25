@@ -52,6 +52,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.stance import stance_holder
+from particles.corpus.rule_sources import is_rule_source
 from particles.embeddings import cosine_similarity
 from particles.extraction.components import component_digest
 from particles.extraction.general import CandidateParticle
@@ -348,6 +349,31 @@ def _authority(uri: str | None) -> str | None:
     return urlparse(uri).netloc or None
 
 
+#: Tags that only the owner's own harvesters stamp (the Claude Code hooks and
+#: the memory audit). Two local entries are one lineage only when both carry
+#: one of these, or a recorded author (security review N6).
+OWNER_HARVEST_TAGS = frozenset({"memory-file", "claude-code"})
+
+
+def _local_lineage_shared(
+    new_entry: CorpusEntry, new_snap: Any, existing_entry: CorpusEntry
+) -> bool:
+    """Whether two distinct entries already keyed as one lineage name one principal.
+
+    An entry with a URL authority is identified by it, so the authority key is
+    enough. A local entry (no authority) carries no principal of its own: it
+    counts as the same lineage only when the snapshots record an author (the
+    caller has checked the two match), the entries record contributors (likewise
+    matched), or both carry the same owner-harvest tag.
+    """
+    if _authority(new_entry.uri_r) is not None:
+        return True
+    if new_snap.author_id or _contributors_key(new_entry):
+        return True
+    shared = set(new_entry.tags or []) & set(existing_entry.tags or [])
+    return bool(shared & OWNER_HARVEST_TAGS)
+
+
 def _contributors_key(entry: CorpusEntry) -> tuple[tuple[str, str], ...]:
     # Who and in what role — never *when*: the same contributor acting on two
     # dates is one lineage (ContributorRef.at defaults to the act's time).
@@ -438,6 +464,18 @@ def update_order(
       or contributor attribution. Only the entry itself may differ; a
       CORPUS_ENTRY-tier trust statement that separates two entries is rung 2's
       to act on, which runs first;
+    * either side is a rule file (``rule-file``) and the two sides are
+      different entries. Every rule file is a ``file://`` Markdown document, so
+      the keys above cannot tell the owner's ``CLAUDE.md`` from a cloned
+      repository's ``AGENTS.md``, whose authors are not the owner's lineage
+      (security review D13). A rule file updates only its own earlier
+      snapshots; a later claim from any other entry is held for review;
+    * the sides are two different local entries (no URL authority, such as two
+      ``file://`` Markdown files) that share neither an owner-harvest tag
+      (:data:`OWNER_HARVEST_TAGS`) nor a recorded author. A local path names no
+      principal, so a cloned vault or repository's notes would otherwise be one
+      lineage with the owner's memory files, and a self-dated third-party file
+      could retire the owner's claim (security review N6);
     * either side's source content date is unknown, or the dates are equal.
       ``new_date`` / ``existing_date`` override the snapshot's own date, which
       is how a caller supplies the **latest** observation of a re-stated claim
@@ -465,6 +503,14 @@ def update_order(
         and _contributors_key(new_entry) == _contributors_key(existing_entry)
     )
     if not same_lineage:
+        return None
+    if new_entry.entry_id != existing_entry.entry_id and (
+        is_rule_source(new_entry) or is_rule_source(existing_entry)
+    ):
+        return None
+    if new_entry.entry_id != existing_entry.entry_id and not _local_lineage_shared(
+        new_entry, new_snap, existing_entry
+    ):
         return None
     if require_attribution and not (new_snap.author_id or _contributors_key(new_entry)):
         return None

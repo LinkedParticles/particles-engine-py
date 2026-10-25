@@ -119,39 +119,85 @@ report JSONs of record beside them.
 
 A memory layer is an *input-shaping* attack surface: it does not merely hold
 data, it shapes what the agent believes and does next, so a poisoned claim is
-an instruction on a delay timer. Before this code was opened we ran an
-adversarial application-security audit over the whole package: the HTTP, CLI,
-and MCP surfaces, the filesystem writers, the egress layer, and the build
-pipeline. The verdict, verbatim: **GO-WITH-FIXES**, with **33 findings (2
-High, 7 Medium, 20 Low, 4 Info)**. The ranked must-fix set merged the following
-day; the last open finding closed in `v1.128.0`.
+an instruction on a delay timer.
 
-What that bought, and what it did not:
+**Three adversarial audits have covered this code, and each returned
+GO-WITH-FIXES.** The verdicts are quoted as given.
 
-- **Prompt injection is contained, not eliminated.** Every LLM call site that
-  touches attacker-controllable text keeps trusted instructions in the system
-  turn and wraps the untrusted material in a per-call, 128-bit-nonce data
-  fence, with structural backstops behind it: a JSON contract enforced at the
-  parser, a citation-id membership gate on synthesized prose. This raises the
-  bar materially. It is hardening, not immunity.
-- **The model is never given tools, and no model output is executed.** No
-  function-calling; nothing the model emits becomes a shell command, a SQL
-  fragment, or a fetch. An injection can at worst distort *claims*, never
-  trigger *actions*.
-- **Outbound fetches are validated per hop.** The host is resolved, the address
-  is checked against a blocklist, and the connection is made to *that vetted
-  address*, re-resolved and re-validated on every redirect. That closes DNS
-  rebinding and redirect SSRF, not just the first lookup. The two fetches that
-  run as subprocesses reach the same guarantee by pinning to addresses this
-  process vetted.
-- **Fail-closed auth, and no raw SQL.** The API refuses to boot on a
-  non-loopback bind without a real bearer key, and the token comparison is
-  constant-time. Every query in the data layer is typed ORM with bound
-  parameters: no `text()`, no string-built SQL, no dynamic `ORDER BY`.
-- **Local-first by default.** Loopback bind, a local SQLite file, telemetry
-  off, and the MCP server as a locally-spawned stdio child rather than a
-  network service. The only outbound traffic in the default posture is what you
-  configured.
+| Audit | Code audited | Verdict | Fixes shipped in |
+|---|---|---|---|
+| June 2026, before the code was opened: the HTTP, CLI and MCP surfaces, the filesystem writers, the egress layer, the CI and wheel build | `v1.62.0` | GO-WITH-FIXES | `1.62.1` to `1.63.0`; the last open finding closed in `1.128.0` |
+| 2026-10-23: everything changed since `v1.62.0`, including the release and publication pipeline the first audit predates, and the claims on this page | `v1.210.2` | GO-WITH-FIXES | `1.210.3` to `1.211.0` |
+| 2026-10-24: everything changed since the second audit, every earlier finding, and the claims on this page again | `v1.211.0` | GO-WITH-FIXES | `1.211.1` to `1.214.0` |
+
+Since those fixes, a cloned repository can no longer configure Particles or
+supply the store an MCP server reads, an HTTP caller can no longer make the
+engine read a file on its own disk, and a web page can no longer send writes to
+an engine on loopback or read from one that runs without a key. The job that
+holds the PyPI publishing identity runs no code from a package index: it
+downloads the built files, checks them against the digests the build job
+recorded, and runs the pinned upload action. Not every finding is
+fixed: part of the second audit's finding on automatic retirements remains
+open, and SECURITY.md describes it and the other limits that remain.
+
+What holds today, and what does not:
+
+- **Prompt injection is contained, not eliminated.** Outside the benchmark
+  harness, every model prompt that carries deposited, stored or harvested text
+  keeps its instructions in the system turn and wraps that text in a per-call
+  fence marked with a 128-bit random nonce. A test finds every call to the
+  model's entry points, including calls through a wrapper that passes a system
+  turn on, and fails the build on one that has not been classified and, if it
+  carries such text, fenced. A call reached another way, such as through a
+  function passed as a value, is outside what that test can find. Behind the
+  fence sit structural checks: a JSON contract enforced at the parser, and a
+  gate that rejects synthesized prose citing a claim it was not given. This
+  raises the bar materially. It is hardening, not immunity.
+- **The model has no tools, but its verdicts change what is stored.** The
+  model is never offered function calling, and nothing it emits is run as code
+  or SQL or used as a fetch destination. Its output still has effects: subject
+  names it extracts become Wikidata search terms; its verdicts retire claims
+  (an older value a newer claim updates, a claim from the same passage that
+  the re-anchor pass restates in words the model wrote, the less trusted side
+  of a contradiction between sources of different trust) and return held
+  claims to active, each recorded in the event log; and the beliefs it extracts
+  are written into Claude Code's `MEMORY.md`, which an agent with tools reads
+  as instructions. An injection can distort claims, and a distorted claim can
+  steer an agent.
+- **Fetches of URLs from deposited content are checked on every hop.** The
+  host is resolved, each address is checked against a blocklist, and the
+  connection goes to that vetted address, again on every redirect, which closes
+  DNS rebinding and redirect SSRF. The two fetches that run as subprocesses are
+  pinned to addresses this process vetted, neither follows a redirect on its
+  own, and the git clone runs under no system or global git config, so no
+  filter driver (git-lfs among them) runs for the cloned files. Endpoints you configure yourself (a model
+  provider, a remote engine, a telemetry collector) are held to the
+  `network.egress` setting but not to the blocklist, since a LAN or local model
+  server is a legitimate target.
+- **Fail-closed auth, and no SQL built from input.** With no bearer key set,
+  the engine refuses to start on a non-loopback bind, reading the bind from the
+  `uvicorn` command line when it is started that way and refusing a launch by
+  another ASGI server whose bind it cannot read. On every path it then serves
+  only a loopback client that names a loopback host or one listed in
+  `api.allowed_hosts`, which turns away a DNS-rebinding page. Routes that act
+  with the operator's authority (subject merges, operator retractions, review
+  rulings, trust policy) need a real key even from loopback. The token
+  comparison is constant-time. The data layer issues typed ORM statements with
+  bound parameters; its few literal SQL statements (a schema-version read and
+  the change-journal triggers) are constants that take no input.
+- **Local by default, with three outbound defaults you should know.** The
+  engine binds to loopback, stores to a local SQLite file, keeps telemetry
+  off, and serves MCP as a locally spawned stdio child. Out of the box it also
+  contacts the model provider you configure, Wikidata for subject lookups
+  during extraction (these carry extracted entity names), and the Hugging Face
+  Hub, to download the embedding model and, while outbound traffic is open, to
+  check for a newer copy when a process loads it. Settings come only from the
+  file `PARTICLES_CONFIG` names or `~/.particles/config.yaml`, never from the
+  directory a command runs in. The store is a different matter: when nothing
+  names one, the `particles` command line and `engine serve` open
+  `./particles.db` in the directory they run in, while an MCP server opens
+  `~/.particles/particles.db`. Set `network.egress` to `none` or `allowlist`
+  to restrict outbound traffic.
 
 The real answer to the residual is epistemic rather than technical: every
 particle carries its provenance, source trust is a read-time lens that
@@ -163,10 +209,11 @@ with the audit trail intact.
 
 The limitations we ask you to read before relying on any of this are in
 [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md):
-the unauthenticated read surface, verbatim storage of whatever you deposit
-(secrets included), the single-operator trust model, and the MCP write
-boundary. SECURITY.md is also where to report a vulnerability; please report
-privately.
+the read surface left open by default, verbatim storage of whatever you
+deposit (secrets included), model verdicts that retire claims, project scope
+as a relevance filter rather than isolation, the single-operator trust model,
+and the MCP write boundary. SECURITY.md is also where to report a
+vulnerability; please report privately.
 
 ## Why Particles?
 

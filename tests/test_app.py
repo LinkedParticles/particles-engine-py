@@ -100,7 +100,7 @@ def client(api_db: Path) -> TestClient:
     # events; we don't want create_tables() (alembic) to run.
     # client=("127.0.0.1", …) presents a loopback peer so the dev-key
     # non-loopback gate treats these in-process calls as local.
-    return TestClient(app, client=("127.0.0.1", 50000))
+    return TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
 
 
 _OPERATOR_KEY = "test-operator-key"
@@ -115,6 +115,19 @@ def operator_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("PARTICLES_API_KEY", _OPERATOR_KEY)
     client.headers["Authorization"] = f"Bearer {_OPERATOR_KEY}"
+
+
+@pytest.fixture
+def default_store_writes() -> None:
+    """Enable belief writes on the default store (``mcp.write.enabled_stores``).
+
+    The operator link and tag mirrors honour the write gate like the operator
+    supersede (security review 2026-10-24, N5).
+    """
+    from particles.config import get_config
+    from particles.db import DEFAULT_STORE
+
+    get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
 
 
 def _run_async(coro: Any) -> Any:
@@ -682,7 +695,7 @@ class TestCuration:
 
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
         reset_config()
-        client = TestClient(app, client=("127.0.0.1", 50000))
+        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
         resp = client.get("/curation", params={"semantic": False})
         assert resp.status_code == 401
         # The same key as a bearer token is accepted.
@@ -835,6 +848,258 @@ class TestCorpus:
         after = set(tmp_dir.glob("*.txt"))
         # No new temp file should survive the failed request.
         assert after == before
+
+
+async def _refreshable_uris() -> list[str]:
+    from particles.corpus.store import list_refreshable_local_entries
+    from particles.db import session_scope
+
+    async with session_scope() as session:
+        return [uri for _entry_id, uri in await list_refreshable_local_entries(session)]
+
+
+async def _corpus_entry_total() -> int:
+    from sqlalchemy import func, select
+
+    from particles.corpus.store import CorpusEntryRow
+    from particles.db import session_scope
+
+    async with session_scope() as session:
+        return int((await session.execute(select(func.count(CorpusEntryRow.entry_id)))).scalar())
+
+
+class TestDepositTextLocalUriRefusal:
+    """An HTTP caller cannot enrol an engine-host path in the local refresh loop.
+
+    Security review 2026-10-23, finding D2: a ``file://`` ``uri_r`` deposited
+    with ``fetch_policy=LAZY`` was re-read from the engine's own disk by the
+    refresh pass and served back from ``/corpus/blob``. Over HTTP, LAZY now
+    needs an http(s) URI-R. Local deposits, which never pass through this
+    route, still enrol and refresh their files.
+    """
+
+    @pytest.mark.parametrize(
+        "uri_r",
+        [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "file://localhost/etc/passwd",
+            "/etc/passwd",
+            "ftp://example.com/x",
+        ],
+    )
+    def test_lazy_with_a_local_uri_is_refused(self, client: TestClient, uri_r: str) -> None:
+        resp = client.post(
+            "/corpus/deposit/text",
+            json={
+                "text": "placeholder",
+                "uri_r": uri_r,
+                "mutability": "MUTABLE",
+                "fetch_policy": "LAZY",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "fetch_policy LAZY needs an http(s) uri_r" in resp.json()["detail"]
+        assert _run_async(_corpus_entry_total()) == 0
+        assert _run_async(_refreshable_uris()) == []
+
+    def test_refused_for_a_keyed_remote_caller(
+        self, api_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audited scenario: a real key, a write bearer and a non-loopback peer."""
+        monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        remote = TestClient(app, client=("203.0.113.7", 5000))
+        resp = remote.post(
+            "/corpus/deposit/text",
+            headers={"Authorization": "Bearer prod-secret"},
+            json={
+                "text": "placeholder",
+                "uri_r": "file:///proc/self/environ",
+                "mutability": "MUTABLE",
+                "fetch_policy": "LAZY",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert _run_async(_refreshable_uris()) == []
+
+    def test_lazy_with_an_existing_entry_is_refused_before_any_write(
+        self, client: TestClient
+    ) -> None:
+        """A NEVER entry already at the URI-R is not promoted to LAZY by a retry."""
+        uri_r = "file:///srv/secret.txt"
+        first = client.post(
+            "/corpus/deposit/text",
+            json={"text": "v1", "uri_r": uri_r, "mutability": "MUTABLE", "fetch_policy": "NEVER"},
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            "/corpus/deposit/text",
+            json={"text": "v1", "uri_r": uri_r, "mutability": "MUTABLE", "fetch_policy": "LAZY"},
+        )
+        assert second.status_code == 400
+        assert _run_async(_refreshable_uris()) == []
+
+    @pytest.mark.parametrize("fetch_policy", [None, "NEVER"])
+    def test_a_file_uri_without_lazy_is_still_accepted(
+        self, client: TestClient, fetch_policy: str | None
+    ) -> None:
+        """The remote harvest's own deposit (identity only, no engine re-read) still works."""
+        resp = client.post(
+            "/corpus/deposit/text",
+            json={
+                "text": "a memory note",
+                "uri_r": "file:///Users/someone/.claude/projects/p/memory/note.md",
+                "mutability": "MUTABLE",
+                "fetch_policy": fetch_policy,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert _run_async(_refreshable_uris()) == []
+
+    def test_lazy_with_an_https_uri_is_accepted(self, client: TestClient) -> None:
+        resp = client.post(
+            "/corpus/deposit/text",
+            json={
+                "text": "a page",
+                "uri_r": "https://example.com/page",
+                "mutability": "MUTABLE",
+                "fetch_policy": "LAZY",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_a_local_lazy_deposit_still_refreshes(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The local path (CLI, hook, rules sync) enrols, re-reads and serves its file."""
+        from particles.config import get_config
+        from particles.core.schema import FetchPolicy, Mutability
+        from particles.corpus.fetch import maybe_refetch
+        from particles.db import session_scope
+        from particles.operations.deposit import deposit_text_versioned
+
+        # The local refresh reads only under allowed roots (D2 defence in depth).
+        monkeypatch.setattr(get_config().local_refresh, "allowed_roots", [str(tmp_path)])
+        note = tmp_path / "AGENTS.md"
+        note.write_text("version one\n", encoding="utf-8")
+        uri_r = note.resolve().as_uri()
+
+        async def _deposit() -> str:
+            async with session_scope() as session:
+                entry_id, _snap, _unchanged = await deposit_text_versioned(
+                    session,
+                    text=note.read_text(encoding="utf-8"),
+                    uri_r=uri_r,
+                    source_type="LOCAL_MARKDOWN",
+                    mutability=Mutability.MUTABLE,
+                    deposited_by="cli",
+                    fetch_policy=FetchPolicy.LAZY,
+                )
+                await session.commit()
+                return entry_id
+
+        async def _refresh(entry_id: str) -> None:
+            async with session_scope() as session:
+                await maybe_refetch(session, entry_id, force=True)
+                await session.commit()
+
+        entry_id = _run_async(_deposit())
+        assert _run_async(_refreshable_uris()) == [uri_r]
+
+        note.write_text("version two\n", encoding="utf-8")
+        _run_async(_refresh(entry_id))
+
+        resp = client.get(f"/corpus/blob/{entry_id}")
+        assert resp.status_code == 200
+        assert resp.content == b"version two\n"
+
+
+async def _local_lazy_entry(path: Path, text: str) -> str:
+    """Enrol ``path`` the way ``rules sync`` does: MUTABLE, LAZY, from the engine's disk."""
+    from particles.core.schema import FetchPolicy, Mutability
+    from particles.db import session_scope
+    from particles.operations.deposit import deposit_text_versioned
+
+    async with session_scope() as session:
+        entry_id, _snap, _unchanged = await deposit_text_versioned(
+            session,
+            text=text,
+            uri_r=path.resolve().as_uri(),
+            source_type="LOCAL_MARKDOWN",
+            mutability=Mutability.MUTABLE,
+            deposited_by="rule-sync",
+            fetch_policy=FetchPolicy.LAZY,
+        )
+        await session.commit()
+        return entry_id
+
+
+async def _entry_state(entry_id: str) -> tuple[str, str, int]:
+    from particles.corpus.store import get_entry, list_snapshots_for_entry
+    from particles.db import session_scope
+
+    async with session_scope() as session:
+        entry = await get_entry(session, entry_id)
+        assert entry is not None
+        snaps = await list_snapshots_for_entry(session, entry_id)
+        return entry.source_type, entry.fetch_policy.value, len(snaps)
+
+
+class TestDepositTextCannotWriteEngineEnrolledEntry:
+    """An HTTP deposit cannot write onto a file the engine refreshes from its own disk.
+
+    Security review 2026-10-24, finding N19: a versioned deposit with no
+    ``fetch_policy`` matched an existing LAZY ``file://`` entry by URI-R alone,
+    appended the caller's bytes as its newest snapshot and retyped the entry to a
+    source type with a week-long re-fetch floor, so the real file was not read
+    back for days.
+    """
+
+    @pytest.mark.parametrize("fetch_policy", [None, "NEVER"])
+    def test_append_to_a_local_lazy_entry_is_refused(
+        self, client: TestClient, tmp_path: Path, fetch_policy: str | None
+    ) -> None:
+        rule = tmp_path / "CLAUDE.md"
+        rule.write_text("the real rule\n", encoding="utf-8")
+        entry_id = _run_async(_local_lazy_entry(rule, "the real rule\n"))
+
+        resp = client.post(
+            "/corpus/deposit/text",
+            json={
+                "text": "an injected rule",
+                "uri_r": rule.resolve().as_uri(),
+                "source_type": "ACADEMIC_PAPER",
+                "mutability": "MUTABLE",
+                "fetch_policy": fetch_policy,
+            },
+        )
+        assert resp.status_code == 409, resp.text
+        assert _run_async(_entry_state(entry_id)) == ("LOCAL_MARKDOWN", "LAZY", 1)
+
+    def test_a_retype_over_http_is_refused(self, client: TestClient) -> None:
+        uri_r = "file:///Users/someone/.claude/projects/p/memory/note.md"
+        first = client.post(
+            "/corpus/deposit/text",
+            json={"text": "v1", "uri_r": uri_r, "source_type": "LOCAL_MARKDOWN"},
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            "/corpus/deposit/text",
+            json={"text": "v2", "uri_r": uri_r, "source_type": "ACADEMIC_PAPER"},
+        )
+        assert second.status_code == 409, second.text
+        entry_id = first.json()["entry_id"]
+        assert _run_async(_entry_state(entry_id)) == ("LOCAL_MARKDOWN", "NEVER", 1)
+
+    def test_the_remote_harvest_still_versions_its_own_entry(self, client: TestClient) -> None:
+        """A NEVER file:// entry the HTTP route owns keeps accepting new versions."""
+        uri_r = "file:///Users/someone/.claude/projects/p/memory/note.md"
+        body = {"uri_r": uri_r, "source_type": "LOCAL_MARKDOWN", "mutability": "MUTABLE"}
+        first = client.post("/corpus/deposit/text", json={**body, "text": "v1"})
+        second = client.post("/corpus/deposit/text", json={**body, "text": "v2"})
+        assert first.status_code == second.status_code == 200, second.text
+        assert second.json()["entry_id"] == first.json()["entry_id"]
+        assert _run_async(_entry_state(first.json()["entry_id"]))[2] == 2
 
 
 # (sibling): POST /corpus/{id}/retract.
@@ -1012,9 +1277,10 @@ class TestBodySizeLimit:
 class TestDevKeyLoopbackGate:
     """End-to-end wiring of the per-request gate through FastAPI.
 
-    Under dev-key (the test default), a non-loopback peer must be refused on
-    the authenticated write endpoints (503), while unauthenticated read
-    endpoints are unaffected (the gate lives in the AuthDep dependency)."""
+    Under dev-key (the test default), a non-loopback peer is refused (503) on
+    every path, the ungated ``/health`` included (security review 2026-10-24,
+    N1 and N11: the middleware applies the bound before any route). With a real
+    key ``/health`` is served to any peer."""
 
     def test_write_endpoint_refused_from_non_loopback(self, api_db: Path) -> None:
         remote = TestClient(app, client=("203.0.113.7", 5000))
@@ -1025,7 +1291,16 @@ class TestDevKeyLoopbackGate:
         assert resp.status_code == 503
         assert "non-loopback" in resp.json()["detail"]
 
-    def test_read_endpoint_unaffected_from_non_loopback(self, api_db: Path) -> None:
+    def test_ungated_health_refused_from_non_loopback(self, api_db: Path) -> None:
+        remote = TestClient(app, client=("203.0.113.7", 5000))
+        resp = remote.get("/health")
+        assert resp.status_code == 503
+        assert "non-loopback" in resp.json()["detail"]
+
+    def test_health_served_from_non_loopback_with_a_real_key(
+        self, api_db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
         remote = TestClient(app, client=("203.0.113.7", 5000))
         assert remote.get("/health").status_code == 200
 
@@ -1194,6 +1469,7 @@ class TestSubjects:
         assert resp.json() == []
 
     # : POST /subjects/{id}/split — HTTP mirror of `subjects split`.
+    @pytest.mark.usefixtures("operator_key")
     def test_split_relinks_particle_via_external_id(self, client: TestClient) -> None:
         source = _run_async(_add_subject("Conflated Source"))
         pid = _run_async(
@@ -1218,6 +1494,7 @@ class TestSubjects:
         assert [p["id"] for p in moved] == [pid]
         assert client.get(f"/subjects/{source}/particles").json() == []
 
+    @pytest.mark.usefixtures("operator_key")
     def test_split_unknown_source_404(self, client: TestClient) -> None:
         resp = client.post(
             f"/subjects/{uuid.uuid4()}/split",
@@ -1225,6 +1502,7 @@ class TestSubjects:
         )
         assert resp.status_code == 404
 
+    @pytest.mark.usefixtures("operator_key")
     def test_split_empty_particles_400(self, client: TestClient) -> None:
         source = _run_async(_add_subject("Source"))
         resp = client.post(
@@ -1233,6 +1511,7 @@ class TestSubjects:
         )
         assert resp.status_code == 400
 
+    @pytest.mark.usefixtures("operator_key")
     def test_split_missing_identity_400(self, client: TestClient) -> None:
         source = _run_async(_add_subject("Source"))
         pid = _run_async(_add_particle_bound_to("a claim", source))
@@ -1417,6 +1696,7 @@ class TestParticleRead:
         assert resp.status_code == 404
 
 
+@pytest.mark.usefixtures("operator_key", "default_store_writes")
 class TestParticleTags:
     def test_add_then_remove_tags(self, client: TestClient) -> None:
         pid = _run_async(_add_active_particle())
@@ -1435,6 +1715,7 @@ class TestParticleTags:
         assert again.json()["tags"] == []  # already present ⇒ nothing added
 
 
+@pytest.mark.usefixtures("operator_key", "default_store_writes")
 class TestLinks:
     def test_create_then_delete(self, client: TestClient) -> None:
         a = _run_async(_add_active_particle(content="link A"))
@@ -1466,6 +1747,7 @@ class TestLinks:
         assert resp.status_code == 400
 
 
+@pytest.mark.usefixtures("operator_key")
 class TestSubjectAliasMerge:
     def test_add_aliases(self, client: TestClient) -> None:
         sid = _run_async(_add_subject(name="Bitcoin"))
@@ -2411,6 +2693,56 @@ class TestRateLimit:
         resp = client.post("/query", json={"question": "anything"})
         assert resp.status_code == 429
 
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            (
+                "/particles/assert",
+                {"content": "c", "subject_names": ["S"], "confidence": 0.5},
+            ),
+            (
+                "/particles/supersede",
+                {
+                    "supersedes_id": "p-missing",
+                    "content": "c",
+                    "subject_names": ["S"],
+                    "confidence": 0.5,
+                },
+            ),
+        ],
+    )
+    def test_agent_ladder_writes_share_the_budget(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        # Security review 2026-10-24, N10: the ladder's probes call the model.
+        self._set_rate(monkeypatch, 1)
+        assert client.post("/reindex", json={"include_failed": False}).status_code == 200
+        assert client.post(path, json=body).status_code == 429
+
+    def test_semantic_card_lookup_shares_the_budget(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+
+        self._set_rate(monkeypatch, 1)
+        monkeypatch.setattr(get_config().curation, "semantic", True)
+        assert client.post("/reindex", json={"include_failed": False}).status_code == 200
+        assert client.get("/curation/cards/contested:p-missing").status_code == 429
+
+    def test_card_lookup_without_semantic_is_not_throttled(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+
+        self._set_rate(monkeypatch, 1)
+        monkeypatch.setattr(get_config().curation, "semantic", False)
+        assert client.post("/reindex", json={"include_failed": False}).status_code == 200
+        assert client.get("/curation/cards/contested:p-missing").status_code == 404
+
     def test_structural_lint_is_not_throttled(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2422,6 +2754,92 @@ class TestRateLimit:
         assert resp.status_code == 200
         # The semantic path, by contrast, is gated before run_lint's LLM call.
         assert client.post("/lint", json={"fix": False, "semantic": True}).status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# Security review 2026-10-23 D16 / D17 / D37: paid routes limited, parameters clamped
+# ---------------------------------------------------------------------------
+
+
+class TestPaidRoutesRateLimited:
+    @pytest.fixture
+    def limited(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        from particles.config import reset_config
+
+        # One request a minute, spent up front on a route that was limited before.
+        monkeypatch.setenv("PARTICLES_API_RATE_LIMIT_PER_MINUTE", "1")
+        reset_config()
+        assert client.post("/reconcile", json={"dry_run": True}).status_code == 200
+        return client
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("post", "/reconcile", {"dry_run": True}),
+            ("post", "/curation/rebuild", None),
+            ("get", "/particles/p-missing/narrative/synthesis", None),
+            ("get", "/curation?semantic=true", None),
+            ("post", "/links/suggest", {"mode": "LLM_JUDGE"}),
+        ],
+    )
+    def test_paid_route_429_once_spent(
+        self, limited: TestClient, method: str, path: str, body: dict[str, object] | None
+    ) -> None:
+        resp = getattr(limited, method)(path, **({} if body is None else {"json": body}))
+        assert resp.status_code == 429, resp.text
+
+    def test_free_variants_not_limited(self, limited: TestClient) -> None:
+        assert limited.get("/curation?semantic=false").status_code == 200
+        assert limited.post("/links/suggest", json={"mode": "REPORT"}).status_code == 200
+
+
+class TestLimitsClamped:
+    def test_curation_limit_clamped_to_page_size(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.api.app as app_module
+        from particles.config import reset_config
+
+        seen: list[int | None] = []
+        real = app_module.build_curation_queue
+
+        async def _spy(session: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs["limit"])
+            return await real(session, **kwargs)
+
+        monkeypatch.setattr(app_module, "build_curation_queue", _spy)
+        monkeypatch.setenv("PARTICLES_MAX_PAGE_SIZE", "5")
+        reset_config()
+        assert client.get("/curation?limit=1000000").status_code == 200
+        assert client.get("/curation").status_code == 200
+        assert seen == [5, 5]  # session_size 7, clamped to the 5 cap
+        assert client.get("/curation?limit=0").status_code == 422
+
+    def test_corpus_links_suggest_limit_clamped(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.operations.deposit_suggest as suggest_module
+        from particles.config import reset_config
+
+        seen: list[int | None] = []
+        real = suggest_module.suggest_deposits
+
+        async def _spy(session: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs["limit"])
+            return await real(session, **kwargs)
+
+        monkeypatch.setattr(suggest_module, "suggest_deposits", _spy)
+        monkeypatch.setenv("PARTICLES_MAX_PAGE_SIZE", "5")
+        reset_config()
+        assert client.post("/corpus/links/suggest", json={"limit": 10**9}).status_code == 200
+        assert seen == [5]
+        assert client.post("/corpus/links/suggest", json={"limit": 0}).status_code == 422
+        assert client.post("/corpus/links/suggest", json={"min_sources": 0}).status_code == 422
+
+    @pytest.mark.parametrize("pace", [0, -5, 601])
+    def test_reindex_pace_bounded(self, client: TestClient, pace: int) -> None:
+        resp = client.post("/reindex", json={"dry_run": True, "rate_limit_per_minute": pace})
+        assert resp.status_code == 422
 
 
 class TestReadAuthForReads:
@@ -2686,3 +3104,16 @@ class TestMemoryProjectionEndpoint:
     def test_an_unknown_store_is_404(self, client: TestClient) -> None:
         resp = client.post("/memory/projection/nope", json={"manifest": _MEMORY_MANIFEST})
         assert resp.status_code == 404
+
+
+class TestNoThirdPartyScriptPages:
+    """Security review 2026-10-24, N7: /docs and /redoc loaded CDN scripts on the engine origin."""
+
+    @pytest.mark.parametrize("path", ["/docs", "/redoc", "/docs/oauth2-redirect"])
+    def test_interactive_docs_pages_are_not_served(self, client: TestClient, path: str) -> None:
+        resp = client.get(path)
+        assert resp.status_code == 404
+        assert "cdn.jsdelivr.net" not in resp.text
+
+    def test_the_schema_is_still_served(self, client: TestClient) -> None:
+        assert client.get("/openapi.json").json()["info"]["title"] == "Particles API"

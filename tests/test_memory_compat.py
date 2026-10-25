@@ -1031,3 +1031,57 @@ class TestProvenance:
         assert particle.asserted_by == get_config().mcp.memory_compat.asserter_identity
         assert particle.provenance, "a façade observation must carry provenance"
         assert particle.provenance[0].corpus_entry_id
+
+
+class TestForeignSubjects:
+    """The façade changes only Subjects it created (security review 2026-10-24, N30)."""
+
+    async def _foreign(self, session: Any) -> Any:
+        from particles.core.schema import Subject
+        from particles.store.subject_store import insert_subject
+
+        subject = Subject(
+            canonical_name="Pluto", asserted_by="operator", subject_class="dwarf_planet"
+        )
+        await insert_subject(session, subject)
+        await session.commit()
+        return subject
+
+    async def test_facade_cannot_reclassify_a_foreign_subject(
+        self, db_session: Any, facade: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The revive path: a foreign Subject tombstoned before the guard existed."""
+        from particles.store.subject_store import get_subject
+
+        pluto = await self._foreign(db_session)
+        with monkeypatch.context() as m:
+            m.setattr(ops, "_owns", lambda _subject: True)
+            await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Pluto"])
+        await ops.create_entities(
+            db_session,
+            store=DEFAULT_STORE,
+            entities=[{"name": "Pluto", "entityType": "restaurant", "observations": []}],
+        )
+        stored = await get_subject(db_session, pluto.id)
+        assert stored is not None
+        assert stored.subject_class == "dwarf_planet"
+
+    async def test_facade_cannot_tombstone_a_foreign_subject(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await self._foreign(db_session)
+        await _create(db_session, [_bare("Alice")])
+        with pytest.raises(ValueError, match="can be changed only by an operator: Pluto"):
+            await ops.delete_entities(
+                db_session, store=DEFAULT_STORE, entity_names=["Alice", "Pluto"]
+            )
+        # Refused before any write: neither entity was deleted.
+        assert _names(await _graph(db_session)) == ["Alice", "Pluto"]
+
+    async def test_its_own_revived_subject_still_takes_the_new_class(
+        self, db_session: Any, facade: Any
+    ) -> None:
+        await _create(db_session, [CHARLIE])
+        await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Charlie"])
+        await _create(db_session, [{**CHARLIE, "entityType": "robot"}])
+        assert _entity(await _graph(db_session), "Charlie")["entityType"] == "robot"

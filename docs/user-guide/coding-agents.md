@@ -60,10 +60,12 @@ already have the package installed, `"command": "particles"` with
 !!! warning "Pin `DATABASE_URL` and `PARTICLES_BLOB_DIR`, always"
     An MCP server is launched by your client as a child process and inherits
     almost nothing: not your shell, not your working directory, not your
-    exports. `storage.blob_dir` defaults to the **relative** `./corpus_blobs`,
-    so an unpinned server started from the wrong directory silently splits a
-    store from its content. Set both explicitly, with absolute paths, in every
-    config below. `PARTICLES_CONFIG` is worth pinning for the same reason
+    exports. A server started with neither `DATABASE_URL` nor
+    `PARTICLES_CONFIG` serves `~/.particles/particles.db` and says so on
+    stderr, which is rarely the store you meant, and one started with only
+    `PARTICLES_CONFIG` refuses a store path relative to its working directory.
+    Set both variables explicitly, with absolute paths, in every config
+    below. `PARTICLES_CONFIG` is worth pinning for the same reason
     ([Configuration](../operator-guide/configuration.md) covers what lives in
     it).
 
@@ -288,9 +290,15 @@ mcp:
     enabled_stores: ["default"]
 ```
 
-Everything an agent writes is attributed and enters
-[effective confidence](concepts.md#confidence) below operator-asserted
-content, so it can never outrank you.
+Everything an agent writes is attributed to the server's agent identity and
+cites a source the agent deposited itself, so its source trust is
+`mcp.write.agent_trust_rank` (0.8 by default) and its confidence is capped at
+`mcp.write.max_asserted_confidence` (0.9 by default). Both feed
+[effective confidence](concepts.md#confidence): an agent's belief ranks below
+an equally confident, equally recent claim from a source you leave at neutral
+trust, though it can rank above a claim from a source you have marked down, or
+one extracted with lower confidence. Lower the agent's trust with `particles trust` if you
+want its writes ranked further down.
 
 ## Recall without asking
 

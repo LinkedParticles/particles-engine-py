@@ -37,9 +37,10 @@ surface concern** — ``mcp.write.enabled_stores`` is checked by the MCP tool's
 ``_resolve_store`` locally and by the engine endpoint server-side.
 ``store`` is threaded through only for the per-store §6.6 mode lookup.
 
-Mutating another principal's beliefs (supersede/retract) is own-beliefs-only
-unless ``mcp.write.allow_cross_asserter``; operator-asserted (``HUMAN_REVIEW``)
-particles are never agent-mutable.
+Mutating another principal's beliefs (supersede, retract, tag, untag, link,
+unlink) is own-beliefs-only unless ``mcp.write.allow_cross_asserter``;
+operator-asserted (``HUMAN_REVIEW``) particles are never agent-mutable. On a
+project-bound surface the target must also be in view for that project.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ from particles.core.observer_scope import (
     project_keys,
     project_tag,
     same_scope,
+    visible,
 )
 from particles.core.schema import (
     Confidence,
@@ -84,7 +86,8 @@ from particles.store.event_store import EventRefKind, OperatorEventType, record_
 from particles.store.observer_scope_join import lens_may_engage, load_scopes, own_attribution
 from particles.store.observer_scope_store import ScopeTarget, add_widening
 from particles.store.particle_store import get_particle
-from particles.store.relation_store import create_relation
+from particles.store.relation_store import create_relation, delete_relation, get_relation
+from particles.store.taxonomy_store import add_particle_tags, remove_particle_tags
 
 
 class AgentWriteResult(BaseModel):
@@ -152,6 +155,7 @@ async def _resolve_provenance(
     corpus_entry_id: str | None,
     project_key: str | None = None,
     excerpt_tags: list[str] | None = None,
+    operator: bool = False,
 ) -> tuple[str, str]:
     """Return (corpus_entry_id, snapshot_id) for the assertion's SOURCE ref (§3).
 
@@ -159,6 +163,14 @@ async def _resolve_provenance(
     (the deposit-excerpt pattern). If an existing ``corpus_entry_id`` is given
     instead, reuses its latest snapshot. An assertion with neither is rejected —
     an unprovenanced belief is the failure mode this design exists to end (§4).
+
+    An agent's SOURCE is always its own deposit (security review 2026-10-24,
+    N4 and N29). Trust and attribution are read from the provenance entry, so
+    a belief citing an operator's entry would rank at the operator's trust,
+    not the seeded agent rank, and read as the operator's document. On the
+    agent path a ``corpus_entry_id`` another principal deposited is refused,
+    and the excerpt deposit matches only the agent's own entries. The operator
+    path (``operator=True``) may cite any entry.
 
     ``excerpt_tags`` replaces the agent's scope tags for an operator supersede,
     whose successor carries its predecessor's attribution.
@@ -171,6 +183,7 @@ async def _resolve_provenance(
             source_type=SourceType.CONVERSATION,
             tags=excerpt_tags if excerpt_tags is not None else _scope_tags(None, project_key),
             author_id=identity,
+            own_entries_only=not operator,
         )
     if corpus_entry_id is not None:
         from particles.corpus.store import get_entry
@@ -187,6 +200,11 @@ async def _resolve_provenance(
             raise ValueError(
                 f"corpus_entry_id {corpus_entry_id!r} is not a source of project "
                 f"{project_key!r}; pass `source_excerpt` instead."
+            )
+        if not operator and entry.deposited_by != identity:
+            raise ValueError(
+                f"corpus_entry_id {corpus_entry_id!r} was not deposited by {identity!r}; "
+                "an agent may cite only its own deposits. Pass `source_excerpt` instead."
             )
         return corpus_entry_id, entry.snapshots[-1].snapshot_id
     raise ValueError(
@@ -317,6 +335,7 @@ async def _construct_and_insert(
             corpus_entry_id=corpus_entry_id,
             project_key=project_key,
             excerpt_tags=excerpt_tags,
+            operator=operator,
         )
         if operator:
             # Range-checked by supersede_belief before any write.
@@ -420,9 +439,23 @@ def _map_result(
 
 
 async def _load_mutable_target(
-    session: Any, particle_id: str, identity: str, *, operator: bool = False
+    session: Any,
+    particle_id: str,
+    identity: str,
+    *,
+    operator: bool = False,
+    project_key: str | None = None,
 ) -> Particle:
     """Fetch a particle and enforce the §6 mutation guards (ownership + HUMAN_REVIEW).
+
+    ``project_key`` is the binding of a project-bound agent surface. With it,
+    and once the store is rescoped, a target that is not in view for that
+    project is refused: every project's server shares one asserter identity, so
+    ownership alone would let a server bound to one project retract or revise
+    a belief only another project sees. Scope is a relevance default, not
+    access control; this is a guard on the bound agent surface,
+    the write-side counterpart of ``link_particles``' refusal.
+    The operator path, and an unbound server, are not affected.
 
     The default (agent) path is own-beliefs-only: a target asserted by another
     principal is rejected unless ``mcp.write.allow_cross_asserter``. The
@@ -467,6 +500,16 @@ async def _load_mutable_target(
         )
     if target.status != Status.ACTIVE:
         raise ValueError(f"Particle {particle_id!r} is {target.status.value}, not ACTIVE.")
+    if not operator and project_key is not None and await lens_may_engage(session):
+        scope = (await load_scopes(session, [target]))[target.id]
+        if not visible(scope, project_key):
+            raise ValueError(
+                f"Particle {particle_id!r} ({describe_scope(scope)}) is not in view for "
+                f"project {project_key!r}, the project this server is bound to, and an "
+                "agent bound to a project changes only beliefs in view for it. A server "
+                "bound to the belief's project, or an operator from the CLI, can make the "
+                "change."
+            )
     return target
 
 
@@ -594,7 +637,9 @@ async def supersede_belief(
         raise ValueError(f"confidence must be between 0 and 1, got {confidence}.")
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
-    predecessor = await _load_mutable_target(session, supersedes_id, identity, operator=operator)
+    predecessor = await _load_mutable_target(
+        session, supersedes_id, identity, operator=operator, project_key=project_key
+    )
     # decision 3: an operator replaces a claim, it does not move it,
     # so the successor keeps the predecessor's own attribution. Read before the
     # predecessor is retired.
@@ -800,6 +845,7 @@ async def retract_belief(
     operator: bool = False,
     actor: str | None = None,
     identity: str | None = None,
+    project_key: str | None = None,
 ) -> None:
     """Retract a belief: ACTIVE → RETRACTED with reason ``EXPLICIT_RETRACTION``.
 
@@ -815,6 +861,8 @@ async def retract_belief(
         identity: Overrides the server-bound principal used for the
             own-beliefs-only ownership check, so a surface that asserts under
             its own principal (the façade) can retract what it wrote.
+        project_key: The binding of a project-bound agent surface; a target
+            not in view for it is refused (see ``_load_mutable_target``).
     """
     from particles.store.particle_store import update_particle_status
 
@@ -822,7 +870,9 @@ async def retract_belief(
         raise ValueError("particle_retract requires a non-empty reason.")
     identity = identity or get_config().mcp.write.asserter_identity
     event_actor = actor or identity
-    await _load_mutable_target(session, particle_id, identity, operator=operator)
+    await _load_mutable_target(
+        session, particle_id, identity, operator=operator, project_key=project_key
+    )
     await update_particle_status(
         session, particle_id, Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION
     )
@@ -865,6 +915,7 @@ async def deposit_conversation_text(
         source_type=SourceType.CONVERSATION,
         tags=_scope_tags(tags, project_key),
         author_id=identity,
+        own_entries_only=True,
     )
 
 
@@ -877,7 +928,11 @@ async def link_particles(
     confidence: float,
     project_key: str | None = None,
 ) -> ParticleRelation:
-    """Write a typed relation, refusing a project-bound link that changes an observer scope.
+    """Write the operator's typed relation, refusing a project-bound link that changes a scope.
+
+    The operator's ``links add`` (``MANUAL_CLI``). An MCP agent links through
+    :func:`link_beliefs`, which adds the §6 guards and credits the agent.
+    ``project_key`` is honoured for a client that still sends it on this route.
 
     A ``CO_EVIDENTIAL`` edge unions the two beliefs' groups in the observer-scope
     join, so a link between beliefs whose scopes differ moves each
@@ -889,24 +944,139 @@ async def link_particles(
     no lens engages and the link is written as before. Does not commit.
     """
     rtype = RelationType(relation_type)
-    if (
-        project_key is not None
-        and rtype is RelationType.CO_EVIDENTIAL
-        and await lens_may_engage(session)
-    ):
+    if project_key is not None and rtype is RelationType.CO_EVIDENTIAL:
         a = await get_particle(session, particle_a)
         b = await get_particle(session, particle_b)
-        if a is not None and b is not None and a.id != b.id:
-            scopes = await load_scopes(session, [a, b])
-            if not same_scope(scopes[a.id], scopes[b.id]):
-                raise ValueError(
-                    f"Refusing to link {a.id} ({describe_scope(scopes[a.id])}) with "
-                    f"{b.id} ({describe_scope(scopes[b.id])}): a CO_EVIDENTIAL link "
-                    "between beliefs with different observer scopes would change which "
-                    f"projects see them, and an agent bound to project {project_key!r} "
-                    "may not change a belief's scope. An operator can link them with "
-                    "`particles links add`."
-                )
+        if a is not None and b is not None:
+            await _refuse_scope_change(session, a, b, project_key)
     return await create_relation(
         session, particle_a, particle_b, rtype, RelationCreatedBy.MANUAL_CLI, confidence=confidence
     )
+
+
+async def _refuse_scope_change(session: Any, a: Particle, b: Particle, project_key: str) -> None:
+    """Refuse a bound agent's ``CO_EVIDENTIAL`` link between differently-scoped beliefs."""
+    if a.id == b.id or not await lens_may_engage(session):
+        return
+    scopes = await load_scopes(session, [a, b])
+    if not same_scope(scopes[a.id], scopes[b.id]):
+        raise ValueError(
+            f"Refusing to link {a.id} ({describe_scope(scopes[a.id])}) with "
+            f"{b.id} ({describe_scope(scopes[b.id])}): a CO_EVIDENTIAL link "
+            "between beliefs with different observer scopes would change which "
+            f"projects see them, and an agent bound to project {project_key!r} "
+            "may not change a belief's scope. An operator can link them with "
+            "`particles links add`."
+        )
+
+
+def _agent_relation_type(relation_type: str) -> RelationType:
+    """Parse a relation kind an agent may write; only CO_EVIDENTIAL today."""
+    try:
+        rtype = RelationType(relation_type)
+    except ValueError as exc:
+        raise ValueError(f"Unknown relation_type {relation_type!r}.") from exc
+    if rtype is not RelationType.CO_EVIDENTIAL:
+        raise ValueError(f"Only CO_EVIDENTIAL relations are agent-writable; got {relation_type!r}.")
+    return rtype
+
+
+async def link_beliefs(
+    session: Any,
+    particle_a: str,
+    particle_b: str,
+    *,
+    relation_type: str = RelationType.CO_EVIDENTIAL.value,
+    confidence: float = 1.0,
+    project_key: str | None = None,
+) -> ParticleRelation:
+    """An agent's link between two beliefs (MCP ``link_add``).
+
+    A ``CO_EVIDENTIAL`` edge pools the pair in the top-k collapse and unions
+    their observer scopes, so it changes how both beliefs rank and who sees
+    them. Each endpoint therefore passes the §6 guards a supersede or retract
+    target does (own-beliefs-only unless ``mcp.write.allow_cross_asserter``,
+    never ``HUMAN_REVIEW``, ACTIVE, in view for ``project_key``), and a bound
+    agent may not link beliefs whose scopes differ. The edge is recorded as
+    ``AGENT_ASSERTED`` and its event credits the asserter identity. Does not
+    commit.
+    """
+    rtype = _agent_relation_type(relation_type)
+    identity = get_config().mcp.write.asserter_identity
+    if particle_a == particle_b:
+        raise ValueError("Cannot create a relation between a particle and itself")
+    a = await _load_mutable_target(session, particle_a, identity, project_key=project_key)
+    b = await _load_mutable_target(session, particle_b, identity, project_key=project_key)
+    if project_key is not None:
+        await _refuse_scope_change(session, a, b, project_key)
+    return await create_relation(
+        session,
+        a.id,
+        b.id,
+        rtype,
+        RelationCreatedBy.AGENT_ASSERTED,
+        confidence=confidence,
+        actor=identity,
+    )
+
+
+async def unlink_beliefs(
+    session: Any,
+    particle_a: str,
+    particle_b: str,
+    *,
+    relation_type: str = RelationType.CO_EVIDENTIAL.value,
+    project_key: str | None = None,
+) -> bool:
+    """An agent's withdrawal of a link (MCP ``link_remove``). Returns whether one was removed.
+
+    Both endpoints pass the guards :func:`link_beliefs` applies, and the agent
+    may withdraw only a link an agent wrote (``AGENT_ASSERTED``): an operator's
+    link, a judged one, or an extractor's stays unless
+    ``mcp.write.allow_cross_asserter``. The event credits the asserter
+    identity. Does not commit.
+    """
+    rtype = _agent_relation_type(relation_type)
+    identity = get_config().mcp.write.asserter_identity
+    for pid in dict.fromkeys((particle_a, particle_b)):
+        await _load_mutable_target(session, pid, identity, project_key=project_key)
+    existing = await get_relation(session, particle_a, particle_b, rtype)
+    if existing is None:
+        return False
+    if (
+        existing.created_by is not RelationCreatedBy.AGENT_ASSERTED
+        and not get_config().mcp.write.allow_cross_asserter
+    ):
+        raise ValueError(
+            f"The {rtype.value} link between {particle_a!r} and {particle_b!r} was "
+            f"written by {existing.created_by.value}, not by an agent; withdrawing it "
+            "requires mcp.write.allow_cross_asserter=true, or an operator's "
+            "`particles links remove`."
+        )
+    return await delete_relation(session, particle_a, particle_b, rtype, actor=identity)
+
+
+async def tag_belief(
+    session: Any, *, particle_id: str, tags: list[str], project_key: str | None = None
+) -> list[str]:
+    """An agent's tag (MCP ``particle_tag``): the §6 guards, then the event under its identity.
+
+    Tags select beliefs in tag-filtered reads, so tagging is a change to the
+    belief and takes the guards a retract does. Returns the tags added. Does
+    not commit.
+    """
+    identity = get_config().mcp.write.asserter_identity
+    await _load_mutable_target(session, particle_id, identity, project_key=project_key)
+    return await add_particle_tags(session, particle_id, tags, actor=identity)
+
+
+async def untag_belief(
+    session: Any, *, particle_id: str, tags: list[str], project_key: str | None = None
+) -> list[str]:
+    """An agent's untag (MCP ``particle_untag``); guarded as :func:`tag_belief` is.
+
+    Returns the tags removed. Does not commit.
+    """
+    identity = get_config().mcp.write.asserter_identity
+    await _load_mutable_target(session, particle_id, identity, project_key=project_key)
+    return await remove_particle_tags(session, particle_id, tags, actor=identity)

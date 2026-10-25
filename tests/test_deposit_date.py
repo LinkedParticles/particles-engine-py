@@ -115,6 +115,19 @@ class TestResolvePrecedence:
             2026, 3, 15, tzinfo=UTC
         )
 
+    def test_a_future_stated_date_is_clamped_to_the_deposit(self, tmp_path: Path) -> None:
+        """Security review N6: a file cannot date itself after its own deposit."""
+        f = tmp_path / "doc.md"
+        f.write_text("2999-01-01\nbody")
+        _set_mtime(f, datetime(2999, 1, 1, tzinfo=UTC))
+        before = datetime.now(UTC)
+        got = _resolve_content_published_at(f, f.read_bytes(), None)
+        assert got is not None and before <= got <= datetime.now(UTC)
+        f.write_text("no date here\nbody")
+        _set_mtime(f, datetime(2999, 1, 1, tzinfo=UTC))
+        got = _resolve_content_published_at(f, f.read_bytes(), None)
+        assert got is not None and got <= datetime.now(UTC)
+
     def test_mtime_fallback_when_no_override_no_leading(self, tmp_path: Path) -> None:
         f = tmp_path / "doc.md"
         f.write_text("no date here\nbody")

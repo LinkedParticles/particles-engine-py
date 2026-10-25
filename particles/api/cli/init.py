@@ -36,22 +36,28 @@ from particles.api.cli._claude_code import (
     absolutize_sqlite_dsn,
     build_hook_commands,
     claude_project_slug,
+    command_env_pins,
     default_memory_manifest_text,
     disable_memory_store_text,
     enable_memory_store_text,
+    foreign_config_pin,
     fresh_config_text,
+    make_private_dir,
     memory_manifest_path,
     merge_particles_hook_entries,
+    minimal_config_text,
     particles_hook_commands,
     particles_mcp_registrations,
+    pinned_default_dsn,
     plan_mcp_registration,
     render_settings_json,
     repository_root,
     rule_file_project_key,
     state_dir,
     strip_particles_hook_entries,
+    write_private_text,
 )
-from particles.config import get_config, reset_config
+from particles.config import get_config, reset_config, user_config_path
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +110,16 @@ def init_claude_code_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the resulting files without writing anything."
     ),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help=(
+            "The config file to pin into the hooks and the MCP registration. Default: "
+            "PARTICLES_CONFIG, else ~/.particles/config.yaml (written when missing). "
+            "A config.yaml in the working directory is never pinned unless named here. "
+            "Given explicitly, it also replaces an MCP registration's pin to another file."
+        ),
+    ),
     command: str | None = typer.Option(
         None,
         "--command",
@@ -141,9 +157,16 @@ def init_claude_code_cmd(
     global _QUIET
     settings_path = _settings_path(project)
     _QUIET = json_output
+    # `--config` and `--remove` point this process at the file the hooks pin,
+    # the launcher-configures-itself bootstrap `engine serve` uses; the entry
+    # value is restored on the way out.
+    entry_config = os.environ.get("PARTICLES_CONFIG")
+    if config is not None:
+        os.environ["PARTICLES_CONFIG"] = str(config.expanduser().resolve())
+        reset_config()
     try:
         if remove:
-            result = _remove(settings_path, dry_run=dry_run)
+            result = _remove(settings_path, dry_run=dry_run, explicit_config=config is not None)
             if install_skills_files:
                 result["skills_removed"] = _remove_skills(project=project, dry_run=dry_run)
         else:
@@ -155,6 +178,7 @@ def init_claude_code_cmd(
                 # --json is non-interactive by construction; the audit is a prompt.
                 no_audit=no_audit or json_output,
                 install_skills_files=install_skills_files,
+                explicit_config=config is not None,
             )
             if json_output and not no_audit and not dry_run:
                 result["next_steps"].append(
@@ -171,6 +195,12 @@ def init_claude_code_cmd(
         raise typer.Exit(1) from exc
     finally:
         _QUIET = False
+        if os.environ.get("PARTICLES_CONFIG") != entry_config:
+            if entry_config is None:
+                os.environ.pop("PARTICLES_CONFIG", None)
+            else:
+                os.environ["PARTICLES_CONFIG"] = entry_config
+            reset_config()
     if json_output:
         typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
@@ -216,11 +246,16 @@ def _load_settings(path: Path) -> dict[str, Any]:
 
 
 def _config_yaml_path() -> Path:
-    """The config.yaml the store auto-create edits (bootstrap override or ./config.yaml)."""
+    """The config file the install pins and edits.
+
+    ``PARTICLES_CONFIG`` (which ``--config`` sets for this process), else the
+    user file, the same two places the loader reads. Never a file in the
+    working directory, which may be a clone.
+    """
     explicit = os.environ.get("PARTICLES_CONFIG")
     if explicit:
         return Path(explicit)
-    return Path.cwd() / "config.yaml"
+    return user_config_path()
 
 
 def _default_command_base() -> str:
@@ -242,7 +277,7 @@ def _default_command_base() -> str:
     raise typer.Exit(1)
 
 
-def _hook_command_env(handle: str, config_path: Path, *, will_write_config: bool) -> dict[str, str]:
+def _hook_command_env(handle: str, config_path: Path) -> dict[str, str]:
     """Absolute env pins baked into the installed hook commands.
 
     Claude Code runs the hook from the session's working directory — routinely a
@@ -255,22 +290,47 @@ def _hook_command_env(handle: str, config_path: Path, *, will_write_config: bool
 
     Two pins make the resolution CWD-independent:
 
-    * ``PARTICLES_CONFIG`` — the operator config.yaml (named-store registry plus
-      all hook tuning: harvest, projection, utility mining). Pinned whenever a
-      config file exists, or is about to be written by this install.
+    * ``PARTICLES_CONFIG`` — the operator config file (named-store registry plus
+      all hook tuning: harvest, projection, utility mining). Pinned always, even
+      when it is the user file, so a hook states its config instead of relying
+      on resolution; the install writes the file when missing.
     * ``DATABASE_URL`` — the ``default`` store's absolute DSN. That store
       resolves to ``storage.database_url`` (default ``./particles.db``), which
       the env var overrides regardless of config discovery. Only the ``default``
       handle uses it — the override maps there; a named store carries its
       absolute DSN in the pinned config.
     """
-    env: dict[str, str] = {}
-    if config_path.exists() or will_write_config:
-        env["PARTICLES_CONFIG"] = str(config_path.resolve())
+    env: dict[str, str] = {"PARTICLES_CONFIG": str(config_path.resolve())}
     if handle == "default":
         dsn = _store_dsn(handle)
         if dsn:
             env["DATABASE_URL"] = absolutize_sqlite_dsn(dsn)
+    return env
+
+
+def _mcp_registration_env(handle: str, hook_env: dict[str, str]) -> dict[str, str]:
+    """The hooks' pins, plus ``DATABASE_URL`` when the pinned config leaves it relative.
+
+    The MCP read tools (``query``, ``particles_list``, ``graph_view`` …) read
+    the ``default`` store. A hook names its store with ``--store``, so the
+    hooks of a named-store install carry no ``DATABASE_URL``; a registration
+    copied from them left ``default`` at the compiled ``./particles.db``,
+    which resolves against the directory Claude Code starts the server in:
+    the session's project, possibly a clone that ships its own
+    ``particles.db`` (security review N3). When the pinned config names no
+    absolute ``default`` store, the registration pins it to the installed
+    store's absolute DSN, so the agent's read tools read the memory its hooks
+    harvest. A config that names one keeps it: that store is the operator's
+    choice. The pinned file is read as written, never through this process's
+    own environment.
+    """
+    env = dict(hook_env)
+    if "DATABASE_URL" in env:
+        return env
+    default = pinned_default_dsn({"PARTICLES_CONFIG": env["PARTICLES_CONFIG"]})
+    if absolutize_sqlite_dsn(default) != default:
+        dsn = _store_dsn(handle) or _default_store_dsn(handle)
+        env["DATABASE_URL"] = absolutize_sqlite_dsn(dsn)
     return env
 
 
@@ -308,6 +368,7 @@ def _install(
     command_override: str | None,
     no_audit: bool,
     install_skills_files: bool = True,
+    explicit_config: bool = False,
 ) -> dict[str, Any]:
     """Install the integration; return the machine-readable result.
 
@@ -333,7 +394,7 @@ def _install(
     config_path, new_config_text = _plan_store_enable(handle)
 
     command_base = command_override or _default_command_base()
-    hook_env = _hook_command_env(handle, config_path, will_write_config=new_config_text is not None)
+    hook_env = _hook_command_env(handle, config_path)
     # Re-running strips every Particles-owned entry first, so this also drops
     # the Stop entry an install made while agent extraction (
     # deprecated) was on.
@@ -357,11 +418,20 @@ def _install(
         _say(f"--dry-run: would write {settings_path}:")
         _say(rendered)
         if new_config_text is not None:
-            _say(f"--dry-run: would write {config_path} (store auto-create):")
+            purpose = (
+                "store auto-create" if handle != "default" else "the config file the hooks pin"
+            )
+            _say(f"--dry-run: would write {config_path} ({purpose}):")
             _say(new_config_text)
         _say(f"--dry-run: would create state directory {state_dir()}")
         if not _is_project_scope(settings_path):
-            _register_mcp_server(result, executable=command_base, env=hook_env, dry_run=True)
+            _register_mcp_server(
+                result,
+                executable=command_base,
+                env=_mcp_registration_env(handle, hook_env),
+                dry_run=True,
+                replace_config_pin=explicit_config,
+            )
         if get_config().agent_memory.projection.enabled:
             if not memory_manifest_path().exists():
                 _say(f"--dry-run: would write {memory_manifest_path()}:")
@@ -383,16 +453,23 @@ def _install(
 
     # 1. Store auto-create: config edit first, then initialize the store DB.
     if new_config_text is not None:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(new_config_text, encoding="utf-8")
         reset_config()  # the new store must be visible to get_engine()
-        _say(f"Enabled store '{handle}' in {config_path}.")
+        if handle in get_config().storage.stores:
+            _say(f"Enabled store '{handle}' in {config_path}.")
+        else:
+            _say(f"Wrote {config_path}, the config file the hooks pin.")
     run(_ensure_store_db(handle))
     result["config_path"] = str(config_path)
     result["created"]["config_store_enabled"] = new_config_text is not None
 
     # 2. State directory (hook log; the projection's manifest lives here too).
     state = state_dir()
-    state.mkdir(parents=True, exist_ok=True)
+    make_private_dir(state)
+    # An older install created it with the umask's mode; it is this
+    # integration's own directory, so tighten it (security review D46).
+    state.chmod(0o700)
     result["created"]["state_dir"] = str(state)
 
     # 2b. MEMORY.md projection provisioning (§3/§7): write the default
@@ -437,7 +514,13 @@ def _install(
 
     # 6. The MCP server, bound to each session's project.
     if not _is_project_scope(settings_path):
-        _register_mcp_server(result, executable=command_base, env=hook_env, dry_run=False)
+        _register_mcp_server(
+            result,
+            executable=command_base,
+            env=_mcp_registration_env(handle, hook_env),
+            dry_run=False,
+            replace_config_pin=explicit_config,
+        )
 
     return result
 
@@ -465,16 +548,35 @@ def _claude_mcp(argv: list[str]) -> bool:
 
 
 def _register_mcp_server(
-    result: dict[str, Any], *, executable: str, env: dict[str, str], dry_run: bool
+    result: dict[str, Any],
+    *,
+    executable: str,
+    env: dict[str, str],
+    dry_run: bool,
+    replace_config_pin: bool = False,
 ) -> None:
     """Register (or bind) the user-scope Particles MCP server: ``mcp serve --project-observer cwd``.
 
     A session's MCP reads then see the same project view as its digest. An
-    existing registration keeps its executable and env pins; only the launch
-    flag is added. The flag goes into the Claude Code registration, whose
+    existing registration keeps its executable, gains the launch flag, and
+    gains the hooks' ``PARTICLES_CONFIG`` pin when it has none.
+    A pin to a different file is kept and reported unless ``--config`` asked
+    to replace it. The flag goes into the Claude Code registration, whose
     server starts in the session's directory, never into machine-wide config.
     """
-    plan = plan_mcp_registration(particles_mcp_registrations(), executable=executable, env=env)
+    existing = particles_mcp_registrations()
+    foreign = None if replace_config_pin else foreign_config_pin(existing, env)
+    if foreign is not None:
+        wanted_config = env.get("PARTICLES_CONFIG", "")
+        result["next_steps"].append(
+            f"The Particles MCP server pins PARTICLES_CONFIG={foreign}, not {wanted_config}; "
+            "it was left as it is. To pin the hooks' file instead, re-run with "
+            f"`particles init claude-code --config {wanted_config}`."
+        )
+        _say(f"The MCP server keeps its own config pin ({foreign}).")
+    plan = plan_mcp_registration(
+        existing, executable=executable, env=env, replace_config_pin=replace_config_pin
+    )
     if plan is None:
         result["mcp_server"] = {"action": "unchanged", "bound": True}
         return
@@ -498,11 +600,19 @@ def _register_mcp_server(
         _say("Could not run `claude mcp`; the registration command is in next_steps.")
         return
     previous = None if replaced is None else replaced.add_argv()
-    (state_dir() / _MCP_STATE).write_text(
+    write_private_text(
+        state_dir() / _MCP_STATE,
         json.dumps({"name": wanted.name, "created": replaced is None, "previous": previous}),
-        encoding="utf-8",
     )
     _say(f"Registered the MCP server bound to each session's project ({wanted.name}).")
+    if replaced is not None and wanted.env != replaced.env:
+        pins = ", ".join(
+            f"{key}={value}"
+            for key, value in sorted(wanted.env.items())
+            if replaced.env.get(key) != value
+        )
+        result["mcp_server"]["pinned"] = pins
+        _say(f"  Pinned its config: {pins}.")
     _say("  Restart running Claude Code sessions to pick it up.")
 
 
@@ -592,7 +702,7 @@ def _install_skills(*, project: bool) -> list[Path]:
 
     target = default_skills_dir(project)
     try:
-        written = install_skills(target)
+        written = install_skills(target, root=Path.cwd() if project else None)
     except OSError as exc:
         # Never fail an otherwise-good install over the skills copy: the hooks
         # are the integration, the skills are guidance. Say what did not happen.
@@ -609,7 +719,7 @@ def _remove_skills(*, project: bool, dry_run: bool) -> str | None:
 
     target = default_skills_dir(project)
     try:
-        removed = remove_skills(target, dry_run=dry_run)
+        removed = remove_skills(target, dry_run=dry_run, root=Path.cwd() if project else None)
     except OSError as exc:
         typer.echo(f"Warning: could not remove skill files from {target}: {exc}", err=True)
         return None
@@ -648,7 +758,9 @@ def _plan_store_enable(handle: str) -> tuple[Path, str | None]:
     stores = cfg.storage.stores
     enabled = cfg.mcp.write.enabled_stores
     if handle == "default" or (handle in stores and handle in enabled):
-        return config_path, None
+        # Nothing to enable, but the hooks pin the file, so it must exist:
+        # a header-only one, never any setting.
+        return config_path, None if config_path.exists() else minimal_config_text()
     dsn = stores.get(handle) or _default_store_dsn(handle)
     if config_path.exists():
         new_text = enable_memory_store_text(config_path.read_text(encoding="utf-8"), handle, dsn)
@@ -885,7 +997,7 @@ def _offer_first_run_audit(handle: str, only_memory_dir: Path | None = None) -> 
 # ---------------------------------------------------------------------------
 
 
-def _remove(settings_path: Path, *, dry_run: bool) -> dict[str, Any]:
+def _remove(settings_path: Path, *, dry_run: bool, explicit_config: bool = False) -> dict[str, Any]:
     """Uninstall the integration; return the machine-readable result."""
     settings = _load_settings(settings_path)
     installed = particles_hook_commands(settings)
@@ -905,6 +1017,29 @@ def _remove(settings_path: Path, *, dry_run: bool) -> dict[str, Any]:
         "state_dir_kept": str(state_dir()),
         "next_steps": [],
     }
+
+    # The hooks name the config they were installed against; revert that one.
+    # Since the working directory is never read, so a remove run from
+    # anywhere else would otherwise not see the store the install enabled.
+    pinned = next(
+        (
+            pins["PARTICLES_CONFIG"]
+            for c in installed
+            if "PARTICLES_CONFIG" in (pins := command_env_pins(c))
+        ),
+        None,
+    )
+    if pinned and not _hook_config_pin_trusted(
+        pinned, settings_path, explicit_config=explicit_config
+    ):
+        _say(
+            f"Ignoring the config pin {pinned} in {settings_path}: a repository can ship "
+            "that file. Pass --config to name the config the install pinned."
+        )
+        pinned = None
+    if pinned and os.environ.get("PARTICLES_CONFIG") != pinned:
+        os.environ["PARTICLES_CONFIG"] = pinned
+        reset_config()
 
     # Revert the store auto-create only while the store is still empty
     # (a store holding data is never deleted).
@@ -959,6 +1094,29 @@ def _remove(settings_path: Path, *, dry_run: bool) -> dict[str, Any]:
     return result
 
 
+def _hook_config_pin_trusted(pinned: str, settings_path: Path, *, explicit_config: bool) -> bool:
+    """Whether ``--remove`` may switch this process to a hook command's config pin.
+
+    An explicit ``--config`` always wins. The user-level settings file is the
+    operator's own, so its pin is taken as written. A project-scope file is
+    ``.claude/settings.local.json`` in the working directory, which a cloned
+    repository can ship; its pin is taken only when it names the user config
+    file, since anything else would let the clone choose which store the
+    remove judges empty and deletes (security review N25).
+    """
+    if explicit_config:
+        return False
+    if not _is_project_scope(settings_path):
+        return True
+    pin = Path(pinned).expanduser()
+    if not pin.is_absolute():
+        return False
+    try:
+        return pin.resolve() == user_config_path().expanduser().resolve()
+    except OSError:
+        return False
+
+
 def _installed_store_handle(commands: list[str]) -> str | None:
     """Parse the ``--store <handle>`` the installed hook commands target."""
     for cmd in commands:
@@ -983,7 +1141,7 @@ async def _store_is_empty(handle: str) -> bool:
     so the store is preserved exactly as before.
     """
     from sqlalchemy import func, select
-    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.exc import DatabaseError
 
     from particles.corpus.rule_sources import RULE_SOURCE_TAG
     from particles.corpus.store import CorpusEntryRow
@@ -1001,9 +1159,29 @@ async def _store_is_empty(handle: str) -> bool:
                 .where(CorpusEntryRow.tags_json.not_like(f'%"{RULE_SOURCE_TAG}"%'))
             )
             particles = await session.scalar(select(func.count()).select_from(ParticleRow))
-    except OperationalError:
-        return True  # tables never created — nothing to preserve
+    except DatabaseError:
+        # No Particles tables. Empty only when the file holds no tables at all
+        # (an install that never reached `db init`); a database with someone
+        # else's schema is never judged empty, so it is never deleted
+        # (security review N25).
+        return dsn is not None and dsn.startswith("sqlite") and _sqlite_has_no_tables(dsn)
     return not entries and not particles
+
+
+def _sqlite_has_no_tables(dsn: str) -> bool:
+    """Whether the SQLite file a DSN names opens as a database with no tables."""
+    import sqlite3
+
+    path = _sqlite_file_path(dsn)
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return False
+    return bool(row) and row[0] == 0
 
 
 def _delete_empty_sqlite_store(handle: str) -> None:

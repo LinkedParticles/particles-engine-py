@@ -887,6 +887,8 @@ class ConsolidationReport(BaseModel):
     refresh_unchanged_hash: int = 0
     refresh_updated: int = 0
     refresh_missing: int = 0
+    # Outside every allowed root, so not read.
+    refresh_refused: int = 0
     refresh_remaining: int = 0
 
     # Pass 1 — extract catch-up.
@@ -2153,6 +2155,8 @@ def _pass_summary(
             parts = [f"{report.refresh_checked} checked", f"{report.refresh_updated} changed"]
             if report.refresh_missing:
                 parts.append(f"{report.refresh_missing} missing")
+            if report.refresh_refused:
+                parts.append(f"{report.refresh_refused} outside the allowed roots")
         case "extract":
             _done, attempted = progress.counters.get("extract", (0, 0))
             parts = [f"{report.pending_extracted} of {attempted} extracted"]
@@ -2364,6 +2368,8 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
                 report.refresh_unchanged_hash += 1
             case RefreshOutcome.CHANGED:
                 report.refresh_updated += 1
+            case RefreshOutcome.REFUSED:
+                report.refresh_refused += 1
     return 0
 
 
@@ -3620,6 +3626,7 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "refresh_checked": report.refresh_checked,
         "refresh_updated": report.refresh_updated,
         "refresh_missing": report.refresh_missing,
+        "refresh_refused": report.refresh_refused,
         "reconcile_demoted": report.reconcile_demoted,
         "reconcile_candidate_pairs": report.reconcile_candidate_pairs,
         "reconcile_probes_run": report.reconcile_probes_run,
@@ -4072,6 +4079,10 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             refresh_line += ", none changed"
         if report.refresh_missing:
             refresh_line += f", {report.refresh_missing} missing"
+        if report.refresh_refused:
+            refresh_line += (
+                f", {report.refresh_refused} outside the allowed roots (run `particles rules sync`)"
+            )
         lines.append(refresh_line)
     lines.append(_pending_line(report))
     if report.reconcile_demoted:

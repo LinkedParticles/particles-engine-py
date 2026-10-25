@@ -234,6 +234,9 @@ class TestBoundMcpLinks:
     @pytest.fixture(autouse=True)
     def _writes_enabled(self) -> None:
         get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+        # The world's beliefs are this agent's, so the ownership guard passes and
+        # each test reaches the scope rule it pins.
+        get_config().mcp.write.asserter_identity = "test-agent"
 
     async def _link(self, a: str, b: str) -> Any:
         return await _call("link_add", {"particle_a": a, "particle_b": b})
@@ -251,9 +254,18 @@ class TestBoundMcpLinks:
         out = await self._link(w["mine"], also_mine.id)
         assert out["verdict"] == "LINKED"
 
-    @pytest.mark.parametrize("partner", ["theirs", "world", "unattributed"])
+    @pytest.mark.parametrize(
+        ("partner", "refusal"),
+        [
+            # Not in view for the bound project: refused before any link is weighed.
+            ("theirs", "is not in view for project"),
+            ("unattributed", "is not in view for project"),
+            # In view (global), but the link would widen this project's belief.
+            ("world", "particles links add"),
+        ],
+    )
     async def test_a_link_across_scopes_is_refused(
-        self, db_session: Any, bound_to_a: None, partner: str
+        self, db_session: Any, bound_to_a: None, partner: str, refusal: str
     ) -> None:
         from mcp.server.fastmcp.exceptions import ToolError
 
@@ -265,7 +277,7 @@ class TestBoundMcpLinks:
         )
         await db_session.commit()
         other = keyless.id if partner == "unattributed" else w[partner]
-        with pytest.raises(ToolError, match="particles links add"):
+        with pytest.raises(ToolError, match=refusal):
             await self._link(w["mine"], other)
         assert await get_relations_for_particle(db_session, w["mine"]) == []
 
@@ -280,10 +292,78 @@ class TestBoundMcpLinks:
         assert (await self._link(w["mine"], w["world"]))["verdict"] == "LINKED"
 
 
+class TestBoundMcpMutations:
+    """A bound agent changes only beliefs in view for its project.
+
+    Every project's server shares one asserter identity, so the ownership guard
+    alone let a server bound to one project retract, revise or retag a belief
+    only another project sees (security review D11). Scope stays a relevance
+    default: an unbound server, or the operator, still can.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _writes_enabled(self) -> None:
+        get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+        get_config().mcp.write.asserter_identity = "test-agent"
+
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("particle_retract", {"reason": "stale"}),
+            ("particle_tag", {"tags": ["x"]}),
+            ("particle_untag", {"tags": ["x"]}),
+        ],
+    )
+    async def test_another_projects_belief_is_refused(
+        self, db_session: Any, bound_to_a: None, tool: str, args: dict[str, Any]
+    ) -> None:
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        from particles.core.status import Status
+        from particles.store.particle_store import get_particle
+
+        w = await _world(db_session)
+        with pytest.raises(ToolError, match="is not in view for project '-proj-a'"):
+            await _call(tool, {"particle_id": w["theirs"], **args})
+        theirs = await get_particle(db_session, w["theirs"])
+        assert theirs is not None and theirs.status is Status.ACTIVE
+
+    async def test_a_supersede_of_another_projects_belief_is_refused(
+        self, db_session: Any, bound_to_a: None
+    ) -> None:
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        w = await _world(db_session)
+        with pytest.raises(ToolError, match="is not in view for project"):
+            await _call(
+                "particle_supersede",
+                {
+                    "supersedes_id": w["theirs"],
+                    "content": "Project B deploys on Tuesdays.",
+                    "subject_names": ["deploys"],
+                    "confidence": 0.5,
+                    "source_excerpt": "B moved its deploys",
+                },
+            )
+
+    async def test_a_belief_in_view_is_changed(self, db_session: Any, bound_to_a: None) -> None:
+        w = await _world(db_session)
+        assert (await _call("particle_tag", {"particle_id": w["mine"], "tags": ["x"]}))[
+            "added"
+        ] == ["x"]
+        out = await _call("particle_retract", {"particle_id": w["mine"], "reason": "stale"})
+        assert out["verdict"] == "RETRACTED"
+
+    async def test_an_unbound_server_is_not_checked(self, db_session: Any) -> None:
+        w = await _world(db_session)
+        out = await _call("particle_retract", {"particle_id": w["theirs"], "reason": "stale"})
+        assert out["verdict"] == "RETRACTED"
+
+
 def test_the_link_rule_holds_over_the_http_transport(
     cli_db: Any, monkeypatch: pytest.MonkeyPatch, bound_to_a: None
 ) -> None:
-    """``HttpBackend`` carries the binding and ``POST /links`` enforces it."""
+    """``HttpBackend`` carries the binding and ``POST /particles/link`` enforces it."""
     import asyncio
 
     import httpx
@@ -294,6 +374,10 @@ def test_the_link_rule_holds_over_the_http_transport(
     monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
     reset_config()
     get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+    get_config().mcp.write.asserter_identity = "test-agent"
+    # The in-process engine runs under the dev-key skip, which serves only
+    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app
 
@@ -324,8 +408,10 @@ def test_the_link_rule_holds_over_the_http_transport(
     from mcp.server.fastmcp.exceptions import ToolError
 
     with pytest.raises(ToolError, match="particles links add"):
+        asyncio.run(_call("link_add", {"particle_a": w["mine"], "particle_b": w["world"]}))
+    with pytest.raises(ToolError, match="is not in view for project"):
         asyncio.run(_call("link_add", {"particle_a": w["mine"], "particle_b": w["theirs"]}))
-    assert "/links" in recorded
+    assert "/particles/link" in recorded
 
 
 class TestGraphView:

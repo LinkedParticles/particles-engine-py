@@ -366,21 +366,24 @@ class TestVerifyReadKey:
 # ---------------------------------------------------------------------------
 
 #: Every operator-scope route, with a body that passes request validation. The
-#: two dry-run-capable routes are listed with ``dry_run`` false, the writing form.
-_OPERATOR_ROUTES: list[tuple[str, dict[str, object]]] = [
+#: dry-run-capable routes are listed in their writing form (``dry_run`` false,
+#: ``fix`` true, ``mode`` APPLY).
+_OPERATOR_ROUTES: list[tuple[str, str, dict[str, object]]] = [
     (
+        "POST",
         "/particles/p-missing/supersede",
         {"content": "c", "subject_names": ["S"], "confidence": 0.5, "reason": "r"},
     ),
-    ("/particles/p-missing/retract", {"reason": "r"}),
-    ("/particles/p-missing/subjects", {"subject_name": "S"}),
-    ("/curation/affirm", {"particle_id": "p-missing"}),
-    ("/curation/snooze", {"card_key": "contested:p-missing"}),
-    ("/review/p-missing", {"action": "DEFER", "reviewer_id": "operator"}),
-    ("/corpus/e-missing/retract", {"reason": "r", "dry_run": False}),
-    ("/subjects/relink-gated", {"dry_run": False}),
-    ("/trust/rules", {"scope": "domain", "pattern": "example.org", "score": 0.5}),
+    ("POST", "/particles/p-missing/retract", {"reason": "r"}),
+    ("POST", "/particles/p-missing/subjects", {"subject_name": "S"}),
+    ("POST", "/curation/affirm", {"particle_id": "p-missing"}),
+    ("POST", "/curation/snooze", {"card_key": "contested:p-missing"}),
+    ("POST", "/review/p-missing", {"action": "DEFER", "reviewer_id": "operator"}),
+    ("POST", "/corpus/e-missing/retract", {"reason": "r", "dry_run": False}),
+    ("POST", "/subjects/relink-gated", {"dry_run": False}),
+    ("POST", "/trust/rules", {"scope": "domain", "pattern": "example.org", "score": 0.5}),
     (
+        "POST",
         "/trust/statements",
         {
             "domain": "general",
@@ -389,6 +392,20 @@ _OPERATOR_ROUTES: list[tuple[str, dict[str, object]]] = [
             "trust_rank": 0.5,
         },
     ),
+    # Security review 2026-10-24, N2 and N5: the subject, link, tag, lint-fix,
+    # reconcile, links-suggest APPLY and db-init writes.
+    ("POST", "/subjects/merge", {"source_ids": ["s-a"], "target_id": "s-b", "dry_run": False}),
+    ("POST", "/subjects/s-missing/merge", {"target_id": "s-b"}),
+    ("POST", "/subjects/s-missing/split", {"particle_ids": ["p-missing"], "new_name": "X"}),
+    ("POST", "/subjects/s-missing/aliases", {"aliases": ["a"]}),
+    ("POST", "/particles/p-missing/tags", {"tags": ["t"]}),
+    ("DELETE", "/particles/p-missing/tags", {"tags": ["t"]}),
+    ("POST", "/links", {"particle_a": "p-a", "particle_b": "p-b"}),
+    ("DELETE", "/links", {"particle_a": "p-a", "particle_b": "p-b"}),
+    ("POST", "/lint", {"fix": True, "semantic": False}),
+    ("POST", "/reconcile", {"dry_run": False}),
+    ("POST", "/links/suggest", {"mode": "APPLY"}),
+    ("POST", "/db/init", {}),
 ]
 
 
@@ -397,7 +414,7 @@ def api_client(cli_db: object) -> Iterator[TestClient]:
     """A loopback ``TestClient`` over a file-backed store with every table created."""
     from particles.api.app import app
 
-    yield TestClient(app, client=("127.0.0.1", 50000))
+    yield TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
 
 
 class TestOperatorRoutesRefuseDevKey:
@@ -408,57 +425,71 @@ class TestOperatorRoutesRefuseDevKey:
     the routes that act with the operator's authority need a real key.
     """
 
-    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), _OPERATOR_ROUTES)
     def test_loopback_dev_key_refused_503(
         self,
         api_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
         path: str,
         body: dict[str, object],
     ) -> None:
         monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
-        resp = api_client.post(path, json=body)
+        resp = api_client.request(method, path, json=body)
         assert resp.status_code == 503
         assert "PARTICLES_API_KEY" in resp.json()["detail"]
 
-    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), _OPERATOR_ROUTES)
     def test_loopback_dev_key_refused_even_with_a_bearer(
         self,
         api_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
         path: str,
         body: dict[str, object],
     ) -> None:
         # Under dev-key there is no key to check a bearer against, so presenting
         # one changes nothing.
         monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
-        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer dev-key"})
+        resp = api_client.request(
+            method, path, json=body, headers={"Authorization": "Bearer dev-key"}
+        )
         assert resp.status_code == 503
 
-    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), _OPERATOR_ROUTES)
     def test_real_key_wrong_bearer_401(
         self,
         api_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
         path: str,
         body: dict[str, object],
     ) -> None:
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
-        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer nope"})
+        resp = api_client.request(method, path, json=body, headers={"Authorization": "Bearer nope"})
         assert resp.status_code == 401
 
-    @pytest.mark.parametrize(("path", "body"), _OPERATOR_ROUTES)
+    @pytest.mark.parametrize(("method", "path", "body"), _OPERATOR_ROUTES)
     def test_real_key_right_bearer_passes_the_gate(
         self,
         api_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
         path: str,
         body: dict[str, object],
     ) -> None:
         # Past the gate the route answers on its own terms (403 writes disabled,
         # 404 no such record, 200 for an empty relink): anything but an auth refusal.
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
-        resp = api_client.post(path, json=body, headers={"Authorization": "Bearer prod-secret"})
+        if path == "/db/init":
+            # The scratch store's tables come from create_all, not Alembic.
+            async def _no_migration() -> None:
+                return None
+
+            monkeypatch.setattr("particles.api.app.create_tables", _no_migration)
+        resp = api_client.request(
+            method, path, json=body, headers={"Authorization": "Bearer prod-secret"}
+        )
         assert resp.status_code not in (401, 503), resp.text
 
     def test_every_operator_route_is_listed(self) -> None:
@@ -486,6 +517,12 @@ class TestOperatorRoutesRefuseDevKey:
             "/review/{particle_id}",
             "/trust/rules",
             "/trust/statements",
+            "/subjects/{source_id}/merge",
+            "/subjects/{subject_id}/split",
+            "/subjects/{subject_id}/aliases",
+            "/particles/{particle_id}/tags",
+            "/links",
+            "/db/init",
         }
 
 
@@ -507,6 +544,28 @@ class TestDevKeyLoopbackSkipStillServes:
         resp = api_client.post("/subjects/relink-gated", json={"dry_run": True})
         assert resp.status_code == 200
 
+    @pytest.mark.parametrize(
+        ("path", "body", "expected"),
+        [
+            # Security review 2026-10-24, N2: the forms that write nothing keep the skip.
+            ("/subjects/merge", {"source_ids": ["s-a"], "target_id": "s-b", "dry_run": True}, 404),
+            ("/lint", {"fix": False, "semantic": False}, 200),
+            ("/reconcile", {"dry_run": True}, 200),
+            ("/links/suggest", {"mode": "REPORT"}, 200),
+        ],
+    )
+    def test_non_writing_forms_served(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        body: dict[str, object],
+        expected: int,
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        resp = api_client.post(path, json=body)
+        assert resp.status_code == expected, resp.text
+
     @pytest.mark.parametrize("path", ["/review", "/events", "/particles", "/subjects"])
     def test_read_routes_served(
         self, api_client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str
@@ -525,3 +584,36 @@ class TestDevKeyLoopbackSkipStillServes:
             "/particles/retract", json={"particle_id": "p-missing", "reason": "r"}
         )
         assert resp.status_code == 403
+
+
+class TestOperatorLinkAndTagMirrorsNeedWriteEnablement:
+    """Security review 2026-10-24, N5: the operator link and tag mirrors had no write gate.
+
+    They call the stores directly, so they are the agent verbs without the
+    ownership, HUMAN_REVIEW and scope guards (D10). Beside the operator bearer,
+    they now honour ``mcp.write.enabled_stores`` like the operator supersede.
+    """
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("POST", "/particles/p-missing/tags", {"tags": ["t"]}),
+            ("DELETE", "/particles/p-missing/tags", {"tags": ["t"]}),
+            ("POST", "/links", {"particle_a": "p-a", "particle_b": "p-b"}),
+            ("DELETE", "/links", {"particle_a": "p-a", "particle_b": "p-b"}),
+        ],
+    )
+    def test_refused_403_when_writes_are_disabled(
+        self,
+        api_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        path: str,
+        body: dict[str, object],
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        resp = api_client.request(
+            method, path, json=body, headers={"Authorization": "Bearer prod-secret"}
+        )
+        assert resp.status_code == 403
+        assert "enabled_stores" in resp.json()["detail"]

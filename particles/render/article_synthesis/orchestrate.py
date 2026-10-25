@@ -232,7 +232,7 @@ async def render_article(
         # Pick the strict-prompt variant based on the prior attempt's
         # failure type. On the first attempt these are both no-ops
         # (strict=False so the misalignments arg is ignored).
-        prompt = _build_synthesis_prompt(
+        system, prompt = _build_synthesis_prompt(
             subject=subject,
             particles=particles,
             eff=eff,
@@ -250,6 +250,7 @@ async def render_article(
         try:
             llm_body = await _call_synthesis_llm(
                 prompt=prompt,
+                system=system,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )

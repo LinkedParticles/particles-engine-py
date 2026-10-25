@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -152,6 +153,18 @@ class TestEngineServe:
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["host"] == "0.0.0.0"
 
+    def test_non_loopback_with_open_reads_warns(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Security review 2026-10-24, N9: a mounted config can turn the read
+        # gate off without a word; the launcher says so.
+        monkeypatch.setenv("PARTICLES_API_KEY", "real-secret")
+        monkeypatch.setenv("PARTICLES_API_REQUIRE_AUTH_FOR_READS", "false")
+        with patch("uvicorn.run"):
+            result = runner.invoke(app, ["engine", "serve", "0.0.0.0:8127"])
+        assert result.exit_code == 0, result.output
+        assert "api.require_auth_for_reads is false" in result.output
+
 
 class TestDaemonFlag:
     """``--daemon`` — opt-in residency."""
@@ -200,3 +213,32 @@ class TestDaemonFlag:
         assert result.exit_code == 1
         assert "Refusing to start" in result.output
         mock_run.assert_not_called()
+
+
+class TestEventLoop:
+    """D18 (SECURITY_REVIEW_20261023-1): the no-egress backstop needs the stdlib loop.
+
+    The backstop is an audit hook on ``socket.connect``; libuv sockets raise no
+    such event, so under uvloop an unadmitted connect would go through.
+    """
+
+    def test_refusing_posture_runs_the_asyncio_loop(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("network:\n  egress: none\n", encoding="utf-8")
+        monkeypatch.setenv("PARTICLES_CONFIG", str(config))
+        monkeypatch.delenv("PARTICLES_API_KEY", raising=False)
+        with patch("uvicorn.run") as mock_run:
+            result = runner.invoke(app, ["engine", "serve", "127.0.0.1:8127"])
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.kwargs["loop"] == "asyncio"
+
+    def test_open_posture_keeps_uvicorn_auto(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PARTICLES_API_KEY", raising=False)
+        with patch("uvicorn.run") as mock_run:
+            result = runner.invoke(app, ["engine", "serve", "127.0.0.1:8128"])
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.kwargs["loop"] == "auto"

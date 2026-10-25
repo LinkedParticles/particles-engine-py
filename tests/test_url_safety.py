@@ -23,6 +23,9 @@ from particles.url_safety import (
     UnsafeUrlError,
     ValidatingTransport,
     format_connect_pin,
+    is_cleartext_remote,
+    is_network_uri,
+    isolated_git_env,
     resolve_and_pin,
     validate_fetch_url,
 )
@@ -587,3 +590,84 @@ class TestFormatConnectPin:
     def test_non_default_port_is_carried(self) -> None:
         spec = format_connect_pin("example.com", 8443, [ipaddress.ip_address("1.2.3.4")])
         assert spec == "example.com:8443:1.2.3.4"
+
+
+class TestIsNetworkUri:
+    """The scheme test a remote deposit's ``fetch_policy=LAZY`` must pass (D2)."""
+
+    @pytest.mark.parametrize(
+        "uri", ["https://example.com/a", "http://example.com", "HTTPS://x.org"]
+    )
+    def test_http_and_https_are_network(self, uri: str) -> None:
+        assert is_network_uri(uri)
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "file://localhost/etc/passwd",
+            "/etc/passwd",
+            "etc/passwd",
+            "ftp://example.com/x",
+            "",
+        ],
+    )
+    def test_everything_else_is_not(self, uri: str) -> None:
+        assert not is_network_uri(uri)
+
+
+# ---------------------------------------------------------------------------
+# Credentials over cleartext (N12, SECURITY_REVIEW_20261024-1)
+# ---------------------------------------------------------------------------
+
+
+class TestIsCleartextRemote:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://mac-mini.local:11434/v1",
+            "http://10.0.0.5:4318",
+            "http://127.0.0.1.example.invalid/v1",
+        ],
+    )
+    def test_remote_non_https_is_cleartext(self, url: str) -> None:
+        assert is_cleartext_remote(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://api.openai.com/v1",
+            "HTTPS://collector.example.invalid",
+            "http://127.0.0.1:8000",
+            "http://127.8.9.10:8000",
+            "http://localhost:11434/v1",
+            "http://[::1]:4318",
+        ],
+    )
+    def test_https_or_loopback_is_not(self, url: str) -> None:
+        assert not is_cleartext_remote(url)
+
+
+class TestIsolatedGitEnv:
+    def test_drops_every_git_variable_and_names_the_isolation(self) -> None:
+        env = isolated_git_env(
+            {
+                "PATH": "/usr/bin",
+                "HOME": "/Users/someone",
+                "GIT_DIR": "/elsewhere/.git",
+                "GIT_CONFIG_PARAMETERS": "'core.fsmonitor=/tmp/x'",
+                "GIT_SSL_NO_VERIFY": "1",
+            },
+            home="/tmp/empty-home",
+        )
+        assert env["PATH"] == "/usr/bin"
+        assert env["HOME"] == env["XDG_CONFIG_HOME"] == "/tmp/empty-home"
+        assert {k for k in env if k.startswith("GIT_")} == {
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_LFS_SKIP_SMUDGE",
+            "GIT_TERMINAL_PROMPT",
+            "GIT_ALLOW_PROTOCOL",
+        }
+        assert env["GIT_ALLOW_PROTOCOL"] == "https"

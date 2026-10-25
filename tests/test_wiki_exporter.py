@@ -314,13 +314,17 @@ def test_build_synthesis_prompt_sequence_mode() -> None:
     ps = [_make_particle("The author woke up tired."), _make_particle("It got better.")]
     eff = {p.id: p.confidence.value for p in ps}
 
-    narrative_prompt = _build_synthesis_prompt(
-        subject=subject, particles=ps, eff=eff, strict=False, sequence_mode=True
+    narrative_prompt = "\n".join(
+        _build_synthesis_prompt(
+            subject=subject, particles=ps, eff=eff, strict=False, sequence_mode=True
+        )
     )
     assert "NARRATIVE:" in narrative_prompt
     assert "IN ORDER" in narrative_prompt
 
-    standard_prompt = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=False)
+    standard_prompt = "\n".join(
+        _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=False)
+    )
     assert "encyclopedic article" in standard_prompt
     assert narrative_prompt != standard_prompt
 
@@ -342,8 +346,8 @@ def test_synthesis_prompt_is_modality_aware() -> None:
     assert "EXPERIENTIAL" in block  # modality column present
     assert "FALSIFIABLE" in block
 
-    prompt = _build_synthesis_prompt(
-        subject=subject, particles=[feeling, fact], eff=eff, strict=False
+    prompt = "\n".join(
+        _build_synthesis_prompt(subject=subject, particles=[feeling, fact], eff=eff, strict=False)
     )
     assert "Modality handling" in prompt
     assert "EXPERIENTIAL" in prompt
@@ -1794,12 +1798,14 @@ class TestLayerBTrichotomy:
             {"id": 0, "verdict": "unrelated", "reason": "citation is ornamental"},
             {"id": 1, "verdict": "contradicts", "reason": "particle disagrees"},
         ]
-        prompt = _build_synthesis_prompt(
-            subject=s,
-            particles=ps,
-            eff=eff,
-            strict=True,
-            layer_b_misalignments=misalignments,
+        prompt = "\n".join(
+            _build_synthesis_prompt(
+                subject=s,
+                particles=ps,
+                eff=eff,
+                strict=True,
+                layer_b_misalignments=misalignments,
+            )
         )
         assert "SEMANTIC-ALIGNMENT VALIDATION" in prompt
         assert "pair 0 [unrelated]: citation is ornamental" in prompt
@@ -1821,12 +1827,14 @@ class TestLayerBTrichotomy:
 
         s = Subject(id=str(uuid.uuid4()), canonical_name="X", asserted_by="t")
         ps = [_make_particle("p")]
-        prompt = _build_synthesis_prompt(
-            subject=s,
-            particles=ps,
-            eff={},
-            strict=True,
-            layer_b_misalignments=[{"id": 0, "verdict": "unrelated", "reason": "noise"}],
+        prompt = "\n".join(
+            _build_synthesis_prompt(
+                subject=s,
+                particles=ps,
+                eff={},
+                strict=True,
+                layer_b_misalignments=[{"id": 0, "verdict": "unrelated", "reason": "noise"}],
+            )
         )
         # (a) + (b): drop is a last resort.
         assert "last resort" in prompt.lower()
@@ -1849,8 +1857,10 @@ class TestLayerBTrichotomy:
 
         s = Subject(id=str(uuid.uuid4()), canonical_name="GDR", asserted_by="t")
         ps = [_make_particle("claim a")]
-        prompt = _build_synthesis_prompt(
-            subject=s, particles=ps, eff={}, strict=True, layer_b_misalignments=None
+        prompt = "\n".join(
+            _build_synthesis_prompt(
+                subject=s, particles=ps, eff={}, strict=True, layer_b_misalignments=None
+            )
         )
         # Layer-A strict prompt is the existing one — covers invented IDs.
         assert "PRIOR ATTEMPT WAS REJECTED" in prompt
@@ -2026,7 +2036,8 @@ class TestLayerBTrichotomy:
 
         # Inspect the third LLM call's prompt — that's the strict
         # retry synthesis call after the first attempt failed Layer B.
-        retry_prompt = client.messages.create.call_args_list[2].kwargs["messages"][0]["content"]
+        retry = client.messages.create.call_args_list[2].kwargs
+        retry_prompt = f"{retry['system']}\n{retry['messages'][0]['content']}"
         assert "SEMANTIC-ALIGNMENT VALIDATION" in retry_prompt
         # The judge's misalignment reason from attempt 1 must appear so
         # the LLM has a fighting chance of fixing it.

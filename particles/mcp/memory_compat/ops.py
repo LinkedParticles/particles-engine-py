@@ -108,6 +108,16 @@ def _cfg() -> Any:
     return get_config().mcp.memory_compat
 
 
+def _owns(subject: Any) -> bool:
+    """Whether the façade created ``subject`` (security review 2026-10-24, N30).
+
+    The façade's view is every Subject in the store, so without this check it
+    could reclassify or tombstone a Subject an extractor or the operator
+    minted. It may change only its own.
+    """
+    return bool(subject.asserted_by == _cfg().asserter_identity)
+
+
 def _granularity() -> tuple[int, int]:
     """Façade granularity limits: a char ceiling only, sentence check disabled.
 
@@ -268,7 +278,10 @@ async def create_entities(
             # live again, and refresh its class from the new payload.
             for tombstone in sub.tombstone_particles_for(subject.id):
                 await _retract(session, store=store, particle_id=tombstone.id)
-            if entity_type and subject.subject_class != entity_type:
+            # Only a Subject the façade created takes the payload's class: the
+            # setter records no event, and another principal's classification
+            # is not the façade's to change (N30).
+            if entity_type and subject.subject_class != entity_type and _owns(subject):
                 from particles.store.subject_store import set_subject_class
 
                 await set_subject_class(session, subject.id, entity_type)
@@ -421,20 +434,33 @@ async def delete_entities(
     An absent name is not an error, but it is reported: returns
     ``(deleted, not_found)``, each in request order, for
     :func:`delete_entities_message`.
+
+    Raises ``ValueError``, before anything is written, when a named entity is a
+    Subject the façade did not create (N30): tombstoning it would hide another
+    principal's Subject from every façade read.
     """
     sub = await load_subgraph(session)
     deleted: list[str] = []
     not_found: list[str] = []
     doomed: list[Any] = []
+    foreign: list[str] = []
     for raw in entity_names:
         name = str(raw)
         subject = sub.subject_by_name(name)
         if subject is None:
             not_found.append(name)
             continue
+        if not _owns(subject):
+            foreign.append(name)
+            continue
         deleted.append(name)
         if subject not in doomed:
             doomed.append(subject)
+    if foreign:
+        raise ValueError(
+            "Not deleted: these entities were not created through the memory-compat "
+            f"façade and can be changed only by an operator: {', '.join(foreign)}"
+        )
     if not doomed:
         return deleted, not_found
 

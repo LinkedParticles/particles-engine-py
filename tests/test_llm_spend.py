@@ -218,7 +218,7 @@ class TestExtractRoutesReportUsage:
         from particles.api.app import app
 
         [(entry_id, snapshot_id)] = asyncio.run(_seed_pending(1))
-        client = TestClient(app, client=("127.0.0.1", 50000))
+        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
         resp = client.post("/extract", json={"entry_id": entry_id, "snapshot_id": snapshot_id})
 
         assert resp.status_code == 200, resp.text
@@ -470,7 +470,7 @@ class TestReindexAndStructureRecordSpend:
         from particles.api.app import app
 
         monkeypatch.setattr("particles.api.app.reindex", _paying_reindex(_REINDEX_SUMMARY))
-        client = TestClient(app, client=("127.0.0.1", 50000))
+        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
         resp = client.post("/reindex", json={})
 
         assert resp.status_code == 200, resp.text
@@ -491,7 +491,7 @@ class TestReindexAndStructureRecordSpend:
         monkeypatch.setattr(
             "particles.api.app.reindex", _paying_reindex({**_REINDEX_SUMMARY, "dry_run": True})
         )
-        client = TestClient(app, client=("127.0.0.1", 50000))
+        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
         resp = client.post("/reindex", json={"dry_run": True})
 
         assert resp.status_code == 200, resp.text

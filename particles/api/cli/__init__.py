@@ -35,7 +35,9 @@ file should rarely need to change.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any, TypeVar
 
 import typer
@@ -280,6 +282,91 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
             )
             raise typer.Exit(1) from exc
         raise
+
+
+def _refuse_cwd_relative_default_store() -> None:
+    """Exit with one line when a config-pinned server would serve ``./particles.db``.
+
+    A server started with ``PARTICLES_CONFIG`` was installed on purpose (by
+    ``init claude-code`` or by hand), so its store should not depend on where
+    the harness starts it. When neither ``DATABASE_URL`` nor that config names
+    an absolute ``default`` store, the read tools would open ``particles.db``
+    in each session's directory, which a cloned repository can ship (security
+    review N3, N17). An unpinned launch keeps its old behaviour, and so does a
+    thin client, which reads no local store.
+    """
+    from particles.config import get_config, sqlite_file_path
+
+    if not os.environ.get("PARTICLES_CONFIG") or os.environ.get("DATABASE_URL"):
+        return
+    cfg = get_config()
+    if cfg.engine.base_url:
+        return
+    db_file = sqlite_file_path(cfg.storage.database_url)
+    if db_file is None or Path(db_file).expanduser().is_absolute():
+        return
+    typer.echo(
+        f"Error: the default store ({cfg.storage.database_url}) resolves against the working "
+        "directory, so this server would read whatever particles.db the session's directory "
+        "holds. Set DATABASE_URL to an absolute DSN in the MCP registration, or re-run "
+        "`particles init claude-code` to pin it.",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+def _anchor_unpinned_default_store() -> None:
+    """Serve an unpinned server's relative ``default`` store from ``~/.particles/``.
+
+    A stdio MCP server started with neither ``DATABASE_URL`` nor
+    ``PARTICLES_CONFIG`` (the registry manifest's zero-config launch, a
+    hand-made ``claude mcp add``) would otherwise open ``./particles.db`` in
+    the directory the harness started it in, which a cloned repository can
+    ship (security review N18). The relative path is anchored on the user
+    config file's directory instead, which is ``~/.particles/`` whether or not
+    that file exists: the compiled default becomes
+    ``~/.particles/particles.db``, and a relative ``storage.database_url`` in
+    the user file anchors beside it. The launcher sets ``DATABASE_URL`` for its
+    own process, the bootstrap ``engine serve`` uses for its bind, so the
+    relative blob directory follows the store by the rule. One stderr
+    line names the file, so a store the CLI does not use is never served
+    silently.
+    """
+    from particles.config import get_config, reset_config, sqlite_file_path, user_config_path
+
+    if os.environ.get("PARTICLES_CONFIG") or os.environ.get("DATABASE_URL"):
+        return
+    cfg = get_config()
+    if cfg.engine.base_url:
+        return
+    url = cfg.storage.database_url
+    db_file = sqlite_file_path(url)
+    if db_file is None or Path(db_file).expanduser().is_absolute():
+        return
+    anchored = Path(os.path.normpath(user_config_path().parent / db_file))
+    os.environ["DATABASE_URL"] = f"{url.split(':///', 1)[0]}:///{anchored}"
+    reset_config()
+    typer.echo(
+        f"Particles MCP: serving the store at {anchored}, since neither DATABASE_URL nor "
+        "PARTICLES_CONFIG is set. Set DATABASE_URL to serve another store.",
+        err=True,
+    )
+
+
+def prepare_stdio_server_store(store: str) -> None:
+    """Apply the stdio MCP servers' store rule, then check the directory.
+
+    ``DATABASE_URL`` set: used as given. ``PARTICLES_CONFIG`` set with a
+    relative ``default`` store: refused. Neither set: a relative ``default``
+    store is anchored under ``~/.particles/``. Only the ``default`` store is
+    concerned; a named store's DSN comes from a config the operator chose.
+    """
+    from particles.db import DEFAULT_STORE
+
+    if store == DEFAULT_STORE:
+        _refuse_cwd_relative_default_store()
+        _anchor_unpinned_default_store()
+    require_store_directory(store)
 
 
 def require_store_directory(store: str) -> None:

@@ -61,10 +61,11 @@ identical.
 
 !!! warning "Pin the paths for any unattended process"
     An MCP server is launched by your client and inherits almost nothing.
-    `storage.blob_dir` defaults to the **relative** `./corpus_blobs`, so an
-    unpinned server started from the wrong directory will silently split a
-    store from its content. Always set `DATABASE_URL` and `PARTICLES_BLOB_DIR`
-    explicitly.
+    Started with neither `DATABASE_URL` nor `PARTICLES_CONFIG`, it serves
+    `~/.particles/particles.db`, which is not the `./particles.db`
+    the `particles` command uses in a project directory. Started with
+    `PARTICLES_CONFIG` and no absolute store path, it refuses to start. Always
+    set `DATABASE_URL` and `PARTICLES_BLOB_DIR` explicitly.
 
 ## Enabling writes
 
@@ -322,6 +323,12 @@ Where a source store keeps its own scores, they are preserved as tags and never
 become confidence values. A confidence is fixed when a belief is created and
 multiplies through every ranking, so importing another system's number would
 quietly re-rank your whole store on a scale that was never yours.
+
+Two limits bound one export. An export larger than `migration.max_bytes`
+(default 32 MiB) is refused before it is parsed, and the mapping stops at
+`migration.max_candidates` records (default 10,000), observations first and
+then relations, with a note naming how many it left out. Raise either in
+`config.yaml` and import again if your store is larger.
 
 To trust an import more, say so as policy rather than editing the floor:
 

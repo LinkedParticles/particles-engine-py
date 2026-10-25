@@ -527,13 +527,10 @@ class Backend(Protocol):
         *,
         relation_type: str,
         confidence: float,
-        project_key: str | None = None,
     ) -> ParticleRelation:
-        """Write a typed relation between two particles.
+        """Write the operator's typed relation between two particles (``links add``).
 
-        ``project_key`` is the project a bound agent surface links as.
-        With it, a ``CO_EVIDENTIAL`` link between beliefs whose observer
-        scopes differ is refused, since the link would change those scopes.
+        An MCP agent links through :meth:`agent_links_add` instead.
         """
         ...
 
@@ -569,9 +566,10 @@ class Backend(Protocol):
     ) -> DismissOutcome: ...
 
     # Agent belief-write surface — the routed MCP write tools target
-    # these. ``store`` is the (already allowlist-resolved) handle the local backend
-    # writes; the HTTP backend ignores it and the engine writes its canonical
-    # store, gated by the engine's own write-enablement.
+    # these. ``store`` is the (already allowlist-resolved) handle: the local
+    # backend writes it, and the HTTP backend sends it as the ``store`` query
+    # parameter, which the engine gates on its own write-enablement (
+    # §5). ``project_key`` is the bound surface's project.
 
     async def particle_assert(
         self,
@@ -603,7 +601,45 @@ class Backend(Protocol):
         project_key: str | None = None,
     ) -> AgentWriteResult: ...
 
-    async def particle_retract(self, *, particle_id: str, reason: str, store: str) -> None: ...
+    async def particle_retract(
+        self, *, particle_id: str, reason: str, store: str, project_key: str | None = None
+    ) -> None: ...
+
+    async def agent_links_add(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> ParticleRelation:
+        """An agent's link (MCP ``link_add``), under the §6 guards; see ``link_beliefs``."""
+        ...
+
+    async def agent_links_remove(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> bool:
+        """An agent's unlink (MCP ``link_remove``), of an agent-written link only."""
+        ...
+
+    async def agent_particle_tag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        """An agent's tag (MCP ``particle_tag``), under the §6 guards."""
+        ...
+
+    async def agent_particle_untag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        """An agent's untag (MCP ``particle_untag``), under the §6 guards."""
+        ...
 
     async def deposit_text(
         self,
@@ -687,6 +723,9 @@ class Backend(Protocol):
         ``fetch_policy`` enrols the entry in the local
         refresh loop — ``"LAZY"`` for a source the nightly cycle should re-check
         on disk. It is reconciled onto an existing entry even when the content
-        is unchanged; ``None`` leaves any stored policy alone.
+        is unchanged; ``None`` leaves any stored policy alone. A remote engine
+        cannot re-read a file on the caller's host, so the HTTP backend sends
+        ``"NEVER"`` in place of ``"LAZY"`` for a non-http(s) ``uri_r``, and the
+        engine refuses ``"LAZY"`` on one (security review 2026-10-23, D2).
         """
         ...

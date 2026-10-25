@@ -119,6 +119,7 @@ class TestResolveSessionProject:
         assert resolved.key == claude_project_slug(repo)
         assert resolved.memory_dir == projects / claude_project_slug(repo) / "memory"
         assert resolved.resolved_from == "repository"
+        assert resolved.root == repo  # the path the key came from
 
     def test_worktree_session_is_keyed_on_its_repository(self, tmp_path: Path) -> None:
         repo = make_repo(tmp_path / "repo")
@@ -403,3 +404,81 @@ class TestObserverBindingLines:
         lines = _observer_binding_lines(here)
 
         assert not any("⚠" in line for line in lines)
+
+
+class TestProjectKeyCollisions:
+    """a key two repositories share is recorded and disclosed, never re-keyed."""
+
+    @pytest.fixture
+    def state(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from particles.config import get_config
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        state = tmp_path / "state"
+        get_config().claude_code.state_dir = str(state)
+        return state
+
+    def test_two_punctuation_variants_share_one_slug(self, tmp_path: Path) -> None:
+        assert claude_project_slug(tmp_path / "a-b") == claude_project_slug(tmp_path / "a" / "b")
+
+    def test_roots_are_a_set_union(self, state: Path, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import record_project_root, recorded_project_roots
+
+        one, two = tmp_path / "a-b", tmp_path / "a" / "b"
+        key = claude_project_slug(one)
+        assert record_project_root(key, one) == [str(one)]
+        assert record_project_root(key, one) == [str(one)]
+        assert record_project_root(key, two) == sorted([str(one), str(two)])
+        assert record_project_root(key, one) == sorted([str(one), str(two)])
+        assert recorded_project_roots(key) == sorted([str(one), str(two)])
+
+    def test_the_record_is_owner_only(self, state: Path, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import project_roots_path, record_project_root
+
+        key = claude_project_slug(tmp_path / "repo")
+        record_project_root(key, tmp_path / "repo")
+        assert project_roots_path(key).stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("key", ["", "..", "../escape", "a/b"])
+    def test_a_key_no_slug_can_be_is_never_written(
+        self, state: Path, tmp_path: Path, key: str
+    ) -> None:
+        from particles.api.cli._claude_code import record_project_root, recorded_project_roots
+
+        assert record_project_root(key, tmp_path / "repo") == []
+        assert recorded_project_roots(key) == []
+        assert not state.exists()
+
+    def test_an_unreadable_record_reads_as_none(self, state: Path) -> None:
+        from particles.api.cli._claude_code import project_roots_path, recorded_project_roots
+
+        path = project_roots_path("-x")
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json")
+        assert recorded_project_roots("-x") == []
+
+    def test_the_doctor_discloses_a_shared_key(self, state: Path, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import record_project_root
+        from particles.api.cli.hook import _observer_binding_lines
+
+        here = make_repo(tmp_path / "src" / "a-b")
+        other = make_repo(tmp_path / "src" / "a" / "b")
+        key = claude_project_slug(here)
+        record_project_root(key, here)
+        record_project_root(key, other)
+
+        lines = "\n".join(_observer_binding_lines(here))
+
+        assert f"project key {key} is shared by 2 repositories" in lines
+        assert str(here) in lines and str(other) in lines
+
+    def test_one_root_raises_no_warning(self, state: Path, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import record_project_root
+        from particles.api.cli.hook import _observer_binding_lines
+
+        here = make_repo(tmp_path / "src" / "repo")
+        record_project_root(claude_project_slug(here), here)
+
+        assert "is shared by" not in "\n".join(_observer_binding_lines(here))

@@ -640,16 +640,19 @@ def _checkout_files(repo: Path) -> tuple[str, list[str]]:
     The key is the Claude Code adapter's for the checkout's repository root,
     so a linked worktree names its main checkout's project.
     """
+    import os
     import subprocess
 
     from particles.api.cli._claude_code import claude_project_slug, repository_root
+    from particles.url_safety import GIT_LOCAL_ARGS, local_git_env
 
     root = repository_root(repo.expanduser().absolute())
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["git", "-C", str(repo), "ls-files", "-z"],  # noqa: S607
+            ["git", *GIT_LOCAL_ARGS, "-C", str(repo), "ls-files", "-z"],  # noqa: S607
             capture_output=True,
             check=True,
+            env=local_git_env(os.environ),
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         typer.echo(f"Cannot list the files of {repo}: {exc}", err=True)

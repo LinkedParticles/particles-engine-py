@@ -45,7 +45,11 @@ snapshot_id: cdcf456c-21d3-46a5-a897-b32b9d664fd4
 Both flags are **local-file only**. A URL deposit takes its class from the
 importer that handles it, and a deposit against a remote engine uploads the
 bytes rather than the path (the engine has no file to re-read later), so both
-cases refuse the flags rather than silently ignoring them.
+cases refuse the flags rather than silently ignoring them. For the same reason
+the engine's `POST /corpus/deposit/text` refuses `fetch_policy: LAZY` with a
+`400` unless `uri_r` is an `http` or `https` URL. A `file://` URI-R sent over
+HTTP names a file on the caller's machine, and a refresh would read whatever
+sits at that path on the engine's machine instead.
 
 ## Tracking the whole set at once
 
@@ -65,6 +69,8 @@ rule_sources.paths is empty — discovered roots: /path/to/proj, /Users/you/.cla
 2 rule source(s): 0 tracked, 0 enrolled in the refresh loop (fetch_policy=LAZY),
 0 exempt from the document-meta exclusion.
 Run `particles rules sync` to track the rest.
+
+No refresh root recorded yet.
 ```
 
 With `rule_sources.paths` empty the set is **discovered**: the nearest ancestor
@@ -83,6 +89,18 @@ particles rules sync
 2 rule source(s): 2 new/changed, 0 unchanged, 0 failed.
 Run `particles extract --all-pending` to turn the new snapshots into beliefs.
 ```
+
+A sync also records each root it resolved. The refresh reads rule files only
+under a recorded root (and `rule_sources.paths`, the main checkout of a
+recorded worktree, and `~/.claude`), never under the directory it happens to
+run from, so the nightly run admits the same files wherever it starts and a
+cloned repository's rule files are never read. `particles rules`
+lists the recorded roots, marks one that no longer exists as missing, and
+counts any enrolled source outside every allowed root; `particles hook doctor`
+and the nightly run's summary report the same count. After the upgrade that
+introduced recorded roots, run `particles rules sync` once from each project
+whose rule files you track: until then those files are reported and not
+refreshed.
 
 ### Why the tag matters beyond addressability
 
@@ -407,6 +425,14 @@ Knobs, all under `local_refresh` in `config.yaml`:
 | `enabled` | `true` | The consolidation pass on/off |
 | `max_entries` | `200` | Per-run cap, oldest-entry-first |
 | `follow_symlinks` | `false` | Whether a path that has since become a symlink is followed |
+
+Under the rule-file roots and `~/.claude/projects`, an entry is refreshed only
+when a local command enrolled it: `rules sync`, `init claude-code`, the
+SessionEnd harvest or `particles deposit`. Every refresh reads the file through
+one descriptor and checks where that descriptor points, so a folder swapped for
+a symlink after the root check is not followed. A file larger than
+`local_files.max_bytes` (default 256 MiB) is skipped like an unreadable one;
+the same cap applies to `particles deposit FILE` and the folder importers.
 
 ## One-time cleanup for existing stores
 

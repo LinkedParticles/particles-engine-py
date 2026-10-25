@@ -55,7 +55,10 @@ log = logging.getLogger(__name__)
 # 12: synthesis prompts are modality-aware — the particle block
 #    carries assertion_modality and the prompt renders EXPERIENTIAL/EVALUATIVE
 #    content distinctly, with confidence-hedging scoped to truth-apt particles.
-_PROMPT_VERSION = "12"
+# 13 (security review N31): the instructions ride the system turn and the
+#    subject name, the particle listing and the judge's reasons ride the user
+#    turn behind a nonce fence.
+_PROMPT_VERSION = "13"
 
 
 def compute_input_hash(

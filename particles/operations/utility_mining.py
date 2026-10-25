@@ -66,6 +66,7 @@ from particles.core.schema import Particle
 from particles.core.status import Status
 from particles.db import session_scope
 from particles.embeddings import cosine_similarity
+from particles.llm.fencing import data_fence_instruction, fence, make_nonce
 from particles.llm.registry import CompletionRequest, complete
 from particles.operations.query.as_of import ensure_utc
 from particles.operations.spend_estimate import PassEstimate, requests_estimate
@@ -390,25 +391,21 @@ _ANSWER_ARRAY = re.compile(r"\[\s*(?:\d+\s*(?:,\s*\d+\s*)*)?\]")
 
 
 def _literal_prompt(batch: Sequence[tuple[Particle, Sequence[str]]]) -> str:
-    """The matcher user turn for literal candidates, each with its own evidence lines."""
+    """The matcher's data for literal candidates, each with its own evidence lines."""
     blocks = []
     for i, (belief, evidence) in enumerate(batch):
         lines = "\n".join(f"   {line}" for line in evidence)
         blocks.append(f"{i + 1}. {belief.content}\n   Actions where it came up:\n{lines}")
     listing = "\n\n".join(blocks)
-    return (
-        f"Beliefs, each with the session's tool actions that mention it:\n\n{listing}\n\n"
-        f"{_MATCHER_QUESTION}"
-    )
+    return f"Beliefs, each with the session's tool actions that mention it:\n\n{listing}"
 
 
 def _behavioural_prompt(batch: Sequence[Particle], evidence: str) -> str:
-    """The matcher user turn for behavioural candidates, sharing the head-and-tail evidence."""
+    """The matcher's data for behavioural candidates, sharing the head-and-tail evidence."""
     listing = "\n".join(f"{i + 1}. {p.content}" for i, p in enumerate(batch))
     return (
         f"Session actions (tool calls; the start and the end of the session):\n{evidence}\n\n"
-        f"Beliefs:\n{listing}\n\n"
-        f"{_MATCHER_QUESTION}"
+        f"Beliefs:\n{listing}"
     )
 
 
@@ -445,10 +442,20 @@ class MatcherGroup:
 
     basis: MatchBasis
     beliefs: tuple[Particle, ...]
-    prompt: str
+    listing: str
+    """The beliefs and the session's actions: stored and transcript text."""
 
     def request(self) -> CompletionRequest:
-        return CompletionRequest(prompt=self.prompt, system=_MATCHER_SYSTEM)
+        """The judge request, the listing fenced behind its own nonce (security F3).
+
+        The nonce is minted per request, so pooled siblings in one batch never
+        share a fence.
+        """
+        nonce = make_nonce()
+        return CompletionRequest(
+            prompt=f"{fence(self.listing, nonce, label='session')}\n\n{_MATCHER_QUESTION}",
+            system=f"{_MATCHER_SYSTEM}\n\n{data_fence_instruction(nonce)}",
+        )
 
 
 @dataclass(frozen=True)
@@ -521,7 +528,7 @@ async def plan_session_mine(
     ]
     groups = [
         MatcherGroup(
-            basis="literal", beliefs=tuple(p for p, _ in batch), prompt=_literal_prompt(batch)
+            basis="literal", beliefs=tuple(p for p, _ in batch), listing=_literal_prompt(batch)
         )
         for batch in _chunks(literal)
     ]
@@ -546,7 +553,7 @@ async def plan_session_mine(
             MatcherGroup(
                 basis="behavioural",
                 beliefs=tuple(batch),
-                prompt=_behavioural_prompt(batch, evidence),
+                listing=_behavioural_prompt(batch, evidence),
             )
             for batch in _chunks(unmatched)
         )

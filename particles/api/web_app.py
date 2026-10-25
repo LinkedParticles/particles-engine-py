@@ -35,12 +35,40 @@ contract. The separate-origin / engine-CORS variant is deferred.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
+import re
 from pathlib import Path
 
+from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 log = logging.getLogger(__name__)
+
+#: An inline ``<script>`` block (one with no ``src``) in the bundle's HTML.
+_INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL | re.I)
+
+
+def content_security_policy(directory: Path) -> str:
+    """The ``Content-Security-Policy`` the bundle is served with (security review 2026-10-24, N7).
+
+    Script runs only from the engine's own origin, plus the inline blocks the
+    bundle's ``index.html`` carries, each allowed by its SHA-256 hash, so a
+    rebuilt bundle keeps working without a hand-kept list. The bundle keeps the
+    operator's bearer in ``localStorage``, which any script on this origin can
+    read; nothing else may run here or frame the page.
+    """
+    hashes: list[str] = []
+    index = directory / "index.html"
+    if index.is_file():
+        for block in _INLINE_SCRIPT.findall(index.read_text(encoding="utf-8")):
+            digest = hashlib.sha256(block.encode("utf-8")).digest()
+            hashes.append(f"'sha256-{base64.b64encode(digest).decode('ascii')}'")
+    script_src = " ".join(["'self'", *hashes])
+    return f"script-src {script_src}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+
 
 # Mount path for the web-UI app shell (unchanged by the
 # unification — existing deep links and bearer setups survive the rename).
@@ -73,7 +101,19 @@ class WebUIStaticFiles(StaticFiles):
     is served here is the static shell only — no store data passes through this
     mount, and every ``/curation``, ``/query``, ``/graph`` call the loaded app
     makes still presents the bearer and is still refused without it.
+
+    Every response carries :func:`content_security_policy`, since the shell
+    holds the bearer once the operator has entered it.
     """
+
+    def __init__(self, *, directory: str, html: bool = False) -> None:
+        super().__init__(directory=directory, html=html)
+        self.csp = content_security_policy(Path(directory))
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Content-Security-Policy"] = self.csp
+        return response
 
 
 def build_web_ui_static_app(bundle_dir: Path | None = None) -> WebUIStaticFiles | None:

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -50,12 +51,13 @@ def pytest_configure(config: pytest.Config) -> None:
     because the ``PARTICLES_CONFIG`` override below has to happen once, before
     collection, for either suite.
 
-    ``PARTICLES_CONFIG`` is unconditionally pointed at a non-existent path so
-    the developer's local ``./config.yaml`` (e.g. ``inbox.file_path``,
+    ``PARTICLES_CONFIG`` is unconditionally pointed at an empty per-worker file
+    so the developer's own config (``~/.particles/config.yaml``, or a
+    ``PARTICLES_CONFIG`` exported in their shell; e.g. ``inbox.file_path``,
     ``obsidian.default_output_path``) does not leak into tests. Tests that
     need specific config values monkeypatch the individual env-var overrides
     registered in ``_ENV_OVERRIDES`` (those take precedence over the file
-    loader, which is missing).
+    loader, which reads an empty file).
 
     Under ``pytest-xdist`` (``-n auto``) this runs once per worker process, each
     with a distinct ``PYTEST_XDIST_WORKER`` (``gw0``, ``gw1``, …). The blob
@@ -68,7 +70,12 @@ def pytest_configure(config: pytest.Config) -> None:
     blob_dir = f"/tmp/particles_test_blobs{('_' + worker) if worker else ''}"
     os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     os.environ.setdefault("PARTICLES_BLOB_DIR", blob_dir)
-    os.environ["PARTICLES_CONFIG"] = "/nonexistent-test-config.yaml"
+    # An empty file that exists, not a missing one: a missing PARTICLES_CONFIG
+    # file is reported once per process, which would put a
+    # warning into whichever test first loads config.
+    empty_config = Path(f"/tmp/particles_test_config{('_' + worker) if worker else ''}.yaml")
+    empty_config.write_text("", encoding="utf-8")
+    os.environ["PARTICLES_CONFIG"] = str(empty_config)
     # Benchmark-run persistence is on by default; keep test runs out of the
     # developer's real ~/.particles/benchmark/runs (worker-suffixed like the
     # blob dir).

@@ -49,6 +49,21 @@ at runtime if neither `auth.existingSecret` nor `auth.apiKey` is set.
 `ANTHROPIC_API_KEY` is optional; without it the LLM-priced work degrades to a
 disclosed structural-only run.
 
+## Reads require the bearer
+
+The image's baked config sets `api.require_auth_for_reads: true`, so every
+route except `/health`, `/openapi.json` and the `/app` shell asks for the
+bearer. A config you mount with `config.create` or `config.existingConfigMap`
+**replaces** the baked file, so carry that line into it:
+
+```yaml
+api:
+  require_auth_for_reads: true
+```
+
+Releases before 1.210.5 served reads unauthenticated; see the container
+deployment guide's upgrade note.
+
 ## No Ingress
 
 Exposure posture is a private mesh or `kubectl port-forward`.
@@ -66,7 +81,7 @@ only if you have made that call yourself.
 | `auth.existingSecret` | `""` | A Secret you manage, carrying `PARTICLES_API_KEY` (and optionally `ANTHROPIC_API_KEY`). |
 | `auth.apiKey` | `""` | A literal the chart renders into its own Secret. Fine for `--set`; never commit it. |
 | `persistence.size` | `20Gi` | The PVC for `/data` — store, corpus blobs, and the consolidation lockfile. |
-| `config.create` / `config.content` | `false` / `""` | Mount your own `config.yaml` over the image's baked one. Keep the absolute `/data` pins. |
+| `config.create` / `config.content` | `false` / `""` | Mount your own `config.yaml` over the image's baked one. Keep the absolute `/data` pins and `api.require_auth_for_reads: true`. |
 | `env` | `{}` | Registered config overrides, e.g. `PARTICLES_DAEMON_STORE`. |
 
 ## Probes

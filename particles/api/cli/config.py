@@ -24,9 +24,11 @@ app.add_typer(config_app, name="config")
 
 @config_app.command("validate")
 def config_validate_cmd() -> None:
-    """Load and validate config.yaml (+ env overrides); report errors readably.
+    """Load and validate the config file (+ env overrides); report errors readably.
 
-    Resolves the same config the rest of the SDK would load, runs the Pydantic
+    Resolves the same config the rest of the SDK would load
+    (``PARTICLES_CONFIG``, else ``~/.particles/config.yaml``), names where it
+    came from and any nearby ``config.yaml`` it does not read, runs the Pydantic
     validation, and prints a human-readable summary. Exits non-zero on the first
     invalid field or an unparseable file, so it is safe to gate a deploy on
     ``particles config validate``.
@@ -34,7 +36,13 @@ def config_validate_cmd() -> None:
     import yaml
     from pydantic import ValidationError
 
-    from particles.config import validate_config
+    from particles.config import (
+        describe_config_resolution,
+        describe_default_store,
+        environment_notes,
+        user_config_path,
+        validate_config,
+    )
 
     try:
         path, _cfg = validate_config()
@@ -49,13 +57,28 @@ def config_validate_cmd() -> None:
         typer.echo(f"Configuration file is not valid YAML:\n  {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    if path is None:
+    resolution = describe_config_resolution()
+    if resolution.missing is not None:
         typer.echo(
-            "Config valid — no config.yaml found; using compiled-in defaults "
-            "(+ any env-var overrides)."
+            f"Config valid — PARTICLES_CONFIG names {resolution.missing}, which does not "
+            "exist; using compiled-in defaults (+ any env-var overrides)."
+        )
+    elif path is None:
+        typer.echo(
+            "Config valid — no config file (PARTICLES_CONFIG unset, no "
+            f"{user_config_path()}); using compiled-in defaults (+ any env-var overrides)."
         )
     else:
-        typer.echo(f"Config valid — {path}")
+        typer.echo(f"Config valid — {path} ({resolution.origin})")
+    if resolution.ignored is not None:
+        typer.echo(
+            f"Ignored: {resolution.ignored} is a Particles config.yaml that is not read "
+            f". Set PARTICLES_CONFIG={resolution.ignored}, or move it to "
+            f"{user_config_path()}."
+        )
+    for note in environment_notes():
+        typer.echo(f"Environment: {note}")
+    typer.echo(f"Default store: {describe_default_store()}")
 
     for line in model_lines(_cfg.llm):
         typer.echo(line)

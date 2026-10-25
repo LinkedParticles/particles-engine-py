@@ -2,8 +2,8 @@
 
 All tuneable parameters live in `particles/config.py` as a Pydantic
 model. The canonical sample is `config.yaml.sample` in the repo
-root; copy it to `config.yaml` to override defaults. `config.yaml`
-is gitignored.
+root; copy it to `~/.particles/config.yaml`, or to any path you name with
+`PARTICLES_CONFIG`, to override defaults.
 
 ## Which sections apply to your install
 
@@ -27,26 +27,47 @@ the tag is how the inert surface is made visible rather than carved away.
 The declaration lives in `CLIENT_SECTIONS` in `particles/config.py`; tests keep
 it, the sample's tags, and the modules that actually read config in agreement.
 
-## Which `config.yaml` loads
+## Which config file loads
 
-Discovery walks upward, git-style:
+Particles reads one config file, chosen in this order:
 
 1. `PARTICLES_CONFIG`, if set: absolute authority. A path that does not
-   exist resolves to *no config file* rather than falling through, so this
-   is also the explicit opt-out from everything below.
-2. `./config.yaml` in the working directory.
-3. The nearest `config.yaml` in an ancestor directory; first match wins.
-   The walk stops after examining the directory that holds a `.git` entry
-   (a *file* in a git worktree, a directory in a normal checkout), so a
-   `config.yaml` in `$HOME` is never inherited by the projects beneath it.
-4. Otherwise: compiled-in defaults plus env-var overrides.
+   exist resolves to *no config file* rather than falling through to the
+   user file, and every command says so once on stderr. A quoted `~` is the
+   usual cause: the shell does not expand it inside double quotes, so write
+   `PARTICLES_CONFIG="$HOME/..."`.
+2. The user file, `~/.particles/config.yaml`, if it exists.
+3. Otherwise: compiled-in defaults plus env-var overrides.
 
-Step 3 is why a verb run from `scripts/`, from a git worktree, or from a
-hook spawn now gets the config you wrote at the repo root. Before it, such
-a process silently reverted **every** knob to its compiled default, the
-cause behind blobs written somewhere nobody looks. `particles config
-validate` and `particles hook doctor` both print the file they resolved;
-when "which config am I loading?" matters, ask them rather than guess.
+Nothing is read from the working directory or its parents. A cloned
+repository that ships a `config.yaml` therefore cannot configure Particles:
+it cannot point the engine, model-provider or telemetry endpoints your
+secrets are sent to at a host of its choosing, and it cannot turn on the MCP
+write tools.
+
+A Particles `config.yaml` that sits in the working directory, or in a parent
+up to the repository root, is reported instead of read. Each command prints
+one warning naming it and the two ways to use it: set
+`PARTICLES_CONFIG=<path>`, or move it to `~/.particles/config.yaml`. A
+`config.yaml` that belongs to another tool (one that names no Particles
+section) is not mentioned. `cli.warn_unused_config: false` turns the warning
+off, and only a file Particles reads can set it.
+
+If you kept a `config.yaml` at a project root, as earlier releases read it,
+choose one of the two remedies. A config pinned with `PARTICLES_CONFIG` in your
+shell profile applies to every command you run, in every directory, so keep
+its paths absolute and pair an absolute `storage.blob_dir` with the store it
+belongs to.
+
+`particles config validate` and `particles hook doctor` both print where the
+config came from (`PARTICLES_CONFIG`, the user file, or none) and any nearby
+file they ignored; when "which config am I loading?" matters, ask them rather
+than guess.
+
+The Claude Code hooks, the MCP server registration and the scheduled
+consolidation job each carry their own absolute `PARTICLES_CONFIG`, which
+`particles init claude-code` writes (see [Claude Code integration](../user-guide/claude-code.md)),
+so they never depend on the directory they start in.
 
 ## Precedence
 
@@ -63,7 +84,7 @@ Env-var overrides are registered in `_ENV_OVERRIDES` in
 |---|---|---|
 | `DATABASE_URL` | `database_url` | SQLite path |
 | `PARTICLES_BLOB_DIR` | `blob_dir` | Where deposited blobs are stored |
-| `PARTICLES_CONFIG` | none (bootstrap) | Path to a non-default `config.yaml` |
+| `PARTICLES_CONFIG` | none (bootstrap) | Path to the config file, ahead of `~/.particles/config.yaml` |
 | `TRUST_DIFFERENTIAL_THRESHOLD` | `trust.differential_threshold` | When trust differences flag inconsistencies |
 | `RECONCILIATION_STORE_MODE` | `reconciliation.store_mode` | `single` (default) or `multi`, the consensus-store reconciliation regime |
 
@@ -167,6 +188,12 @@ the environment, never in `config.yaml`. The `local` entry also honours the
 legacy `PARTICLES_LOCAL_LLM_API_KEY`. Endpoints that enforce no auth (bare
 Ollama / llama.cpp) need no key and the adapter omits the `Authorization`
 header.
+
+A key is never sent over `http://` to a host that is not loopback: the call is
+refused before any request, naming the entry. Use `https://`, or reach the
+endpoint through an SSH or Tailscale forward to `http://127.0.0.1`. For an
+endpoint on a network you trust end to end, `allow_plaintext_key: true` on the
+entry sends the key anyway, with a warning.
 
 The two dialect knobs are declarative statements about a known endpoint,
 not runtime negotiation: `max_tokens_param` picks which body member carries
@@ -338,7 +365,8 @@ view contains. Three switches, deliberately in three places:
   store its `link_add` refuses a `CO_EVIDENTIAL` link between beliefs whose
   observer scopes differ, since the link would change both scopes; cross-scope
   links stay an operator act (`particles links add`, `POST /links` without a
-  `project_key`, a curate merge). A **launch flag,
+  `project_key`, a curate merge). It also refuses to retract, supersede, tag,
+  untag or link a belief that is not in view for its project. A **launch flag,
   not config**, because `config.yaml` is shared by every MCP client on the
   machine and a client started from your home directory should not be bound to
   it. `particles init claude-code` writes it into the Claude Code registration

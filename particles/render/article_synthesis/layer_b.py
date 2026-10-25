@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 
 
 async def _call_synthesis_llm(
-    *, prompt: str, max_tokens: int, temperature: float, system: str | None = None
+    *, prompt: str, system: str, max_tokens: int, temperature: float
 ) -> str:
     """Send the synthesis prompt and return the raw response text.
 
@@ -54,9 +54,10 @@ async def _call_synthesis_llm(
     ``config.llm.default``). Tests still mock at the ``particles.llm.set_client``
     seam — that reaches the ``anthropic`` adapter this purpose resolves to.
 
-    ``system`` carries the trusted instructions for the Layer B judge call (F11
-    hardening); the orchestrator's synthesis calls leave it ``None`` and are
-    unchanged.
+    ``system`` is required: it carries the trusted instructions and the
+    data-fence clause, and ``prompt`` holds only fenced stored text. Both
+    callers, the synthesis attempt and the Layer B judge, build the pair
+    (security review F11, N31).
 
     Any provider exception propagates — callers translate to a fallback
     decision. The adapter runs the synchronous SDK call in a worker thread, so

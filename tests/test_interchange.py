@@ -1231,3 +1231,46 @@ class TestSchemaVersionCompatibilityStore:
         assert json.loads(files["manifest.json"])["schemaVersion"] == _SDK
         stamps = {u["content"]: u["schemaVersion"] for u in read_jsonl(files["particles.jsonl"])}
         assert stamps == {"Water is H2O.": _SDK, "Ice is cold.": "1.2.4"}
+
+
+def test_read_bundle_members_reads_no_non_member_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """N20: a file with no member suffix is never opened (a non-UTF-8 one used to abort)."""
+    import os
+
+    from particles.api.cli.interchange import _read_bundle_members
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text("{}", encoding="utf-8")
+    (bundle / "notes.bin").write_bytes(b"\xff\xfe not utf-8")
+    os.mkfifo(bundle / "pipe")  # reading this would block forever
+    assert set(_read_bundle_members(bundle)) == {"manifest.json"}
+
+
+def test_read_bundle_members_refuses_a_member_over_the_cap(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """D26: the per-member cap is checked on the file's size, before it is buffered."""
+    from unittest.mock import patch
+
+    from particles.api.cli.interchange import BundleReadError, _read_bundle_members
+    from particles.interchange import jsonl as jsonl_mod
+
+    monkeypatch.setattr(jsonl_mod, "_MAX_BUNDLE_BYTES", 1024)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "particles.jsonl").write_bytes(b"x" * 6144)
+    with (
+        patch("os.read", side_effect=AssertionError("buffered past the cap")),
+        pytest.raises(BundleReadError, match="cap"),
+    ):
+        _read_bundle_members(bundle)
+
+
+def test_restore_of_one_oversized_file_is_refused(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from particles.api.cli.interchange import BundleReadError, _read_member_file
+    from particles.interchange import jsonl as jsonl_mod
+
+    monkeypatch.setattr(jsonl_mod, "_MAX_BUNDLE_BYTES", 10)
+    one = tmp_path / "x.corpus.jsonl"
+    one.write_bytes(b"y" * 11)
+    with pytest.raises(BundleReadError):
+        _read_member_file(one, None)

@@ -21,10 +21,12 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import urlsplit
 
 from particles.config import get_config
 from particles.extraction.github._shared import (
@@ -48,7 +50,12 @@ from particles.extraction.github._shared import (
     _raise_for_github_error,
 )
 from particles.secrets import get_github_api_key_optional
-from particles.url_safety import Resolver, format_connect_pin, resolve_and_pin
+from particles.url_safety import (
+    Resolver,
+    format_connect_pin,
+    isolated_git_env,
+    resolve_and_pin,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -417,26 +424,31 @@ async def _fetch_gist_comments(client: Any, gist_id: str) -> list[dict[str, Any]
                 return out
         link_header = resp.headers.get("Link") if hasattr(resp, "headers") else None
         url = _parse_link_next(link_header)
+        if url is not None and not _same_api_origin(url):
+            # The client carries the GITHUB_API_KEY bearer as a default header,
+            # and a next link is a fresh request, not a redirect, so httpx's
+            # cross-origin header strip never runs (D45).
+            log.warning(
+                "gist comments for %s: refusing a next page off the GitHub API host (%s)",
+                gist_id,
+                url,
+            )
+            break
     return out
 
 
-_GIST_CLONE_HOST = "gist.github.com"
+def _same_api_origin(url: str) -> bool:
+    """True iff ``url`` has the scheme, host and port of ``GITHUB_API_BASE``."""
+    want = urlsplit(GITHUB_API_BASE)
+    got = urlsplit(url)
+    return (got.scheme.lower(), got.hostname, got.port) == (
+        want.scheme.lower(),
+        want.hostname,
+        want.port,
+    )
 
-#: Variables that point git at a repository other than the one its arguments
-#: name. A git hook exports several of them, so a deposit run from inside one
-#: would otherwise reach the hook's repository.
-_GIT_REDIRECT_VARS = frozenset(
-    {
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_NAMESPACE",
-        "GIT_PREFIX",
-    }
-)
+
+_GIST_CLONE_HOST = "gist.github.com"
 
 
 async def _clone_gist_files(
@@ -459,16 +471,6 @@ async def _clone_gist_files(
     """
     clone_url = f"https://{_GIST_CLONE_HOST}/{gist_id}.git"
 
-    # Restrict git's transport to https so neither the clone URL nor any
-    # server-side redirect can downgrade to a non-https protocol (file://,
-    # ext::, etc.). A no-op for the pinned gist.github.com host, but explicit
-    # hardening before this code is public and forkable.
-    # The repository variables a git hook exports are dropped as well: inherited
-    # from a hook, GIT_INDEX_FILE makes the clone overwrite the outer
-    # repository's index, and GIT_DIR points the ``log`` below at it.
-    git_env = {k: v for k, v in os.environ.items() if k not in _GIT_REDIRECT_VARS}
-    git_env["GIT_ALLOW_PROTOCOL"] = "https"
-
     # Pin the clone's connection to addresses vetted in *this* process, so the
     # validated address is the connected address — the git-side
     # equivalent of `curl --resolve`, and of the validating transport for httpx.
@@ -482,12 +484,35 @@ async def _clone_gist_files(
         _GIST_CLONE_HOST, 443, resolve_and_pin(_GIST_CLONE_HOST, resolve=resolve)
     )
 
-    with tempfile.TemporaryDirectory(prefix="particles-gist-") as tmpdir:
+    with (
+        tempfile.TemporaryDirectory(prefix="particles-gist-") as tmpdir,
+        tempfile.TemporaryDirectory(prefix="particles-gist-home-") as git_home,
+    ):
+        # The clone runs under no system or global git config and an empty
+        # HOME (N13, SECURITY_REVIEW_20261024-1): a filter driver the operator
+        # configured (a stock ``git lfs install`` defines one) would otherwise
+        # run for any path the cloned ``.gitattributes`` assigns it, and
+        # git-lfs fetches from wherever a committed ``.lfsconfig`` says,
+        # outside the pin below and ``network.egress``. Only https is allowed,
+        # so no redirect can downgrade the transport, and every inherited
+        # ``GIT_*`` variable is dropped: from a hook, GIT_INDEX_FILE makes the
+        # clone overwrite the outer repository's index, and GIT_DIR points the
+        # ``log`` below at it.
+        git_env = isolated_git_env(os.environ, home=git_home)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
                 "-c",
                 f"http.curloptResolve={pin}",
+                # A gist is a git repository, so it can hold a mode-120000
+                # symlink entry. Checked out as plain files, a link becomes a
+                # file holding its target path and never reaches outside the
+                # clone (D7, SECURITY_REVIEW_20261023-1). ``_read_clone_files``
+                # refuses links as well, for a git that ignores this setting.
+                "-c",
+                "core.symlinks=false",
+                "-c",
+                "http.followRedirects=false",
                 "clone",
                 "--depth=1",
                 "--quiet",
@@ -524,17 +549,49 @@ async def _clone_gist_files(
         ts_stdout, _ = await ts_proc.communicate()
         last_commit_iso: str | None = ts_stdout.decode().strip() or None
 
-        files: dict[str, dict[str, str]] = {}
-        tmpdir_path = Path(tmpdir)
-        for entry in sorted(tmpdir_path.iterdir()):
-            if entry.name == ".git" or entry.name.startswith(".git/"):
-                continue
-            if not entry.is_file():
-                continue
-            try:
-                body = entry.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                body = entry.read_bytes().decode("utf-8", errors="replace")
-            files[entry.name] = {"content": body}
+        files = _read_clone_files(Path(tmpdir), max_bytes=get_config().http.max_bytes)
 
     return files, last_commit_iso
+
+
+def _read_clone_files(root: Path, *, max_bytes: int) -> dict[str, dict[str, str]]:
+    """Read the top-level regular files of a cloned tree, gist-API shaped.
+
+    Only regular files whose real path lies inside ``root`` are read. A
+    symlink, a directory or any other entry is skipped, and the open refuses a
+    link with ``O_NOFOLLOW``, so a link planted in the cloned repository can
+    never pull a local file into the corpus (D7, SECURITY_REVIEW_20261023-1).
+    The bytes read are capped at ``max_bytes`` per file and in total, matching
+    the cap on a fetched HTTP body.
+
+    Raises:
+        ValueError: if one file, or all files together, exceed ``max_bytes``.
+    """
+    files: dict[str, dict[str, str]] = {}
+    real_root = root.resolve()
+    total = 0
+    for entry in sorted(root.iterdir()):
+        if entry.name == ".git":
+            continue
+        st = entry.lstat()
+        if not stat.S_ISREG(st.st_mode):
+            if stat.S_ISLNK(st.st_mode):
+                log.warning("gist clone: skipping symlink %r", entry.name)
+            continue
+        if not entry.resolve().is_relative_to(real_root):
+            log.warning("gist clone: skipping %r, which resolves outside the clone", entry.name)
+            continue
+        fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(max_bytes - total + 1)
+        total += len(raw)
+        if total > max_bytes:
+            raise ValueError(
+                f"gist clone exceeds the {max_bytes}-byte cap (http.max_bytes) at {entry.name!r}"
+            )
+        try:
+            body = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            body = raw.decode("utf-8", errors="replace")
+        files[entry.name] = {"content": body}
+    return files

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -81,11 +82,17 @@ def http_backend(
     backend's requests through ``ASGITransport`` exercises the real
     request → handler → operations → JSON → model round-trip without a socket.
     """
-    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
+    # https: the in-process transport never leaves the process, but the client
+    # refuses a token over non-loopback http:// before it gets that far,
+    # and the operator-verb tests send one.
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "https://engine.test")
     monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
-    from particles.config import reset_config
+    from particles.config import get_config, reset_config
 
     reset_config()
+    # The in-process engine runs under the dev-key skip, which serves only
+    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app
 
@@ -115,6 +122,16 @@ def operator_engine_key(http_backend: HttpBackend, monkeypatch: pytest.MonkeyPat
     """
     monkeypatch.setenv("PARTICLES_API_KEY", "test-operator-key")
     monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "test-operator-key")
+
+
+@pytest.fixture
+def default_store_writes() -> None:
+    """Enable belief writes on the default store; the operator link and tag
+    mirrors honour the write gate (security review 2026-10-24, N5)."""
+    from particles.config import get_config
+    from particles.db import DEFAULT_STORE
+
+    get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
 
 
 class TestHttpBackendRoundTrip:
@@ -362,12 +379,14 @@ class TestHttpBackendOperatorVerbs:
         found = asyncio.run(http_backend.subjects_search("Reichsmark"))
         assert any(s.canonical_name == "Reichsmark" for s in found)
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_subject_alias(self, http_backend: HttpBackend) -> None:
         sid = asyncio.run(_seed_subject("Mark"))
         outcome = asyncio.run(http_backend.subject_alias(sid, ["Deutsche Mark"]))
         assert outcome.subject.id == sid
         assert "Deutsche Mark" in outcome.added
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_subject_merge(self, http_backend: HttpBackend) -> None:
         source = asyncio.run(_seed_subject("Source subj"))
         target = asyncio.run(_seed_subject("Target subj"))
@@ -376,6 +395,7 @@ class TestHttpBackendOperatorVerbs:
         assert isinstance(outcome.particles_relinked, int)
         assert [s.subject_id for s in outcome.sources] == [source]
 
+    @pytest.mark.usefixtures("operator_engine_key")
     def test_subject_merge_many_dry_run(self, http_backend: HttpBackend) -> None:
         a = asyncio.run(_seed_subject("Source one"))
         b = asyncio.run(_seed_subject("Source two"))
@@ -416,6 +436,7 @@ class TestHttpBackendOperatorVerbs:
         assert passage.match.value == "UNAVAILABLE"
         assert asyncio.run(http_backend.particle_source("does-not-exist")) is None
 
+    @pytest.mark.usefixtures("operator_engine_key", "default_store_writes")
     def test_particle_tag_untag(self, http_backend: HttpBackend) -> None:
         pid = asyncio.run(_seed_particle("Taggable claim."))
         added = asyncio.run(http_backend.particle_tag(pid, ["coins/germany"]))
@@ -423,6 +444,7 @@ class TestHttpBackendOperatorVerbs:
         removed = asyncio.run(http_backend.particle_untag(pid, ["coins/germany"]))
         assert "coins/germany" in removed
 
+    @pytest.mark.usefixtures("operator_engine_key", "default_store_writes")
     def test_links_add_remove(self, http_backend: HttpBackend) -> None:
         a = asyncio.run(_seed_particle("Claim A."))
         b = asyncio.run(_seed_particle("Claim B."))
@@ -828,6 +850,35 @@ class TestHttpBackendStoreHandle:
         assert asyncio.run(_uris(other_store)) == ["file:///tmp/sess.jsonl"]
         assert asyncio.run(_uris("default")) == []
 
+    def test_a_lazy_file_harvest_is_sent_as_never(self, http_backend: HttpBackend) -> None:
+        """A remote engine cannot re-read this host's file, and refuses LAZY on one (D2).
+
+        The harvest still lands, without enrolling the engine's refresh loop.
+        """
+        from particles.corpus.store import list_refreshable_local_entries
+        from particles.db import session_scope
+
+        outcome = asyncio.run(
+            http_backend.deposit_text_at_uri(
+                text="a memory note",
+                uri_r="file:///tmp/memory/note.md",
+                source_type="LOCAL_MARKDOWN",
+                mutability="MUTABLE",
+                tags=[],
+                deposited_by="claude-code-hook",
+                content_published_at=None,
+                store="default",
+                fetch_policy="LAZY",
+            )
+        )
+        assert outcome.unchanged is False
+
+        async def _refreshable() -> list[tuple[str, str]]:
+            async with session_scope() as session:
+                return await list_refreshable_local_entries(session)
+
+        assert asyncio.run(_refreshable()) == []
+
     def test_an_unknown_store_is_an_engine_error(self, http_backend: HttpBackend) -> None:
         from particles.api.client.http import EngineHttpError
 
@@ -947,12 +998,14 @@ class TestHttpBackendMemoryRegion:
             )
 
 
-class TestPlaintextTokenWarning:
-    """Security review F18 — warn when a bearer token rides plaintext non-loopback http://.
+class TestPlaintextToken:
+    """Security review F18, completed.
 
-    The documented remote-engine setup tunnels http:// over Tailscale / SSH, so
-    loopback http:// must stay silent; only a *non-loopback* http:// with a
-    token present is exposed and warns (once). https:// never warns.
+    A bearer over a *non-loopback* ``http://`` URL is refused before any
+    request, unless ``engine.allow_plaintext_token`` is set, which restores the
+    old warn-once-and-send. The documented remote-engine setup tunnels http://
+    over Tailscale / SSH, so loopback http:// stays silent, and https:// never
+    refuses.
     """
 
     @staticmethod
@@ -963,58 +1016,178 @@ class TestPlaintextTokenWarning:
 
         _warn_plaintext_token_once.cache_clear()
 
-    def test_non_loopback_http_with_token_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_non_loopback_http_with_token_is_refused(self) -> None:
+        from particles.api.client.http import PlaintextTokenRefused, _check_plaintext_token
+
+        with pytest.raises(PlaintextTokenRefused, match="allow_plaintext_token"):
+            _check_plaintext_token("http://mac-mini:8000", has_token=True, allow=False)
+
+    def test_allowed_non_loopback_http_warns_once_per_base_url(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import logging
 
-        from particles.api.client.http import _maybe_warn_plaintext_token
+        from particles.api.client.http import _check_plaintext_token
 
         self._reset_warn_cache()
         with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
-            _maybe_warn_plaintext_token("http://mac-mini:8000", has_token=True)
-        assert any("unencrypted" in r.message for r in caplog.records)
-        assert any("mac-mini" in r.message for r in caplog.records)
+            for _ in range(3):
+                _check_plaintext_token("http://mac-mini:8000", has_token=True, allow=True)
+        warnings = [r for r in caplog.records if "unencrypted" in r.message]
+        assert len(warnings) == 1
+        assert "mac-mini" in warnings[0].message
 
     def test_loopback_http_with_token_silent(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
-        from particles.api.client.http import _maybe_warn_plaintext_token
+        from particles.api.client.http import _check_plaintext_token
 
         for base_url in ("http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000"):
             self._reset_warn_cache()
             caplog.clear()
             with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
-                _maybe_warn_plaintext_token(base_url, has_token=True)
+                _check_plaintext_token(base_url, has_token=True, allow=False)
             assert not caplog.records, f"{base_url} should not warn"
 
     def test_https_with_token_silent(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
-        from particles.api.client.http import _maybe_warn_plaintext_token
+        from particles.api.client.http import _check_plaintext_token
 
-        self._reset_warn_cache()
         with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
-            _maybe_warn_plaintext_token("https://mac-mini:8000", has_token=True)
+            _check_plaintext_token("https://mac-mini:8000", has_token=True, allow=False)
         assert not caplog.records
 
     def test_no_token_silent(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
-        from particles.api.client.http import _maybe_warn_plaintext_token
+        from particles.api.client.http import _check_plaintext_token
 
-        self._reset_warn_cache()
         with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
-            _maybe_warn_plaintext_token("http://mac-mini:8000", has_token=False)
+            _check_plaintext_token("http://mac-mini:8000", has_token=False, allow=False)
         assert not caplog.records
 
-    def test_warns_at_most_once_per_base_url(self, caplog: pytest.LogCaptureFixture) -> None:
-        import logging
+    async def test_backend_refuses_before_any_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal fires in ``_client``, so nothing reaches the network."""
+        from particles.api.client.http import HttpBackend, PlaintextTokenRefused
+        from particles.config import reset_config
 
-        from particles.api.client.http import _maybe_warn_plaintext_token
+        monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://198.51.100.7:8000")
+        monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "victim-secret-token")
+        reset_config()
+        with pytest.raises(PlaintextTokenRefused):
+            await HttpBackend().health()
 
-        self._reset_warn_cache()
-        with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
-            _maybe_warn_plaintext_token("http://mac-mini:8000", has_token=True)
-            _maybe_warn_plaintext_token("http://mac-mini:8000", has_token=True)
-            _maybe_warn_plaintext_token("http://mac-mini:8000", has_token=True)
-        warnings = [r for r in caplog.records if "unencrypted" in r.message]
-        assert len(warnings) == 1
+
+async def _seed_agent_belief(content: str, store: str, identity: str) -> str:
+    from particles.core.schema import Confidence, Particle, UncertaintyNature
+    from particles.core.scoring.confidence import CalibrationSource
+    from particles.db import session_scope
+    from particles.store.particle_store import insert_particle
+
+    p = Particle(
+        content=content,
+        confidence=Confidence(value=0.7, calibration_source=CalibrationSource.AGENT_ASSERTED),
+        uncertainty_nature=UncertaintyNature.EPISTEMIC,
+        asserted_by=identity,
+    )
+    async with session_scope(store) as session:
+        await insert_particle(session, p)
+        await session.commit()
+    return p.id
+
+
+class TestHttpBackendAgentLinkAndTag:
+    """The agent link and tag verbs name their store and pass the engine's gate (review D9)."""
+
+    AGENT = "mcp:test-agent"
+
+    @pytest.fixture(autouse=True)
+    def _agent(self, http_backend: HttpBackend) -> None:
+        # After http_backend, whose reset_config() would drop the identity.
+        from particles.config import get_config
+
+        get_config().mcp.write.asserter_identity = self.AGENT
+
+    def test_writes_land_in_the_named_store(
+        self, http_backend: HttpBackend, other_store: str
+    ) -> None:
+        from particles.config import get_config
+        from particles.core.schema import RelationCreatedBy
+
+        get_config().mcp.write.enabled_stores = [other_store]
+        a = asyncio.run(_seed_agent_belief("Other A.", other_store, self.AGENT))
+        b = asyncio.run(_seed_agent_belief("Other B.", other_store, self.AGENT))
+
+        added = asyncio.run(http_backend.agent_particle_tag(a, ["t"], store=other_store))
+        assert added == ["t"]
+        removed = asyncio.run(http_backend.agent_particle_untag(a, ["t"], store=other_store))
+        assert removed == ["t"]
+        rel = asyncio.run(
+            http_backend.agent_links_add(a, b, relation_type="CO_EVIDENTIAL", store=other_store)
+        )
+        assert rel.created_by is RelationCreatedBy.AGENT_ASSERTED
+        assert asyncio.run(
+            http_backend.agent_links_remove(a, b, relation_type="CO_EVIDENTIAL", store=other_store)
+        )
+
+    def test_a_store_not_write_enabled_is_refused(
+        self, http_backend: HttpBackend, other_store: str
+    ) -> None:
+        from particles.api.client.http import EngineHttpError
+        from particles.config import get_config
+
+        get_config().mcp.write.enabled_stores = [other_store]
+        pid = asyncio.run(_seed_agent_belief("Default belief.", "default", self.AGENT))
+        with pytest.raises(EngineHttpError, match="403"):
+            asyncio.run(http_backend.agent_particle_tag(pid, ["t"], store="default"))
+
+    def test_a_guard_violation_is_a_400(self, http_backend: HttpBackend) -> None:
+        from particles.api.client.http import EngineHttpError
+        from particles.config import get_config
+
+        get_config().mcp.write.enabled_stores = ["default"]
+        pid = asyncio.run(_seed_agent_belief("Someone else's.", "default", "extractor"))
+        with pytest.raises(EngineHttpError, match="400.*cross-asserter"):
+            asyncio.run(http_backend.agent_particle_tag(pid, ["t"], store="default"))
+
+
+class TestPathSegments:
+    """Caller-supplied ids are one encoded path segment each (review D12)."""
+
+    def test_reserved_characters_are_encoded(self) -> None:
+        from particles.api.client.http import _seg
+
+        assert _seg("../corpus/e1/retract#") == "..%2Fcorpus%2Fe1%2Fretract%23"
+        assert _seg("p-1a2b") == "p-1a2b"
+
+    @pytest.mark.parametrize("bad", ["", ".", ".."])
+    def test_dot_segments_are_refused(self, bad: str) -> None:
+        from particles.api.client.http import _seg
+
+        with pytest.raises(ValueError, match="Not a valid id"):
+            _seg(bad)
+
+    def test_a_traversal_id_cannot_reach_another_route(
+        self, http_backend: HttpBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        real_request = HttpBackend._request
+
+        async def _record(self: HttpBackend, method: str, path: str, **kwargs: Any) -> Any:
+            sent.append(path)
+            return await real_request(self, method, path, **kwargs)
+
+        monkeypatch.setattr(HttpBackend, "_request", _record)
+        # Unencoded, httpx resolved this to GET /health and parsed its body.
+        assert asyncio.run(http_backend.particle_show("../health")) is None
+        from particles.api.client.http import EngineHttpError
+
+        with pytest.raises(EngineHttpError):
+            asyncio.run(http_backend.particle_tag("../corpus/e1/retract#", ["x"]))
+        assert sent == [
+            "/particles/..%2Fhealth",
+            "/particles/..%2Fcorpus%2Fe1%2Fretract%23/tags",
+        ]

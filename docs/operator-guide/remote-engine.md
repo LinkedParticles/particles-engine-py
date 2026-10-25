@@ -26,19 +26,20 @@ particles engine serve 0.0.0.0:8000
 fail-closed gate
 **before** the socket opens: a non-loopback bind without a real
 `PARTICLES_API_KEY` is **refused up front** rather than serving the write verbs
-unauthenticated. (Raw `uvicorn particles.api.app:app` still works and is still
-gated, but you must keep `--host` and `api.bind_host` in sync yourself;
-`engine serve` removes that footgun.)
+unauthenticated. (Raw `uvicorn particles.api.app:app` is gated the same way:
+the check reads the bind from uvicorn's own `--host`. Without a key, an empty
+`--host`, an inherited `--fd`, or a launch by another ASGI server such as
+gunicorn or `fastapi run` is refused, because its bind cannot be read.)
 
 ## Pointing a client at the engine
 
 On the client machine, set the engine URL (config or env) and the bearer token
-(a secret: env only, never `config.yaml`):
+(a secret: env only, never in a config file):
 
 ```yaml
-# config.yaml
+# ~/.particles/config.yaml, or the file PARTICLES_CONFIG names
 engine:
-  base_url: "http://mac-mini.local:8000"
+  base_url: "http://localhost:8000"   # an SSH forward to the engine; see below
   timeout_seconds: 60
 ```
 
@@ -52,6 +53,14 @@ With `engine.base_url` set, the daily verbs (`deposit`, `extract`, `query`,
 everything runs locally as before. The two modes share the same Pydantic models
 and the same `operations/` code, reached either in-process or over HTTP.
 
+The client refuses to send the token over `http://` to a host that is not
+loopback, before any request is made: use `https://`, or reach the
+engine through a loopback hop such as the SSH forward below. On a network you
+trust end to end, `engine.allow_plaintext_token: true` sends it anyway with a
+warning. A config file in the directory you run a command from is never read,
+so a cloned repository cannot point `engine.base_url` somewhere else and
+collect the token.
+
 The client token (`PARTICLES_ENGINE_TOKEN`) is **distinct** from the engine's
 `PARTICLES_API_KEY`: the engine reads the key it expects, the client reads the
 token it presents. For a single operator they may hold the same value.
@@ -61,8 +70,12 @@ token it presents. For a single operator they may hold the same value.
 For the MVP, expose the engine over a **private path**, not a public TLS
 endpoint:
 
-- **Tailscale** (or another private mesh): the bind stays effectively private;
-  point `engine.base_url` at the engine's tailnet name.
+- **Tailscale** (or another private mesh): the bind stays effectively private.
+  Serve the engine over HTTPS with `tailscale serve` and point `engine.base_url`
+  at its `https://` tailnet name. A plain `http://` tailnet name is not
+  loopback, so the client refuses to send the token to it unless you set
+  `engine.allow_plaintext_token: true`; WireGuard encrypts that hop, but the
+  client cannot see that it does.
 - **SSH local-forward**: `ssh -L 8000:localhost:8000 mac-mini` and set
   `engine.base_url=http://localhost:8000`. The engine binds loopback on its host;
   nothing is exposed publicly.
@@ -72,6 +85,15 @@ of it, so the per-request loopback gate sees the real peer. If you do put the
 engine behind a proxy, list it in `api.trusted_proxies` so the gate reads
 `X-Forwarded-For` from that hop only. A public TLS endpoint is out of
 scope.
+
+On a non-loopback bind the read routes are open to anything that reaches the
+port, raw corpus bytes included, unless `api.require_auth_for_reads` is `true`;
+set it whenever the network is not itself the read-access control. The
+container image sets it by default. Separately, every gated route refuses a
+request a web page on another site sends (the browser marks it with
+`Sec-Fetch-Site` or `Origin`) unless it carries a valid bearer. The CLI and the
+web UI at `/app` are unaffected; `api.allowed_origins` admits another browser
+origin you trust.
 
 The SSH forward has one further property: an engine bound to loopback with no
 `PARTICLES_API_KEY` runs with the development-key skip, and every tunnelled
@@ -96,6 +118,11 @@ development-key skip never applies to them, not even from loopback:
 | `POST /subjects/relink-gated` | batch relink (a `dry_run` plan is still served) |
 | `POST /trust/rules` | add or change a source-trust rule (`particles trust set` against an engine) |
 | `POST /trust/statements` | write a trust statement and run its cascade, which can resolve held conflicts (`particles trust statement-set` against an engine) |
+| `POST /subjects/merge`, `POST /subjects/{id}/merge` | merge subjects, which deletes the sources (a `dry_run` plan is still served) |
+| `POST /subjects/{id}/split`, `POST /subjects/{id}/aliases` | split a subject, add aliases |
+| `POST` / `DELETE /links`, `POST` / `DELETE /particles/{id}/tags` | link, unlink, tag and untag any belief; these also need the store in `mcp.write.enabled_stores` |
+| `POST /lint` with `fix: true`, `POST /reconcile`, `POST /links/suggest` in `APPLY` mode | status changes and links (a report-only run is still served) |
+| `POST /db/init` | create or migrate the store's tables |
 
 The skip treats a loopback caller as the operator, and an agent with a shell on
 the engine host is a loopback caller too. With `PARTICLES_API_KEY` unset or
@@ -192,7 +219,7 @@ refused with a 404, recorded in the hook log. The hook steps behave as follows:
 | Hook step | With an engine configured |
 |---|---|
 | SessionStart digest | Served by the engine (`GET /digest/{store}`). The freshness check runs as it does locally: the engine renders the region from this machine's manifest, and the hook compares it with the `MEMORY.md` here. A current region means no digest, a stale one means only the new lines, and an engine that fails or answers too slowly means the full digest |
-| SessionEnd harvest | Refused unless `claude_code.harvest.allow_remote: true`, because transcripts are the most sensitive material the SDK handles. With it, the distilled, redacted transcript and the memory files are deposited on the engine, and the engine's own consolidation extracts them |
+| SessionEnd harvest | Refused unless `claude_code.harvest.allow_remote: true`, because transcripts are the most sensitive material the SDK handles. With it, the distilled, redacted transcript and the memory files are deposited on the engine, and the engine's own consolidation extracts them. The memory files are deposited with `fetch_policy: NEVER`, since the engine cannot re-read a file on this machine: the next SessionEnd harvest is what picks up an edit |
 | SessionEnd MEMORY.md re-render | Rendered by the engine from this machine's own manifest (`POST /memory/projection/{store}`) and spliced into `MEMORY.md` here, with the same fold, backup and atomic write as a local render. It runs only when an installed hook names this store and pins this engine. A manifest section that includes a file is refused, with the reason in the hook log |
 | SessionEnd utility mining | Skipped |
 

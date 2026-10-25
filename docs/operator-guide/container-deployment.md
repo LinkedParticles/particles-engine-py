@@ -122,7 +122,8 @@ container refuses to start without a real `PARTICLES_API_KEY`**:
 
 ```
 Refusing to start: bearer auth is disabled (PARTICLES_API_KEY is unset or
-'dev-key') and api.bind_host='0.0.0.0' is not a loopback address …
+'dev-key') and the bind from api.bind_host, '0.0.0.0', is not a loopback
+address …
 ```
 
 That refusal is a tested property of the image, not a hope: the image cannot
@@ -134,6 +135,48 @@ the container crash-loop).
 write verb; the LLM-priced work (extraction, semantic lint, the consolidation
 cycle's semantic passes) degrades to a **disclosed** structural-only run
 rather than failing quietly.
+
+## Reads require the bearer too
+
+The image's baked config sets `api.require_auth_for_reads: true`, so every read
+route asks for the same bearer as the writes. Only `GET /health`, the API
+schema at `GET /openapi.json` and the web UI shell at `/app` stay open. Without it, a client that reached the port could
+list the store and read the raw deposited bytes (`GET /corpus/blob/{selector}`,
+`GET /particles/{id}/source`) with no credential, because the image binds
+`0.0.0.0`.
+
+Every client already sends the bearer on every call: the CLI's remote backend
+(`PARTICLES_ENGINE_TOKEN`), the web UI (the token in its settings), and the
+Obsidian plugin. A script that read the engine with a bare `curl` now gets a
+`401` and needs `-H "Authorization: Bearer $PARTICLES_API_KEY"`.
+
+**Upgrading.** This changed in 1.210.5. An image from an earlier release served
+reads unauthenticated. A config you mount over `/etc/particles/config.yaml`
+replaces the baked one, and the image also sets
+`PARTICLES_API_REQUIRE_AUTH_FOR_READS=true` in its environment, which wins over
+any file, so a mounted config no longer opens the reads by leaving the line out.
+Open them only when the network itself is your read-access control (a private
+mesh with no other tenants), with `-e PARTICLES_API_REQUIRE_AUTH_FOR_READS=false`.
+`particles engine serve` prints a warning whenever it binds beyond loopback with
+the reads open.
+
+## Browser requests from other sites are refused
+
+Every gated route refuses a request that a web page on another site sends, so
+a page open in the operator's browser cannot deposit into the engine or start
+paid work through it. The browser marks such a request itself
+(`Sec-Fetch-Site: cross-site`, or an `Origin` that is not the engine's own), and
+a request carrying a valid bearer is still served. The web UI at `/app` is
+same-origin and is unaffected. To let another browser origin call the engine,
+list it in `api.allowed_origins`.
+
+A DNS-rebinding page is different: it reaches the engine's address under its
+own hostname, and the browser treats it as same-origin. List the names the
+engine answers on in `api.allowed_hosts` (for example `engine.example.org` or
+`*.tailnet.example`) and every other `Host` is refused on every path. The
+loopback names stay allowed, so the image's own health check keeps working; a
+Kubernetes probe that sends the pod address as its `Host` needs that address
+listed, or a `Host` header set on the probe.
 
 Exposure posture is unchanged by containerization: keep the engine on a private
 mesh or a port-forward. A public TLS endpoint is out of
@@ -257,7 +300,7 @@ it discloses the tasks:
         "runs": 4,
         "failures": 1,
         "last_outcome": "failed",
-        "last_error": "OperationalError: database is locked"
+        "last_error": "OperationalError (message in the engine log)"
       }
     ]
   }
@@ -268,7 +311,10 @@ A failing *iteration* is caught, logged with its traceback, and counted in
 `failures`; the task keeps its cadence, because every task here is
 level-triggered (the corpus, the inbox file, the captures directory are the
 state, so the next tick simply sees the same work again). A task that dies
-outright is marked `crashed` and flips `status` to `degraded`.
+outright is marked `crashed` and flips `status` to `degraded`. `last_error`
+names the exception type only: `/health` carries no auth gate, and an error's
+text can quote a database statement or a fetched URL, so the message stays in
+the engine log.
 
 `/health` deliberately stays **200** in that case: the API is still serving
 requests, and taking the whole engine down because a scheduled tick died would

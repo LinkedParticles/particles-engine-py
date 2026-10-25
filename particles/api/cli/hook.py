@@ -51,6 +51,7 @@ from particles.api.cli._claude_code import (
     InstallPin,
     append_hook_log,
     claude_project_slug,
+    command_env_pins,
     distill_transcript,
     filter_memory_file_for_deposit,
     hook_log_path,
@@ -60,9 +61,12 @@ from particles.api.cli._claude_code import (
     observer_project_for,
     particles_hook_commands,
     particles_mcp_executables,
+    particles_mcp_registrations,
+    pinned_default_dsn,
     projection_enabled,
     projection_refusal,
     read_hook_log_tail,
+    record_project_root,
     redact_secrets,
     repository_root,
     resolve_session_project,
@@ -72,9 +76,11 @@ from particles.api.cli._claude_code import (
     untimed_session_end_hooks,
 )
 from particles.api.cli._memory_projection import DigestDecision, bullet_beliefs
-from particles.config import get_config
+from particles.config import config_resolution_warnings, get_config
 from particles.corpus.rule_sources import refresh_policy_for
+from particles.egress import ensure_backstop
 from particles.store.session_exposure_store import SessionExposure, ShownBelief
+from particles.url_safety import GIT_LOCAL_ARGS
 
 if TYPE_CHECKING:
     from particles.api.client.base import TextDepositOutcome
@@ -119,6 +125,9 @@ def _run_hook(event: str, store: str, impl: _HookImpl) -> None:
         record["session_id"] = payload.get("session_id")
         record["source"] = payload.get("source") or payload.get("reason")
         deadline = get_config().claude_code.hook_deadline_seconds
+        # Arm the no-egress backstop (D18): a hook runs its body
+        # under its own asyncio.run, not the CLI's run(), which arms it there.
+        ensure_backstop()
         output = asyncio.run(asyncio.wait_for(impl(store, payload, record), timeout=deadline))
         record["outcome"] = "ok"
     except Exception as exc:  # noqa: BLE001 — the degrade-to-nothing contract
@@ -135,6 +144,12 @@ def _run_hook(event: str, store: str, impl: _HookImpl) -> None:
             )
     finally:
         record["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
+        # The hooks print nothing but their own output, so a config-resolution
+        # warning (a missing PARTICLES_CONFIG file, a nearby config left unread;
+        # §2, §3) goes to the hook log instead.
+        warnings = config_resolution_warnings()
+        if warnings:
+            record["config_warnings"] = warnings
         append_hook_log(record)
     if output:
         typer.echo(output)
@@ -394,6 +409,8 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
     project = session_project.key
     record["project"] = project
     record["project_resolved_from"] = session_project.resolved_from
+    if project and session_project.root is not None:
+        _note_project_key_collision(project, session_project.root, record)
 
     deposited: list[tuple[str, str]] = []  # (entry_id, snapshot_id) of NEW snapshots
     unchanged = 0
@@ -561,6 +578,21 @@ def _distilled_session(jsonl_text: str, session_id: str) -> str:
     """The text a harvest deposits for a session: distilled, then redacted."""
     text = distill_transcript(jsonl_text, session_id)
     return redact_secrets(text) if text else ""
+
+
+def _note_project_key_collision(key: str, root: Path, record: dict[str, Any]) -> None:
+    """Record the session's repository root for its key; flag a shared key.
+
+    Never a failure surface: an unwritable state directory costs the
+    disclosure, not the harvest.
+    """
+    try:
+        roots = record_project_root(key, root)
+    except OSError:
+        log.debug("could not record the project root for %s", key, exc_info=True)
+        return
+    if len(roots) > 1:
+        record["project_key_collision"] = roots
 
 
 async def _harvest_transcript(
@@ -782,22 +814,43 @@ def hook_doctor_cmd(
 
 
 def _run_doctor(store: str) -> bool:
-    from particles.config import validate_config
+    from particles.config import (
+        describe_config_resolution,
+        environment_notes,
+        user_config_path,
+        validate_config,
+    )
 
     typer.echo(f"particles hook doctor — store '{store}'")
     typer.echo(f"  cwd:            {os.getcwd()}")
 
-    config_path, _ = validate_config()
-    if config_path is None:
-        typer.echo("  config.yaml:    NOT FOUND (compiled defaults + env overrides only)")
+    validate_config()
+    resolution = describe_config_resolution()
+    if resolution.missing is not None:
+        typer.echo(
+            f"  config:         ⚠ PARTICLES_CONFIG names {resolution.missing}, which does not "
+            "exist (compiled defaults + env overrides only)"
+        )
+    elif resolution.path is None:
+        typer.echo("  config:         none (compiled defaults + env overrides only)")
     else:
-        typer.echo(f"  config.yaml:    {config_path}")
+        typer.echo(f"  config:         {resolution.origin} {resolution.path}")
+    if resolution.ignored is not None:
+        typer.echo(
+            f"  ignored:        {resolution.ignored} is not read; set "
+            f"PARTICLES_CONFIG={resolution.ignored} or move it to {user_config_path()}"
+        )
     if os.environ.get("PARTICLES_CONFIG"):
         typer.echo(f"  PARTICLES_CONFIG env: {os.environ['PARTICLES_CONFIG']}")
     if os.environ.get("DATABASE_URL"):
         typer.echo(f"  DATABASE_URL env:     {os.environ['DATABASE_URL']}")
+    for note in environment_notes():
+        typer.echo(f"  env:            {note}")
 
     for line in _check_hook_timeouts():
+        typer.echo(f"  {line}")
+
+    for line in _check_config_pins():
         typer.echo(f"  {line}")
 
     for line in _check_install():
@@ -845,6 +898,9 @@ def _run_doctor(store: str) -> bool:
     for line in _check_observer_scope(store):
         typer.echo(f"  {line}")
 
+    for line in _check_refresh_roots(store):
+        typer.echo(f"  {line}")
+
     for line in _check_retired_stop_hook():
         typer.echo(f"  {line}")
 
@@ -860,6 +916,81 @@ def _run_doctor(store: str) -> bool:
         return False
     typer.echo("  ✓ Store resolves and is initialized from this directory.")
     return True
+
+
+def _check_config_pins() -> list[str]:
+    """Warn about an installed hook command or MCP registration with no absolute config pin.
+
+    Since the loader reads ``PARTICLES_CONFIG`` or the user file and
+    never the working directory, and ``init claude-code`` pins
+    ``PARTICLES_CONFIG`` into every hook and the MCP registration so each one
+    states its config. An entry without the pin, or with a relative one, is
+    a pre-upgrade or hand-made install whose config depends on the
+    environment it happens to start in. Reported, never fatal.
+    """
+    root = repository_root(Path.cwd())
+    paths = [Path.home() / ".claude" / "settings.json"] + [
+        root / ".claude" / name for name in ("settings.local.json", "settings.json")
+    ]
+    fix = "Re-run `particles init claude-code` to pin it."
+    lines: list[str] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(settings, dict):
+            continue
+        for command in particles_hook_commands(settings):
+            pins = command_env_pins(command)
+            problem = _config_pin_problem(pins.get("PARTICLES_CONFIG"))
+            if problem is None and _uses_default_store(command):
+                problem = _store_pin_problem(pins)
+            if problem is not None:
+                lines.append(f"config pin:     ⚠ a Particles hook in {path} {problem}.")
+                lines.append(f"                {fix}")
+                break
+    for registration in particles_mcp_registrations():
+        problem = _config_pin_problem(registration.env.get("PARTICLES_CONFIG"))
+        if problem is None:
+            # The MCP read tools always read the default store (security review N17).
+            problem = _store_pin_problem(registration.env)
+        if problem is not None:
+            lines.append(f"config pin:     ⚠ the MCP server '{registration.name}' {problem}.")
+            lines.append(f"                {fix}")
+    return lines
+
+
+def _uses_default_store(command: str) -> bool:
+    """Whether a hook command reaches the ``default`` store (``--store default`` or none)."""
+    tokens = command.split()
+    for i, token in enumerate(tokens[:-1]):
+        if token == "--store":
+            return tokens[i + 1] == "default"
+    return True
+
+
+def _store_pin_problem(env: dict[str, str]) -> str | None:
+    """A ``default`` store that resolves against the working directory, if it does."""
+    dsn = pinned_default_dsn(env)
+    if _dsn_is_cwd_relative(dsn):
+        return (
+            f"has no DATABASE_URL pin, so its default store ({dsn}) is read from each "
+            "session's working directory"
+        )
+    return None
+
+
+def _config_pin_problem(pin: str | None) -> str | None:
+    if pin is None:
+        return "has no PARTICLES_CONFIG pin"
+    if not Path(pin).is_absolute():
+        return f"pins a relative PARTICLES_CONFIG ({pin})"
+    return None
 
 
 def _check_hook_timeouts() -> list[str]:
@@ -904,7 +1035,7 @@ def _git(root: Path, *args: str) -> str | None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["git", "-C", str(root), *args],  # noqa: S607 — git from PATH, as a user runs it
+            ["git", *GIT_LOCAL_ARGS, "-C", str(root), *args],  # noqa: S607 — git from PATH
             env=env,
             capture_output=True,
             text=True,
@@ -1098,6 +1229,34 @@ def _check_egress() -> list[str]:
     return lines
 
 
+def _check_refresh_roots(store: str) -> list[str]:
+    """Report enrolled local sources the refresh would refuse to read.
+
+    The refresh reads rule files only under recorded roots, so after the
+    upgrade that introduced them, and until a ``rules sync``, the project rule
+    files are refused. The line says so and names the command. Reported,
+    never fatal.
+    """
+    from particles.corpus.fetch import count_refused_local_entries
+    from particles.db import session_scope
+
+    async def _count() -> int:
+        async with session_scope(store) as session:
+            return await count_refused_local_entries(session)
+
+    try:
+        refused = asyncio.run(_count())
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
+        return [f"refresh roots:  could not check the store: {exc}"]
+    if not refused:
+        return []
+    return [
+        f"refresh roots:  ⚠ {refused} LAZY local source(s) lie outside every allowed root "
+        "and are not refreshed.",
+        "                Run `particles rules sync` from the project that holds them.",
+    ]
+
+
 def _check_observer_scope(store: str) -> list[str]:
     """Report what a session here reads: the whole store, or its project's view.
 
@@ -1142,7 +1301,9 @@ def _observer_binding_lines(cwd: Path) -> list[str]:
     """
     from particles.api.cli._claude_code import (
         particles_mcp_registrations,
+        project_key_collision_note,
         read_hook_log_tail,
+        recorded_project_roots,
         server_project_key,
     )
 
@@ -1158,6 +1319,7 @@ def _observer_binding_lines(cwd: Path) -> list[str]:
             "`particles init claude-code` to add --project-observer cwd"
         ]
     server_key = server_project_key(cwd)
+    shared_by = recorded_project_roots(server_key) if server_key else []
     fallbacks: dict[str, str] = {}
     hooks_key: str | None = None
     for raw in read_hook_log_tail(2000):
@@ -1173,6 +1335,9 @@ def _observer_binding_lines(cwd: Path) -> list[str]:
         if entry.get("cwd") == str(cwd):
             hooks_key = key
     lines.append(f"{pad}key here: a bound server takes {server_key or '(none: unbound at /)'}")
+    if server_key and len(shared_by) > 1:
+        # a key two repositories share is disclosed, never fixed here.
+        lines.append(f"{pad}⚠ {project_key_collision_note(server_key, shared_by)}")
     if hooks_key is not None:
         lines.append(f"{pad}          the hooks last resolved {hooks_key or '(none)'}")
         if server_key is not None and hooks_key != server_key:

@@ -735,7 +735,6 @@ class LocalBackend:
         *,
         relation_type: str,
         confidence: float,
-        project_key: str | None = None,
     ) -> ParticleRelation:
         from particles.operations.agent_write import link_particles
 
@@ -746,7 +745,6 @@ class LocalBackend:
                 particle_b,
                 relation_type=relation_type,
                 confidence=confidence,
-                project_key=project_key,
             )
             await session.commit()
             return rel
@@ -918,12 +916,88 @@ class LocalBackend:
             await session.commit()
             return result
 
-    async def particle_retract(self, *, particle_id: str, reason: str, store: str) -> None:
+    async def particle_retract(
+        self, *, particle_id: str, reason: str, store: str, project_key: str | None = None
+    ) -> None:
         from particles.operations.agent_write import retract_belief
 
         async with session_scope(store) as session:
-            await retract_belief(session, store=store, particle_id=particle_id, reason=reason)
+            await retract_belief(
+                session,
+                store=store,
+                particle_id=particle_id,
+                reason=reason,
+                project_key=project_key,
+            )
             await session.commit()
+
+    async def agent_links_add(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> ParticleRelation:
+        from particles.operations.agent_write import link_beliefs
+
+        async with session_scope(store, write=True) as session:  # writer lock
+            rel = await link_beliefs(
+                session,
+                particle_a,
+                particle_b,
+                relation_type=relation_type,
+                project_key=project_key,
+            )
+            await session.commit()
+            return rel
+
+    async def agent_links_remove(
+        self,
+        particle_a: str,
+        particle_b: str,
+        *,
+        relation_type: str,
+        store: str,
+        project_key: str | None = None,
+    ) -> bool:
+        from particles.operations.agent_write import unlink_beliefs
+
+        async with session_scope(store, write=True) as session:  # writer lock
+            removed = await unlink_beliefs(
+                session,
+                particle_a,
+                particle_b,
+                relation_type=relation_type,
+                project_key=project_key,
+            )
+            await session.commit()
+            return removed
+
+    async def agent_particle_tag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        from particles.operations.agent_write import tag_belief
+
+        async with session_scope(store, write=True) as session:  # writer lock
+            added = await tag_belief(
+                session, particle_id=particle_id, tags=tags, project_key=project_key
+            )
+            await session.commit()
+            return added
+
+    async def agent_particle_untag(
+        self, particle_id: str, tags: list[str], *, store: str, project_key: str | None = None
+    ) -> list[str]:
+        from particles.operations.agent_write import untag_belief
+
+        async with session_scope(store, write=True) as session:  # writer lock
+            removed = await untag_belief(
+                session, particle_id=particle_id, tags=tags, project_key=project_key
+            )
+            await session.commit()
+            return removed
 
     async def deposit_text(
         self,

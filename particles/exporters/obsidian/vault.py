@@ -56,6 +56,7 @@ from particles.render.markdown import (
     build_subject_naming,
     disambiguation_name,
     is_within_directory,
+    neutralize_inline_markdown,
     sanitize_filename,
     subject_slug,
 )
@@ -245,7 +246,7 @@ def _render_coin_note(
     for p in descriptive:
         section = _desc_section(p.content)
         if section != "catalog":  # catalog refs already in frontmatter
-            sections[section].append(p.content)
+            sections[section].append(neutralize_inline_markdown(p.content))
 
     _section_order = ["obverse", "reverse", "edge", "mints", "comments"]
     _section_titles = {

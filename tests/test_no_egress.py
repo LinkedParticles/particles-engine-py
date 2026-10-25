@@ -468,7 +468,7 @@ class TestDepositPaths:
 
         from particles.api.app import app
 
-        client = TestClient(app, client=("127.0.0.1", 50000))
+        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
         resp = client.post("/corpus/deposit/url", json={"url": "https://example.org/page"})
         assert resp.status_code == 403
         assert resp.json()["error"] == "egress_refused"
@@ -598,9 +598,10 @@ class TestEncoderAndTelemetry:
 
     def test_otlp_endpoint_refused(self, refusing: None) -> None:
         from particles.config import ObservabilityConfig
-        from particles.observability.setup import _otlp_allowed
+        from particles.observability.setup import _otlp_kwargs
 
-        assert _otlp_allowed(ObservabilityConfig(enabled=True, exporter="otlp")) is False
+        cfg = ObservabilityConfig(enabled=True, exporter="otlp")
+        assert _otlp_kwargs(cfg, "traces") is None
 
 
 class TestReports:

@@ -535,7 +535,7 @@ async def test_judge_claim_pairs_batches_and_keeps_order() -> None:
     with patch("particles.operations._llm._llm_call", side_effect=fake_call):
         verdicts = await judge_claim_pairs(pairs, batch_size=2)
     assert len(prompts) == 3
-    assert "A: old 4\nB: new 4" in prompts[2]
+    assert "\nold 4\n" in prompts[2] and "\nnew 4\n" in prompts[2]
     assert verdicts == [
         JudgeVerdictKind.PARAPHRASE,
         JudgeVerdictKind.UNSURE,
@@ -618,8 +618,13 @@ async def test_judge_pairs_maps_positional_keys_back_in_order() -> None:
 
     async def fake_call(prompt: str, *, max_tokens: int, **_: object) -> str:
         budgets.append(max_tokens)
-        assert "[p0]\nA: a0\nB: b0" in prompt
-        assert "[p3]\nA: a3\nB: b3" in prompt
+        # Security F3: each claim behind its own labelled fence, one nonce a call.
+        system = _["system"]
+        assert isinstance(system, str) and "PARAPHRASE" in system
+        nonce = system.split('nonce="', 1)[1].split('"', 1)[0]
+        assert f'[p0]\nA:\n<p0_a nonce="{nonce}">\na0\n</p0_a nonce="{nonce}">\nB:\n' in prompt
+        assert f'<p3_b nonce="{nonce}">\nb3\n</p3_b nonce="{nonce}">' in prompt
+        assert "PARAPHRASE" not in prompt
         return reply
 
     pairs = [(f"a{i}", f"b{i}") for i in range(4)]

@@ -14,19 +14,28 @@ by that importer rather than by a GET of its URI-R.
 Each entry commits on its own, and a failure rolls back that entry only and is
 reported on its result, so one bad source never stops the sweep. Results are
 yielded as they land, which lets a caller stream progress.
+
+A local entry outside every allowed root is not handed to the ladder at all: it
+yields ``REFUSED``, and the loop logs one warning per run with the count and
+the fix, rather than a line per entry.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+import logging
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.corpus.fetch import maybe_refetch
+from particles.corpus.fetch import is_entry_refused, maybe_refetch
 from particles.corpus.refresh_outcome import RefreshOutcome, classify_refresh
-from particles.corpus.store import list_snapshots_for_entry
+from particles.corpus.rule_roots import list_rule_source_roots
+from particles.corpus.store import CorpusEntryRow, list_snapshots_for_entry
 from particles.ingest.importers.registry import get_importers
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,8 +64,14 @@ async def refresh_entries(
         ``error`` is set.
     """
     importers = get_importers()
+    recorded = await list_rule_source_roots(session)
+    refused = 0
     for entry_id in entry_ids:
         try:
+            if await _is_refused(session, entry_id, recorded):
+                refused += 1
+                yield RefreshResult(entry_id=entry_id, outcome=RefreshOutcome.REFUSED)
+                continue
             before_id = await _latest_snapshot_id(session, entry_id)
             snap = await maybe_refetch(session, entry_id, force=force, importers=importers)
             outcome = classify_refresh(before_id, snap)
@@ -70,6 +85,19 @@ async def refresh_entries(
             outcome=outcome,
             snapshot_id=snap.snapshot_id if snap is not None else None,
         )
+    if refused:
+        log.warning(
+            "%d local source(s) lie outside every allowed root and were not read. Run "
+            "`particles rules sync` from the project that holds them to record its root, "
+            "or add their directory to local_refresh.allowed_roots.",
+            refused,
+        )
+
+
+async def _is_refused(session: AsyncSession, entry_id: str, recorded: Sequence[Path]) -> bool:
+    """Whether the local tier would refuse this entry's ``file://`` source."""
+    row = await session.get(CorpusEntryRow, entry_id)
+    return row is not None and is_entry_refused(row, recorded)
 
 
 async def _latest_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:

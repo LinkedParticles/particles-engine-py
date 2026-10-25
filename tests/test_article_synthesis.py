@@ -13,8 +13,10 @@ tests pin the deterministic prompt-construction surface.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from particles.core.schema import (
     Confidence,
@@ -26,6 +28,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
+from particles.llm import data_fence_instruction, fence
 from particles.render.article_synthesis import _build_synthesis_prompt
 from particles.render.article_synthesis.render import _format_particles_for_prompt
 
@@ -55,11 +58,11 @@ def _make_particle(content: str, confidence_value: float = 0.9) -> Particle:
     )
 
 
-# The pre-ADR-0163 standard first-attempt prompt, frozen as a literal. The
+# The standard first-attempt instructions, frozen as a literal. The
 # ``flowing=False, direction=None, framing=None`` path MUST reproduce this
-# byte-for-byte — the new fields are additive and the no-field render is
-# unchanged. (Title/subject = "X", and two particles "a" / "b" with the
-# placeholder block filled below.)
+# byte-for-byte in the system turn: the new fields are additive and the
+# no-field render is unchanged. The subject and the particle block ride the
+# fenced user turn (security review N31).
 _EXPECTED_STANDARD_NO_FIELDS = """\
 You are writing one encyclopedic article about a single subject, based ONLY
 on the structured particle list below. Every claim in your article must be
@@ -103,15 +106,9 @@ Style:
   in the References section. Emitting your own definition produces a
   duplicate, and markdown footnote parsers silently drop the link.
 
-Output: the article body in Markdown, starting with the `# {title}` H1
-heading. No frontmatter; no preamble before the H1; no closing remarks
-after the last paragraph.
-
-----
-SUBJECT: {subject}
-PARTICLE LIST (id_prefix, modality, effective_confidence, content):
-{particles}
-----"""
+Output: the article body in Markdown, starting with an H1 heading that is
+`# ` followed by the SUBJECT from the user message. No frontmatter; no
+preamble before the H1; no closing remarks after the last paragraph."""
 
 
 def _subject_and_particles() -> tuple[Subject, list[Particle], dict[str, float]]:
@@ -123,24 +120,50 @@ def _subject_and_particles() -> tuple[Subject, list[Particle], dict[str, float]]
 
 def test_standard_prompt_byte_identical_without_new_fields() -> None:
     """with ``flowing=False, direction=None, framing=None`` the
-    standard first-attempt prompt is byte-identical to the pre-0163 prompt."""
+    standard first-attempt instructions are byte-identical to the frozen ones."""
     subject, ps, eff = _subject_and_particles()
-    prompt = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=False)
-    expected = _EXPECTED_STANDARD_NO_FIELDS.format(
-        title="X",
-        subject="X",
-        particles=_format_particles_for_prompt(ps, eff),
+    system, user = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=False)
+    nonce = re.search(r'nonce="([0-9a-f]{32})"', user).group(1)  # type: ignore[union-attr]
+    assert system == f"{_EXPECTED_STANDARD_NO_FIELDS}\n\n{data_fence_instruction(nonce)}"
+    assert user == (
+        "SUBJECT:\n"
+        + fence("X", nonce, label="subject")
+        + "\n\nPARTICLE LIST (id_prefix, modality, effective_confidence, content):\n"
+        + fence(_format_particles_for_prompt(ps, eff), nonce, label="particles")
     )
-    assert prompt == expected
+
+
+def test_the_synthesis_prompt_fences_the_stored_text() -> None:
+    """Security review N31: subject name and claims ride the fence, never the system turn."""
+    from tests.test_fencing_call_sites import HOSTILE, assert_fenced
+
+    subject = Subject(id="s1", canonical_name=HOSTILE, asserted_by="test")
+    ps = [_make_particle(HOSTILE)]
+    eff = {p.id: p.confidence.value for p in ps}
+    for kwargs in (
+        {"strict": False},
+        {"strict": False, "flowing": True},
+        {"strict": False, "sequence_mode": True},
+        {"strict": True},
+        {"strict": True, "layer_b_misalignments": [{"id": 0, "reason": HOSTILE}]},
+    ):
+        assert_fenced(*_build_synthesis_prompt(subject=subject, particles=ps, eff=eff, **kwargs))
+
+
+_NONCE = re.compile(r"[0-9a-f]{32}")
+
+
+def _prompt(**kwargs: Any) -> str:
+    """Both turns as one string with the per-call nonce normalised out."""
+    system, user = _build_synthesis_prompt(**kwargs)
+    return _NONCE.sub("N", f"{system}\n{user}")
 
 
 def test_flowing_prompt_suppresses_subheadings() -> None:
     """``flowing=True`` first-attempt prompt swaps the standard
     sub-headings instruction for the no-sub-headings, single-passage one."""
     subject, ps, eff = _subject_and_particles()
-    flowing = _build_synthesis_prompt(
-        subject=subject, particles=ps, eff=eff, strict=False, flowing=True
-    )
+    flowing = _prompt(subject=subject, particles=ps, eff=eff, strict=False, flowing=True)
     assert "One continuous passage of connected prose under the section title" in flowing
     assert "sub-headings, no bullet lists" in flowing
     # The standard sub-headings instruction is gone.
@@ -148,7 +171,7 @@ def test_flowing_prompt_suppresses_subheadings() -> None:
     # It is otherwise the standard prompt — encyclopedic, fully cited.
     assert "You are writing one encyclopedic article" in flowing
 
-    standard = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=False)
+    standard = _prompt(subject=subject, particles=ps, eff=eff, strict=False)
     assert "short topical sections with `## `" in standard
     assert flowing != standard
 
@@ -158,10 +181,8 @@ def test_flowing_is_first_attempt_only_strict_unchanged() -> None:
     ``strict=True`` the (unchanged) strict prompt is returned regardless of
     ``flowing``."""
     subject, ps, eff = _subject_and_particles()
-    strict_plain = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=True)
-    strict_flowing = _build_synthesis_prompt(
-        subject=subject, particles=ps, eff=eff, strict=True, flowing=True
-    )
+    strict_plain = _prompt(subject=subject, particles=ps, eff=eff, strict=True)
+    strict_flowing = _prompt(subject=subject, particles=ps, eff=eff, strict=True, flowing=True)
     assert strict_flowing == strict_plain
     # The strict retry prompt is the citation-focused one, not the flowing body.
     assert "PRIOR ATTEMPT WAS REJECTED" in strict_flowing
@@ -174,12 +195,10 @@ def test_direction_appears_in_first_attempt_prompt() -> None:
     subject, ps, eff = _subject_and_particles()
     brief = "Write a single tight elevator-pitch paragraph; lead with the ledger framing."
 
-    standard = _build_synthesis_prompt(
-        subject=subject, particles=ps, eff=eff, strict=False, direction=brief
-    )
+    standard = _prompt(subject=subject, particles=ps, eff=eff, strict=False, direction=brief)
     assert brief in standard
 
-    flowing = _build_synthesis_prompt(
+    flowing = _prompt(
         subject=subject, particles=ps, eff=eff, strict=False, flowing=True, direction=brief
     )
     assert brief in flowing
@@ -191,14 +210,12 @@ def test_framing_appears_in_first_attempt_prompt() -> None:
     subject, ps, eff = _subject_and_particles()
     spine = "The whole document turns on three mechanics; it is one argument, not four summaries."
 
-    standard = _build_synthesis_prompt(
-        subject=subject, particles=ps, eff=eff, strict=False, framing=spine
-    )
+    standard = _prompt(subject=subject, particles=ps, eff=eff, strict=False, framing=spine)
     assert spine in standard
     # Framing is a prefix block — it precedes the task instruction.
     assert standard.index(spine) < standard.index("You are writing one encyclopedic article")
 
-    flowing = _build_synthesis_prompt(
+    flowing = _prompt(
         subject=subject, particles=ps, eff=eff, strict=False, flowing=True, framing=spine
     )
     assert spine in flowing
@@ -208,7 +225,7 @@ def test_direction_and_framing_absent_from_strict_retry() -> None:
     """direction/framing steer the first attempt only; the strict
     retry prompt is the unchanged citation-focused one and never carries them."""
     subject, ps, eff = _subject_and_particles()
-    strict = _build_synthesis_prompt(
+    strict = _prompt(
         subject=subject,
         particles=ps,
         eff=eff,
@@ -218,5 +235,5 @@ def test_direction_and_framing_absent_from_strict_retry() -> None:
     )
     assert "Write the pitch." not in strict
     assert "The spine." not in strict
-    plain_strict = _build_synthesis_prompt(subject=subject, particles=ps, eff=eff, strict=True)
+    plain_strict = _prompt(subject=subject, particles=ps, eff=eff, strict=True)
     assert strict == plain_strict

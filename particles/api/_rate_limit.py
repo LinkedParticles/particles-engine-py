@@ -28,6 +28,7 @@ from a clean limiter.
 
 from __future__ import annotations
 
+import ipaddress
 import time
 from typing import Annotated
 
@@ -35,13 +36,50 @@ from fastapi import Depends, HTTPException, Request, status
 
 from particles.config import get_config, register_reset_hook
 
-# Per-host bucket state: host -> (tokens, last_refill_monotonic). Module-global
+# Per-client bucket state: key -> (tokens, last_refill_monotonic). Module-global
 # and lock-free: ``enforce_rate_limit`` mutates it synchronously (no ``await``
 # in the critical section), so the asyncio event loop cannot interleave two
-# updates for the same host. The dict grows with distinct client hosts seen;
-# for the loopback / behind-a-trusted-proxy single-operator threat model that is
-# negligible, and ``reset_rate_limiter`` clears it.
+# updates for the same key. Bounded by ``_MAX_BUCKETS`` (security review
+# 2026-10-24, C9): a caller rotating source addresses grew it without limit.
 _buckets: dict[str, tuple[float, float]] = {}
+
+#: The most clients tracked at once. A bucket idle for a minute has refilled to
+#: full and is the same as no bucket, so those are dropped first.
+_MAX_BUCKETS = 10_000
+
+
+def _bucket_key(host: str) -> str:
+    """The rate-limit key for a client address.
+
+    An IPv6 client is keyed by its ``/64``: one host is routinely handed a whole
+    ``/64``, so keying by address let a caller take a fresh bucket per request
+    (security review 2026-10-24, C9). An IPv4-mapped address is keyed as IPv4.
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.IPv6Network(f"{ip}/64", strict=False))
+    return host
+
+
+def _make_room(now: float) -> None:
+    """Drop buckets until a new one fits under ``_MAX_BUCKETS``.
+
+    Full buckets go first, since forgetting them changes nothing (any bucket
+    refills completely in a minute); then the least recently seen.
+    """
+    for key in [k for k, (_, last) in _buckets.items() if now - last >= 60.0]:
+        del _buckets[key]
+    if len(_buckets) < _MAX_BUCKETS:
+        return
+    for key, _ in sorted(_buckets.items(), key=lambda item: item[1][1])[
+        : len(_buckets) - _MAX_BUCKETS + 1
+    ]:
+        del _buckets[key]
 
 
 def reset_rate_limiter() -> None:
@@ -57,6 +95,8 @@ def _allow(host: str, rate_per_minute: int, now: float) -> bool:
     ``False`` when the bucket is empty (caller should reject with 429).
     """
     capacity = float(rate_per_minute)
+    if host not in _buckets and len(_buckets) >= _MAX_BUCKETS:
+        _make_room(now)
     tokens, last = _buckets.get(host, (capacity, now))
     # Refill proportional to elapsed time, capped at capacity.
     tokens = min(capacity, tokens + (now - last) * rate_per_minute / 60.0)
@@ -84,7 +124,7 @@ def enforce_rate_limit(request: Request) -> None:
     host = _real_client_host(request)
     if host is None:
         return
-    if not _allow(host, rate, time.monotonic()):
+    if not _allow(_bucket_key(host), rate, time.monotonic()):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(

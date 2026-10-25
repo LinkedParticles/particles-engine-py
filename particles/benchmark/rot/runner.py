@@ -27,13 +27,16 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import hashlib
+import io
 import logging
 import pickle
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime, time, timedelta
+from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, get_args
@@ -164,11 +167,17 @@ class ExtractionCache:
                 break
 
     def _load(self, path: Path) -> dict[str, ExtractionResult]:
-        """Entries on disk at ``path`` under this stamp, or an empty dict."""
+        """Entries on disk at ``path`` under this stamp, or an empty dict.
+
+        The directory is the operator's to choose, so a file there may not be
+        one this harness wrote. It is read by :class:`_CacheUnpickler`, which
+        resolves only the classes a cached result is built from, so a planted
+        file fails to load rather than running its code (security review C6).
+        """
         if not path.exists():
             return {}
         with contextlib.suppress(Exception):
-            loaded = pickle.loads(path.read_bytes())
+            loaded = _CacheUnpickler(io.BytesIO(path.read_bytes())).load()
             if isinstance(loaded, dict) and loaded.get("stamp") == self._stamp:
                 entries: dict[str, ExtractionResult] = loaded["entries"]
                 return entries
@@ -205,6 +214,39 @@ class ExtractionCache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         merged = self._load(self.path) | self._mem
         self.path.write_bytes(pickle.dumps({"stamp": self._stamp, "entries": merged}))
+
+
+#: Standard-library classes a cached result may hold (dates on candidates).
+_CACHE_STDLIB_CLASSES = {
+    ("builtins", "set"),
+    ("builtins", "frozenset"),
+    ("datetime", "date"),
+    ("datetime", "datetime"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("datetime", "timezone"),
+}
+
+
+class _CacheUnpickler(pickle.Unpickler):
+    """An unpickler that resolves only the data classes a cached result holds.
+
+    Pickle runs any callable a file names. Here a name resolves only when it is
+    one of :data:`_CACHE_STDLIB_CLASSES` or a ``particles`` class that is an
+    enum, a dataclass or a pydantic model, so loading a file builds data and
+    calls nothing else (security review C6).
+    """
+
+    def find_class(self, module: str, name: str) -> Any:
+        if (module, name) in _CACHE_STDLIB_CLASSES:
+            return super().find_class(module, name)
+        if module == "particles" or module.startswith("particles."):
+            found = super().find_class(module, name)
+            if isinstance(found, type) and (
+                issubclass(found, (Enum, BaseModel)) or dataclasses.is_dataclass(found)
+            ):
+                return found
+        raise pickle.UnpicklingError(f"refused to load {module}.{name} from the cache")
 
 
 class _CachedExtractor:

@@ -232,6 +232,7 @@ from particles.llm.breaker import (
     llm_circuit_open,
     record_unusable_reply,
 )
+from particles.llm.fencing import data_fence_instruction, fence, make_nonce
 from particles.llm.registry import PurposeRefused, purpose_allowed, purpose_endpoint
 from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import record_event
@@ -2459,35 +2460,69 @@ UPDATE_SLOT_REQUEST = "SLOT: CHANGES or SLOT: FIXED"
 _SLOT_LINE_RE = re.compile(r"^\W*SLOT\W*:\W*(CHANGES|FIXED|NONE)\W*$", re.IGNORECASE)
 
 
-def _contradiction_prompt(content_a: str, content_b: str) -> str:
-    """The L-SEM-01-style contradiction-probe prompt (one source of truth).
+#: The two claims a pair probe compares, each behind its own nonce fence. The
+#: census probe and the second reading use the same labels and layout, so a
+#: scripted provider reads every pair probe with one parser.
+CLAIM_A_LABEL = "claim_a"
+CLAIM_B_LABEL = "claim_b"
+
+
+def _claim_pair_turn(content_a: str, content_b: str, nonce: str) -> str:
+    """The user turn of a pair probe: both claims, fenced (security F3)."""
+    return (
+        f"Claim A:\n{fence(content_a, nonce, label=CLAIM_A_LABEL)}\n\n"
+        f"Claim B:\n{fence(content_b, nonce, label=CLAIM_B_LABEL)}"
+    )
+
+
+def _fenced_system(instructions: str, nonce: str) -> str:
+    return f"{instructions.rstrip()}\n\n{data_fence_instruction(nonce)}"
+
+
+_CONTRADICTION_INSTRUCTIONS = (
+    "Do the two claims in the user message contradict each other, so that both "
+    "cannot be true at once? Claims that agree, are about different things, are "
+    "paraphrases, or where one merely attributes, quotes, or restates the other do "
+    "not contradict.\n\n"
+    "Reply with exactly two lines and nothing else:\n"
+    "REASON: <one sentence of at most 25 words naming the conflicting detail, "
+    "or why there is none>\n"
+    "VERDICT: YES or VERDICT: NO"
+)
+
+
+def _contradiction_prompt(
+    content_a: str, content_b: str, *, nonce: str | None = None
+) -> tuple[str, str]:
+    """``(system, user)`` for the L-SEM-01-style contradiction probe (one source of truth).
 
     Shared with the reconcile sweep
     (:mod:`particles.operations.reconcile`), whose breaker-routed probe uses
-    the same prompt through the ``operations._llm`` seam. The reply is a
+    the same request through the ``operations._llm`` seam. The reply is a
     reason line then a final verdict line, the shape the lint probe uses, so
     :func:`_contradiction_verdict` never reads a verdict into a cut reply.
+
+    Both claims are stored or deposited text, so the instructions stay in the
+    system turn and each claim is fenced (security F3; an injected
+    ``VERDICT: NO`` would otherwise suppress the INCONSISTENCY record).
+    ``nonce`` is fixed only by :func:`contradiction_prompt_hash`; a real probe
+    mints its own.
     """
+    nonce = nonce or make_nonce()
     return (
-        "Do these two claims contradict each other, so that both cannot be true "
-        "at once? Claims that agree, are about different things, are paraphrases, "
-        "or where one merely attributes, quotes, or restates the other do not "
-        "contradict.\n\n"
-        "Reply with exactly two lines and nothing else:\n"
-        "REASON: <one sentence of at most 25 words naming the conflicting detail, "
-        "or why there is none>\n"
-        "VERDICT: YES or VERDICT: NO\n\n"
-        f"Claim A: {content_a}\n\nClaim B: {content_b}"
+        _fenced_system(_CONTRADICTION_INSTRUCTIONS, nonce),
+        _claim_pair_turn(content_a, content_b, nonce),
     )
 
 
 def contradiction_prompt_hash() -> str:
     """The §6.6 contradiction probe's prompt version.
 
-    Rendered by :func:`_contradiction_prompt` itself over placeholder claims,
-    so the key a remembered verdict is filed under cannot drift from the text.
+    Rendered by :func:`_contradiction_prompt` itself over placeholder claims
+    and nonce, so the key a remembered verdict is filed under cannot drift
+    from the text.
     """
-    return prompt_hash(_contradiction_prompt("{claim_a}", "{claim_b}"))
+    return prompt_hash(*_contradiction_prompt("{claim_a}", "{claim_b}", nonce="{nonce}"))
 
 
 #: The write path's contradiction probe as a rung of the contradiction ladder:
@@ -2575,14 +2610,14 @@ async def _llm_confirms_contradiction(content_a: str, content_b: str) -> bool | 
     ``None``: extraction maps it to "no contradiction" (fail-open, unchanged);
     the assertion pathway fails closed (quarantine + INCONSISTENCY).
     """
-    prompt = _contradiction_prompt(content_a, content_b)
+    system, prompt = _contradiction_prompt(content_a, content_b)
     try:
         from particles.llm import complete
 
         # The reconcile-ladder contradiction check is part of the semantic-lint
         # purpose: it mirrors the L-SEM-01 lint prompt.
         response = await complete(
-            "semantic_lint", prompt, max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS
+            "semantic_lint", prompt, max_tokens=_CONTRADICTION_PROBE_MAX_TOKENS, system=system
         )
     except EgressRefused as exc:
         # A standing policy, not a failure: the caller's
@@ -2624,15 +2659,13 @@ async def _has_contradiction_signal(content_a: str, content_b: str) -> bool | No
     return await _llm_confirms_contradiction(content_a, content_b)
 
 
-def _update_prompt(
-    earlier: str,
-    later: str,
+def _update_instructions(
     *,
     reported_change: bool = True,
     configuration: bool = False,
     bounded_lasting: bool = True,
 ) -> str:
-    """The rung 2.5 update-probe prompt (one source of truth).
+    """The rung 2.5 update probe's trusted instructions (one source of truth).
 
     The contradiction probe asks whether two claims can both be true. Rung 2.5
     needs a narrower answer before it retires anything on a date: whether the
@@ -2761,9 +2794,34 @@ def _update_prompt(
         "REASON: <one sentence of at most 25 words naming the slot, or why the "
         "claims fill different slots>\n"
         f"{UPDATE_SLOT_REQUEST}, or SLOT: NONE when they fill different slots\n"
-        "VERDICT: YES or VERDICT: NO\n\n"
-        f"Claim A: {earlier}\n\nClaim B: {later}"
+        "VERDICT: YES or VERDICT: NO"
     )
+
+
+def _update_prompt(
+    earlier: str,
+    later: str,
+    *,
+    nonce: str | None = None,
+    reported_change: bool = True,
+    configuration: bool = False,
+    bounded_lasting: bool = True,
+) -> tuple[str, str]:
+    """``(system, user)`` for one reading of the update probe.
+
+    The instructions (:func:`_update_instructions`, with the same switches) go
+    in the system turn and both claims are fenced in the user turn (security
+    F3): a verdict here can retire a claim, so a claim must not be able to
+    answer for the model. Both readings build their own request, each with its
+    own nonce. ``nonce`` is fixed only by :func:`update_prompt_hash`.
+    """
+    nonce = nonce or make_nonce()
+    instructions = _update_instructions(
+        reported_change=reported_change,
+        configuration=configuration,
+        bounded_lasting=bounded_lasting,
+    )
+    return _fenced_system(instructions, nonce), _claim_pair_turn(earlier, later, nonce)
 
 
 #: Folded into the update-slot prompt hash: a verdict settled by two readings
@@ -2773,7 +2831,9 @@ UPDATE_SLOT_PROTOCOL = "second-reading:verification"
 
 def update_prompt_hash() -> str:
     """The update-slot probe's version: its prompt and its reading protocol."""
-    return prompt_hash(_update_prompt("{earlier}", "{later}"), UPDATE_SLOT_PROTOCOL)
+    return prompt_hash(
+        *_update_prompt("{earlier}", "{later}", nonce="{nonce}"), UPDATE_SLOT_PROTOCOL
+    )
 
 
 def _slot_verdict(reply: str) -> SlotVerdict | None:
@@ -2834,13 +2894,16 @@ def _as_slot_verdict(verdict: UpdateVerdict) -> SlotVerdict | None:
     return None if verdict is UpdateVerdict.ABSTAIN else SlotVerdict(verdict.value)
 
 
-async def _slot_call(prompt: str, purpose: LLMPurpose, budgets: list[int]) -> SlotVerdict | None:
+async def _slot_call(
+    request: tuple[str, str], purpose: LLMPurpose, budgets: list[int]
+) -> SlotVerdict | None:
     """One reading of the slot question through the breaker seam.
 
     A reply with no usable verdict (cut at the budget, empty because a thinking
     model spent it all, or off protocol) is re-issued at the next budget, if
     any. A failed call (breaker open, network, refusal) is not retried.
     """
+    system, prompt = request
     response = ""
     for attempt, max_tokens in enumerate(budgets):
         if attempt:
@@ -2856,6 +2919,7 @@ async def _slot_call(prompt: str, purpose: LLMPurpose, budgets: list[int]) -> Sl
         reply = await _llm_call(
             prompt,
             max_tokens=max_tokens,
+            system=system,
             purpose=purpose,
             empty_reply_as_text=len(budgets) > 1,
         )
@@ -3024,7 +3088,7 @@ async def _hold_retired_reassertion(
     return held
 
 
-async def _restatement_judge_call(prompt: str, *, max_tokens: int) -> str | None:
+async def _restatement_judge_call(prompt: str, *, max_tokens: int, system: str) -> str | None:
     """The duplicate judge's model call for the restatement match.
 
     Deferred import: a test seam. Tests patch ``particles.llm.breaker._llm_call``,
@@ -3033,7 +3097,7 @@ async def _restatement_judge_call(prompt: str, *, max_tokens: int) -> str | None
     """
     from particles.llm.breaker import _llm_call
 
-    return await _llm_call(prompt, max_tokens=max_tokens)
+    return await _llm_call(prompt, max_tokens=max_tokens, system=system)
 
 
 async def _restatement_slot(earlier: str, later: str) -> UpdateGuard:
