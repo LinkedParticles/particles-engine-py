@@ -22,6 +22,11 @@ class RefreshOutcome(StrEnum):
 
     MISSING = "missing"
     """No snapshot came back: the source is unavailable, or the entry is not refetchable."""
+    ABSENT_RECORDED = "absent_recorded"
+    """No snapshot came back, and the entry's latest record is already ``ABSENT``.
+
+    The deletion is recorded, so it is not counted as missing.
+    """
     UNCHANGED_MTIME = "unchanged_mtime"
     """The latest snapshot came back untouched: a tier-1 short-circuit, before any read."""
     UNCHANGED_HASH = "unchanged_hash"
@@ -29,27 +34,33 @@ class RefreshOutcome(StrEnum):
     CHANGED = "changed"
     """A new RESPONSE snapshot landed PENDING."""
     REFUSED = "refused"
-    """Not read: the local source lies outside every allowed root.
+    """Not read: the root allowlist refuses the local source.
+
+    The source lies outside every allowed root, or an untrusted depositor
+    enrolled it (``corpus.fetch.RefreshRefusal`` names which).
 
     Decided by the refresh loop before the ladder runs, never by
     :func:`classify_refresh`.
     """
 
 
-def classify_refresh(before_id: str | None, snap: Snapshot | None) -> RefreshOutcome:
+def classify_refresh(
+    before_id: str | None, snap: Snapshot | None, *, before_absent: bool = False
+) -> RefreshOutcome:
     """Classify a refetch result against the entry's latest snapshot id before it.
 
     Args:
         before_id: The entry's newest snapshot id before the refetch, or None
             when it had none.
         snap: What ``maybe_refetch`` returned.
+        before_absent: Whether that newest snapshot is an ``ABSENT`` record.
 
     Returns:
         The outcome. A returned snapshot whose id equals ``before_id`` is
         ``UNCHANGED_MTIME`` whatever its record type, since no new row was written.
     """
     if snap is None:
-        return RefreshOutcome.MISSING
+        return RefreshOutcome.ABSENT_RECORDED if before_absent else RefreshOutcome.MISSING
     if snap.snapshot_id == before_id:
         return RefreshOutcome.UNCHANGED_MTIME
     if snap.warc_record_type is WarcRecordType.REVISIT:

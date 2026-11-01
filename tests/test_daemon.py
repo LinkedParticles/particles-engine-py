@@ -130,6 +130,8 @@ async def test_inbox_tick_skips_the_read_until_the_mtime_moves(
 
     async def _fake_process_inbox(_session: Any, path: Path, **_kw: Any) -> dict[str, list[str]]:
         calls.append(path)
+        # Marks every line, as the real pass does, so none is left pending.
+        path.write_text("".join(f"# done {line}\n" for line in path.read_text().splitlines()))
         return {"processed": ["https://example.com/one"], "failed": [], "refused": []}
 
     monkeypatch.setattr("particles.operations.inbox.process_inbox", _fake_process_inbox)
@@ -169,6 +171,7 @@ async def test_web_clipper_tick_rescans_only_on_change(
 
     monkeypatch.setattr("particles.operations.deposit.deposit_web_clipper", _fake_scan)
     monkeypatch.setattr("particles.db.session_scope", _fake_session_scope)
+    monkeypatch.setattr("particles.db.write_transaction", _fake_write_transaction)
 
     tick = daemon_mod._make_web_clipper_tick(captures)
     assert await tick() == "deposited 1"
@@ -225,6 +228,24 @@ async def test_consolidation_tick_passes_if_due(monkeypatch: pytest.MonkeyPatch)
     assert captured["if_due"] is True
     assert captured["store"] == "default"
     assert outcome.startswith("skipped: not due")
+
+
+@pytest.mark.asyncio
+async def test_a_lock_skip_names_no_holder_on_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Security review 2026-10-24-2, N8: /health is open, the lock holder's pid is not."""
+
+    async def _fake_run_consolidation(_session: Any, **_kwargs: Any) -> Any:
+        return _Report(outcome="skipped", skip_reason="held by pid 4242 on host-a since 09:00")
+
+    monkeypatch.setattr(
+        "particles.operations.consolidation.run_consolidation", _fake_run_consolidation
+    )
+    monkeypatch.setattr("particles.db.session_scope", _fake_session_scope)
+
+    outcome = await consolidation_tick()
+
+    assert outcome == "skipped: another run holds the cycle lock (details in the engine log)"
+    assert "4242" not in outcome and "host-a" not in outcome
 
 
 @pytest.mark.asyncio
@@ -417,6 +438,10 @@ def _fake_session_scope(_store: str = "default") -> _FakeSessionScope:
     return _FakeSessionScope()
 
 
+def _fake_write_transaction(_session: Any, _store: str = "default") -> _FakeSessionScope:
+    return _FakeSessionScope()
+
+
 @pytest.mark.asyncio
 async def test_a_failing_tick_reports_its_type_but_not_its_message() -> None:
     """A tick's exception text can carry SQL parameters and URLs; /health is open (N8)."""
@@ -432,3 +457,79 @@ async def test_a_failing_tick_reports_its_type_but_not_its_message() -> None:
     await asyncio.gather(task, return_exceptions=True)
     assert status.last_error == "RuntimeError (message in the engine log)"
     assert "secret belief" not in status.model_dump_json()
+
+
+def test_the_captures_tick_commits_what_it_deposits(
+    cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture the watcher reports as deposited is in the store after the tick
+    (security review 2026-10-26-1, W11, W24)."""
+    from particles.config import get_config
+    from particles.corpus.store import list_entries
+    from particles.db import get_engine, session_scope
+
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / "note.md").write_text(
+        "---\nsource: https://example.org/page\ntitle: A page\n---\n\nThe page body text.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(get_config().network, "egress", "none")
+
+    async def _count() -> int:
+        try:
+            async with session_scope() as s:
+                return len(list(await list_entries(s)))
+        finally:
+            await get_engine().dispose()
+
+    before = asyncio.run(_count())
+    tick = daemon_mod._make_web_clipper_tick(captures)
+
+    async def _run() -> str:
+        try:
+            return await tick()
+        finally:
+            await get_engine().dispose()
+
+    assert asyncio.run(_run()) == "deposited 1"
+    assert asyncio.run(_count()) == before + 1
+
+
+def test_one_unbuildable_capture_does_not_stop_the_tick_committing_the_rest(
+    cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture whose header cannot be built is skipped, and the tick commits the rest (G17)."""
+    from particles.config import get_config
+    from particles.corpus.store import list_entries
+    from particles.db import get_engine, session_scope
+
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / "a.md").write_text(
+        "---\nsource: https://example.org/page\ntitle: A page\n---\n\nThe page body text.\n",
+        encoding="utf-8",
+    )
+    (captures / "b.md").write_text(
+        "---\nk: " + "[" * 3000 + "]" * 3000 + "\n---\nBody.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(get_config().network, "egress", "none")
+
+    async def _count() -> int:
+        try:
+            async with session_scope() as s:
+                return len(list(await list_entries(s)))
+        finally:
+            await get_engine().dispose()
+
+    before = asyncio.run(_count())
+    tick = daemon_mod._make_web_clipper_tick(captures)
+
+    async def _run() -> str:
+        try:
+            return await tick()
+        finally:
+            await get_engine().dispose()
+
+    assert asyncio.run(_run()) == "deposited 2"
+    assert asyncio.run(_count()) == before + 2

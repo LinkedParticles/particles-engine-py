@@ -55,6 +55,8 @@ from particles.interchange import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -788,6 +790,82 @@ def test_read_yaml_ld_rejects_bytes_over_cap(monkeypatch) -> None:  # type: igno
         yaml_mod.read_yaml_ld(oversized)
 
 
+def _alias_document(field: str, depth: int, fanout: int) -> str:
+    """One valid unit as YAML-LD whose ``field`` nests ``fanout ** depth`` aliased leaves."""
+    import yaml
+
+    from particles.interchange.codec import to_unit
+
+    unit = to_unit(_particle().model_copy(update={"subject_ids": [], "properties": None}), {})
+    unit.pop("basis", None)
+    unit.pop("properties", None)
+    text = yaml.safe_dump([unit], allow_unicode=True)
+    lines = [f"  {field}:", "    l0: &a0 [x" + ", x" * (fanout - 1) + "]"]
+    for i in range(1, depth):
+        lines.append(f"    l{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * fanout) + "]")
+    return text + "\n".join(lines) + "\n"
+
+
+def test_a_yaml_ld_member_cannot_decode_past_the_byte_cap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """R14: anchors and aliases cannot decode a member past its byte cap."""
+    from particles.interchange import yaml_ld as yaml_mod
+    from particles.interchange.codec import from_unit
+
+    cap = 64 * 1024
+    monkeypatch.setattr(yaml_mod, "_MAX_BUNDLE_BYTES", cap)
+    text = _alias_document("basis", depth=5, fanout=10)  # 10**5 leaves
+    assert len(text.encode()) < 4096
+
+    try:
+        parsed = [from_unit(u) for u in yaml_mod.read_yaml_ld(text)]
+    except ValueError:
+        return
+    expanded = sum(len(p.particle.model_dump_json()) for p in parsed)
+    assert expanded <= cap, f"{len(text)} input bytes decoded to a {expanded}-byte particle"
+
+
+def test_a_self_referencing_yaml_ld_alias_is_refused() -> None:
+    """R14: an anchor that contains its own alias is refused, not walked forever."""
+    from particles.interchange import yaml_ld as yaml_mod
+
+    with pytest.raises(ValueError, match="anchors and aliases"):
+        yaml_mod.read_yaml_ld("- &a {basis: [*a]}\n")
+
+
+def test_aliases_the_writer_emits_still_round_trip() -> None:
+    """R14: the bound keeps the shared values ``safe_dump`` writes as aliases."""
+    from particles.interchange import yaml_ld as yaml_mod
+
+    shared = ["one", "two"]
+    units = [{"a": shared, "b": shared}]
+    text = write_yaml_ld(units)
+    assert "*id" in text
+    assert yaml_mod.read_yaml_ld(text) == units
+
+
+async def test_an_imported_yaml_ld_member_stores_no_more_than_the_member_cap(  # type: ignore[no-untyped-def]
+    db_session, monkeypatch
+) -> None:
+    """R14: a YAML-LD bundle member never stores a particle larger than the member cap."""
+    from sqlalchemy import text
+
+    from particles.interchange import yaml_ld as yaml_mod
+    from particles.interchange.store import PARTICLES_BASE, import_store_bundle
+
+    cap = 64 * 1024
+    monkeypatch.setattr(yaml_mod, "_MAX_BUNDLE_BYTES", cap)
+    member = _alias_document("properties", depth=5, fanout=10)
+    assert len(member.encode()) < 4096
+    try:
+        await import_store_bundle(db_session, {f"{PARTICLES_BASE}.yaml": member})
+    except ValueError:
+        return
+    await db_session.flush()
+    rows = (await db_session.execute(text("SELECT properties_json FROM particles"))).all()
+    stored = max((len(r[0] or "") for r in rows), default=0)
+    assert stored <= cap, f"{len(member)} member bytes stored a {stored}-byte properties column"
+
+
 async def test_store_bundle_yaml_container_round_trip(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A YAML-LD store bundle carries the same knowledge-graph core and re-imports."""
     from unittest.mock import MagicMock
@@ -929,10 +1007,131 @@ async def test_import_never_binds_a_foreign_subject_through_a_persona_alias(db_s
     assert imported_id != persona.id
 
     unit = subject_to_unit(Subject(canonical_name="User", asserted_by="elsewhere"))
-    assert await _import_subject_unit(db_session, unit) is True
+    assert await _import_subject_unit(db_session, unit) == (True, False)
     # The persona's own canonical name still joins, as it always has.
     same_id, created = await _resolve_subject_ref(db_session, SubjectRef(canonical_name="the user"))
     assert (same_id, created) == (persona.id, False)
+
+
+@pytest.fixture
+def stub_embedding_model():  # type: ignore[no-untyped-def]
+    """A fixed-vector encoder, so an import's re-embed needs no real model."""
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from particles import embeddings as ep
+
+    model = MagicMock()
+    model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
+    original = ep._embedding_model
+    ep.set_embedding_model(model)
+    try:
+        yield
+    finally:
+        ep.set_embedding_model(original)
+
+
+@pytest.mark.usefixtures("stub_embedding_model")
+class TestReservedAsserterOnImport:
+    """An import never grants a server identity's authority (security review 2026-10-25-1, Q34).
+
+    The memory-server façade owns and tombstones by its asserter identity, and
+    the agent verbs mutate what the agent identity asserted. A bundle is bytes
+    its author chose, so a unit naming either is re-stamped ``interchange-import``
+    and the claimed identity is kept as an ``author`` contributor.
+    """
+
+    @staticmethod
+    def _identities() -> list[str]:
+        from particles.config import get_config
+
+        mcp = get_config().mcp
+        return [mcp.write.asserter_identity, mcp.memory_compat.asserter_identity]
+
+    @pytest.mark.parametrize("which", [0, 1], ids=["agent", "facade"])
+    async def test_a_particle_naming_a_server_identity_is_restamped(
+        self, db_session: AsyncSession, which: int
+    ) -> None:
+        from particles.core.schema import ContributorRef
+        from particles.interchange.store import IMPORT_ASSERTER, import_units
+        from particles.store.particle_store import get_active_particles
+
+        reserved = self._identities()[which]
+        original = _particle().model_copy(update={"asserted_by": reserved, "subject_ids": []})
+        summary = await import_units(db_session, [to_unit(original, {})])
+        await db_session.commit()
+        assert (summary.imported, summary.restamped) == (1, 1)
+        [imported] = await get_active_particles(db_session)
+        assert imported.asserted_by == IMPORT_ASSERTER
+        assert imported.contributors == [
+            ContributorRef(id=reserved, role="author", at=original.asserted_at)
+        ]
+
+    async def test_an_agent_cannot_retract_an_imported_belief_stamped_as_its_own(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.db import DEFAULT_STORE
+        from particles.interchange.store import import_units
+        from particles.operations.agent_write import retract_belief
+        from particles.store.particle_store import get_active_particles
+
+        original = _particle().model_copy(
+            update={"asserted_by": self._identities()[0], "subject_ids": []}
+        )
+        await import_units(db_session, [to_unit(original, {})])
+        await db_session.commit()
+        [imported] = await get_active_particles(db_session)
+        with pytest.raises(ValueError, match="cross-asserter mutation"):
+            await retract_belief(
+                db_session, store=DEFAULT_STORE, particle_id=imported.id, reason="cleanup"
+            )
+
+    async def test_another_asserter_is_kept_as_an_author_contributor(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Any asserter is re-stamped, since any principal name can be an
+        agent key's (security review 2026-10-26-1, W38); only a server identity
+        counts as ``restamped``."""
+        from particles.core.schema import ContributorRef
+        from particles.interchange.store import IMPORT_ASSERTER, import_units
+        from particles.store.particle_store import get_active_particles
+
+        original = _particle()
+        summary = await import_units(db_session, [to_unit(original, _subjects())])
+        await db_session.commit()
+        assert summary.restamped == 0
+        [imported] = await get_active_particles(db_session)
+        assert imported.asserted_by == IMPORT_ASSERTER
+        assert imported.contributors == [
+            ContributorRef(id="general-extractor", role="author", at=original.asserted_at)
+        ]
+
+    async def test_a_subject_naming_a_server_identity_is_restamped(
+        self, db_session: AsyncSession
+    ) -> None:
+        import json
+
+        from particles.interchange.codec import subject_to_unit
+        from particles.interchange.store import IMPORT_ASSERTER, import_store_bundle
+        from particles.store.subject_store import find_by_name
+
+        units = [
+            subject_to_unit(Subject(canonical_name="Eris", asserted_by=self._identities()[1])),
+            subject_to_unit(Subject(canonical_name="Ceres", asserted_by="operator")),
+        ]
+        member = "".join(json.dumps(u) + "\n" for u in units)
+        summary = await import_store_bundle(db_session, {"subjects.jsonl": member})
+        await db_session.commit()
+        assert (summary.subjects_created, summary.restamped) == (2, 1)
+        eris = await find_by_name(db_session, "Eris")
+        ceres = await find_by_name(db_session, "Ceres")
+        assert eris is not None and ceres is not None
+        assert eris.asserted_by == IMPORT_ASSERTER
+        assert [(c.id, c.role) for c in eris.contributors or []] == [
+            (self._identities()[1], "author")
+        ]
+        assert ceres.asserted_by == "operator"
 
 
 class TestPackageRootSurface:
@@ -1274,3 +1473,171 @@ def test_restore_of_one_oversized_file_is_refused(tmp_path, monkeypatch) -> None
     one.write_bytes(b"y" * 11)
     with pytest.raises(BundleReadError):
         _read_member_file(one, None)
+
+
+# --- Member bounds (security review 2026-10-26-1, W19, W20) ------------------
+
+
+def _alias_member(fanout: int) -> str:
+    inner = "[" + ",".join(["[]"] * 1000) + "]"
+    middle = "[" + ",".join(["*a"] * 1000) + "]"
+    outer = "[" + ",".join(["*b"] * fanout) + "]"
+    return f"- a: &a {inner}\n  b: &b {middle}\n  c: {outer}\n"
+
+
+def test_a_small_yaml_ld_member_cannot_decode_to_millions_of_nodes() -> None:
+    """A member under 8 KiB that aliases one anchor into ten million nodes is refused, quickly."""
+    import time
+
+    from particles.interchange.yaml_ld import read_yaml_ld
+
+    member = _alias_member(10)
+    assert len(member.encode()) < 8 * 1024
+    started = time.monotonic()
+    with pytest.raises(ValueError):
+        read_yaml_ld(member)
+    assert time.monotonic() - started < 2.0
+
+
+def test_a_yaml_ld_member_sharing_a_value_still_round_trips() -> None:
+    """The writer's anchors for a shared value still read back."""
+    from particles.interchange.yaml_ld import read_yaml_ld, write_yaml_ld
+
+    shared = {"k": "v", "n": [1, 2]}
+    units = [{"@type": "Particle", "props": shared}, {"@type": "Particle", "props": shared}]
+    assert read_yaml_ld(write_yaml_ld(units)) == units
+
+
+def test_a_bundle_never_buffers_more_than_one_member_cap_in_unnamed_members(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory of many capped members is refused rather than buffered whole."""
+    from particles.api.cli import interchange as cli_interchange
+    from particles.interchange import jsonl
+
+    monkeypatch.setattr(jsonl, "_MAX_BUNDLE_BYTES", 1000)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for i in range(8):
+        (bundle / f"extra{i}.json").write_text("x" * 900)
+    with pytest.raises(cli_interchange.BundleReadError):
+        cli_interchange._read_bundle_members(bundle)
+
+
+def test_a_bundle_reads_its_named_members_each_to_the_member_cap(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest, particles and subjects members each keep the per-member cap."""
+    from particles.api.cli import interchange as cli_interchange
+    from particles.interchange import jsonl
+
+    monkeypatch.setattr(jsonl, "_MAX_BUNDLE_BYTES", 1000)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name in ("manifest.json", "particles.jsonl", "subjects.jsonl", "x.corpus.jsonl"):
+        (bundle / name).write_text("x" * 900)
+    assert sorted(cli_interchange._read_bundle_members(bundle)) == [
+        "manifest.json",
+        "particles.jsonl",
+        "subjects.jsonl",
+        "x.corpus.jsonl",
+    ]
+
+
+def test_a_bundle_directory_buffers_at_most_four_member_caps(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A bundle directory buffers no more than the manifest, one particles, one subjects
+    and one shared cap, however many spellings of a base it holds (G57)."""
+    from particles.api.cli import interchange as cli_interchange
+    from particles.interchange import jsonl
+
+    cap = 1000
+    monkeypatch.setattr(jsonl, "_MAX_BUNDLE_BYTES", cap)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    for name in sorted(cli_interchange._NAMED_MEMBERS):
+        (bundle / name).write_text("x" * 900)
+    (bundle / "x.corpus.jsonl").write_text("x" * 900)
+    try:
+        files = cli_interchange._read_bundle_members(bundle)
+    except cli_interchange.BundleReadError:
+        return
+    assert sum(len(v) for v in files.values()) <= 4 * cap
+
+
+def test_the_first_read_spelling_of_a_base_keeps_its_own_cap(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The spelling the import reads takes its own cap; a second spelling shares the other cap."""
+    from particles.api.cli import interchange as cli_interchange
+    from particles.interchange import jsonl
+
+    monkeypatch.setattr(jsonl, "_MAX_BUNDLE_BYTES", 1000)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text("{}")
+    (bundle / "particles.jsonl").write_text("x" * 900)
+    (bundle / "particles.yaml").write_text("y" * 50)
+    files = cli_interchange._read_bundle_members(bundle)
+    assert set(files) == {"manifest.json", "particles.jsonl", "particles.yaml"}
+
+
+def test_a_malformed_yaml_ld_member_is_refused_as_malformed() -> None:
+    """A member that is not valid YAML is a ``ValueError`` the import reports (G17)."""
+    with pytest.raises(ValueError, match="not valid YAML"):
+        read_yaml_ld("- a: [1, 2\n- b: }\n")
+
+
+# Peak per input byte does not depend on the unit count (2000 to 8000 units give
+# the same ratio to the JSONL reader within 0.02), so 2000 pin it at a quarter
+# of the cost under ``tracemalloc``.
+_PEAK_UNITS = 2000
+
+
+def test_a_yaml_ld_member_costs_no_more_memory_per_byte_than_four_times_the_jsonl_reader() -> None:
+    """Both containers admit a member at one cap, so both readers cost the same order of memory.
+
+    The YAML-LD reader builds one unit at a time; holding the composer's nodes
+    for the whole member cost about nine times the JSONL reader's peak per
+    input byte (security review 2026-10-28-2, AA16).
+    """
+    import json
+    import tracemalloc
+
+    from particles.interchange.jsonl import read_jsonl
+    from particles.interchange.yaml_ld import read_yaml_ld
+
+    def _peak(fn: Callable[[str], object], arg: str) -> int:
+        tracemalloc.start()
+        try:
+            fn(arg)
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    units = [
+        {
+            "@context": "https://linkedparticles.org/ns/v1",
+            "@type": "Particle",
+            "id": f"p{i}",
+            "content": "x",
+        }
+        for i in range(_PEAK_UNITS)
+    ]
+    jsonl_text = "".join(json.dumps(u) + "\n" for u in units)
+    yaml_text = "".join(
+        f'- "@context": https://linkedparticles.org/ns/v1\n  "@type": Particle\n'
+        f"  id: p{i}\n  content: x\n"
+        for i in range(_PEAK_UNITS)
+    )
+    assert read_yaml_ld(yaml_text) == units
+    jsonl_per_byte = _peak(read_jsonl, jsonl_text) / len(jsonl_text)
+    yaml_per_byte = _peak(read_yaml_ld, yaml_text) / len(yaml_text)
+    assert yaml_per_byte <= 4 * jsonl_per_byte, (
+        f"YAML-LD peak {yaml_per_byte:.0f} B per input byte against JSONL {jsonl_per_byte:.0f}"
+    )
+
+
+def test_a_yaml_ld_member_past_the_unit_cap_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from particles.interchange import yaml_ld
+
+    monkeypatch.setattr(yaml_ld, "_MAX_UNITS", 2)
+    with pytest.raises(ValueError, match="unit import cap"):
+        yaml_ld.read_yaml_ld("- {a: 1}\n- {a: 2}\n- {a: 3}\n")

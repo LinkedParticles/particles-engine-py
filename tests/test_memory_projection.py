@@ -1780,7 +1780,8 @@ class TestIndexEntries:
 # client's manifest and answers the fold verdicts; the client splices.
 # ---------------------------------------------------------------------------
 
-_ENGINE = "http://engine.test"
+# https: the client refuses a token over non-loopback http://.
+_ENGINE = "https://engine.test"
 
 
 @pytest.fixture
@@ -1807,7 +1808,11 @@ def remote_engine(
         'api:\n  allowed_hosts: ["engine.test"]\n'
     )
     monkeypatch.setenv("PARTICLES_CONFIG", str(client_config))
-    monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
+    # A real key on both sides: the harvest names the harvester's marks, which
+    # a deposit route accepts only with a real bearer (security review
+    # 2026-10-24-2, P5).
+    monkeypatch.setenv("PARTICLES_API_KEY", "test-engine-key")
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "test-engine-key")
     reset_config()
     bind_hooks_to_engine(tmp_path, client_config)
 
@@ -1981,3 +1986,30 @@ class TestRemoteEngine:
         assert "ClientFileSectionError" in projection["error"]
         assert not (memory_dir / "MEMORY.md").exists()
         assert not any(p.startswith("/memory/projection") for p in remote_engine)
+
+
+def test_memory_md_is_read_capped_and_never_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The projection reads MEMORY.md through one capped descriptor that follows no link (W22)."""
+    from particles.api.cli._memory_projection import _read_memory_md
+    from particles.config import get_config
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    memory_md = memory_dir / "MEMORY.md"
+    assert _read_memory_md(memory_md) == (False, None)
+    memory_md.write_text("# index\n")
+    assert _read_memory_md(memory_md) == (True, b"# index\n")
+    cap = get_config().local_files.max_bytes
+    monkeypatch.setattr(get_config().local_files, "max_bytes", 4)
+    assert _read_memory_md(memory_md) == (True, None)
+    monkeypatch.setattr(get_config().local_files, "max_bytes", cap)
+    memory_md.unlink()
+    outside = tmp_path / "outside.md"
+    outside.write_text("not this directory's\n")
+    memory_md.symlink_to(outside)
+    assert _read_memory_md(memory_md) == (True, None)
+    memory_md.unlink()
+    memory_md.symlink_to(tmp_path / "missing.md")
+    assert _read_memory_md(memory_md) == (True, None)

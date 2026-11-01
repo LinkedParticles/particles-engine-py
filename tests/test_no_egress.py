@@ -38,6 +38,7 @@ from particles.config import (
     ProviderSelection,
     get_config,
 )
+from tests._engine_client import keyed_engine_client
 
 _EXTRACTION_REPLY = json.dumps(
     [
@@ -463,12 +464,9 @@ class TestWikidataLabels:
 
 
 class TestDepositPaths:
-    def test_api_deposit_is_a_403(self, refusing: None) -> None:
-        from fastapi.testclient import TestClient
-
-        from particles.api.app import app
-
-        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
+    def test_api_deposit_is_a_403(self, refusing: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A keyed engine: a keyless one refuses every write.
+        client = keyed_engine_client(monkeypatch)
         resp = client.post("/corpus/deposit/url", json={"url": "https://example.org/page"})
         assert resp.status_code == 403
         assert resp.json()["error"] == "egress_refused"
@@ -594,7 +592,29 @@ class TestEncoderAndTelemetry:
             assert ep.get_embedding_model() is None  # remembered, not retried
         finally:
             ep.set_embedding_model(original)
-        assert seen == [{"local_files_only": True}]
+        # The pinned revision only: never the hub, and never the cache's `main`
+        # ref, which another tool may have refreshed (security review Q58).
+        assert seen == [{"revision": ep.EMBEDDING_MODEL_REVISION, "local_files_only": True}]
+
+    def test_a_pinned_only_cache_counts_as_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A download by commit writes no `main` ref; the posture report still sees it (P38)."""
+        import huggingface_hub
+
+        from particles import network_posture
+
+        def fake(repo: str, filename: str, revision: str | None = None) -> str | None:
+            return "/cache/config.json" if revision == ep.EMBEDDING_MODEL_REVISION else None
+
+        monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", fake)
+        assert network_posture.encoder_cached() is True
+
+        def legacy(repo: str, filename: str, revision: str | None = None) -> str | None:
+            return "/cache/config.json" if revision is None else None
+
+        # A cache holding only another revision is not the encoder the load
+        # accepts, so the report does not call it cached (Q58).
+        monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", legacy)
+        assert network_posture.encoder_cached() is False
 
     def test_otlp_endpoint_refused(self, refusing: None) -> None:
         from particles.config import ObservabilityConfig
@@ -642,3 +662,179 @@ class TestReports:
         lines = _check_egress()
         assert lines[0].startswith("egress:         none")
         assert any("use_judge refused" in line for line in lines)
+
+
+def test_engine_served_without_its_lifespan_has_the_backstop_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security review 2026-10-25, Q46: an engine serving under ``none`` has the backstop armed.
+
+    A server run with its lifespan off (``uvicorn --lifespan off``, or a
+    TestClient used outside a ``with`` block) never enters the lifespan, so the
+    first request arms the backstop instead.
+    """
+    from fastapi.testclient import TestClient
+
+    from particles.api.app import app
+
+    egress.disarm_backstop()
+    monkeypatch.setattr(get_config(), "network", NetworkConfig(egress="none"))
+    client = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8000")
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    try:
+        assert egress._backstop_policy is not None
+        assert egress._backstop_policy.posture == "none"
+    finally:
+        egress.disarm_backstop()
+
+
+def test_engine_refuses_to_start_on_uvloop_under_a_refusing_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B49: a raw ``uvicorn`` launch picks uvloop, whose sockets the backstop cannot see.
+
+    The lifespan is driven on a uvloop loop, as uvicorn's ``auto`` factory would
+    run it, and must abort startup before it creates tables or starts the daemon.
+    """
+    uvloop = pytest.importorskip("uvloop")
+    from particles.api import app as app_mod
+
+    monkeypatch.setattr(get_config(), "network", NetworkConfig(egress="none"))
+    created: list[str] = []
+
+    async def no_tables() -> None:
+        created.append("tables")
+
+    monkeypatch.setattr(app_mod, "create_tables", no_tables)
+
+    async def start() -> None:
+        async with app_mod.lifespan(app_mod.app):
+            pass
+
+    try:
+        with pytest.raises(egress.UncoveredEventLoop):
+            uvloop.run(start())
+    finally:
+        egress.disarm_backstop()
+    assert created == []
+
+
+# ---------------------------------------------------------------------------
+# Every loop the CLI, hooks and MCP servers start (security review 2026-10-26-1, D18, U13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def uncovered_loops() -> Iterator[None]:
+    """Make every loop this test starts a uvloop loop, whose sockets skip the backstop."""
+    import asyncio
+    import warnings
+
+    uvloop = pytest.importorskip("uvloop")
+    with warnings.catch_warnings():
+        # The loop-policy API is deprecated from Python 3.14 and still honoured.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        previous = asyncio.get_event_loop_policy()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        try:
+            yield
+        finally:
+            asyncio.set_event_loop_policy(previous)
+            egress.disarm_backstop()
+
+
+def test_no_surface_starts_a_loop_of_its_own() -> None:
+    """Every package surface starts loops only through ``run_armed`` or a checked server.
+
+    The CLI, hooks and MCP servers, and the LangChain adapter's sync path too
+    (security review 2026-10-27-1, G51). ``db.py``'s engine dispose closes
+    connections and opens none; the benchmarks' child processes are the
+    documented exception. So is the migration environment the wheel packages as
+    ``_alembic/env.py`` (a checkout keeps it outside the package, at
+    ``alembic/env.py``): only ``db.create_tables`` runs it, on an executor
+    thread of a surface that already armed the process-wide backstop.
+    """
+    import ast
+
+    root = Path(egress.__file__).parent
+    bare: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("benchmark/") or rel in {"egress.py", "db.py", "_alembic/env.py"}:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"run", "run_until_complete"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"asyncio", "loop"}
+            ):
+                bare.append(f"{rel}:{node.lineno}")
+    assert bare == []
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "particles.api.cli.hook:_check_tables",
+        "particles.api.cli.extract:_is_pdf_entry",
+    ],
+)
+def test_a_diagnostic_probe_runs_with_the_backstop_armed(refusing: None, probe: str) -> None:
+    import importlib
+
+    module, name = probe.split(":")
+    egress.disarm_backstop()
+    try:
+        getattr(importlib.import_module(module), name)("default")
+        assert egress._backstop_policy is not None
+    finally:
+        egress.disarm_backstop()
+
+
+def test_run_armed_refuses_an_uncovered_loop_before_the_body_starts(
+    refusing: None, uncovered_loops: None
+) -> None:
+    ran: list[str] = []
+
+    async def body() -> None:
+        ran.append("body")
+
+    with pytest.raises(egress.UncoveredEventLoop):
+        egress.run_armed(body())
+    assert ran == []
+
+
+def test_open_admits_any_loop(uncovered_loops: None) -> None:
+    async def body() -> str:
+        return "ran"
+
+    assert egress.run_armed(body()) == "ran"
+
+
+def test_a_cli_verb_on_an_uncovered_loop_exits_1_with_one_line(
+    refusing: None, uncovered_loops: None
+) -> None:
+    from typer.testing import CliRunner
+
+    from particles.api.cli import app
+
+    result = CliRunner().invoke(app, ["mcp", "tools"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "network.egress is none" in result.output
+
+
+@pytest.mark.parametrize("verb", [["mcp", "serve"], ["memory", "serve"]])
+def test_an_mcp_server_on_an_uncovered_loop_refuses_to_start(
+    refusing: None, uncovered_loops: None, verb: list[str]
+) -> None:
+    from typer.testing import CliRunner
+
+    from particles.api.cli import app
+
+    result = CliRunner().invoke(app, verb, input="")
+    assert result.exit_code == 1, result.output
+    assert "network.egress is none" in result.output

@@ -217,11 +217,15 @@ async def _generate_response(
     if handles:
         system_body += "\n" + GROUNDED_RULES
     system = system_body + "\n\n" + data_fence_instruction(nonce)
+    # The coverage note names a stored subject, which deposited text or a
+    # Wikidata label supplied, so it rides a fence too (security review N33;
+    # 2026-10-24-2, P33). The confidence note is built from numbers only.
+    coverage = f"\n{fence(coverage_note, nonce, label='coverage_note')}" if coverage_note else ""
     user = (
         f"Question:\n{fence(question, nonce, label='question')}\n\n"
         f"Relevant particles ({audience.value} audience):\n"
         f"{fence(particle_list, nonce, label='particles')}\n\n"
-        f"{confidence_note}\n{coverage_note}"
+        f"{confidence_note}{coverage}"
     )
 
     cfg = get_config().query

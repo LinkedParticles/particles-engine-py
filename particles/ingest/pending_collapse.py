@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import db
 from particles.config import get_config
 from particles.core.schema import ExtractionStatus
 from particles.corpus.deposit import blob_path
@@ -57,7 +58,7 @@ from particles.corpus.store import (
     list_generations_with_unextracted_snapshots,
     mark_snapshot_superseded,
 )
-from particles.db import write_lock
+from particles.db import store_of
 
 log = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ async def collapse_superseded_pending(
         report.collapsed.extend(planned)
         return report
 
-    async with write_lock():
+    async with db.write_lock(store_of(session)):
         for entry_id, snapshot_id, superseded_by in planned:
             if await mark_snapshot_superseded(session, snapshot_id, superseded_by=superseded_by):
                 report.collapsed.append((entry_id, snapshot_id, superseded_by))

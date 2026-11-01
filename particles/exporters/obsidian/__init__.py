@@ -43,7 +43,6 @@ from particles.exporters.obsidian.format import (
     _strip_per_particle_callouts,
     _to_obsidian_block_refs,
     _to_superscript,
-    _wiki,
 )
 from particles.exporters.obsidian.synthesis import (
     _should_skip_synthesis_for_low_coverage,
@@ -90,5 +89,4 @@ __all__ = [
     "_subject_slug",
     "_to_obsidian_block_refs",
     "_to_superscript",
-    "_wiki",
 ]

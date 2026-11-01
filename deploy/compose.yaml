@@ -38,10 +38,13 @@ services:
     # Nothing here re-declares the entrypoint: the image already runs
     # `particles engine serve 0.0.0.0:8000 --daemon`.
     environment:
-      # Required. The bind is non-loopback, so the fail-closed gate
-      # refuses to start without it — `:?` fails the `up` with a clear message
-      # instead of letting the container crash-loop on the same refusal.
-      PARTICLES_API_KEY: ${PARTICLES_API_KEY:?set PARTICLES_API_KEY before `docker compose up` — the engine refuses to start on a non-loopback bind without it}
+      # The operator's key. The bind is non-loopback, so the fail-closed gate
+      # refuses to start without a real key: either this one, or a
+      # live per-client key in the volume's /data/engine-keys.json. To run
+      # on per-client keys alone, leave this unset and mint one first:
+      #   docker compose run --rm engine engine keys create --role operator --principal operator:local
+      # With neither, the engine logs the refusal and the container restarts on it.
+      PARTICLES_API_KEY: ${PARTICLES_API_KEY:-}
       # Optional. Without it the engine still serves every read/write verb;
       # the LLM-priced work (extraction, semantic lint, the consolidation
       # cycle's semantic passes) degrades to a disclosed structural-only run.

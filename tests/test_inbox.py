@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from particles.operations.inbox import (
+    apply_markers,
     format_failed_marker,
     format_processed_marker,
     parse_inbox,
@@ -217,3 +219,116 @@ class TestResolveInboxPath:
         path = resolve_inbox_path()
         assert path is not None
         assert path == tmp_path / "inbox.txt"
+
+
+class TestInboxTickIntegrity:
+    """O3, O7: the daemon's inbox tick writes under the writer lock and keeps late shares."""
+
+    @pytest.fixture
+    def inbox(self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from particles.config import get_config, reset_config
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("network:\n  egress: none\n", encoding="utf-8")
+        monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+        reset_config()
+        assert get_config().network.egress == "none"
+        return tmp_path / "inbox.md"
+
+    @staticmethod
+    def _run(tick: Any) -> Any:
+        import asyncio
+
+        async def go() -> Any:
+            from particles.db import get_engine
+
+            try:
+                return await tick()
+            finally:
+                await get_engine().dispose()
+
+        return asyncio.run(go())
+
+    def test_every_inbox_tick_deposit_writes_under_the_store_writer_lock(
+        self, inbox: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.corpus.deposit as dep
+        import particles.db as db
+        from particles.api.daemon import _make_inbox_tick
+
+        inbox.write_text("https://example.org/one\nhttps://example.org/two\n", encoding="utf-8")
+        held: list[bool] = []
+
+        async def fake_deposit_url(session: Any, url: str, **_: Any) -> tuple[str, str]:
+            # The real deposit fetches first, then writes in its write units.
+            async with dep._write_unit(session):
+                lock = db._async_write_locks.get("default")
+                held.append(bool(lock is not None and lock.locked()))
+            return "e-" + url[-3:], "s-" + url[-3:]
+
+        monkeypatch.setattr(dep, "deposit_url", fake_deposit_url)
+        result = self._run(_make_inbox_tick(inbox))
+        assert result.startswith("processed 2"), result
+        assert held and all(held), held
+
+    def test_a_url_appended_while_the_inbox_tick_runs_survives_its_rewrite(
+        self, inbox: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.corpus.deposit as dep
+        from particles.api.daemon import _make_inbox_tick
+
+        inbox.write_text("https://example.org/one\n", encoding="utf-8")
+
+        async def fake_deposit_url(session: Any, url: str, **_: Any) -> tuple[str, str]:
+            with inbox.open("a", encoding="utf-8") as fh:  # a share lands mid-pass
+                fh.write("https://example.org/late\n")
+            return "e-1", "s-1"
+
+        monkeypatch.setattr(dep, "deposit_url", fake_deposit_url)
+        self._run(_make_inbox_tick(inbox))
+        text = inbox.read_text(encoding="utf-8")
+        assert "\nhttps://example.org/late\n" in text
+        assert parse_inbox(text) == [(1, "https://example.org/late")]
+
+    def test_the_next_tick_deposits_a_url_shared_while_the_last_one_ran(
+        self, inbox: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A carried-over share is pending, so the next tick reads the file again (O21)."""
+        import particles.corpus.deposit as dep
+        from particles.api.daemon import _make_inbox_tick
+
+        inbox.write_text("https://example.org/one\n", encoding="utf-8")
+        calls: list[str] = []
+
+        async def fake_deposit_url(session: Any, url: str, **_: Any) -> tuple[str, str]:
+            if not calls:
+                with inbox.open("a", encoding="utf-8") as fh:  # a share lands mid-pass
+                    fh.write("https://example.org/late\n")
+            calls.append(url)
+            return "e-" + str(len(calls)), "s-" + str(len(calls))
+
+        monkeypatch.setattr(dep, "deposit_url", fake_deposit_url)
+        tick = _make_inbox_tick(inbox)
+        assert self._run(tick).startswith("processed 1")
+        assert self._run(tick).startswith("processed 1")
+        assert calls == ["https://example.org/one", "https://example.org/late"]
+        assert parse_inbox(inbox.read_text(encoding="utf-8")) == []
+        assert self._run(tick) == "unchanged"
+
+
+class TestApplyMarkers:
+    """O3: the rewrite marks processed lines in the file as it is now."""
+
+    def test_an_appended_line_after_an_unterminated_last_line_stays_its_own_line(self) -> None:
+        out = apply_markers("https://a", "https://ahttps://b\n", {0: ("https://a", "# done")})
+        assert out == "# done\nhttps://b\n"
+
+    def test_an_edited_file_keeps_its_lines_and_marks_the_url_where_it_now_is(self) -> None:
+        first = "https://a\nhttps://b\n"
+        current = "https://new\nhttps://b\nhttps://a\n"
+        out = apply_markers(first, current, {0: ("https://a", "# done a")})
+        assert out == "https://new\nhttps://b\n# done a\n"
+
+    def test_a_url_removed_during_the_pass_is_not_marked(self) -> None:
+        out = apply_markers("https://a\n", "https://z\n", {0: ("https://a", "# done a")})
+        assert out == "https://z\n"

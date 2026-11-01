@@ -33,6 +33,7 @@ from particles.core.schema import Particle
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.status import Status
 from particles.exporters.summaries import AnkiSummary
+from particles.render.escape import anki_deck, anki_field
 
 log = logging.getLogger(__name__)
 
@@ -202,12 +203,20 @@ class AnkiExporter:
             # field. Anki tags can't contain whitespace, so internal spaces
             # collapse to ``_``; the ``/`` hierarchy separator is a valid
             # tag character and is preserved.
-            tags_clean = " ".join("_".join(tag.split()) for tag in (particle.tags or []))
+            tags_clean = anki_field(
+                " ".join("_".join(tag.split()) for tag in (particle.tags or []))
+            )
             for subject_name in names:
-                full_deck = f"{deck_name}::{subject_name}"
+                # A stored subject name with a line break would end the
+                # ``#deck:`` header line and start card lines of its own, so
+                # the deck path is one line (security review 2026-10-27-1, R3),
+                # and its ``::`` adds no sub-deck (security review 2026-10-28-1).
+                full_deck = f"{' '.join(deck_name.split())}::{anki_deck(subject_name)}"
                 for front, back in _cards_for_particle(subject_name, particle, max_cards):
-                    front_clean = front.replace("\t", " ").replace("\n", " ")
-                    back_clean = back.replace("\t", " ").replace("\n", "<br>")
+                    # Every field is stored text: one field of one card line,
+                    # whatever tabs, line breaks or quotes it holds.
+                    front_clean = anki_field(front)
+                    back_clean = anki_field(back, line_separator="<br>")
                     deck_cards.setdefault(full_deck, []).append(
                         (front_clean, back_clean, tags_clean)
                     )

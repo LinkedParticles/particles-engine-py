@@ -16,6 +16,7 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.db import session_scope
 
 cache_app = typer.Typer(
@@ -76,16 +77,16 @@ async def _list_entries() -> None:
     async with session_scope() as session:
         rows = await list_cache_entries(session)
     if not rows:
-        typer.echo("Synthesis cache is empty.")
+        terminal_echo("Synthesis cache is empty.")
         return
     names = await _subject_name_map()
-    typer.echo(f"{len(rows)} cached article(s):")
+    terminal_echo(f"{len(rows)} cached article(s):")
     for r in rows:
         name = names.get(r.subject_id, "(subject deleted)")
         when = r.generated_at.strftime("%Y-%m-%d")
-        verdict = f"  [{r.layer_b_verdict}]" if r.layer_b_verdict else ""
-        typer.echo(
-            f"  {r.subject_id[:8]}…  {name}  hash={r.input_hash[:8]}…  "
+        verdict = f"  [{terminal_field(r.layer_b_verdict)}]" if r.layer_b_verdict else ""
+        terminal_echo(
+            f"  {r.subject_id[:8]}…  {terminal_field(name)}  hash={r.input_hash[:8]}…  "
             f"pv={r.prompt_version}  {when}  {len(r.article_body)} chars{verdict}"
         )
 
@@ -109,9 +110,9 @@ async def _show_entry(subject_prefix: str) -> None:
     resolved = await _resolve_subject(subject_prefix)
     if isinstance(resolved, list):
         if not resolved:
-            typer.echo(f"No cached articles for subject {subject_prefix!r}.", err=True)
+            terminal_echo(f"No cached articles for subject {subject_prefix!r}.", err=True)
         else:
-            typer.echo(
+            terminal_echo(
                 f"Subject prefix {subject_prefix!r} is ambiguous "
                 f"({len(resolved)} matches). Use a longer prefix.",
                 err=True,
@@ -122,17 +123,17 @@ async def _show_entry(subject_prefix: str) -> None:
     async with session_scope() as session:
         rows = [r for r in await list_cache_entries(session) if r.subject_id == resolved]
     name = names.get(resolved, "(subject deleted)")
-    typer.echo(f"Subject: {resolved}  ({name})")
+    terminal_echo(f"Subject: {resolved}  ({terminal_field(name)})")
     for i, r in enumerate(rows, start=1):
         if len(rows) > 1:
-            typer.echo(f"\n--- entry {i}/{len(rows)} ---")
-        typer.echo(f"input_hash:     {r.input_hash}")
-        typer.echo(f"prompt_version: {r.prompt_version}")
-        typer.echo(f"generated_at:   {r.generated_at.isoformat()}")
+            terminal_echo(f"\n--- entry {i}/{len(rows)} ---")
+        terminal_echo(f"input_hash:     {r.input_hash}")
+        terminal_echo(f"prompt_version: {r.prompt_version}")
+        terminal_echo(f"generated_at:   {r.generated_at.isoformat()}")
         if r.layer_b_verdict:
-            typer.echo(f"layer_b:        {r.layer_b_verdict}")
-        typer.echo("")
-        typer.echo(r.article_body)
+            terminal_echo(f"layer_b:        {terminal_field(r.layer_b_verdict)}")
+        terminal_echo("")
+        terminal_echo(r.article_body)
 
 
 async def _vacuum(dry_run: bool) -> None:
@@ -148,14 +149,14 @@ async def _vacuum(dry_run: bool) -> None:
             await session.commit()
 
     if total == 0:
-        typer.echo("Nothing to vacuum — every cache row is reachable.")
+        terminal_echo("Nothing to vacuum — every cache row is reachable.")
         return
     verb = "Would remove" if dry_run else "Removed"
-    typer.echo(f"{verb} {total} unreachable cache row(s):")
-    typer.echo(f"  stale prompt version: {counts['stale_prompt_version']}")
-    typer.echo(f"  orphaned subject:     {counts['orphaned_subject']}")
+    terminal_echo(f"{verb} {total} unreachable cache row(s):")
+    terminal_echo(f"  stale prompt version: {counts['stale_prompt_version']}")
+    terminal_echo(f"  orphaned subject:     {counts['orphaned_subject']}")
     if dry_run:
-        typer.echo("  (no changes made)")
+        terminal_echo("  (no changes made)")
 
 
 async def _evict(subject_prefix: str, yes: bool) -> None:
@@ -164,9 +165,9 @@ async def _evict(subject_prefix: str, yes: bool) -> None:
     resolved = await _resolve_subject(subject_prefix)
     if isinstance(resolved, list):
         if not resolved:
-            typer.echo(f"No cached articles for subject {subject_prefix!r}.", err=True)
+            terminal_echo(f"No cached articles for subject {subject_prefix!r}.", err=True)
         else:
-            typer.echo(
+            terminal_echo(
                 f"Subject prefix {subject_prefix!r} is ambiguous "
                 f"({len(resolved)} matches). Use a longer prefix.",
                 err=True,
@@ -178,4 +179,4 @@ async def _evict(subject_prefix: str, yes: bool) -> None:
     async with session_scope() as session:
         removed = await evict_subject(session, resolved)
         await session.commit()
-    typer.echo(f"Evicted {removed} cached article(s) for {resolved[:8]}….")
+    terminal_echo(f"Evicted {removed} cached article(s) for {resolved[:8]}….")

@@ -63,6 +63,7 @@ from particles.store.particle_store import (
     insert_particle,
     strip_entry_provenance_refs,
 )
+from tests import _source_tree
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "particles"
 COLUMN = "provenance_json"
@@ -144,7 +145,7 @@ class _WriteFinder(ast.NodeVisitor):
 
 def _writes_in(source: str) -> list[tuple[str, int]]:
     finder = _WriteFinder()
-    finder.visit(ast.parse(source))
+    finder.visit(_source_tree.parse(source))
     return finder.writes
 
 

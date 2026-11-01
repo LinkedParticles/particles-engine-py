@@ -61,9 +61,14 @@ already have the package installed, `"command": "particles"` with
     An MCP server is launched by your client as a child process and inherits
     almost nothing: not your shell, not your working directory, not your
     exports. A server started with neither `DATABASE_URL` nor
-    `PARTICLES_CONFIG` serves `~/.particles/particles.db` and says so on
-    stderr, which is rarely the store you meant, and one started with only
-    `PARTICLES_CONFIG` refuses a store path relative to its working directory.
+    `PARTICLES_CONFIG` serves the store `~/.particles/config.yaml` names (a
+    relative path there is read under `~/.particles/`), and with no such
+    store serves `~/.particles/particles.db` and says so on stderr, which is
+    rarely the store you meant. One started with only
+    `PARTICLES_CONFIG` refuses a store path relative to its working directory,
+    for the default store and for every named store, and refuses a relative
+    `PARTICLES_CONFIG` itself. A `DATABASE_URL` is used as given, so a relative
+    one opens against whatever directory the client starts the server in.
     Set both variables explicitly, with absolute paths, in every config
     below. `PARTICLES_CONFIG` is worth pinning for the same reason
     ([Configuration](../operator-guide/configuration.md) covers what lives in
@@ -291,14 +296,19 @@ mcp:
 ```
 
 Everything an agent writes is attributed to the server's agent identity and
-cites a source the agent deposited itself, so its source trust is
-`mcp.write.agent_trust_rank` (0.8 by default) and its confidence is capped at
-`mcp.write.max_asserted_confidence` (0.9 by default). Both feed
-[effective confidence](concepts.md#confidence): an agent's belief ranks below
-an equally confident, equally recent claim from a source you leave at neutral
-trust, though it can rank above a claim from a source you have marked down, or
-one extracted with lower confidence. Lower the agent's trust with `particles trust` if you
-want its writes ranked further down.
+cites a source the agent deposited itself, or one that reads exactly as such a
+deposit, so its source trust is `mcp.write.agent_trust_rank` (0.8 by default)
+and its confidence is capped at `mcp.write.max_asserted_confidence` (0.9 by
+default). One write names at most `mcp.write.max_subject_names` subjects (16 by
+default), and a longer list is refused. Both feed [effective confidence](concepts.md#confidence): with the
+default trust policy, an agent's belief ranks below an equally confident,
+equally recent claim from a source you leave at neutral trust, though it can
+rank above a claim from a source you have marked down, or one extracted with
+lower confidence. Lower the agent's trust with `particles trust` if you want
+its writes ranked further down. That holds while nothing else deposits into
+the store under the agent's label: on an engine with a key, an operator key's
+deposit can move the agent's belief to neutral source trust, and
+[SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#each-agent-principal-owns-its-own-beliefs-callers-are-not-isolated) says which keys can and which cannot.
 
 ## Recall without asking
 
@@ -422,7 +432,9 @@ If your agent is configured against
 the shortest path in is to change one entry in the config blocks above:
 `particles memory serve` presents the same nine tools with the same arguments
 and the same responses, so nothing else about your setup changes, and it works
-in any MCP client, with no hooks involved.
+in any MCP client, with no hooks involved. It reads and writes a local store
+only: it refuses every tool call while `engine.base_url` is
+set, rather than write a store the engine does not hold, and it applies the local store rules above even then.
 
 See [Swapping in for the reference memory server](memory-server-swap.md),
 which also covers bringing your existing graph across.

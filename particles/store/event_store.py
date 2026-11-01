@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -59,6 +60,18 @@ class OperatorEventType(StrEnum):
     # An entry's mutability is the operator's policy about the source, so it is
     # reconciled in place; this event is its durable history. Retires nothing.
     CORPUS_ENTRY_RECLASSIFIED = "CORPUS_ENTRY_RECLASSIFIED"
+    # Security review 2026-10-26-1, W26: a deposit took a URL a web capture's
+    # frontmatter had named, so the capture's entry gave up its URI-R (R13).
+    # System-emitted (actor ``deposit``); CORPUS_ENTRY ref names the capture's
+    # entry; payload ``uri_r`` (the URL released) and ``released_to`` (the
+    # depositor that now holds it). The entry keeps its snapshots and tags.
+    CORPUS_ENTRY_URI_RELEASED = "CORPUS_ENTRY_URI_RELEASED"
+    # `rules forget` removed a recorded rule-source root (actor
+    # ``cli:rules-forget``). No record ref: a root is a path, not a record. The
+    # payload carries the path, the verb that recorded it and when, and the
+    # counts the verb printed: entries that stopped being refreshed, and
+    # entries another route still admits (in total and by route).
+    RULE_SOURCE_ROOT_FORGOTTEN = "RULE_SOURCE_ROOT_FORGOTTEN"
     # system-emitted (not operator-initiated) — the §6.6
     # SUPERSEDED_BY_EXISTING verdict drops the candidate without persisting
     # it, and the drop must be auditable: the event carries the candidate
@@ -96,9 +109,10 @@ class OperatorEventType(StrEnum):
     # of the existing kinds — a URL is not a particle / subject / corpus entry).
     DEPOSIT_SUGGESTION_DISMISSED = "DEPOSIT_SUGGESTION_DISMISSED"
     # curation session-model writes. BELIEF_AFFIRMED records an
-    # operator "still true" gesture (audited, suppresses the card; does NOT touch
-    # confidence — first-class corroboration is vouch). The affirmed
-    # belief id(s) ride as PARTICLE refs. CURATION_CARD_SNOOZED records a skipped
+    # operator "still true" gesture: audited, it suppresses the card and does
+    # NOT touch confidence. Agreeing with a belief is a different act, an
+    # ENDORSES stance, which never feeds confidence either (§5(b)).
+    # The affirmed belief id(s) ride as PARTICLE refs. CURATION_CARD_SNOOZED records a skipped
     # card keyed by ``card_key`` in the payload (+ ``snoozed_until``); a belief
     # card also carries its PARTICLE refs, a uncited_url card reuses the existing
     # DEPOSIT_SUGGESTION_DISMISSED path instead.
@@ -134,14 +148,17 @@ class OperatorEventType(StrEnum):
     # from here. The record rides as a PARTICLE ref, then each dropped member.
     INCONSISTENCY_CLOSED = "INCONSISTENCY_CLOSED"
     # one event per claim the nightly re-anchor pass judged
-    # dependent on a state an update retired but did not restate as a new
-    # belief. ``outcome: unrestated`` keeps the claim ACTIVE and backs a
-    # STALE_BASIS curation card (the cursor has moved on, so nothing else
-    # remembers the verdict); ``outcome: matched_existing`` retired it in favour
-    # of an ACTIVE claim that already states the restatement, which the status
-    # change alone does not name. System-emitted, like INCONSISTENCY_CLOSED.
-    # Refs: the claim, the retired state claim, then the other claim when there
-    # is one (the match, or the belief a restatement would have contradicted).
+    # dependent on a state an update retired. ``outcome: unrestated`` keeps the
+    # claim ACTIVE and backs a STALE_BASIS curation card (the cursor has moved
+    # on, so nothing else remembers the verdict); ``outcome: matched_existing``
+    # retired it in favour of an ACTIVE claim that already states the
+    # restatement, which the status change alone does not name; ``outcome:
+    # restated`` retired it in favour of the restatement the pass wrote, so
+    # every retirement the pass makes is in the log even when the run's own
+    # event is never written (security review 2026-10-25-1, Q36).
+    # System-emitted, like INCONSISTENCY_CLOSED. Refs: the claim, the retired
+    # state claim, then the other claim when there is one (the match, the
+    # restatement, or the belief a restatement would have contradicted).
     DEPENDENT_CLAIM_EXAMINED = "DEPENDENT_CLAIM_EXAMINED"
     # One event per claim a rung 2.5 route retires SUPERSEDED_BY_UPDATE (ADR
     # 0268): the extraction ladder, its extras, the assertion door and the
@@ -151,6 +168,19 @@ class OperatorEventType(StrEnum):
     # nothing. Payload: ``retired_id``, ``winner_id`` and ``route``; refs: both
     # claims. System-emitted, like DEPENDENT_CLAIM_EXAMINED.
     UPDATE_SUPERSESSION = "UPDATE_SUPERSESSION"
+    # One event per claim the trust rung (rung 2) retires
+    # LOWER_TRUST_SOURCE, and one per claim the document-supersession prior
+    # (rung 1.5) retires DOCUMENT_SUPERSEDED, on the write
+    # path or in the reconcile sweep. Every automatic retirement is then in the
+    # log an operator reads after depositing untrusted material; before, these
+    # two left only a log line (security review 2026-10-24-2, P34). Payload:
+    # ``retired_id``, ``winner_id``, ``route`` (``ladder`` or ``sweep``), and the
+    # two trust scores for a trust retirement or the two corpus entries for a
+    # document one. Refs: both claims. System-emitted, like UPDATE_SUPERSESSION,
+    # and kept apart from it because its readers (the held-claim release, the
+    # demotion cards) read rung 2.5's winner only.
+    TRUST_SUPERSESSION = "TRUST_SUPERSESSION"
+    DOCUMENT_SUPERSESSION = "DOCUMENT_SUPERSESSION"
     # one event per examination by the nightly release pass of a
     # write-time record whose stored side an autonomous pass retired, when an
     # ACTIVE claim still contradicts the held one, so nothing was written to
@@ -174,6 +204,27 @@ class OperatorEventType(StrEnum):
     # resolves, and (on accept) the asserted particle id. Every resolution is
     # a labelled datapoint for the §8 faithfulness evaluation.
     ABSTRACTION_RESOLVED = "ABSTRACTION_RESOLVED"
+    # one event per derived belief the revalidation ladder moves
+    # out of ACTIVE, so every claim the abstraction pass retires is named in the
+    # log (security review 2026-10-25-2, R29). Payload: ``retired_id``,
+    # ``successor_id`` (``None`` for a floor retirement, or when §6.6 declined
+    # the re-synthesized claim), ``rung`` (1 to 4), ``outcome``
+    # (``refreshed_structural``, ``refreshed_entailed``, ``refreshed_paraphrase``,
+    # ``superseded`` or ``retired``), ``status`` and ``decided_by``. Refs: the
+    # retired claim, then its successor. System-emitted, like
+    # DEPENDENT_CLAIM_EXAMINED.
+    ABSTRACTION_RETIRED = "ABSTRACTION_RETIRED"
+    # One event per pass of a structural retiring path that moved at least one
+    # claim out of ACTIVE: a lint fix (``route``: ``lint_staleness``,
+    # ``lint_retraction_cascade`` or ``lint_corpus_link``), the snapshot
+    # generation cascade (``generation_cascade``) and reindex
+    # (``reindex``). Before, these retired claims with no event, so the event
+    # log an operator reads after a deposit missed them (security review
+    # 2026-10-28-1, O36). ``batch: true``; payload ``route``, ``retired_ids``,
+    # ``status``, ``status_reason`` and, where the pass has one, ``entry_id``
+    # and ``snapshot_id``. Refs: each retired claim, then the corpus entry.
+    # System-emitted, like ABSTRACTION_RETIRED; ``actor`` names the verb.
+    CLAIMS_RETIRED = "CLAIMS_RETIRED"
     # one event per auto-merged exact-duplicate group. Carries the
     # survivor id, every superseded id, the content hash, and the config values in
     # force — this is both the audit trail and the input to the revert path (§5),
@@ -197,7 +248,9 @@ class OperatorEventType(StrEnum):
     # The credited belief rides as a PARTICLE ref; the payload carries the §7
     # daily `credit_key` and whether this press produced a new credit or
     # collapsed into an existing one, so the log explains the arithmetic rather
-    # than merely listing presses.
+    # than merely listing presses. A press without operator authority (an agent
+    # key on `POST /memory/useful`) carries `operator_credit: false` and no
+    # `credit_key`, and credits nothing (amended 2026-10-27).
     BELIEF_MARKED_USEFUL = "BELIEF_MARKED_USEFUL"
 
     # observer scope. RESCOPED is also the store's "the lens may
@@ -376,6 +429,22 @@ def _to_model(row: OperatorEventRow, ref_rows: Sequence[OperatorEventRefRow]) ->
 # ---------------------------------------------------------------------------
 
 
+#: The HTTP caller events are recorded for (rule 6): the principal's
+#: id and the key id, set by the engine's route gate for the request it admits,
+#: ``None`` outside an HTTP request. Lives here, not in the API layer, because
+#: the Engine may not import the Surface.
+_http_actor: ContextVar[tuple[str, str] | None] = ContextVar("particles_http_actor", default=None)
+
+#: The payload fields :func:`record_event` adds for an HTTP caller.
+HTTP_PRINCIPAL_FIELD = "http_principal"
+HTTP_KEY_ID_FIELD = "http_key_id"
+
+
+def bind_http_actor(principal: str | None, key_id: str | None) -> None:
+    """Name the HTTP caller the current request's events are recorded for, or clear it."""
+    _http_actor.set(None if principal is None or key_id is None else (principal, key_id))
+
+
 async def record_event(
     session: AsyncSession,
     *,
@@ -399,13 +468,24 @@ async def record_event(
         event_type: The :class:`OperatorEventType`.
         reason: Operator free-text rationale, if any.
         refs: ``(EventRefKind, record_id)`` pairs the event touched.
-        payload: Event-type-specific structured detail.
+        payload: Event-type-specific structured detail. During an HTTP request
+            the gate's caller is added as ``http_principal`` and
+            ``http_key_id`` (:func:`bind_http_actor`).
 
     Returns:
         The persisted :class:`OperatorEvent`.
     """
     event_id = str(uuid.uuid4())
     occurred_at = datetime.now(UTC)
+    http_actor = _http_actor.get()
+    if http_actor is not None:
+        # Added beside the event's own fields, never replacing ``actor``, so a
+        # reader of today's events sees nothing removed or renamed.
+        payload = {
+            **(payload or {}),
+            HTTP_PRINCIPAL_FIELD: http_actor[0],
+            HTTP_KEY_ID_FIELD: http_actor[1],
+        }
     session.add(
         OperatorEventRow(
             event_id=event_id,
@@ -433,6 +513,64 @@ async def record_event(
         event_type=event_type,
         reason=reason,
         refs=ref_models,
+        payload=payload,
+    )
+
+
+async def record_claims_retired(
+    session: AsyncSession,
+    *,
+    actor: str,
+    route: str,
+    retired_ids: Sequence[str],
+    status: str,
+    status_reason: str | None,
+    reason: str,
+    entry_id: str | None = None,
+    snapshot_id: str | None = None,
+) -> OperatorEvent | None:
+    """Name the claims one structural pass moved out of ACTIVE (security review 2026-10-28-1, O36).
+
+    One ``CLAIMS_RETIRED`` event per pass, flushed with the status changes it
+    records, so the caller commits both together. Writes nothing when the pass
+    retired nothing.
+
+    Args:
+        session: The session that ran the status changes.
+        actor: The verb that ran the pass (``lint``, ``reindex``, ``extract``, ...).
+        route: Which retiring path ran (see :attr:`OperatorEventType.CLAIMS_RETIRED`).
+        retired_ids: The claims retired, in the order the pass retired them.
+        status: The status they moved to.
+        status_reason: The ``StatusReason`` value recorded with the status.
+        reason: A short sentence saying why the pass retired them.
+        entry_id: The corpus entry the pass worked on, when it had one.
+        snapshot_id: The snapshot the pass measured against, when it had one.
+
+    Returns:
+        The persisted event, or ``None`` when ``retired_ids`` is empty.
+    """
+    ids = list(dict.fromkeys(retired_ids))
+    if not ids:
+        return None
+    refs: list[tuple[EventRefKind, str]] = [(EventRefKind.PARTICLE, pid) for pid in ids]
+    payload: dict[str, Any] = {
+        "batch": True,
+        "route": route,
+        "retired_ids": ids,
+        "status": status,
+        "status_reason": status_reason,
+    }
+    if entry_id is not None:
+        refs.append((EventRefKind.CORPUS_ENTRY, entry_id))
+        payload["entry_id"] = entry_id
+    if snapshot_id is not None:
+        payload["snapshot_id"] = snapshot_id
+    return await record_event(
+        session,
+        actor=actor,
+        event_type=OperatorEventType.CLAIMS_RETIRED,
+        reason=reason,
+        refs=refs,
         payload=payload,
     )
 
@@ -492,9 +630,11 @@ async def list_events(
     ref_kind: EventRefKind | None = None,
     ref_id: str | None = None,
     event_type: OperatorEventType | None = None,
+    http_principal: str | None = None,
+    http_key_id: str | None = None,
     limit: int = 50,
 ) -> list[OperatorEvent]:
-    """List events newest-first, optionally filtered by record ref and/or type.
+    """List events newest-first, optionally filtered by record ref, type or HTTP caller.
 
     Args:
         session: An open session.
@@ -503,6 +643,9 @@ async def list_events(
         ref_id: Restrict to events touching this record id (e.g. a particle or
             subject id). Uses the ``(ref_kind, ref_id)`` index.
         event_type: Restrict to a single :class:`OperatorEventType`.
+        http_principal: Restrict to events an HTTP caller with this principal
+            wrote (rule 6).
+        http_key_id: Restrict to events one key's requests wrote.
         limit: Maximum events to return (default 50).
     """
     stmt = select(OperatorEventRow)
@@ -515,6 +658,12 @@ async def list_events(
             stmt = stmt.where(OperatorEventRefRow.ref_kind == ref_kind.value)
     if event_type is not None:
         stmt = stmt.where(OperatorEventRow.event_type == event_type.value)
+    if http_principal is not None:
+        stmt = stmt.where(
+            OperatorEventRow.payload[HTTP_PRINCIPAL_FIELD].as_string() == http_principal
+        )
+    if http_key_id is not None:
+        stmt = stmt.where(OperatorEventRow.payload[HTTP_KEY_ID_FIELD].as_string() == http_key_id)
     stmt = stmt.order_by(desc(OperatorEventRow.occurred_at), OperatorEventRow.event_id).limit(limit)
     result = await session.execute(stmt)
     rows = result.scalars().unique().all()

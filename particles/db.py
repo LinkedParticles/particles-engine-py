@@ -142,8 +142,9 @@ def _ensure_sqlite_parent_dir(url: str) -> None:
     lock beside the DB), so every entry point accepts a database path whose
     directory does not exist yet, not just ``particles db init``.
 
-    The path is used exactly as the driver will open it (no ``~`` expansion),
-    so the directory created is the one SQLite looks in.
+    The path is used exactly as the driver will open it, so the directory
+    created is the one SQLite looks in. The driver does no ``~`` expansion;
+    the config does it once, when it loads a DSN (``StorageConfig``).
 
     Raises:
         StoreDirectoryError: If the directory cannot be created.
@@ -262,9 +263,40 @@ async def write_lock(store: StoreHandle = DEFAULT_STORE) -> AsyncGenerator[None,
         async_lock.release()
 
 
+def write_lock_held(store: StoreHandle = DEFAULT_STORE) -> bool:
+    """Whether this process holds ``store``'s writer lock right now.
+
+    Read-only, for the guard that checks :func:`write_lock`'s contract: no
+    writer calls a model, a live authority or the embedder while it holds the
+    lock (``tests/test_writer_lock_guard.py``). ``False`` where the lock is a
+    no-op.
+    """
+    async_lock = _async_write_locks.get(store)
+    flock = _file_write_locks.get(store)
+    return bool(
+        (async_lock is not None and async_lock.locked()) or (flock is not None and flock.is_locked)
+    )
+
+
+def store_of(session: AsyncSession) -> StoreHandle:
+    """The store whose engine ``session`` is bound to, else ``DEFAULT_STORE``.
+
+    The session is the store binding, so a write pass that holds
+    only a session takes the writer lock of the store it writes, never the
+    default store's (security review E4, W18). A session bound to an engine
+    this registry did not create (a test's in-memory engine) maps to the
+    default store, as before.
+    """
+    bind = session.bind
+    for handle, engine in _engines.items():
+        if engine is bind:
+            return handle
+    return DEFAULT_STORE
+
+
 @asynccontextmanager
 async def write_transaction(
-    session: AsyncSession, store: StoreHandle = DEFAULT_STORE
+    session: AsyncSession, store: StoreHandle | None = None
 ) -> AsyncGenerator[None, None]:
     """Write inside the writer lock and commit before releasing it.
 
@@ -279,14 +311,43 @@ async def write_transaction(
     On an exception the session is rolled back before the lock is released, for
     the same reason. Anything the session wrote before the block, uncommitted, is
     committed or rolled back with it.
+
+    The lock is ``store``'s when given, else the session's own store
+    (:func:`store_of`).
+
+    On SQLite the block runs in a transaction opened explicitly
+    (:func:`_open_sqlite_transaction`), so a savepoint that is the block's first
+    statement nests inside it and the rollback on an exception undoes it.
     """
-    async with write_lock(store):
+    async with write_lock(store_of(session) if store is None else store):
         try:
+            await _open_sqlite_transaction(session)
             yield
         except BaseException:
             await session.rollback()
             raise
         await session.commit()
+
+
+async def _open_sqlite_transaction(session: AsyncSession) -> None:
+    """Open a real transaction on ``session``'s SQLite connection unless one is open.
+
+    The sqlite3 driver issues ``BEGIN`` only before an ``INSERT``, ``UPDATE`` or
+    ``DELETE``, never before a ``SAVEPOINT``, and releasing a savepoint that
+    opened no transaction commits it. A savepoint that was a write block's first
+    statement therefore committed on its release, and the block's rollback left
+    its rows behind (security review 2026-10-28-1, O52). ``BEGIN IMMEDIATE`` is
+    issued under the writer lock, so it waits on no cooperating writer and its
+    snapshot is taken after every earlier commit. A connection already in a
+    transaction (uncommitted writes made before the block) is left as it is.
+    """
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    raw = await connection.get_raw_connection()
+    if getattr(raw.driver_connection, "in_transaction", True):
+        return
+    await connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 _engines: dict[StoreHandle, AsyncEngine] = {}
@@ -339,7 +400,10 @@ def get_engine(store: StoreHandle = DEFAULT_STORE) -> AsyncEngine:
         url = _resolve_store_dsn(store)
         # SQLite creates the database file on first connect, never its directory.
         _ensure_sqlite_parent_dir(url)
-        engine = create_async_engine(url, echo=False)
+        # hide_parameters: a statement error's message names no bound value, so
+        # a stored or deposited text never rides an exception into a log line
+        # or a span (G12, SECURITY_REVIEW_20261027-1).
+        engine = create_async_engine(url, echo=False, hide_parameters=True)
         if url.startswith("sqlite"):
             event.listen(engine.sync_engine, "connect", _sqlite_set_pragmas)
             # Count write-lock contention at the DB boundary.

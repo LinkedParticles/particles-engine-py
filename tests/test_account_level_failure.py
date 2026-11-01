@@ -98,15 +98,23 @@ class TestExtractionSeamRaises:
     @pytest.mark.asyncio
     async def test_per_call_error_still_degrades_to_transient(self) -> None:
         """Unchanged for the failure class that genuinely is worth retrying."""
+        from particles.config import get_config
         from particles.extraction import general
 
+        calls: list[int] = []
+
         async def boom(*_a: Any, **_k: Any) -> str:
+            calls.append(1)
             raise _ApiError(429, "rate limit exceeded")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("particles.llm.complete_with_provider_model", boom)
+            # The 429 is retried with a real backoff of 10 s doubled
+            # per attempt; zero it so the retries cost no wall-clock time.
+            mp.setattr(get_config().extraction, "rate_limit_backoff_seconds", 0.0)
             candidates, notes, transient = await general._call_llm("some source text")
 
+        assert len(calls) == 1 + get_config().extraction.rate_limit_retries
         assert candidates == []
         assert transient is True
         assert any("API error" in n for n in notes)

@@ -30,6 +30,7 @@ from particles.exporters.logseq.synthesis import (  # noqa: PLC2701 — module-i
     _stamp_article_synthesis_state,
 )
 from particles.render.article_synthesis import render_article, split_rendered_article
+from particles.render.escape import logseq_text
 from particles.render.markdown import narrative_as_subject
 
 if TYPE_CHECKING:
@@ -80,7 +81,10 @@ async def render_narrative_page(
     # its title as the first block and its metadata as block properties.
     _fm, _h1, prose, references = split_rendered_article(body)
 
-    page = f"- # {narrative.content or 'Narrative'}\n{_INDENT}tags:: {_NARRATIVE_TAG}\n"
+    # The label is claim text (model-written or imported): one inert line whose
+    # ``::`` cannot read as a property either (security review 2026-10-24-2, P32).
+    label = logseq_text(narrative.content or "Narrative")
+    page = f"- # {label}\n{_INDENT}tags:: {_NARRATIVE_TAG}\n"
     page = _stamp_article_input_hash(page, article_hash)
     page = _stamp_article_synthesis_state(page, "llm" if used_synthesis else "structured-listing")
     page += _format_synthesis_block(prose, references, heading=None)

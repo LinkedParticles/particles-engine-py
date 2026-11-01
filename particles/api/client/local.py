@@ -36,6 +36,7 @@ from particles.api.client.base import (
     SubjectDetail,
     TextDepositOutcome,
 )
+from particles.config import get_config
 from particles.core.schema import (
     ContestedBadge,
     CorpusEntry,
@@ -54,7 +55,7 @@ from particles.core.schema import (
     SuggestReport,
     TaxonomyDefinition,
 )
-from particles.db import session_scope
+from particles.db import session_scope, write_lock, write_transaction
 from particles.extraction.general import PageStat
 
 if TYPE_CHECKING:
@@ -88,23 +89,30 @@ class LocalBackend:
         follow_post_links: bool | None,
         follow_comment_links: bool | None,
     ) -> DepositOutcome:
-        from particles.operations.deposit import deposit_url
+        from particles.operations.deposit import deposit_url, writes_committed_under_lock
 
         follow: list[tuple[str, str, str]] = []
         unchanged: list[bool] = []
-        async with session_scope(write=True) as session:  # writer lock
-            entry_id, snapshot_id = await deposit_url(
-                session,
-                url,
-                deposited_by=deposited_by,
-                source_type=source_type,
-                tags=tags,
-                follow_post_links=follow_post_links,
-                follow_comment_links=follow_comment_links,
-                out_follow_targets=follow,
-                out_unchanged=unchanged,
-            )
-            await session.commit()
+        # The fetches run outside the store's writer lock and each write unit
+        # commits under it, as the HTTP URL route does, so a slow origin never
+        # holds up every other writer.
+        async with session_scope() as session:
+            with writes_committed_under_lock():
+                entry_id, snapshot_id = await deposit_url(
+                    session,
+                    url,
+                    deposited_by=deposited_by,
+                    source_type=source_type,
+                    tags=tags,
+                    follow_post_links=follow_post_links,
+                    follow_comment_links=follow_comment_links,
+                    out_follow_targets=follow,
+                    out_unchanged=unchanged,
+                )
+            # Each write unit committed itself; this commits, under the lock,
+            # any write a unit did not cover.
+            async with write_transaction(session):
+                pass
         return DepositOutcome(
             entry_id=entry_id,
             snapshot_id=snapshot_id,
@@ -221,6 +229,19 @@ class LocalBackend:
     ) -> GraphData:
         from particles.operations.graph_view import build_graph_data
 
+        # An MCP client names the manifest, so the projection scope reads only
+        # under graph.manifest_root, as GET /graph does (security review
+        # 2026-10-25, Q11).
+        manifest_root: Path | None = None
+        if manifest is not None:
+            root = get_config().graph.manifest_root
+            if root is None:
+                raise ValueError(
+                    "unknown manifest: the projection scope is served to MCP clients "
+                    "only from graph.manifest_root, which is not set"
+                )
+            manifest_root = Path(root)
+
         async with session_scope(store) as session:
             return await build_graph_data(
                 session,
@@ -234,6 +255,7 @@ class LocalBackend:
                 as_of=as_of,
                 max_nodes=max_nodes,
                 observer_project=observer_project,
+                manifest_root=manifest_root,
             )
 
     async def lint(self, *, fix: bool, semantic: bool, low_coverage_threshold: int) -> LintReport:
@@ -611,6 +633,8 @@ class LocalBackend:
         entry: str | None,
         event_type: str | None,
         limit: int,
+        principal: str | None = None,
+        key: str | None = None,
     ) -> list[OperatorEvent]:
         from particles.store.event_store import OperatorEventType, list_events, ref_filter
 
@@ -618,7 +642,13 @@ class LocalBackend:
         etype = OperatorEventType(event_type) if event_type is not None else None
         async with session_scope() as session:
             return await list_events(
-                session, ref_kind=ref_kind, ref_id=ref_id, event_type=etype, limit=limit
+                session,
+                ref_kind=ref_kind,
+                ref_id=ref_id,
+                event_type=etype,
+                http_principal=principal,
+                http_key_id=key,
+                limit=limit,
             )
 
     async def event_show(self, event_id: str) -> OperatorEvent | None:
@@ -706,22 +736,37 @@ class LocalBackend:
         new_external_id: str | None,
         dry_run: bool,
     ) -> SplitOutcome:
-        from particles.ingest.subject_resolver import split_subject_resolving
+        from particles.ingest.subject_resolver import (
+            gather_split_target,
+            split_subject_resolving,
+        )
 
-        async with session_scope(write=True) as session:  # writer lock
-            new_subject, relinked, not_bound = await split_subject_resolving(
-                session,
-                source_id=source_id,
-                particle_ids=particle_ids,
-                new_name=new_name,
-                new_external_id=new_external_id,
+        async with session_scope() as session:
+            # The target's live lookups and label fetch run before the writer
+            # lock (security review 2026-10-31-1); the reads end before it.
+            gathered = await gather_split_target(
+                session, new_name=new_name, new_external_id=new_external_id
             )
-            # Dry-run: the resolver inserted the new Subject and re-linked
-            # particles in this transaction; roll it back so nothing persists.
-            if dry_run:
-                await session.rollback()
-            else:
-                await session.commit()
+            await session.commit()
+            async with write_lock():  # writer lock
+                try:
+                    new_subject, relinked, not_bound = await split_subject_resolving(
+                        session,
+                        source_id=source_id,
+                        particle_ids=particle_ids,
+                        new_name=new_name,
+                        new_external_id=new_external_id,
+                        gathered=gathered,
+                    )
+                except BaseException:
+                    await session.rollback()
+                    raise
+                # Dry-run: the resolver inserted the new Subject and re-linked
+                # particles in this transaction; roll it back so nothing persists.
+                if dry_run:
+                    await session.rollback()
+                else:
+                    await session.commit()
             return SplitOutcome(
                 new_subject=new_subject,
                 relinked_particle_ids=relinked,
@@ -865,6 +910,9 @@ class LocalBackend:
     ) -> AgentWriteResult:
         from particles.operations.agent_write import assert_belief
 
+        # Commits under the store's writer lock (security review 2026-10-30-1, AB4),
+        # which the subject lookups, embedding and model probes run before
+        # (security review 2026-10-30-2, AC1, AC3).
         async with session_scope(store) as session:
             result = await assert_belief(
                 session,
@@ -877,8 +925,8 @@ class LocalBackend:
                 uncertainty_nature=uncertainty_nature,
                 tags=tags,
                 project_key=project_key,
+                commit_under_lock=True,
             )
-            await session.commit()
             return result
 
     async def particle_supersede(
@@ -898,6 +946,9 @@ class LocalBackend:
     ) -> AgentWriteResult:
         from particles.operations.agent_write import supersede_belief
 
+        # Commits under the store's writer lock (security review 2026-10-30-1, AB4),
+        # which the subject lookups, embedding and model probes run before
+        # (security review 2026-10-30-2, AC1, AC3).
         async with session_scope(store) as session:
             result = await supersede_belief(
                 session,
@@ -912,8 +963,8 @@ class LocalBackend:
                 tags=tags,
                 reason=reason,
                 project_key=project_key,
+                commit_under_lock=True,
             )
-            await session.commit()
             return result
 
     async def particle_retract(
@@ -1013,6 +1064,15 @@ class LocalBackend:
         from particles.operations.agent_write import deposit_conversation_text
         from particles.operations.deposit import deposit_text as deposit_text_op
 
+        if deposited_by is None and store not in get_config().mcp.write.enabled_stores:
+            # An agent's deposit writes only to a store writes are enabled for,
+            # whichever in-process surface makes it (the LangChain adapter calls
+            # this directly), before the writer lock is taken (security review
+            # 2026-10-30-1, completeness critic).
+            raise ValueError(
+                f"Agent writes are disabled for store {store!r}: it is not in "
+                "mcp.write.enabled_stores (default-deny)."
+            )
         async with session_scope(store, write=True) as session:  # writer lock
             if deposited_by is None:
                 # Agent path: the asserter identity is resolved inside

@@ -29,6 +29,7 @@ import ast
 from pathlib import Path
 
 from particles.corpus import store as corpus_store
+from tests import _source_tree
 
 #: The installed package, found through an Engine module so the scan runs where
 #: the readers it audits are (this file never ships in the Client tree).
@@ -71,7 +72,7 @@ def _functions() -> list[tuple[str, str, ast.AST]]:
     found: list[tuple[str, str, ast.AST]] = []
     for path in sorted(PACKAGE.rglob("*.py")):
         rel = path.relative_to(PACKAGE).as_posix()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        for node in ast.walk(_source_tree.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 found.append((rel, node.name, node))
     return found

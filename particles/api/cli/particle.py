@@ -19,6 +19,7 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import indented, terminal_safe
 from particles.db import DEFAULT_STORE, session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
@@ -31,6 +32,16 @@ if TYPE_CHECKING:
 
 particle_app = typer.Typer(help="Inspect individual extracted particles.", no_args_is_help=True)
 app.add_typer(particle_app, name="particle")
+
+
+def _echo(message: str = "", *, err: bool = False) -> None:
+    """Print one line; every verb here echoes stored text through this.
+
+    Claim text, subject names, source URIs and passages are shown with each
+    control character as a visible escape, so none reaches the terminal live
+    (security review 2026-10-28-1, O39).
+    """
+    typer.echo(terminal_safe(message), err=err)
 
 
 @particle_app.command("show")
@@ -57,7 +68,7 @@ async def _particle_show(id_prefix: str) -> None:
 
     particle = await backend.particle_show(norm)
     if particle is None:
-        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        _echo(f"Particle {id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
 
     _render_particle_header(particle)
@@ -85,29 +96,29 @@ async def _resolve_show_prefix(session: AsyncSession, norm: str, original: str) 
     )
     rows = result.scalars().all()
     if not rows:
-        typer.echo(f"No particle matches prefix {original!r}.", err=True)
+        _echo(f"No particle matches prefix {original!r}.", err=True)
         raise typer.Exit(1)
     if len(rows) > 1:
-        typer.echo(f"Ambiguous prefix {original!r} matches {len(rows)} particles:", err=True)
+        _echo(f"Ambiguous prefix {original!r} matches {len(rows)} particles:", err=True)
         for r in rows[:10]:
-            typer.echo(f"  {r}", err=True)
+            _echo(f"  {r}", err=True)
         raise typer.Exit(1)
     return str(rows[0])
 
 
 def _render_particle_header(particle: Particle) -> None:
     """Render the transport-agnostic header block (works local + remote)."""
-    typer.echo(f"ID:           {particle.id}")
-    typer.echo(f"Status:       {particle.status}")
+    _echo(f"ID:           {particle.id}")
+    _echo(f"Status:       {particle.status}")
     if particle.status_reason is not None:
-        typer.echo(f"Reason:       {particle.status_reason.value}")
-    typer.echo(f"Type:         {particle.particle_type}")
-    typer.echo(f"Modality:     {particle.assertion_modality}")
+        _echo(f"Reason:       {particle.status_reason.value}")
+    _echo(f"Type:         {particle.particle_type}")
+    _echo(f"Modality:     {particle.assertion_modality}")
     calib = particle.confidence.calibration_source.value
-    typer.echo(f"Confidence:   {particle.confidence.value:.2f} ({calib})")
-    typer.echo(f"Uncertainty:  {particle.uncertainty_nature}")
-    typer.echo(f"Asserted by:  {particle.asserted_by}")
-    typer.echo(f"Asserted at:  {particle.asserted_at.isoformat()}")
+    _echo(f"Confidence:   {particle.confidence.value:.2f} ({calib})")
+    _echo(f"Uncertainty:  {particle.uncertainty_nature}")
+    _echo(f"Asserted by:  {particle.asserted_by}")
+    _echo(f"Asserted at:  {particle.asserted_at.isoformat()}")
     # the world-time axis, when the claim carries it.
     if particle.valid_from is not None or particle.valid_until is not None:
         start = particle.valid_from.date().isoformat() if particle.valid_from else "?"
@@ -115,31 +126,33 @@ def _render_particle_header(particle: Particle) -> None:
         kind = particle.valid_kind.value if particle.valid_kind else "unkinded"
         basis = (particle.properties or {}).get("extraction:valid_from_basis")
         basis_note = f" [{basis}]" if basis else ""
-        typer.echo(f"Holds:        {start} → {end} ({kind}){basis_note}")
+        _echo(f"Holds:        {start} → {end} ({kind}){basis_note}")
     if particle.extractor_ref:
         ext_name = particle.extractor_ref.name
         ext_version = particle.extractor_ref.version
-        typer.echo(f"Extractor:    {ext_name} v{ext_version}")
+        _echo(f"Extractor:    {ext_name} v{ext_version}")
     # Sibling of extractor_ref, not a key inside it — and
     # independently absent: a superseding agent write carries the pairing over
     # with no extractor_ref of its own, while a pre-0229 particle legally has
     # neither. Its own line keeps all four combinations readable.
     if particle.extraction_provider_model:
-        typer.echo(f"Model:        {particle.extraction_provider_model}")
+        _echo(f"Model:        {particle.extraction_provider_model}")
     if particle.context_fingerprint:
-        typer.echo(f"Fingerprint:  {particle.context_fingerprint[:16]}…")
-    typer.echo("")
-    typer.echo("Content:")
-    typer.echo(f"  {particle.content}")
-    typer.echo("")
+        _echo(f"Fingerprint:  {particle.context_fingerprint[:16]}…")
+    _echo("")
+    _echo("Content:")
+    # Every line of the claim stays indented under its heading, so a stored
+    # line break cannot print a line that reads as a field (AA62).
+    _echo(indented(particle.content, "  "))
+    _echo("")
     # the source now states this claim in other words. The content
     # keeps its first wording; the latest restatement is shown beside it.
     restated = (particle.properties or {}).get("restated_as")
     if isinstance(restated, dict) and restated.get("text"):
         snapshot = str(restated.get("snapshot_id") or "")[:8]
-        typer.echo(f"Restated as (snapshot {snapshot}):")
-        typer.echo(f"  {restated['text']}")
-        typer.echo("")
+        _echo(f"Restated as (snapshot {snapshot}):")
+        _echo(indented(str(restated["text"]), "  "))
+        _echo("")
 
 
 async def _render_particle_detail(session: AsyncSession, particle: Particle) -> None:
@@ -158,47 +171,47 @@ async def _render_particle_detail(session: AsyncSession, particle: Particle) -> 
         stamp, state = stamped
         model = f", {stamp.model}" if stamp.model else ""
         when = f", {stamp.classified_at.date().isoformat()}" if stamp.classified_at else ""
-        typer.echo(f"Classifier:   {stamp.classifier} ({state.value}{model}{when})")
-        typer.echo("")
+        _echo(f"Classifier:   {stamp.classifier} ({state.value}{model}{when})")
+        _echo("")
 
     if particle.subject_ids:
-        typer.echo("Subjects:")
+        _echo("Subjects:")
         for sid in particle.subject_ids:
             srow = await session.get(SubjectRow, sid)
             name = srow.canonical_name if srow else "(unknown)"
-            typer.echo(f"  {sid[:8]}…  {name}")
-        typer.echo("")
+            _echo(f"  {sid[:8]}…  {name}")
+        _echo("")
 
     if particle.provenance:
-        typer.echo("Provenance:")
+        _echo("Provenance:")
         for ref in particle.provenance:
             eid = ref.corpus_entry_id
             if not eid:
-                typer.echo(f"  {ref.type}  (no corpus entry)")
+                _echo(f"  {ref.type}  (no corpus entry)")
                 continue
             entry = await session.get(CorpusEntryRow, eid)
             uri = entry.uri_r if entry else None
             source_type = entry.source_type if entry else "?"
-            typer.echo(f"  {ref.type}  {eid[:8]}…  ({source_type})")
+            _echo(f"  {ref.type}  {eid[:8]}…  ({source_type})")
             if uri:
-                typer.echo(f"            URL: {uri}")
+                _echo(f"            URL: {uri}")
             if ref.snapshot_id:
-                typer.echo(f"            Snapshot: {ref.snapshot_id[:8]}…")
+                _echo(f"            Snapshot: {ref.snapshot_id[:8]}…")
 
     containing = await get_narratives_containing(session, particle.id)
     if containing:
-        typer.echo("")
-        typer.echo("Part of narratives:")
+        _echo("")
+        _echo("Part of narratives:")
         for nar in containing:
-            typer.echo(f"  {nar.id[:8]}…  {nar.content}")
+            _echo(f"  {nar.id[:8]}…  {nar.content}")
 
     if particle.particle_type == ParticleType.NARRATIVE:
         sequence = await get_narrative_sequence(session, particle.id)
-        typer.echo("")
-        typer.echo(f"Narrative constituents ({len(sequence)}, in sequence):")
+        _echo("")
+        _echo(f"Narrative constituents ({len(sequence)}, in sequence):")
         for i, member in enumerate(sequence, start=1):
             preview = member.content if len(member.content) <= 70 else member.content[:67] + "…"
-            typer.echo(f"  {i}. {member.id[:8]}…  {preview}")
+            _echo(f"  {i}. {member.id[:8]}…  {preview}")
 
 
 @particle_app.command("source")
@@ -232,14 +245,14 @@ async def _particle_source(id_prefix: str) -> None:
 
     passage = await backend.particle_source(norm)
     if passage is None:
-        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        _echo(f"Particle {id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
     for line in header_lines(passage):
-        typer.echo(line, err=True)
+        _echo(line, err=True)
     if not passage.text:
         raise typer.Exit(1)
-    typer.echo("", err=True)
-    typer.echo(passage.text)
+    _echo("", err=True)
+    _echo(passage.text)
 
 
 @particle_app.command("narrative")
@@ -272,10 +285,10 @@ async def _particle_narrative(id_prefix: str, *, synthesize: bool = False) -> No
         narrative_id = await _resolve_particle_id(session, id_prefix)
         narrative = await get_particle(session, narrative_id)
         if narrative is None:
-            typer.echo(f"Particle {narrative_id!r} not found.", err=True)
+            _echo(f"Particle {narrative_id!r} not found.", err=True)
             raise typer.Exit(1)
         if narrative.particle_type != ParticleType.NARRATIVE:
-            typer.echo(
+            _echo(
                 f"Particle {narrative_id[:8]}… is {narrative.particle_type}, not NARRATIVE. "
                 f"`particle narrative` only applies to NARRATIVE particles.",
                 err=True,
@@ -287,36 +300,36 @@ async def _particle_narrative(id_prefix: str, *, synthesize: bool = False) -> No
 
             article = await synthesize_narrative(session, narrative_id)
             if article is None or not article.constituents:
-                typer.echo(
+                _echo(
                     "No constituents yet — nothing to synthesize. Link claims with:\n"
                     f"  particles links add <claim-id> {narrative_id[:8]} --type part-of"
                 )
                 return
-            typer.echo(article.body)
+            _echo(article.body)
             if not article.used_synthesis:
-                typer.echo(
+                _echo(
                     "\n(structured-listing fallback — no LLM synthesis; "
                     "set ANTHROPIC_API_KEY for prose)",
                     err=True,
                 )
             return
 
-        typer.echo(f"Narrative:  {narrative.content}")
-        typer.echo(f"ID:         {narrative.id}")
-        typer.echo("")
+        _echo(f"Narrative:  {narrative.content}")
+        _echo(f"ID:         {narrative.id}")
+        _echo("")
 
         sequence = await get_narrative_sequence(session, narrative_id)
         if not sequence:
-            typer.echo(
+            _echo(
                 "No constituents yet. Link claims into this narrative with:\n"
                 f"  particles links add <claim-id> {narrative_id[:8]} --type part-of\n"
                 "and order them with `--type sequence-in` between adjacent claims."
             )
             return
-        typer.echo(f"Constituents ({len(sequence)}, in sequence):")
+        _echo(f"Constituents ({len(sequence)}, in sequence):")
         for i, member in enumerate(sequence, start=1):
             preview = member.content if len(member.content) <= 80 else member.content[:77] + "…"
-            typer.echo(f"  {i}. {member.id[:8]}…  {preview}")
+            _echo(f"  {i}. {member.id[:8]}…  {preview}")
 
 
 @particle_app.command("tag")
@@ -336,10 +349,10 @@ def particle_tag_cmd(
 ) -> None:
     """Add taxonomy tags to a particle."""
     if not tag:
-        typer.echo("Provide at least one --tag value.", err=True)
+        _echo("Provide at least one --tag value.", err=True)
         raise typer.Exit(1)
     if supersede:
-        typer.echo(
+        _echo(
             "--supersede is reserved for Phase B; Phase A edits in place only.",
             err=True,
         )
@@ -359,10 +372,10 @@ def particle_untag_cmd(
 ) -> None:
     """Remove taxonomy tags from a particle."""
     if not tag:
-        typer.echo("Provide at least one --tag value.", err=True)
+        _echo("Provide at least one --tag value.", err=True)
         raise typer.Exit(1)
     if supersede:
-        typer.echo(
+        _echo(
             "--supersede is reserved for Phase B; Phase A edits in place only.",
             err=True,
         )
@@ -387,10 +400,10 @@ async def _resolve_particle_id(session: AsyncSession, id_prefix: str) -> str:
     )
     ids = list(result.scalars())
     if not ids:
-        typer.echo(f"No particle matches prefix {id_prefix!r}.", err=True)
+        _echo(f"No particle matches prefix {id_prefix!r}.", err=True)
         raise typer.Exit(1)
     if len(ids) > 1:
-        typer.echo(
+        _echo(
             f"Ambiguous prefix {id_prefix!r} matches {len(ids)} particles.",
             err=True,
         )
@@ -401,7 +414,18 @@ async def _resolve_particle_id(session: AsyncSession, id_prefix: str) -> str:
 async def _particle_tag(id_prefix: str, tags: list[str], *, force: bool) -> None:
     from particles.api.cli._id_norm import normalise_particle_id
     from particles.api.client import get_backend
+    from particles.store.taxonomy_store import RESERVED_TAGS
 
+    reserved = sorted(RESERVED_TAGS.intersection(tags))
+    if reserved:
+        # Refused here too, before the engine round trip, so a remote tag says why.
+        _echo(
+            f"Refusing to add {', '.join(reserved)}: only `particles import mcp-memory` "
+            "stamps that tag, when it creates a belief, and the memory-server facade "
+            "reads it as its own memory.",
+            err=True,
+        )
+        raise typer.Exit(1)
     backend = get_backend()
     if backend.remote:
         # Prefix resolution + taxonomy validation read the local store, so they
@@ -416,7 +440,7 @@ async def _particle_tag(id_prefix: str, tags: list[str], *, force: bool) -> None
             if not force:
                 for t in tags:
                     if not await tag_exists(session, t):
-                        typer.echo(
+                        _echo(
                             f"Tag {t!r} is not defined in any active taxonomy. "
                             f"Pass --force to apply ad-hoc tags.",
                             err=True,
@@ -424,9 +448,9 @@ async def _particle_tag(id_prefix: str, tags: list[str], *, force: bool) -> None
                         raise typer.Exit(1)
     added = await backend.particle_tag(particle_id, tags)
     if added:
-        typer.echo(f"Tagged {particle_id[:8]}… with {', '.join(added)}")
+        _echo(f"Tagged {particle_id[:8]}… with {', '.join(added)}")
     else:
-        typer.echo(f"Particle {particle_id[:8]}… already had all requested tags.")
+        _echo(f"Particle {particle_id[:8]}… already had all requested tags.")
 
 
 async def _particle_untag(id_prefix: str, tags: list[str]) -> None:
@@ -441,9 +465,9 @@ async def _particle_untag(id_prefix: str, tags: list[str]) -> None:
             particle_id = await _resolve_particle_id(session, id_prefix)
     removed = await backend.particle_untag(particle_id, tags)
     if removed:
-        typer.echo(f"Untagged {particle_id[:8]}… from {', '.join(removed)}")
+        _echo(f"Untagged {particle_id[:8]}… from {', '.join(removed)}")
     else:
-        typer.echo(f"Particle {particle_id[:8]}… had none of the requested tags.")
+        _echo(f"Particle {particle_id[:8]}… had none of the requested tags.")
 
 
 @particle_app.command("retract")
@@ -471,7 +495,7 @@ def particle_retract_cmd(
     ``PROVENANCE_STALE`` to anything that depended on it.
     """
     if not reason.strip():
-        typer.echo("--reason must be non-empty.", err=True)
+        _echo("--reason must be non-empty.", err=True)
         raise typer.Exit(1)
     run(_particle_retract(particle_id, reason, dry_run=dry_run, yes=yes))
 
@@ -500,19 +524,19 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
         particle_id = await _resolve_particle_id(session, id_prefix)
         target = await get_particle(session, particle_id)
     if target is None:  # pragma: no cover — the resolver already exits on a miss
-        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        _echo(f"Particle {id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
 
     # You identified it by eight characters; see what you are about to retire.
-    typer.echo(f"  {particle_id}")
-    typer.echo(f"  status      {target.status.value}")
-    typer.echo(f"  asserted by {target.asserted_by}")
-    typer.echo(f"  confidence  {target.confidence.value:.2f}")
-    typer.echo(f"  content     {target.content}")
-    typer.echo(f"  reason      {reason}")
+    _echo(f"  {particle_id}")
+    _echo(f"  status      {target.status.value}")
+    _echo(f"  asserted by {target.asserted_by}")
+    _echo(f"  confidence  {target.confidence.value:.2f}")
+    _echo(f"  content     {target.content}")
+    _echo(f"  reason      {reason}")
 
     if dry_run:
-        typer.echo("\n--dry-run: nothing written.")
+        _echo("\n--dry-run: nothing written.")
         return
     if not yes:
         confirm("\nRetract this belief?", abort=True)
@@ -531,12 +555,12 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
             # The §6 guards (HUMAN_REVIEW non-claims, ACTIVE-only) and the §6.6 transition
             # table surface here. Idempotence is theirs, not a special case: a
             # second run reports "is RETRACTED, not ACTIVE".
-            typer.echo(f"Error: {exc}", err=True)
+            _echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from exc
         await session.commit()
 
-    typer.echo(f"\nRetracted {particle_id[:8]}… (EXPLICIT_RETRACTION); reason recorded.")
-    typer.echo("Run `particles lint` to cascade PROVENANCE_STALE to dependents.")
+    _echo(f"\nRetracted {particle_id[:8]}… (EXPLICIT_RETRACTION); reason recorded.")
+    _echo("Run `particles lint` to cascade PROVENANCE_STALE to dependents.")
 
 
 @particle_app.command("reclassify")
@@ -571,10 +595,10 @@ def particle_reclassify_cmd(
         target = AssertionModality(modality.strip().upper())
     except ValueError:
         valid = ", ".join(m.value for m in AssertionModality)
-        typer.echo(f"Unknown modality {modality!r}. Valid: {valid}.", err=True)
+        _echo(f"Unknown modality {modality!r}. Valid: {valid}.", err=True)
         raise typer.Exit(1) from None
     if not reason.strip():
-        typer.echo("--reason must be non-empty.", err=True)
+        _echo("--reason must be non-empty.", err=True)
         raise typer.Exit(1)
     run(_particle_reclassify(particle_id, target, reason, dry_run=dry_run))
 
@@ -598,19 +622,19 @@ async def _particle_reclassify(
         target = await get_particle(session, particle_id)
         stamped = await particle_stamp(session, particle_id)
     if target is None:  # pragma: no cover — the resolver already exits on a miss
-        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        _echo(f"Particle {id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
 
     classifier = stamped[0].classifier if stamped is not None else "unknown"
-    typer.echo(f"  {particle_id}")
-    typer.echo(f"  status      {target.status.value}")
-    typer.echo(f"  content     {target.content}")
-    typer.echo(f"  modality    {target.assertion_modality.value} (set by {classifier})")
-    typer.echo(f"  new         {modality.value}")
-    typer.echo(f"  reason      {reason}")
+    _echo(f"  {particle_id}")
+    _echo(f"  status      {target.status.value}")
+    _echo(f"  content     {target.content}")
+    _echo(f"  modality    {target.assertion_modality.value} (set by {classifier})")
+    _echo(f"  new         {modality.value}")
+    _echo(f"  reason      {reason}")
 
     if dry_run:
-        typer.echo("\n--dry-run: nothing written.")
+        _echo("\n--dry-run: nothing written.")
         return
 
     async with session_scope(write=True) as session:  # writer lock
@@ -620,13 +644,13 @@ async def _particle_reclassify(
         await session.commit()
 
     if result.prior == result.modality:
-        typer.echo(f"\nPinned {particle_id[:8]}… at {modality.value} by operator verdict.")
+        _echo(f"\nPinned {particle_id[:8]}… at {modality.value} by operator verdict.")
     else:
-        typer.echo(
+        _echo(
             f"\nReclassified {particle_id[:8]}… {result.prior.value} → {modality.value}; "
             "reason recorded."
         )
-    typer.echo("The next `particles memory consolidate` run re-pairs it under the new default.")
+    _echo("The next `particles memory consolidate` run re-pairs it under the new default.")
 
 
 @particle_app.command("date")
@@ -669,13 +693,13 @@ def particle_date_cmd(
     from particles.core.schema import ValidKind
 
     if not reason.strip():
-        typer.echo("--reason must be non-empty.", err=True)
+        _echo("--reason must be non-empty.", err=True)
         raise typer.Exit(1)
     if clear and (valid_from is not None or kind is not None):
-        typer.echo("--clear takes no --from or --kind.", err=True)
+        _echo("--clear takes no --from or --kind.", err=True)
         raise typer.Exit(1)
     if not clear and (valid_from is None or kind is None):
-        typer.echo("--from and --kind are both required (or pass --clear).", err=True)
+        _echo("--from and --kind are both required (or pass --clear).", err=True)
         raise typer.Exit(1)
     start: datetime | None = None
     target: ValidKind | None = None
@@ -684,7 +708,7 @@ def particle_date_cmd(
         try:
             start = datetime.fromisoformat(valid_from)
         except ValueError:
-            typer.echo(
+            _echo(
                 f"Invalid --from value {valid_from!r}: expected an ISO-8601 date or datetime.",
                 err=True,
             )
@@ -694,7 +718,7 @@ def particle_date_cmd(
         try:
             target = ValidKind(kind.strip().upper())
         except ValueError:
-            typer.echo(f"Unknown kind {kind!r}. Valid: EVENT, STATE.", err=True)
+            _echo(f"Unknown kind {kind!r}. Valid: EVENT, STATE.", err=True)
             raise typer.Exit(1) from None
     run(_particle_date(particle_id, start, target, reason, dry_run=dry_run))
 
@@ -718,24 +742,24 @@ async def _particle_date(
         particle_id = await _resolve_particle_id(session, id_prefix)
         target = await get_particle(session, particle_id)
     if target is None:  # pragma: no cover — the resolver already exits on a miss
-        typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+        _echo(f"Particle {id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
 
     current = target.valid_from.date().isoformat() if target.valid_from else "none"
     current_kind = target.valid_kind.value if target.valid_kind else "unkinded"
-    typer.echo(f"  {particle_id}")
-    typer.echo(f"  status      {target.status.value}")
-    typer.echo(f"  content     {target.content}")
-    typer.echo(f"  valid_from  {current} ({current_kind})")
+    _echo(f"  {particle_id}")
+    _echo(f"  status      {target.status.value}")
+    _echo(f"  content     {target.content}")
+    _echo(f"  valid_from  {current} ({current_kind})")
     if valid_from is None:
-        typer.echo("  new         cleared")
+        _echo("  new         cleared")
     else:
         assert valid_kind is not None
-        typer.echo(f"  new         {valid_from.date().isoformat()} ({valid_kind.value})")
-    typer.echo(f"  reason      {reason}")
+        _echo(f"  new         {valid_from.date().isoformat()} ({valid_kind.value})")
+    _echo(f"  reason      {reason}")
 
     if dry_run:
-        typer.echo("\n--dry-run: nothing written.")
+        _echo("\n--dry-run: nothing written.")
         return
 
     async with session_scope(write=True) as session:  # writer lock
@@ -744,15 +768,15 @@ async def _particle_date(
                 session, particle_id, valid_from=valid_from, valid_kind=valid_kind, reason=reason
             )
         except ValueError as exc:
-            typer.echo(f"Error: {exc}", err=True)
+            _echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from None
         await session.commit()
 
     if valid_from is None:
-        typer.echo(f"\nCleared the world-time record on {particle_id[:8]}…; reason recorded.")
+        _echo(f"\nCleared the world-time record on {particle_id[:8]}…; reason recorded.")
     else:
         assert valid_kind is not None
-        typer.echo(
+        _echo(
             f"\nDated {particle_id[:8]}… from {valid_from.date().isoformat()} "
             f"({valid_kind.value}) by operator verdict; reason recorded."
         )
@@ -781,10 +805,10 @@ async def _particle_search(fingerprint: str, limit: int) -> None:
 
     fp = fingerprint.lower().strip()
     if len(fp) < 8:
-        typer.echo("Fingerprint prefix must be at least 8 hex characters.", err=True)
+        _echo("Fingerprint prefix must be at least 8 hex characters.", err=True)
         raise typer.Exit(1)
     if any(ch not in "0123456789abcdef" for ch in fp):
-        typer.echo("Fingerprint must be hexadecimal.", err=True)
+        _echo("Fingerprint must be hexadecimal.", err=True)
         raise typer.Exit(1)
 
     async with session_scope() as session:
@@ -800,11 +824,11 @@ async def _particle_search(fingerprint: str, limit: int) -> None:
         rows = result.scalars().all()
 
         if not rows:
-            typer.echo(f"No particles found with fingerprint {fp[:16]}….", err=True)
+            _echo(f"No particles found with fingerprint {fp[:16]}….", err=True)
             raise typer.Exit(1)
 
-        typer.echo(f"{len(rows)} particle(s) sharing fingerprint {fp[:16]}…:")
-        typer.echo("")
+        _echo(f"{len(rows)} particle(s) sharing fingerprint {fp[:16]}…:")
+        _echo("")
         for r in rows:
             content_preview = r.content if len(r.content) <= 80 else r.content[:77] + "…"
-            typer.echo(f"  {r.id[:8]}…  [{r.status}]  {content_preview}")
+            _echo(f"  {r.id[:8]}…  [{r.status}]  {content_preview}")

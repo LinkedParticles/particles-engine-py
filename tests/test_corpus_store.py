@@ -588,3 +588,30 @@ class TestBatchLookupsPastVariableLimit:
         assert await get_entry_uri_map(db_session, set()) == {}
         assert await get_entry_source_facts(db_session, set()) == {}
         assert await get_document_supersession_map(db_session, set()) == {}
+
+
+class TestListFileEntriesUnder:
+    """The root is a literal prefix: ``_`` and ``%`` in a path are not wildcards.
+
+    Found while fixing security review 2026-10-25-2, R35: an unescaped
+    ``startswith`` read the ``_`` of ``my_vault`` as any character and listed
+    a sibling ``my-vault`` note. The vault walk re-filters by path, so nothing
+    acted on it; the helper's own contract is what this pins.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_sibling_differing_at_a_wildcard_is_not_listed(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.corpus.store import list_file_entries_under
+
+        for eid, uri in [
+            ("inside", "file:///notes/my_vault/a.md"),
+            ("sibling", "file:///notes/my-vault/b.md"),
+            ("percent", "file:///notes/my%25vault/c.md"),
+        ]:
+            db_session.add(CorpusEntryRow.from_model(_entry(eid, uri)))
+        await db_session.commit()
+
+        listed = await list_file_entries_under(db_session, "file:///notes/my_vault")
+        assert [row.entry_id for row in listed] == ["inside"]

@@ -93,6 +93,9 @@ class GraphExporter:
             max_nodes=raw_max_nodes if isinstance(raw_max_nodes, int) else None,
             min_particle_confidence=min_particle_confidence,
             include_non_asserted=bool(options.get("include_non_asserted", False)),
+            # The operator running `export graph` names the manifest file, so
+            # it is read as given (security review 2026-10-25, Q11).
+            read_any_manifest=True,
         )
 
         html = render_html(data, generated_at=datetime.now(UTC))

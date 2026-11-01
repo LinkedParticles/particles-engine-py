@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import particles.store.taxonomy_store  # noqa: F401  # register taxonomy sink
 import particles.store.wikidata_cache  # noqa: F401  # register wikidata label cache
+from particles import db
 from particles.config import get_config
 from particles.core.conflict_resolution import (
     ConflictVerdict,
@@ -91,11 +92,12 @@ from particles.corpus.store import (
     release_extraction_claim,
     update_extraction_status,
 )
-from particles.db import write_lock
+from particles.db import store_of
 from particles.egress import EgressRefused, current_policy
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.extraction.append_delta import raw_offset_for
 from particles.extraction.calibration import (
+    TRANSFORM_ISOTONIC,
     describe_calibration,
     scaler_for_record,
     version_mismatch_reason,
@@ -117,7 +119,7 @@ from particles.extraction.scope import (
     is_scope_exempt_source,
 )
 from particles.extraction.subject_gate import GATE_COMPONENT, gate_candidate_subjects, gate_digest
-from particles.ingest.absence import process_absence
+from particles.ingest.absence import memory_absence_holder, process_absence
 from particles.ingest.append_base import (
     AUTO_BASE,
     earlier_all_complete,
@@ -203,10 +205,12 @@ from particles.ingest.second_reading import (
 )
 from particles.ingest.structure_edges import plan_structure_edges
 from particles.ingest.subject_resolver import (
+    LiveAnswers,
     _persona_canonical,
     find_existing_qualified,
     find_existing_subject,
     load_speaker_key,
+    prefetch_subjects,
     resolve_subjects,
 )
 from particles.ingest.update_supersession import (
@@ -235,12 +239,20 @@ from particles.llm.breaker import (
 from particles.llm.fencing import data_fence_instruction, fence, make_nonce
 from particles.llm.registry import PurposeRefused, purpose_allowed, purpose_endpoint
 from particles.store.candidate_cache import load_active_candidates
+from particles.store.change_journal import (
+    JOURNAL_RETENTION,
+    changed_since,
+    journal_installed,
+    read_head,
+    token_at,
+)
 from particles.store.event_store import record_event
 from particles.store.extractor_store import get_calibration
 from particles.store.particle_store import (
     append_provenance_ref,
     compute_context_fingerprint,
     get_active_particles_for_entry,
+    get_active_particles_with_embeddings_by_ids,
     get_particles_by_ids,
     insert_particle,
     set_particle_property,
@@ -352,6 +364,10 @@ class SnapshotOutcome:
     waiting_on_failed: bool = False
     """…and that snapshot is FAILED (its blob is missing): only restoring the
     blob or `particles reindex <entry>` releases the wait."""
+    waiting_on_memory_file: bool = False
+    """The snapshot is a memory-file ``ABSENT`` record waiting on ``waiting_on``,
+    an unextracted memory file of its project, rather than on a partial whole
+    read."""
     absence_retired: list[str] | None = None
     """Set when the snapshot was an ``ABSENT`` record: the ids
     its processing retired, with no model call. ``None`` for every other
@@ -458,29 +474,38 @@ async def extract_snapshot(
     request's time localizes across the embed / LLM / DB child spans, and the
     written-particle count feeds the ``particles.extracted`` throughput metric.
     """
-    with _tracer.start_as_current_span("extract.snapshot") as span:
+    # The exception's type alone, never its message (security review
+    # 2026-10-26-1, R7).
+    with _tracer.start_as_current_span(
+        "extract.snapshot", record_exception=False, set_status_on_exception=False
+    ) as span:
         span.set_attribute("particles.entry_id", entry_id)
         span.set_attribute("particles.snapshot_id", snapshot_id)
-        written = await _extract_snapshot_impl(
-            session,
-            entry_id,
-            snapshot_id,
-            extractor=extractor,
-            agent_id=agent_id,
-            page_stats_out=page_stats_out,
-            supersede_ids=supersede_ids,
-            carry_forward_ids_out=carry_forward_ids_out,
-            suppressed_ids_out=suppressed_ids_out,
-            completion_pool=completion_pool,
-            skip_if_superseded=skip_if_superseded,
-            divergences_out=divergences_out,
-            outcome_out=outcome_out,
-            append_base=append_base,
-            ignore_partial=ignore_partial,
-            provider_model=provider_model,
-            fail_closed_probes=fail_closed_probes,
-            before_apply=before_apply,
-        )
+        try:
+            written = await _extract_snapshot_impl(
+                session,
+                entry_id,
+                snapshot_id,
+                extractor=extractor,
+                agent_id=agent_id,
+                page_stats_out=page_stats_out,
+                supersede_ids=supersede_ids,
+                carry_forward_ids_out=carry_forward_ids_out,
+                suppressed_ids_out=suppressed_ids_out,
+                completion_pool=completion_pool,
+                skip_if_superseded=skip_if_superseded,
+                divergences_out=divergences_out,
+                outcome_out=outcome_out,
+                append_base=append_base,
+                ignore_partial=ignore_partial,
+                provider_model=provider_model,
+                fail_closed_probes=fail_closed_probes,
+                before_apply=before_apply,
+            )
+        except Exception as exc:
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+            raise
         span.set_attribute("particles.extracted_count", len(written))
         _extracted_counter.add(len(written))
         return written
@@ -537,6 +562,21 @@ async def _extract_snapshot_impl(
         if absent.extraction_status is ExtractionStatus.COMPLETE:
             if outcome_out is not None:
                 outcome_out.absence_retired = []
+            return []
+        sibling = await memory_absence_holder(session, entry, absent.captured_at)
+        if sibling is not None:
+            log.info(
+                "Absence %s: waiting on %s, an unextracted memory file of the same project "
+                "(%s), which may restate what the deleted file said",
+                snapshot_id[:8],
+                sibling.snapshot_id[:8],
+                "FAILED" if sibling.failed else "pending",
+            )
+            if outcome_out is not None:
+                outcome_out.skipped = "waiting"
+                outcome_out.waiting_on = sibling.snapshot_id
+                outcome_out.waiting_on_failed = sibling.failed
+                outcome_out.waiting_on_memory_file = True
             return []
         if before_apply is not None:
             await before_apply()
@@ -644,7 +684,7 @@ async def _extract_snapshot_impl(
     # running several snapshots at once claims while another's write pass
     # holds the store, and the lock queues the claim instead of leaving it to
     # race ``busy_timeout``.
-    async with write_lock():
+    async with db.write_lock(store_of(session)):
         await claim_snapshot_for_extraction(session, snapshot_id, started_at=datetime.now(UTC))
         await session.commit()
 
@@ -707,16 +747,17 @@ async def _release_claim(session: AsyncSession, snapshot_id: str) -> None:
     be unusable after a cancelled await or a connection error, and it is
     conditional (``release_extraction_claim``), so a snapshot that already
     reached PENDING, COMPLETE or FAILED is left as it is. BaseException
-    callers cover both KeyboardInterrupt and asyncio's CancelledError.
+    callers cover both KeyboardInterrupt and asyncio's CancelledError. The
+    fresh session is bound to ``session``'s engine, so the claim is released
+    in the store it was taken in, never the default store (security review
+    2026-10-25-2, R12).
     """
-    from particles.db import session_scope
-
     try:
         await session.rollback()
     except Exception as exc:  # noqa: BLE001 — best effort; the reset below is what matters
         log.debug("Snapshot %s: rollback before releasing the claim failed: %s", snapshot_id, exc)
     try:
-        async with session_scope() as cleanup_session:
+        async with AsyncSession(session.bind, expire_on_commit=False) as cleanup_session:
             released = await release_extraction_claim(cleanup_session, snapshot_id)
             await cleanup_session.commit()
         if released:
@@ -1048,6 +1089,10 @@ async def _extract_claimed(
     # Load existing ACTIVE particles for this entry (for conflict detection).
     # Exclude particles that are about to be superseded by this reindex pass so
     # that within-entry re-extraction conflicts are not incorrectly flagged.
+    # The store's change marker, read before any candidate is loaded: the write
+    # phase re-reads what changed after it, under the lock (security review
+    # 2026-10-31-2, AE2).
+    watermark = await read_conflict_watermark(session)
     all_existing: list[Particle] = await get_active_particles_for_entry(session, entry_id)
     # DOCUMENT_META and non-asserted particles never
     # participate in §6.6 conflict resolution — see _skips_conflict_resolution.
@@ -1086,7 +1131,9 @@ async def _extract_claimed(
     # (the pair was never found at all, and both claims stayed ACTIVE), so the
     # subject-scoped search declines such a pair rather than manufacturing a
     # review item. The same-entry 0.80 search is untouched.
-    updates_only = get_config().reconciliation.store_mode != "single"
+    # The trust regime is the target store's own, never the process-global
+    # mode (security review 2026-10-26-1, P30).
+    updates_only = get_config().reconciliation_mode_for(store_of(session)) != "single"
 
     written: list[Particle] = []
 
@@ -1112,15 +1159,23 @@ async def _extract_claimed(
     # both parameterises the retired linear form and was fitted against
     # all-False labels.
     if calibration is not None and scaler_for_record(calibration) is None:
+        # an isotonic record without breakpoints is malformed, not
+        # an old fit, and its temperature is an unused 1.0, so it is named as
+        # what it is.
+        if calibration.transform == TRANSFORM_ISOTONIC:
+            why = "it is an isotonic record with no breakpoints"
+        else:
+            why = (
+                f"it was fitted before a format change (transform={calibration.transform!r}, "
+                f"T={calibration.temperature:.4f})"
+            )
         log.warning(
-            "Ignoring the stored calibration for %s under %s: it was fitted before "
-            "a format change (transform=%r, T=%.4f) and cannot be applied. Particles carry "
-            "EXTRACTOR_DIRECT until you re-fit with `particles extractor calibrate "
-            "%s --regenerate`.",
+            "Ignoring the stored calibration for %s under %s: %s and cannot be applied. "
+            "Particles carry EXTRACTOR_DIRECT until you re-fit with `particles extractor "
+            "calibrate %s --regenerate`.",
             ext_agent,
             current_model,
-            calibration.transform,
-            calibration.temperature,
+            why,
             ext_agent,
         )
         calibration = None
@@ -1473,20 +1528,66 @@ async def _extract_claimed(
     # the lock — releasing SQLite's write lock before the advisory lock — so
     # the caller's later commit is a no-op.
     divergences = 0
+    # A candidate that may retire a claim by update is written before its
+    # siblings, so a sibling that only contradicts that claim meets it
+    # retired whichever order the extractor emitted them in.
+    order = write_order(selections)
+    # The live subject authorities (a network lookup and, for Wikidata, the
+    # judge's model call) are asked here, before the writer lock, in write
+    # order and once per name; the write loop replays their answers (
+    # D2; security review 2026-10-31-1, AD2).
+    qualified_by_index = {
+        i: qualified_contexts(result.candidates[i], entry.tags, entry.uri_r, entry.source_type)
+        for i in order
+    }
+    live_answers = LiveAnswers()
+    for i in order:
+        candidate = result.candidates[i]
+        qualified = qualified_by_index[i]
+        await prefetch_subjects(
+            session,
+            [name for name in candidate.subjects if name not in qualified],
+            particle_content=candidate.content,
+            source_type=entry.source_type,
+            source_tags=entry.tags,
+            answers=live_answers,
+        )
     # Waiting on the write lock can take as long as every other writer's write
     # phase, so end the reads above before it: a task queued on the lock must
     # not pin a pooled connection while it queues.
     await session.commit()
-    async with write_lock():
+    async with db.write_lock(store_of(session)):
+        # Search the store again under the lock (security review 2026-10-31-2,
+        # AE2): re-read the claims this pass would act on, and every claim
+        # committed since its candidates were loaded. A claim retired meanwhile
+        # is no partner; a claim that became ACTIVE meanwhile, which the pass
+        # never probed, is put to the ladder with no probe and held for review.
+        acted_on = {
+            other.id
+            for selection in selections
+            for other in ([selection.primary] if selection.primary else []) + list(selection.extras)
+        }
+        found = await search_store_under_lock(session, watermark, acted_on)
+        seen_ids = {p.id for p, _ in all_with_embs} | {p.id for p in existing}
+        if found is None:
+            # The journal cannot say what changed: read the whole set, and take
+            # as new every claim the gather did not hold (none, when it held
+            # none: the pass loaded no candidate set).
+            under_lock = await load_active_conflict_candidates(session)
+            new_ids = frozenset(p.id for p, _ in under_lock if p.id not in seen_ids)
+        else:
+            under_lock, new_ids = found[0], found[1] - seen_ids
+        live_ids = {p.id for p, _ in under_lock}
+        lapsed_ids = acted_on - live_ids
+        fresh_pairs = [
+            (p, e) for p, e in under_lock if p.id in new_ids and p.id not in supersede_ids
+        ]
         # candidate index → the stored particle id that represents it,
         # so post-write edge creation can bind a stance to its (co-extracted) target.
         index_to_id: dict[int, str] = {}
-        # A candidate that may retire a claim by update is written before its
-        # siblings, so a sibling that only contradicts that claim meets it
-        # retired whichever order the extractor emitted them in.
-        for i in write_order(selections):
+        for i in order:
             candidate = result.candidates[i]
-            # Resolve subject names/QIDs to Subject UUIDs
+            # Resolve subject names/QIDs to Subject UUIDs, on the answers above
             subject_ids = await resolve_subjects(
                 session,
                 candidate.subjects,
@@ -1494,7 +1595,8 @@ async def _extract_claimed(
                 particle_content=candidate.content,
                 source_type=entry.source_type,
                 source_tags=entry.tags,
-                qualified=qualified_contexts(candidate, entry.tags, entry.uri_r, entry.source_type),
+                qualified=qualified_by_index[i],
+                answers=live_answers,
             )
 
             # Apply subject classification for structured extractors
@@ -1547,8 +1649,25 @@ async def _extract_claimed(
                 duplicates=dup_index,
                 retired_values=retired_index,
                 conflict=selection.primary,
-                retired_ids=retired,
+                retired_ids=retired | lapsed_ids,
             )
+            # A claim committed since the gather, found only under the lock.
+            found_late: Particle | None = None
+            if (
+                route in (Route.INSERT, Route.LADDER)
+                and fresh_pairs
+                and emb is not None
+                and holder_from_properties(candidate.properties) is None
+            ):
+                found_late, _ = await _nearest_conflict(
+                    session,
+                    particle,
+                    np.asarray(emb, dtype=np.float32),
+                    fresh_pairs,
+                    frozenset(retired),
+                )
+                if found_late is not None:
+                    route, target = Route.LADDER, found_late
 
             earlier = restatement.carried.get(i)
             if earlier is not None and route is not Route.SUPPRESS:
@@ -1628,7 +1747,10 @@ async def _extract_claimed(
                 assert target is not None
                 # a fail-closed pass hands the ladder the tri-state
                 # for a primary pair whose probe never ran, so it quarantines.
-                fail_closed_pair = fail_closed_probes and target.id in unverified[i]
+                # So does a claim found only under the lock (AE2).
+                fail_closed_pair = found_late is not None or (
+                    fail_closed_probes and target.id in unverified[i]
+                )
                 resolved = await _resolve_conflict(
                     session,
                     particle,
@@ -1639,26 +1761,34 @@ async def _extract_claimed(
                     fail_closed=fail_closed_pair,
                     new_embedding=emb,
                     allow_update_supersession=True,
-                    slot=selection.slot_of(target.id),
-                    same_slot_update=selection.same_slot_update(target.id),
+                    slot=None if found_late is not None else selection.slot_of(target.id),
+                    same_slot_update=(found_late is None and selection.same_slot_update(target.id)),
                     retired_out=retired,
                     observer=gate,
                     candidate_scope=candidate_scope,
-                    reading=selection.reading,
-                    revision_pair=target.id in revision,
+                    reading=None if found_late is not None else selection.reading,
+                    revision_pair=found_late is None and target.id in revision,
                     settled_out=revision_settled,
                 )
                 if resolved is not None:
                     written.append(resolved)
                     index_to_id[i] = resolved.id
                     dup_index.add(resolved)
-                    if resolved.id == particle.id and resolved.status == Status.ACTIVE:
+                    if (
+                        found_late is None
+                        and resolved.id == particle.id
+                        and resolved.status == Status.ACTIVE
+                    ):
                         await _apply_update_extras(
                             session,
                             resolved,
                             entry,
                             snapshot_id,
-                            [p for p in selection.extras if p.id not in retired],
+                            [
+                                p
+                                for p in selection.extras
+                                if p.id not in retired and p.id not in lapsed_ids
+                            ],
                             retired,
                             entries=entries,
                             precondition=candidate_pairs[i].precondition,
@@ -2113,9 +2243,13 @@ async def load_active_conflict_candidates(session: AsyncSession) -> list[Embeddi
     The candidate set is every ACTIVE particle with an embedding, minus the
     DOCUMENT_META particles §6.6 ignores — exactly what
     :func:`reconcile_and_insert` would load per call. Pass the returned list as
-    that function's ``candidate_cache`` for a whole batch (e.g. an interchange
-    import): the function maintains it in place as particles are written, so a
-    batch of N imports runs **one** full-store scan instead of N (F4.3).
+    that function's ``candidate_cache`` for a batch written on one session
+    with no commit between its items: the function maintains it in place as
+    particles are written, so a batch of N runs **one** full-store scan
+    instead of N (F4.3). A caller that commits between items (an interchange
+    import) passes none, since other writers commit between them too; each
+    gather then reads the process-wide candidate cache, which catches up from
+    the change journal.
 
     The list is the caller's, but its particles are the candidate cache's
     (:mod:`particles.store.candidate_cache`), shared with every other reader
@@ -2137,6 +2271,7 @@ async def reconcile_and_insert(
     candidate_cache: list[EmbeddingPair] | None = None,
     single_trust_order: bool | None = None,
     fail_closed: bool = False,
+    append_provenance: bool = True,
 ) -> Particle | None:
     """Insert one particle into the current store, running the §6.6 ladder.
 
@@ -2155,51 +2290,162 @@ async def reconcile_and_insert(
     claims from *other* sources. Subject-scoped candidate retrieval for scale is
     deferred. The consensus-safe trust regime is resolved per store by
     the caller and passed as ``single_trust_order``;
-    ``None`` falls back to the process-global ``reconciliation.store_mode``.
+    ``None`` falls back to the regime of the store ``session`` writes
+    (``reconciliation_mode_for``; security review 2026-10-26-1, P30).
     ``fail_closed`` makes an unverifiable high-similarity pair
     quarantine instead of corroborate — the assertion pathway passes ``True``.
 
-    ``candidate_cache`` lets a batch caller (e.g. interchange import) avoid the
-    per-call full-store embedding scan that is O(N²) over a batch (F4.3): pass
-    the list returned by :func:`load_active_conflict_candidates` and it is read
-    *and maintained in place* — newly written ACTIVE particles are appended and
-    trust-superseded ones removed — so later items in the same batch still
-    reconcile against earlier ones. When ``None`` (the default, single-call
-    path) the candidate set is loaded fresh from the store.
+    ``candidate_cache`` lets a batch caller on one uncommitted session avoid
+    the per-call full-store embedding scan that is O(N²) over a batch (F4.3):
+    pass the list returned by :func:`load_active_conflict_candidates` and the
+    gather searches it, and it is *maintained in place* (newly written ACTIVE
+    particles are appended and trust-superseded ones removed), so later items
+    in the same batch still reconcile against earlier ones. The apply never
+    searches it: it re-reads the store (:func:`apply_reconcile`). When ``None``
+    (the default, single-call path) the candidate set is loaded fresh.
 
     Returns the inserted / winning particle, or ``None`` when trust resolution
     kept the existing particle and dropped this one. When suppression
     fires — this exact claim is already ACTIVE with the same subjects and stance
     holder — the **existing** particle is returned with this call's provenance
     ref appended to it, which is what makes a repeated assertion idempotent
-    rather than a second copy.
-    """
-    if embedding is not None:
-        emb: np.ndarray[Any, np.dtype[np.float32]] | None = np.asarray(embedding, dtype=np.float32)
-        emb_list: list[float] | None = embedding
-    else:
-        batch = await _embed_batch_async([particle.content])
-        emb = batch[0] if batch else None
-        emb_list = emb.tolist() if emb is not None else None
-        if emb is None:
-            # same two failures as the extract path, on the write-time
-            # reconciliation route (agent asserts, interchange import). There is
-            # no ExtractResult to hang a quality note on here, so the log line is
-            # the whole disclosure — make it name both halves.
-            log.warning(
-                "Reconciling %r without an embedding model: §6.6 conflict resolution "
-                "skipped and the particle stored without an embedding, so it will not "
-                "appear in semantic query, dedup or lint until re-extracted.",
-                particle.content[:80],
-            )
+    rather than a second copy. ``append_provenance=False`` returns the existing
+    particle unchanged instead: the interchange importer passes it, because a
+    bundle's refs are origin metadata, and appending them would let a bundle
+    choose which sources attest a belief this store already holds (security
+    review 2026-10-25-2, R23).
 
-    # The rungs above §6.6 route through the one pure router the extract loop
-    # uses (D2), so "duplicate" means one thing on both write paths.
-    # The conflict search is the expensive gather here, so it runs
-    # only when the cheap rungs miss: the router is called once without a
-    # conflict, then again with the search's result.
+    It runs :func:`gather_reconcile` and then :func:`apply_reconcile` on one
+    session. A caller that holds the store's writer lock for the write runs
+    them apart: the gather (the embedding and the ladder's model probes)
+    before the lock, the apply under it.
+    """
+    gathered = await gather_reconcile(session, particle, embedding, candidate_cache=candidate_cache)
+    return await apply_reconcile(
+        session,
+        particle,
+        gathered,
+        candidate_cache=candidate_cache,
+        single_trust_order=single_trust_order,
+        fail_closed=fail_closed,
+        append_provenance=append_provenance,
+    )
+
+
+@dataclass(frozen=True)
+class ReconcileGather:
+    """What :func:`reconcile_and_insert` embeds, reads and asks before it writes.
+
+    The gather of its gather / decide / apply (D2): the embedding, the
+    §6.6 conflict candidate, and the probes' answers on it, none of which needs
+    the store's writer lock. :func:`apply_reconcile` runs the conflict search
+    again under the lock and acts on these answers only when it finds the same
+    ACTIVE claim.
+    """
+
+    embedding: np.ndarray[Any, np.dtype[np.float32]] | None
+    searched: bool
+    """Whether the conflict search ran. A cheap rung (an exact duplicate, a
+    retired twin, an unchecked claim) settled the particle without it."""
+    conflict: Particle | None = None
+    """The pair the ladder runs on, as the gather read it. On this path it is
+    always the nearest claim the search found, or ``None`` when it found none."""
+    probe: bool | None = False
+    """The contradiction probe's answer on ``conflict``; ``None`` when it could
+    not complete. A pair the update answer settled was not probed."""
+    slot: SlotVerdict | None = None
+    same_slot_update: bool = False
+    exclude_ids: frozenset[str] = frozenset()
+    """The ids the search left out (an explicit supersede's predecessor), left
+    out again when the apply searches under the lock."""
+    watermark: ConflictWatermark = None
+    """The store's change marker, read before the search loaded its candidates."""
+    neighbourhood: frozenset[str] = frozenset()
+    """Every claim the search could have chosen: those at or above the lowest
+    similarity floor it applies. The apply re-reads these and the claims
+    changed since ``watermark``, never the whole store (AE5)."""
+
+
+#: The store's change-journal marker a gather searched at (``read_head``), or
+#: ``None`` where the store keeps no journal.
+ConflictWatermark = tuple[int, bytes] | None
+
+
+async def read_conflict_watermark(session: AsyncSession) -> ConflictWatermark:
+    """The marker a conflict search records before it loads its candidates.
+
+    Read before the candidates, so every claim committed after the load is
+    named in the journal after the marker. ``None`` where the store keeps no
+    change journal (not SQLite, or an unmigrated store).
+    """
+    if not await journal_installed(session):
+        return None
+    return await read_head(session)
+
+
+async def search_store_under_lock(
+    session: AsyncSession, watermark: ConflictWatermark, ids: Collection[str]
+) -> tuple[list[EmbeddingPair], frozenset[str]] | None:
+    """The §6.6 candidates a belief write searches again under the writer lock.
+
+    Reads the store as it stands, bounded by what a gather already searched:
+    the claims named in ``ids`` (the gather's neighbourhood and the pairs it
+    acts on) and every claim the change journal names after ``watermark``,
+    each kept only if it is ACTIVE now and takes part in §6.6. Returns those
+    candidates and the ids changed since ``watermark``, or ``None`` when the
+    journal cannot say what changed (no journal, or the marker is gone), and
+    the caller must read the whole candidate set instead.
+
+    Every belief writer's apply calls it with the writer lock held; the guard
+    (``tests/test_writer_lock_guard.py``) checks that each one does (security
+    review 2026-10-31-2, AE1, AE2, AE5, AE15).
+    """
+    if watermark is None:
+        return None
+    if await token_at(session, watermark[0]) != watermark[1]:
+        return None
+    changed = await changed_since(session, watermark[0], limit=JOURNAL_RETENTION)
+    if changed is None:
+        return None
+    pairs = await get_active_particles_with_embeddings_by_ids(session, changed | set(ids))
+    return (
+        [pair for pair in pairs if not _skips_conflict_resolution(pair[0].properties)],
+        frozenset(changed),
+    )
+
+
+async def _reconcile_embedding(
+    particle: Particle, embedding: list[float] | None
+) -> np.ndarray[Any, np.dtype[np.float32]] | None:
+    if embedding is not None:
+        return np.asarray(embedding, dtype=np.float32)
+    batch = await _embed_batch_async([particle.content])
+    emb = batch[0] if batch else None
+    if emb is None:
+        # same two failures as the extract path, on the write-time
+        # reconciliation route (agent asserts, interchange import). There is
+        # no ExtractResult to hang a quality note on here, so the log line is
+        # the whole disclosure — make it name both halves.
+        log.warning(
+            "Reconciling %r without an embedding model: §6.6 conflict resolution "
+            "skipped and the particle stored without an embedding, so it will not "
+            "appear in semantic query, dedup or lint until re-extracted.",
+            particle.content[:80],
+        )
+    return emb
+
+
+async def _route_cheap_rungs(
+    session: AsyncSession, particle: Particle, exclude_ids: frozenset[str] = frozenset()
+) -> tuple[Route, Particle | None]:
+    """Route ``particle`` on the rungs above §6.6, before any conflict search.
+
+    The one pure router the extract loop uses (D2), so "duplicate"
+    means one thing on both write paths. The conflict search is the
+    expensive gather, so it runs only when these rungs route to ``INSERT``.
+    """
     duplicates = (
-        await build_duplicate_index(session, [particle.content])
+        await build_duplicate_index(session, [particle.content], exclude_ids=exclude_ids)
         if get_config().extraction.duplicate_suppression.enabled
         else DuplicateIndex()
     )
@@ -2208,7 +2454,7 @@ async def reconcile_and_insert(
         if get_config().extraction.retired_value_quarantine.enabled
         else DuplicateIndex()
     )
-    route, target = route_particle(
+    return route_particle(
         particle,
         duplicates=duplicates,
         retired_values=retired_values,
@@ -2216,65 +2462,48 @@ async def reconcile_and_insert(
         retired_ids=frozenset(),
     )
 
-    if route is Route.UNCHECKED:
-        # DOCUMENT_META and non-asserted never participate
-        # in §6.6 (mirrors extract_snapshot). They are also excluded from the
-        # conflict-candidate set, so neither is ever appended to ``candidate_cache``.
-        validate_transition(None, Status.ACTIVE)
-        await insert_particle(session, particle, emb_list)
-        return particle
 
-    if route is Route.SUPPRESS:
-        # without this rung an exact duplicate reaches the ladder,
-        # finds no contradiction signal, returns CORROBORATES, and is written as
-        # a second ACTIVE particle — which is why ``particle_assert`` was not
-        # idempotent before this ADR.
-        assert target is not None
-        for ref in particle.provenance:
-            await append_provenance_ref(session, target.id, ref)
-        log.info(
-            "Duplicate suppressed: assertion already ACTIVE as %s",
-            target.id[:8],
-        )
-        return target
+def _conflict_floor() -> float:
+    """The lowest similarity at which :func:`_nearest_conflict` can choose a claim."""
+    threshold = get_config().extraction.similarity_threshold
+    update_cfg = get_config().reconciliation.update_supersession
+    return min(threshold, update_cfg.subject_floor) if update_cfg.enabled else threshold
 
-    if route is Route.RETIRED_TWIN:
-        # a re-asserted retired claim is held on both write paths.
-        assert target is not None
-        corpus_entry_id, snapshot_id, trigger_ref_type = _trigger_ref_for(particle)
-        entry = (
-            await get_entry(session, corpus_entry_id)
-            if trigger_ref_type is ProvenanceRefType.SOURCE
-            else None
-        )
-        return await _hold_retired_reassertion(
-            session,
-            particle,
-            emb_list,
-            target,
-            corpus_entry_id=corpus_entry_id,
-            snapshot_id=snapshot_id,
-            trigger_ref_type=trigger_ref_type,
-            domain=infer_domain(entry.source_type) if entry else None,
-        )
 
-    if candidate_cache is None:
-        pairs = await load_active_conflict_candidates(session)
-    else:
-        pairs = candidate_cache
-    existing = [p for p, _ in pairs]
-    existing_embs = [e for _, e in pairs]
+async def _nearest_conflict(
+    session: AsyncSession,
+    particle: Particle,
+    emb: np.ndarray[Any, np.dtype[np.float32]] | None,
+    pairs: Sequence[EmbeddingPair],
+    exclude_ids: frozenset[str],
+) -> tuple[Particle | None, frozenset[str]]:
+    """The store-wide nearest claim, else the subject-keyed one: the §6.6 conflict search.
+
+    Returns the claim, and the neighbourhood the search chose it from: every
+    candidate at or above :func:`_conflict_floor`. Both searches choose only
+    within it, so searching the neighbourhood alone finds the same claim.
+    """
+    if emb is None:
+        return None, frozenset()
+    floor = _conflict_floor()
+    near = [
+        (p, e)
+        for p, e in pairs
+        if p.id not in exclude_ids and e is not None and cosine_similarity(emb, e) >= floor
+    ]
+    existing = [p for p, _ in near]
+    existing_embs = [e for _, e in near]
 
     generic = is_generic_claim(particle.content)
     conflict = _find_conflict(emb, existing, existing_embs, candidate_generic=generic)
-    if conflict is None and emb is not None:
+    if conflict is None:
         # the subject-keyed search reaches this path too — an
         # agent's "the user lives in Denver" scores ~0.70 against its own
         # earlier "…Boston" and never cleared the 0.80 gate either.
         update_cfg = get_config().reconciliation.update_supersession
         speaker = await load_speaker_key(session) if update_cfg.enabled else None
         if update_cfg.enabled and particle_subject_ids(particle, speaker=speaker):
-            index = SubjectIndex.build(pairs, speaker=speaker)
+            index = SubjectIndex.build(near, speaker=speaker)
             nearest = index.candidates(
                 particle_subject_ids(particle, speaker=speaker),
                 emb,
@@ -2283,6 +2512,37 @@ async def reconcile_and_insert(
                 generic=generic,
             )
             conflict = nearest[0] if nearest else None
+    return conflict, frozenset(p.id for p in existing)
+
+
+async def gather_reconcile(
+    session: AsyncSession,
+    particle: Particle,
+    embedding: list[float] | None = None,
+    *,
+    candidate_cache: list[EmbeddingPair] | None = None,
+    exclude_ids: frozenset[str] = frozenset(),
+) -> ReconcileGather:
+    """Embed ``particle``, find its §6.6 conflict, and run the probes on it; write nothing.
+
+    The half of :func:`reconcile_and_insert` that calls the embedding model
+    and the ladder's contradiction and update probes, so it runs before the
+    store's writer lock. ``exclude_ids`` are left out of the duplicate index
+    and the conflict search: an explicit supersede passes the belief it is
+    about to retire, which the apply retires before it writes.
+    """
+    emb = await _reconcile_embedding(particle, embedding)
+    route, _ = await _route_cheap_rungs(session, particle, exclude_ids)
+    if route is not Route.INSERT:
+        return ReconcileGather(embedding=emb, searched=False, exclude_ids=exclude_ids)
+
+    watermark = await read_conflict_watermark(session)
+    pairs = (
+        candidate_cache
+        if candidate_cache is not None
+        else await load_active_conflict_candidates(session)
+    )
+    conflict, neighbourhood = await _nearest_conflict(session, particle, emb, pairs, exclude_ids)
     # This path's candidacy policy, stated as arguments (``ingest.pair_selection``):
     # one pair, always primary. No subject pool, no precondition pre-screen (the
     # ladder applies it) and no lineage filter. The probe keeps its tri-state for
@@ -2313,17 +2573,131 @@ async def reconcile_and_insert(
             if verdict is not None:
                 slots[other.id] = verdict
     selection = select_pairs(candidacy, confirmed, slots, admitted)
-    route, target = route_particle(
-        particle,
-        duplicates=duplicates,
-        retired_values=retired_values,
-        conflict=selection.primary,
-        retired_ids=frozenset(),
+    primary = selection.primary
+    if primary is None:
+        return ReconcileGather(
+            embedding=emb,
+            searched=True,
+            exclude_ids=exclude_ids,
+            watermark=watermark,
+            neighbourhood=neighbourhood,
+        )
+    return ReconcileGather(
+        embedding=emb,
+        searched=True,
+        conflict=primary,
+        probe=probe_results.get(primary.id, False),
+        slot=selection.slot_of(primary.id),
+        same_slot_update=selection.same_slot_update(primary.id),
+        exclude_ids=exclude_ids,
+        watermark=watermark,
+        neighbourhood=neighbourhood,
     )
+
+
+async def apply_reconcile(
+    session: AsyncSession,
+    particle: Particle,
+    gathered: ReconcileGather,
+    *,
+    candidate_cache: list[EmbeddingPair] | None = None,
+    single_trust_order: bool | None = None,
+    fail_closed: bool = False,
+    append_provenance: bool = True,
+) -> Particle | None:
+    """Write ``particle`` on what :func:`gather_reconcile` found; calls no model.
+
+    The half of :func:`reconcile_and_insert` that runs under the store's writer
+    lock. It reads the cheap rungs again and runs the conflict search again (a
+    store read, no model call), against the store as it stands and the
+    particle's subjects as the caller resolved them under the lock, so a
+    change another writer made since the gather is acted on. The search reads
+    only the gather's neighbourhood and the claims changed since its watermark
+    (:func:`search_store_under_lock`), each re-read for its current status, so
+    the lock is never held across a store-wide load (security review
+    2026-10-31-2, AE5); only a store whose change journal cannot say what
+    changed is read whole. ``candidate_cache`` is maintained, never searched.
+    The gathered probe answers are kept only when the search finds the same
+    ACTIVE claim. When it finds another claim (one committed since the gather,
+    or one the gathered conflict's retirement left nearest), the pair goes to
+    the ladder with no probe and is quarantined, whether or not the caller is
+    ``fail_closed`` (security review 2026-10-31-1, AD1, AD4;
+    2026-10-31-2, AE1). When it finds none, the particle is inserted.
+    """
+    emb = gathered.embedding
+    emb_list = emb.tolist() if emb is not None else None
+    route, target = await _route_cheap_rungs(session, particle)
+    if route is Route.UNCHECKED:
+        # DOCUMENT_META and non-asserted never participate
+        # in §6.6 (mirrors extract_snapshot). They are also excluded from the
+        # conflict-candidate set, so neither is ever appended to ``candidate_cache``.
+        validate_transition(None, Status.ACTIVE)
+        await insert_particle(session, particle, emb_list)
+        return particle
+
+    if route is Route.SUPPRESS:
+        # without this rung an exact duplicate reaches the ladder,
+        # finds no contradiction signal, returns CORROBORATES, and is written as
+        # a second ACTIVE particle — which is why ``particle_assert`` was not
+        # idempotent before this ADR.
+        assert target is not None
+        if append_provenance:
+            for ref in particle.provenance:
+                await append_provenance_ref(session, target.id, ref)
+        log.info(
+            "Duplicate suppressed: assertion already ACTIVE as %s",
+            target.id[:8],
+        )
+        return target
+
+    if route is Route.RETIRED_TWIN:
+        # a re-asserted retired claim is held on both write paths.
+        assert target is not None
+        corpus_entry_id, snapshot_id, trigger_ref_type = _trigger_ref_for(particle)
+        entry = (
+            await get_entry(session, corpus_entry_id)
+            if trigger_ref_type is ProvenanceRefType.SOURCE
+            else None
+        )
+        return await _hold_retired_reassertion(
+            session,
+            particle,
+            emb_list,
+            target,
+            corpus_entry_id=corpus_entry_id,
+            snapshot_id=snapshot_id,
+            trigger_ref_type=trigger_ref_type,
+            domain=infer_domain(entry.source_type) if entry else None,
+        )
+
+    # Search again under the lock: the store, and the subjects resolved under
+    # it, may differ from what the gather read. The search reads the store as
+    # it stands, never a list loaded before an earlier commit, and only the
+    # gathered neighbourhood and what changed since (AE1, AE5): a claim retired
+    # meanwhile is no longer ACTIVE there and is no partner (L10).
+    gathered_ids = set(gathered.neighbourhood)
+    if gathered.conflict is not None:
+        gathered_ids.add(gathered.conflict.id)
+    found = await search_store_under_lock(session, gathered.watermark, gathered_ids)
+    pairs = found[0] if found is not None else await load_active_conflict_candidates(session)
+    conflict, _ = await _nearest_conflict(session, particle, emb, pairs, gathered.exclude_ids)
+    probe, slot, same_slot_update = None, None, False
+    probed = (
+        gathered.searched
+        and conflict is not None
+        and gathered.conflict is not None
+        and conflict.id == gathered.conflict.id
+    )
+    if probed:
+        # The same ACTIVE claim the gather probed: its answers stand.
+        probe, slot = gathered.probe, gathered.slot
+        same_slot_update = gathered.same_slot_update
+    route = Route.INSERT if conflict is None else Route.LADDER
+    target = conflict
     if route is Route.INSERT:
         validate_transition(None, Status.ACTIVE)
         await insert_particle(session, particle, emb_list)
-        if candidate_cache is not None and emb is not None:
+        if candidate_cache is not None and emb is not None and particle.status == Status.ACTIVE:
             candidate_cache.append((particle, emb))
         return particle
 
@@ -2337,15 +2711,17 @@ async def reconcile_and_insert(
         snapshot_id,
         # A pair the update answer settled was not probed: no
         # contradiction signal, and rung 2.5 acts on the answer.
-        probe=probe_results.get(target.id, False),
+        probe=probe,
         candidate_cache=candidate_cache,
         new_embedding=emb,
         single_trust_order=single_trust_order,
-        fail_closed=fail_closed,
+        # A claim the gather never probed is held for review whatever the
+        # caller's regime: it is never corroborated unprobed (AE1, AE4).
+        fail_closed=fail_closed or not probed,
         trigger_ref_type=trigger_ref_type,
         allow_own_assertion_supersession=True,
-        slot=selection.slot_of(target.id),
-        same_slot_update=selection.same_slot_update(target.id),
+        slot=slot,
+        same_slot_update=same_slot_update,
         observer=await ObserverGate.open(session),
     )
 
@@ -3204,10 +3580,10 @@ async def _apply_conflict_plan(
     """Perform a :class:`~particles.ingest.conflict_plan.ConflictWritePlan`, in its order.
 
     Insert, then demote (the mirror verdicts demote the row just inserted),
-    then the INCONSISTENCY record, the dropped-candidate event and the observer
-    divergence. ``embedding`` is stored with the inserted row, and joins a batch
-    caller's ``candidate_cache`` beside it (F4.3), so a later item in the batch
-    reconciles against this verdict.
+    then the INCONSISTENCY record, the retirement and dropped-candidate events
+    and the observer divergence. ``embedding`` is stored with the inserted row,
+    and joins a batch caller's ``candidate_cache`` beside it (F4.3), so a later
+    item in the batch reconciles against this verdict.
     """
     if plan.insert is not None:
         validate_transition(None, plan.insert.status)
@@ -3218,7 +3594,7 @@ async def _apply_conflict_plan(
     if plan.wrapper is not None:
         validate_transition(None, Status.INCONSISTENCY)
         await insert_particle(session, plan.wrapper, domain_hint=plan.wrapper_domain_hint)
-    for event in (plan.update_event, plan.dropped_event):
+    for event in (plan.update_event, plan.retirement_event, plan.dropped_event):
         if event is not None:
             await _record_planned(session, event)
     if plan.record_divergence and observer is not None and plan.insert is not None:
@@ -3357,7 +3733,7 @@ async def _resolve_conflict(
     # the rung inputs: the attribution requirement keys on it —
     # in a ``multi`` store an anonymous lineage is not one principal.
     effective_single = effective_single_trust_order(
-        single_trust_order, get_config().reconciliation.store_mode
+        single_trust_order, get_config().reconciliation_mode_for(store_of(session))
     )
 
     # Gather the rung inputs only when the ladder can consult them. The domain
@@ -4033,10 +4409,16 @@ async def _embed_batch_async(texts: list[str]) -> list[Any]:
     worker body), so the active OTel context parents it for free across the
     ``asyncio.to_thread`` boundary (which copies the context).
     """
-    with _tracer.start_as_current_span("embed.batch") as span:
+    with _tracer.start_as_current_span(
+        "embed.batch", record_exception=False, set_status_on_exception=False
+    ) as span:
         span.set_attribute("particles.embed_count", len(texts))
         start = time.perf_counter()
         try:
             return await asyncio.to_thread(_embed_batch, texts)
+        except Exception as exc:
+            span.set_attribute("error.type", type(exc).__name__)
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+            raise
         finally:
             _embed_duration.record(time.perf_counter() - start)

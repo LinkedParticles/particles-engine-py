@@ -138,20 +138,10 @@ async def _splice_synthesised_article(
 
     if not regenerate:
         log.info("%s — article cache hit", progress_prefix)
-        # backfill: when the on-disk hash matches but the
-        # cross-exporter DB cache has no row for this key, populate
-        # the cache from the prior note body. This handles the
-        # operator who had Obsidian export artefacts on disk pre-
-        # 0.41.0 — the synthesised article exists in the file but
-        # never made it into the DB. Without this backfill, the first
-        # cross-exporter use (wiki or Logseq) re-pays full LLM cost
-        # for every subject Obsidian already synthesised.
-        await _backfill_synthesis_cache_if_absent(
-            session,
-            subject_id=subject.id,
-            input_hash=article_hash,
-            prior_body=prior_body,
-        )
+        # The shared synthesis cache is never filled from the on-disk note:
+        # a vault another party can edit holds text the engine never wrote,
+        # which the wiki and Logseq exporters would serve as its synthesis
+        # (security review 2026-10-30-1, AB34).
         # Preserve the synthesised prose on a cache hit. The freshly-rendered
         # ``note`` is the *structural* template only — it has no synthesised
         # article body. The prior on-disk note (``prior_body``) does, and
@@ -236,60 +226,3 @@ async def _splice_synthesised_article(
     return _annotate_obsidian_frontmatter(
         spliced, article_input_hash=article_hash, article_synthesis="llm"
     ), "synthesised"
-
-
-# ---------------------------------------------------------------------------
-# backfill — populate the shared DB synthesis cache from on-disk
-# Obsidian notes when the exporter's per-note hash short-circuit fires.
-# ---------------------------------------------------------------------------
-
-
-async def _backfill_synthesis_cache_if_absent(
-    session: AsyncSession,
-    *,
-    subject_id: str,
-    input_hash: str,
-    prior_body: str | None,
-) -> None:
-    """If the DB cache has no row for ``(subject_id, input_hash, prompt_version)``
-    AND we have the prior note body on disk, store it.
-
-    The case this catches: an operator whose Obsidian vault was
-    synthesised before 0.41.0 (when the DB cache was introduced).
-    The on-disk article exists with a matching frontmatter hash, so
-    Obsidian's per-note shortcut fires and ``render_article`` is never
-    called — which means the DB cache never gets populated for that
-    subject through Obsidian's normal write path. Without this backfill,
-    the next cross-exporter run (wiki, Logseq) sees an empty DB cache
-    and re-pays the full LLM cost.
-
-    The body stored is the FULL note text from the on-disk file, which
-    is what the cross-exporter consumers expect to receive from
-    ``lookup_cached_article``. The cache key uses the same
-    ``_PROMPT_VERSION`` constant as live renders so a prompt-version
-    bump invalidates the backfill correctly.
-    """
-    if prior_body is None:
-        return
-    from particles.render.article_synthesis.cache import _PROMPT_VERSION
-    from particles.store.synthesis_cache_store import (
-        lookup_cached_article,
-        store_cached_article,
-    )
-
-    existing = await lookup_cached_article(session, subject_id, input_hash, _PROMPT_VERSION)
-    if existing is not None:
-        return
-    await store_cached_article(
-        session,
-        subject_id,
-        input_hash,
-        _PROMPT_VERSION,
-        prior_body,
-        quality_notes="backfilled-from-obsidian-vault",
-    )
-    log.debug(
-        "backfill: stored on-disk synthesis body for subject_id=%s (input_hash=%s)",
-        subject_id,
-        input_hash[:8],
-    )

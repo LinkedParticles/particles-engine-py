@@ -29,14 +29,26 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, select
+from sqlalchemy import (
+    Boolean,
+    ColumnElement,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
+from particles.core.observer_scope import canonical_project_key
 from particles.db import Base
 
 __all__ = [
@@ -86,6 +98,12 @@ class SessionExposure(BaseModel):
     beliefs: list[ShownBelief] = Field(default_factory=list)
 
 
+#: ``recorded_by`` on a row the in-process writer (the hook writing its own
+#: store) appended. No key principal is blank (``keys create`` and the record
+#: rule refuse one), so an HTTP write never records it.
+IN_PROCESS_RECORDER = ""
+
+
 class SessionExposureRow(Base):
     """One SessionStart that delivered context. Append-only."""
 
@@ -100,6 +118,11 @@ class SessionExposureRow(Base):
     observer_scope_applied: Mapped[bool] = mapped_column(Boolean, nullable=False)
     #: The shown beliefs in order, as a JSON array of :class:`ShownBelief`.
     beliefs: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The engine key principal that wrote the row over HTTP;
+    #: :data:`IN_PROCESS_RECORDER` for an in-process write. ``None`` on a row
+    #: whose writer was never recorded (one older than the column, or carried
+    #: through a downgrade of it), which no reader trusts.
+    recorded_by: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (Index("ix_session_exposures_session", "session_id", "recorded_at"),)
 
@@ -144,11 +167,15 @@ async def _resolve_ids(session: AsyncSession, ids: set[str]) -> dict[str, str]:
     return resolved
 
 
-async def record_session_exposure(session: AsyncSession, exposure: SessionExposure) -> int:
+async def record_session_exposure(
+    session: AsyncSession, exposure: SessionExposure, *, recorded_by: str | None = None
+) -> int:
     """Append one session-start row, resolving ``p-`` short ids to full ids.
 
-    Returns the new row's id. Earlier rows, including ones for the same
-    session, are never changed.
+    ``recorded_by`` is the engine key principal of an HTTP write; an in-process
+    write (none given) records :data:`IN_PROCESS_RECORDER`. Returns the new
+    row's id. Earlier rows, including ones for the same session, are never
+    changed.
     """
     stripped = [
         b.model_copy(update={"particle_id": b.particle_id.removeprefix("p-")})
@@ -164,20 +191,45 @@ async def record_session_exposure(session: AsyncSession, exposure: SessionExposu
         recorded_at=exposure.recorded_at,
         source=exposure.source,
         action=exposure.action,
-        project_key=exposure.project_key,
+        # Stored as reads compare it, so one project is one key whatever form
+        # the writer passed (security review 2026-10-30-1, AB69).
+        project_key=(
+            canonical_project_key(exposure.project_key)
+            if exposure.project_key
+            else exposure.project_key
+        ),
         observer_scope_applied=exposure.observer_scope_applied,
         beliefs=json.dumps([b.model_dump() for b in beliefs]),
+        recorded_by=IN_PROCESS_RECORDER if recorded_by is None else recorded_by,
     )
     session.add(row)
     await session.flush()
     return row.id
 
 
-async def session_exposures_for(session: AsyncSession, session_id: str) -> list[SessionExposure]:
-    """Every session-start row recorded for ``session_id``, oldest first."""
+def recorded_by_one_of(recorders: Collection[str]) -> ColumnElement[bool]:
+    """The rows an in-process writer recorded or one of ``recorders`` did.
+
+    A row with no ``recorded_by`` is not among them. Its writer was never
+    recorded: before migration 060 an agent key's HTTP row looked exactly like
+    the hook's own, and a downgrade of 060 forgets every writer (security
+    review 2026-10-28-2, AA44).
+    """
+    return SessionExposureRow.recorded_by.in_([IN_PROCESS_RECORDER, *sorted(recorders)])
+
+
+async def session_exposures_for(
+    session: AsyncSession, session_id: str, *, recorders: Collection[str] | None = None
+) -> list[SessionExposure]:
+    """Every session-start row recorded for ``session_id``, oldest first.
+
+    With ``recorders``, only the rows an in-process writer recorded or one of
+    those principals did (:func:`recorded_by_one_of`).
+    """
+    query = select(SessionExposureRow).where(SessionExposureRow.session_id == session_id)
+    if recorders is not None:
+        query = query.where(recorded_by_one_of(recorders))
     rows = await session.execute(
-        select(SessionExposureRow)
-        .where(SessionExposureRow.session_id == session_id)
-        .order_by(SessionExposureRow.recorded_at, SessionExposureRow.id)
+        query.order_by(SessionExposureRow.recorded_at, SessionExposureRow.id)
     )
     return [row.to_model() for row in rows.scalars()]

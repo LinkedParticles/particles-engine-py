@@ -27,6 +27,11 @@ api:
   # stays open for the probes. A mounted config replaces this file, so keep
   # this line in yours unless the network itself is your read-access control.
   require_auth_for_reads: true
+  # The per-client keys live on the data volume, beside the store,
+  # so they survive a container rebuild. Mint them with
+  # `docker compose exec engine particles engine keys create ...`, which runs
+  # as the image's user and so leaves the file the engine's own.
+  keys_file: /data/engine-keys.json
 
 storage:
   # Four slashes = an absolute path (sqlite+aiosqlite:////data/particles.db).

@@ -53,6 +53,7 @@ from particles.render.article_synthesis import (
 from particles.render.article_synthesis import (
     _parse_layer_b_verdicts as _parse_layer_b_verdicts,
 )
+from particles.render.escape import md_text, wikilink, wikilink_target
 from particles.render.markdown import (
     SubjectNaming,
     atomic_write_text,
@@ -386,6 +387,9 @@ class WikiExporter:
             # every article referencing one is spuriously invalidated each run.
             for nslug in narrative_naming.values():
                 known_names.add(_narrative_rel_path(nslug))
+            # The engine writes each link's target through ``wikilink_target``,
+            # so that form of every name is a valid target too.
+            known_names |= {wikilink_target(name) for name in known_names}
             # Narrative articles live in a subdirectory, so the scan recurses.
             invalidated_paths = invalidate_stale_link_articles(output, known_names, recursive=True)
             stale_invalidated = len(invalidated_paths)
@@ -805,17 +809,19 @@ def _render_wiki_disambiguation_page(
     counts: dict[str, int],
 ) -> str:
     """Render a Wikipedia-style ``(disambiguation)`` page for a wiki collision group."""
+    # The base name and each qualifier are stored text, written as inert lines
+    # (security review 2026-10-28-1, O1).
     lines = [
-        f"# {disambiguation_name(base_name)}\n",
-        f'"{base_name}" refers to multiple subjects:\n',
+        f"# {md_text(disambiguation_name(base_name))}\n",
+        f'"{md_text(base_name)}" refers to multiple subjects:\n',
     ]
     for s in sorted(members, key=lambda m: naming.display_name(m)):
         slug = _subject_slug(naming.display_name(s))
-        qualifier = naming.qualifier_by_id.get(s.id, "")
+        qualifier = md_text(naming.qualifier_by_id.get(s.id, ""))
         count = counts.get(s.id, 0)
         noun = "particle" if count == 1 else "particles"
         suffix = f" — {qualifier} ({count} {noun})" if qualifier else f" — {count} {noun}"
-        lines.append(f"- [[{slug}]]{suffix}\n")
+        lines.append(f"- {wikilink(slug)}{suffix}\n")
     return "".join(lines)
 
 
@@ -824,7 +830,7 @@ def _write_index(output: Path, article_filenames: list[str]) -> None:
     lines = ["# Wiki articles\n\n"]
     for fname in sorted(article_filenames):
         title = fname.removesuffix(".md")
-        lines.append(f"- [[{title}]]\n")
+        lines.append(f"- {wikilink(title)}\n")
     atomic_write_text(output / "index.md", "".join(lines))
 
 

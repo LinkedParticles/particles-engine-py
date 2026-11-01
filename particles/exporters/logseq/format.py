@@ -22,11 +22,17 @@ import re
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, TypeVar
 
-from particles.render.markdown import (
-    neutralize_inline_markdown,
-    neutralize_link_label,
-    sanitize_filename,
+from particles.render.escape import (
+    identifier,
+    logseq_alias,
+    logseq_page_ref,
+    logseq_property_key,
+    logseq_property_value,
+    logseq_tag,
+    logseq_text,
+    md_link_label,
 )
+from particles.render.markdown import sanitize_filename
 
 if TYPE_CHECKING:
     from particles.core.schema import Particle, Subject
@@ -90,21 +96,20 @@ def render_inline_tags(tags: list[str] | None) -> str:
     Returns a leading-space-prefixed string (e.g. ``" #ml/optimizers #cold-war"``)
     suitable for appending to a block's content line, or ``""`` when the
     particle carries no tags. A tag path's ``/`` is preserved — Logseq reads
-    it as tag hierarchy. Tags containing spaces are wrapped as ``#[[tag]]``
+    it as tag hierarchy. Any other tag (one holding a space, a line break or a
+    bracket) is wrapped as ``#[[tag]]`` by :func:`~particles.render.escape.logseq_tag`,
     because a bare ``#`` token terminates at the first whitespace.
     """
     if not tags:
         return ""
-    rendered = [f"#[[{t}]]" if " " in t else f"#{t}" for t in tags]
-    return " " + " ".join(rendered)
+    return " " + " ".join(logseq_tag(t) for t in tags)
 
 
 def render_block(content: str, *, depth: int = 0) -> str:
     """Render a single block: ``- <content>`` at the requested depth.
 
-    The content is emitted verbatim — no escaping. The orchestrator
-    is responsible for not feeding raw newlines into a block (split
-    multi-line content into multiple blocks instead).
+    The content is emitted verbatim: the caller writes every stored string
+    in it through :mod:`particles.render.escape`.
     """
     return f"{_INDENT * depth}- {content}"
 
@@ -114,7 +119,9 @@ def render_property(key: str, value: str, *, depth: int = 0) -> str:
 
     Per Logseq's grammar, properties live on indented continuation
     lines of their parent block (depth + 1 conceptually). Callers pass
-    the *parent block's* depth and we add the one-level indent.
+    the *parent block's* depth and we add the one-level indent. ``value`` is
+    emitted verbatim: the caller writes a stored one through
+    :func:`~particles.render.escape.logseq_property_value`.
     """
     return f"{_INDENT * (depth + 1)}{key}:: {value}"
 
@@ -154,13 +161,17 @@ def render_subject_page(
     # properties on the H1's continuation indent. ``display_name`` carries
     # the disambiguation qualifier when the canonical name
     # collides with another subject's.
-    lines.append(render_block(f"# {display_name or subject.canonical_name}"))
+    # Every one of these is stored text, written as one inert line, so a name
+    # carries no macro or HTML and an alias adds no property or block
+    # (security review 2026-10-28-1, O1, O38).
+    lines.append(render_block(f"# {logseq_text(display_name or subject.canonical_name)}"))
     if subject.subject_class:
-        lines.append(render_property("type", subject.subject_class, depth=0))
+        lines.append(render_property("type", logseq_property_value(subject.subject_class)))
     for alias in subject.aliases:
-        lines.append(render_property("alias", alias, depth=0))
+        lines.append(render_property("alias", logseq_alias(alias), depth=0))
     for ref in subject.external_ids:
-        lines.append(render_property("external-id", f"{ref.namespace}:{ref.id}", depth=0))
+        external_id = logseq_property_value(f"{ref.namespace}:{ref.id}")
+        lines.append(render_property("external-id", external_id, depth=0))
 
     structured = [p for p in particles if p.properties]
     descriptive = [p for p in particles if not p.properties]
@@ -172,10 +183,13 @@ def render_subject_page(
             # property block so Logseq's tag-search indexes them once per
             # particle rather than once per property key.
             for first, (key, value) in _flag_first((p.properties or {}).items()):
-                rendered_value = _format_property_value(value, eligible_ids=eligible_ids)
+                rendered_value = logseq_property_value(
+                    _format_property_value(value, eligible_ids=eligible_ids)
+                )
                 tag_suffix = render_inline_tags(p.tags) if first else ""
-                lines.append(render_block(f"{key}:: {rendered_value}{tag_suffix}", depth=1))
-                lines.append(render_property("id", p.id, depth=1))
+                prop_key = logseq_property_key(key)
+                lines.append(render_block(f"{prop_key}:: {rendered_value}{tag_suffix}", depth=1))
+                lines.append(render_property("id", identifier(p.id), depth=1))
                 lines.append(
                     render_property(
                         "confidence", f"{eff_conf.get(p.id, p.confidence.value):.2f}", depth=1
@@ -187,10 +201,9 @@ def render_subject_page(
         for p in descriptive:
             # The particle content might contain raw newlines — collapse
             # to spaces so the block stays a single Logseq line.
-            content = _suppress_dead_wikilinks(p.content, eligible_ids=eligible_ids)
-            content = neutralize_inline_markdown(content)
+            content = logseq_text(_suppress_dead_wikilinks(p.content, eligible_ids=eligible_ids))
             lines.append(render_block(f"{content}{render_inline_tags(p.tags)}", depth=1))
-            lines.append(render_property("id", p.id, depth=1))
+            lines.append(render_property("id", identifier(p.id), depth=1))
             lines.append(
                 render_property(
                     "confidence", f"{eff_conf.get(p.id, p.confidence.value):.2f}", depth=1
@@ -218,9 +231,12 @@ def render_narratives_block(narratives: list[Particle], narrative_naming: dict[s
         if slug is None:
             continue
         # Labels are sentences; keep them on one line — Logseq treats a
-        # newline inside a block as a block boundary.
-        label = neutralize_link_label(n.content)
-        links.append(f"{_INDENT}- [{label}]([[Narratives/{slug}]])")
+        # newline inside a block as a block boundary. The label is Logseq
+        # block text too, so it holds no live macro, property or block
+        # reference (security review 2026-10-28-2, AA28).
+        label = logseq_text(md_link_label(n.content))
+        target = logseq_page_ref(f"Narratives/{slug}")
+        links.append(f"{_INDENT}- [{label}]([[{target}]])")
     if not links:
         return ""
     return "- ## Narratives\n" + "\n".join(links) + "\n"

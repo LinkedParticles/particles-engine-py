@@ -483,6 +483,74 @@ class TestDelhi:
         assert WALK not in active and RESTATED in active
         assert {TIKKA, VEG, MOVED, BANDRA} <= active
 
+    async def test_a_restatement_is_never_written_beside_a_claim_committed_during_the_pass(
+        self, db_session: Any, bow: None, candidate_cache_mode: str
+    ) -> None:
+        """The restatement's write searches again under the lock (security review
+        2026-10-31-3, AF1): a claim committed after the pass loaded its pool, which
+        the contradiction check would have asked, keeps the original for the owner."""
+        from particles.operations import reanchor
+        from particles.operations.reanchor import run_reanchor
+
+        ex = await _delhi(db_session)
+        walk = await _one(db_session, WALK)
+        meanwhile = (
+            "Sandeep's Curry House is a forty-minute drive from the flat in Lajpat Nagar, "
+            "Delhi, where the user lived."
+        )
+        real = reanchor._duplicate_of
+        fired: list[bool] = []
+
+        async def commit_then_check(session: Any, *args: Any, **kwargs: Any) -> Any:
+            if not fired:
+                fired.append(True)
+                # Another writer (a later session's extraction) commits now.
+                await _session(session, ex, [(meanwhile, [_PLACE, _USER])], day=25)
+            return await real(session, *args, **kwargs)
+
+        with (
+            patch.object(reanchor, "_duplicate_of", commit_then_check),
+            _Scripted(),
+        ):
+            report = await run_reanchor(db_session, cursor=None)
+            await db_session.commit()
+
+        assert fired
+        assert report.restated == [] and len(report.unrestated) == 1
+        assert "committed during the pass" in report.unrestated[0]["why"]
+        kept = await _one(db_session, WALK)
+        assert kept.id == walk.id and kept.status is Status.ACTIVE
+        assert await _one(db_session, meanwhile, Status.ACTIVE) is not None
+        from particles.store.particle_store import get_particles_by_status
+
+        active = {p.content for p in await get_particles_by_status(db_session, Status.ACTIVE)}
+        assert RESTATED not in active
+
+    async def test_a_claim_the_pass_retires_is_named_by_an_event(
+        self, db_session: Any, bow: None
+    ) -> None:
+        """Security review 2026-10-25-1, Q36: a restatement's retirement is in the log."""
+        from particles.operations.reanchor import run_reanchor
+        from particles.store.event_store import OperatorEventType, list_events
+
+        await _delhi(db_session)
+        walk = await _one(db_session, WALK)
+        retired_state = await _one(db_session, RESIDENCE)
+        with _Scripted():
+            report = await run_reanchor(db_session, cursor=None)
+            await db_session.commit()
+        [restated] = report.restated
+        new = await _one(db_session, RESTATED)
+
+        [event] = await list_events(db_session, ref_id=walk.id, limit=100)
+        assert event.event_type is OperatorEventType.DEPENDENT_CLAIM_EXAMINED
+        assert event.event_id == restated["event"]
+        assert event.payload["outcome"] == "restated"
+        assert event.payload["particle_id"] == walk.id
+        assert event.payload["retired_id"] == retired_state.id
+        assert event.payload["other_id"] == new.id
+        assert event.payload["restatement"] == RESTATED
+
     async def test_the_digest_carries_the_restatement(self, db_session: Any, bow: None) -> None:
         from particles.operations.digest import build_digest
         from particles.operations.reanchor import run_reanchor

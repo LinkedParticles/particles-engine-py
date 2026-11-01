@@ -35,11 +35,15 @@ Particles reads one config file, chosen in this order:
    exist resolves to *no config file* rather than falling through to the
    user file, and every command says so once on stderr. A quoted `~` is the
    usual cause: the shell does not expand it inside double quotes, so write
-   `PARTICLES_CONFIG="$HOME/..."`.
+   `PARTICLES_CONFIG="$HOME/..."`. A relative path is read against the
+   working directory: the `particles` command line reads it and warns once
+   that it should be absolute, while the stdio MCP servers, the Claude Code
+   hooks and `particles init claude-code` refuse one.
 2. The user file, `~/.particles/config.yaml`, if it exists.
 3. Otherwise: compiled-in defaults plus env-var overrides.
 
-Nothing is read from the working directory or its parents. A cloned
+Apart from a relative `PARTICLES_CONFIG` you set, no config file is read from
+the working directory or its parents. A cloned
 repository that ships a `config.yaml` therefore cannot configure Particles:
 it cannot point the engine, model-provider or telemetry endpoints your
 secrets are sent to at a host of its choosing, and it cannot turn on the MCP
@@ -59,6 +63,11 @@ shell profile applies to every command you run, in every directory, so keep
 its paths absolute and pair an absolute `storage.blob_dir` with the store it
 belongs to.
 
+Keep the path settings inside the file absolute too: a relative path setting can
+resolve against the directory a command runs in, and a relative
+`api.keys_file` is refused. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#which-store-a-process-opens) lists the settings this
+covers and the ones that resolve beside the config file instead.
+
 `particles config validate` and `particles hook doctor` both print where the
 config came from (`PARTICLES_CONFIG`, the user file, or none) and any nearby
 file they ignored; when "which config am I loading?" matters, ask them rather
@@ -67,7 +76,12 @@ than guess.
 The Claude Code hooks, the MCP server registration and the scheduled
 consolidation job each carry their own absolute `PARTICLES_CONFIG`, which
 `particles init claude-code` writes (see [Claude Code integration](../user-guide/claude-code.md)),
-so they never depend on the directory they start in.
+so they never depend on the directory they start in. Each hook command and
+the MCP server registration also pin `PARTICLES_ENGINE_BASE_URL` empty, which
+overrides nothing, so the environment a session starts with cannot point them
+at another engine; `particles hook doctor` warns about one with no pin or an
+inherited one, and a re-run of `particles init claude-code` gives it the
+empty pin. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#which-store-a-process-opens) states each pin and what it guards.
 
 ## Precedence
 
@@ -101,6 +115,8 @@ in `particles/secrets.py`:
 | Anthropic API key | `ANTHROPIC_API_KEY` | Extractor, semantic lint, wiki synthesis |
 | Numista API key | `NUMISTA_API_KEY` (optional) | Numista extractor |
 | GitHub API key | `GITHUB_API_KEY` (optional) | GitHub extractor (gist / repo / pages) |
+| Engine key | `PARTICLES_API_KEY` (optional) | `particles engine serve`: the operator's key. Unset, empty or `dev-key`, and with no per-client key minted, the engine serves reads only: every write route answers `503`, from loopback too, and since `1.220.9` a report it serves records nothing in the store. Give other clients keys of their own with `particles engine keys create`; they live, as digests only, in `api.keys_file` |
+| Engine token | `PARTICLES_ENGINE_TOKEN` (optional) | The CLI, hooks and MCP server with `engine.base_url` set: the bearer they send, ideally a per-client key of their own |
 
 Migrating to a secrets manager (1Password, AWS, sops, …) only
 requires editing `particles/secrets.py`.

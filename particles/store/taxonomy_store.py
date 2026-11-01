@@ -31,7 +31,18 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.core.schema import TagNode, TaxonomyDefinition
 from particles.db import Base
+from particles.extraction.mcp_memory import IMPORT_TAG as MIGRATION_TAG
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+
+#: Tags only a Particles server stamps, at mint, and which a reader keys on as
+#: authority: the memory-server migration's tag, which with
+#: ``CalibrationSource.IMPORTED`` makes a belief the memory-server façade's own
+#: memory (P50). No tag verb adds one to an existing belief.
+RESERVED_TAGS = frozenset({MIGRATION_TAG})
+
+
+class ReservedTagError(ValueError):
+    """A tag verb was asked to add a tag only a Particles server stamps."""
 
 
 class TaxonomyRow(Base):
@@ -280,9 +291,24 @@ async def add_particle_tags(
 
     ``actor`` is recorded on the ``PARTICLE_TAGGED`` event; an MCP agent's tag
     passes its asserter identity.
+
+    Raises:
+        ReservedTagError: If ``new_tags`` holds a :data:`RESERVED_TAGS` tag.
+            Every tag surface (the CLI, the operator and agent HTTP routes, the
+            MCP tool) comes through here, so none can turn a belief into the
+            memory-server façade's own memory (security review 2026-10-25-2,
+            R26).
+        ValueError: If the particle does not exist.
     """
     from particles.store.particle_store import ParticleRow
 
+    reserved = sorted(RESERVED_TAGS.intersection(new_tags))
+    if reserved:
+        raise ReservedTagError(
+            f"Refusing to add {', '.join(reserved)}: only the memory-server migration "
+            "(`particles import mcp-memory`) stamps that tag, when it creates a belief, "
+            "and the memory-server facade reads it as its own memory."
+        )
     row = await session.get(ParticleRow, particle_id)
     if row is None:
         raise ValueError(f"Particle {particle_id} not found")

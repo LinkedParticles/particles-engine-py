@@ -17,6 +17,9 @@ mocked; embeddings are supplied directly so cosine similarity is deterministic.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -135,6 +138,32 @@ class TestReconcileSupersessionSweep:
         assert loser.status is Status.PROVENANCE_STALE
         assert loser.status_reason is StatusReason.DOCUMENT_SUPERSEDED
         assert winner.status is Status.ACTIVE  # the current claim stays ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_demotion_is_recorded_in_the_event_log(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Security review 2026-10-24-2, P34: every automatic retirement leaves an event."""
+        from particles.store.event_store import OperatorEventType, list_events
+
+        superseded_id, superseding_id = await _setup_flagship(
+            db_session, superseded_modality=AssertionModality.FALSIFIABLE
+        )
+        with patch("particles.operations.reconcile._has_contradiction_signal", _probe(True)):
+            await reconcile_supersession(db_session)
+        [event] = await list_events(db_session, event_type=OperatorEventType.DOCUMENT_SUPERSESSION)
+        assert event.payload["retired_id"] == superseded_id
+        assert event.payload["winner_id"] == superseding_id
+        assert event.payload["route"] == "sweep"
+
+    @pytest.mark.asyncio
+    async def test_a_dry_run_records_no_event(self, db_session: AsyncSession) -> None:
+        from particles.store.event_store import OperatorEventType, list_events
+
+        await _setup_flagship(db_session, superseded_modality=AssertionModality.FALSIFIABLE)
+        with patch("particles.operations.reconcile._has_contradiction_signal", _probe(True)):
+            await reconcile_supersession(db_session, dry_run=True)
+        assert not await list_events(db_session, event_type=OperatorEventType.DOCUMENT_SUPERSESSION)
 
     @pytest.mark.asyncio
     async def test_falsifiable_superseded_is_demoted(self, db_session: AsyncSession) -> None:
@@ -306,3 +335,214 @@ async def test_a_demotion_is_committed_before_the_next_probe(
     assert writable_during_probes == [True, True, True]
     stored = await get_particles_by_ids(session, [p.id for p in subs])
     assert {p.status for p in stored.values()} == {Status.PROVENANCE_STALE}
+
+
+# ---------------------------------------------------------------------------
+# The sweeps read the regime of the store they sweep (security review
+# 2026-10-27-1, G6)
+# ---------------------------------------------------------------------------
+
+
+def _multi_by_its_own_entry(session: AsyncSession, how: str) -> None:
+    from particles.config import get_config
+    from particles.db import DEFAULT_STORE, store_of
+
+    cfg = get_config()
+    cfg.reconciliation.store_mode = "single"
+    if how == "per_store":
+        cfg.reconciliation.per_store = {DEFAULT_STORE: "multi"}
+    else:
+        cfg.mcp.write.enabled_stores = [DEFAULT_STORE]
+    assert cfg.reconciliation_mode_for(store_of(session)) == "multi"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["per_store", "write_enabled"])
+async def test_document_sweep_uses_the_stores_own_regime(
+    db_session: AsyncSession, how: str
+) -> None:
+    """On a store whose own regime is multi, the document sweep runs no single-trust ordering."""
+    _multi_by_its_own_entry(db_session, how)
+    with patch("particles.operations.version_guard.assert_store_schema_current", AsyncMock()):
+        summary = await reconcile_supersession(db_session, dry_run=True)
+    assert summary["single_trust_order"] is False, summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["per_store", "write_enabled"])
+async def test_update_sweep_requires_attribution_on_a_store_whose_own_regime_is_multi(
+    db_session: AsyncSession, how: str
+) -> None:
+    """The update sweep's gather asks for attribution on a store multi by its own entry."""
+    from particles.operations import reconcile
+
+    _multi_by_its_own_entry(db_session, how)
+    gathered = AsyncMock(return_value=reconcile._UpdateGather())
+    with patch.object(reconcile, "_update_candidates", gathered):
+        await reconcile.count_update_candidates(db_session, None)
+    assert gathered.call_args.kwargs["require_attribution"] is True
+
+
+# ---------------------------------------------------------------------------
+# The same regime, read from a second registered store (security review
+# 2026-10-28-1, O72). The tests above make the default store multi on the
+# in-memory default engine, so they hold whether a sweep reads the store it was
+# handed or the default store's entry. These register a second store through
+# the config loader, make only it multi, keep the global mode and the default
+# store single, and drive each pass on a session ``session_scope("team")``
+# opens. The replacement probe is patched; no model call.
+# ---------------------------------------------------------------------------
+
+
+def _two_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    from particles.config import reset_config
+
+    extra = (
+        "reconciliation:\n  store_mode: single\n  per_store:\n    team: multi\n"
+        if how == "per_store"
+        else "reconciliation:\n  store_mode: single\nmcp:\n  write:\n    enabled_stores: [team]\n"
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "network:\n  egress: none\n"
+        "storage:\n"
+        f"  database_url: sqlite+aiosqlite:///{tmp_path / 'default.db'}\n"
+        f"  blob_dir: {tmp_path / 'blobs'}\n"
+        "  stores:\n"
+        f"    team: sqlite+aiosqlite:///{tmp_path / 'team.db'}\n" + extra,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("PARTICLES_BLOB_DIR", raising=False)
+    reset_config()
+
+
+def _probe_true() -> Callable[[str, str], Awaitable[bool | None]]:
+    async def _fake(_a: str, _b: str) -> bool | None:
+        return True
+
+    return _fake
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["per_store", "write_enabled"])
+async def test_the_document_sweep_retires_nothing_on_a_named_store_whose_own_regime_is_multi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """A replacement signal on a named multi store demotes nothing; the default store still does."""
+    from particles.db import create_tables, session_scope, store_of
+
+    _two_stores(tmp_path, monkeypatch, how)
+    await create_tables("default")
+    await create_tables("team")
+    with patch("particles.operations.reconcile._has_contradiction_signal", _probe_true()):
+        async with session_scope("team") as team:
+            assert store_of(team) == "team"
+            old_id, _ = await _setup_flagship(
+                team, superseded_modality=AssertionModality.FALSIFIABLE
+            )
+            summary = await reconcile_supersession(team)
+            loser = await get_particle(team, old_id)
+        async with session_scope("default") as default:
+            d_old, _ = await _setup_flagship(
+                default, superseded_modality=AssertionModality.FALSIFIABLE
+            )
+            d_summary = await reconcile_supersession(default)
+            d_loser = await get_particle(default, d_old)
+    assert summary["single_trust_order"] is False, summary
+    assert summary.get("demoted", 0) == 0, summary
+    assert loser is not None and loser.status is Status.ACTIVE
+    # The control: the single default store's sweep does demote.
+    assert d_summary["single_trust_order"] is True
+    assert d_loser is not None and d_loser.status is Status.PROVENANCE_STALE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["per_store", "write_enabled"])
+async def test_the_update_sweep_requires_attribution_on_a_named_multi_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The update sweep's gather on a named store multi by its own entry asks for attribution."""
+    from particles.db import create_tables, session_scope
+    from particles.operations import reconcile
+
+    _two_stores(tmp_path, monkeypatch, how)
+    await create_tables("team")
+    gathered = AsyncMock(return_value=reconcile._UpdateGather())
+    with patch.object(reconcile, "_update_candidates", gathered):
+        async with session_scope("team") as team:
+            await reconcile.count_update_candidates(team, None)
+    assert gathered.call_args.kwargs["require_attribution"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["per_store", "write_enabled"])
+async def test_the_paraphrase_pass_requires_attribution_on_a_named_multi_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The paraphrase pass on a named store multi by its own entry asks for attribution."""
+    from datetime import UTC, datetime
+
+    from particles.db import create_tables, session_scope
+    from particles.operations import paraphrases
+
+    _two_stores(tmp_path, monkeypatch, how)
+    await create_tables("team")
+    retired = type("R", (), {"id": "p-retired"})()
+    winner = object()
+    pages: list[list[tuple[Any, datetime]]] = [[(retired, datetime(2026, 1, 1, tzinfo=UTC))], []]
+
+    async def _page(*_a: Any, **_k: Any) -> list[tuple[Any, datetime]]:
+        return pages.pop(0)
+
+    seen: dict[str, object] = {}
+
+    async def _cands(*_a: Any, **kw: Any) -> list[Any]:
+        seen.update(kw)
+        return []
+
+    with (
+        patch.object(paraphrases, "get_update_retirements_after", _page),
+        patch.object(
+            paraphrases, "get_embeddings_by_ids", AsyncMock(return_value={"p-retired": [1.0]})
+        ),
+        patch.object(paraphrases, "winner_of", AsyncMock(return_value=winner)),
+        patch.object(paraphrases, "_winner_usable", lambda _w: True),
+        patch.object(paraphrases, "_candidates", _cands),
+    ):
+        async with session_scope("team") as team:
+            await paraphrases.run_paraphrases(team, cursor=None, dry_run=True)
+    assert seen.get("require_attribution") is True, seen
+
+
+@pytest.mark.asyncio
+async def test_the_extraction_conflict_fallback_reads_a_named_stores_own_regime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extraction's section 6.6 ladder on a named multi store runs with no single trust order."""
+    from particles.db import create_tables, session_scope
+    from particles.ingest import pipeline
+
+    _two_stores(tmp_path, monkeypatch, "per_store")
+    await create_tables("team")
+
+    class _Stop(Exception):
+        pass
+
+    seen: dict[str, object] = {}
+
+    def _ladder(*_a: Any, **kw: Any) -> None:
+        seen.update(kw)
+        raise _Stop
+
+    a = _particle(content="x is 1", entry_id="e1", snapshot_id="s1")
+    b = _particle(content="x is 2", entry_id="e2", snapshot_id="s2")
+    with (
+        patch.object(pipeline, "decide_ladder", _ladder),
+        patch.object(pipeline, "needs_rung_inputs", lambda *a, **k: False),
+    ):
+        async with session_scope("team") as team:
+            with pytest.raises(_Stop):
+                await pipeline._resolve_conflict(team, b, a, "e2", "s2", probe=True)
+    assert seen["single_trust_order"] is False, seen

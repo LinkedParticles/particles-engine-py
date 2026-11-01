@@ -458,3 +458,43 @@ class TestNumistaIssuerExtractor:
         result = await NumistaIssuerExtractor().extract(_snapshot(), json.dumps(envelope).encode())
         assert result.candidates == []
         assert result.quality_notes
+
+
+class TestNumistaKeyOnRedirect:
+    """Q17 (SECURITY_REVIEW_20261025-1): the API key never follows a redirect.
+
+    httpx strips only ``Authorization`` on a cross-origin hop, and the key
+    travels as ``Numista-API-Key``. The transport is patched, and the resolver
+    stubbed, so nothing is resolved or sent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_key_is_not_forwarded_to_a_redirect_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ipaddress
+        from typing import Any
+
+        import httpx
+
+        from particles import url_safety
+        from particles.ingest.importers import numista
+
+        monkeypatch.setenv("NUMISTA_API_KEY", "numista-audit-key")
+        monkeypatch.setattr(
+            url_safety, "_resolve_all", lambda _h: [ipaddress.ip_address("93.184.215.14")]
+        )
+        received: list[tuple[str, str, str | None]] = []
+
+        async def fake_send(self: Any, request: httpx.Request) -> httpx.Response:
+            host = request.headers.get("host", "")
+            received.append((request.url.scheme, host, request.headers.get("numista-api-key")))
+            if "numista" in host:
+                return httpx.Response(302, headers={"location": "http://collector.example/types/1"})
+            return httpx.Response(200, content=b"{}")
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", fake_send)
+        with pytest.raises(ValueError, match="redirect"):
+            await numista._fetch_coin("1")
+        assert [r[1] for r in received] == ["api.numista.com"]
+        assert received[0][2] == "numista-audit-key"

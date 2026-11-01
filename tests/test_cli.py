@@ -377,6 +377,30 @@ class TestVersion:
         assert f"particles {__version__} (client)" in result.output
         assert "unreachable" in result.output
 
+    def test_version_remote_arms_the_backstop_and_reports_a_refusal_in_one_line(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """E7 (SECURITY_REVIEW_20261026-1, W57): in remote mode under
+        ``network.egress: none``, ``--version`` arms the backstop and prints the
+        refusal instead of a traceback."""
+        from particles import __version__, egress
+        from particles.config import NetworkConfig, get_config
+
+        cfg = get_config()
+        monkeypatch.setattr(cfg, "network", NetworkConfig(egress="none"))
+        monkeypatch.setattr(cfg.engine, "base_url", "https://engine.example.test")
+        egress.disarm_backstop()
+        try:
+            result = _invoke(runner, ["--version"])
+            armed = egress._backstop_policy is not None
+        finally:
+            egress.disarm_backstop()
+        assert not isinstance(result.exception, egress.EgressRefused), result.output
+        assert armed
+        assert result.exit_code == 0
+        assert f"particles {__version__} (client)" in result.output
+        assert "network.egress is none" in result.output
+
 
 # ---------------------------------------------------------------------------
 # trust sub-Typer
@@ -3267,12 +3291,18 @@ class TestProjectMultiRegion:
     declared region in one pass; `--splice REGION` re-rolls one; `--export-corpus`
     writes the sibling drift-gate bundle. All deterministic (no API key)."""
 
+    @pytest.fixture(autouse=True)
+    def _in_tmp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A manifest's `output:` resolves against the working directory and
+        # must stay inside the manifest's tree (security review 2026-10-24-2, P3).
+        monkeypatch.chdir(tmp_path)
+
     @staticmethod
     def _write_manifest(tmp_path: Path, readme: Path) -> Path:
         manifest = tmp_path / "readme.yaml"
         manifest.write_text(
             "name: readme\n"
-            f"output: {readme}\n"
+            f"output: {readme.name}\n"
             "sections:\n"
             "  - title: What is this\n"
             "    query: overview\n"
@@ -3360,7 +3390,7 @@ class TestProjectMultiRegion:
         manifest = tmp_path / "readme.yaml"
         manifest.write_text(
             "name: readme\n"
-            f"output: {readme}\n"
+            f"output: {readme.name}\n"
             "sections:\n"
             "  - title: Bound\n    query: q\n    region: what-is\n"
             "  - title: Unbound\n    query: q\n",

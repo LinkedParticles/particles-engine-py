@@ -43,6 +43,7 @@ from particles.store.particle_store import (
     update_particle_status,
 )
 from particles.store.taxonomy_store import get_particle_ids_for_tags
+from tests.test_benchmark_rot import bow_encoder  # noqa: F401 — the stand-in encoder fixture
 
 OLD = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -360,6 +361,9 @@ class TestRevalidationLadder:
             await ab._revalidate(db_session, report, ab._Budget(5))
         assert report.revalidation.refreshed_entailed == 1
         await _assert_refreshed(db_session, d, [successor.id, premises[1].id, premises[2].id])
+        (event,) = await _retirement_events(db_session, d.id)
+        assert (event.payload["rung"], event.payload["outcome"]) == (2, "refreshed_entailed")
+        assert event.payload["decided_by"] == f"entailment_judge@{ab.entailment_judge_version()}"
 
     @pytest.mark.asyncio
     async def test_rung3_paraphrase_refresh(self, db_session) -> None:
@@ -385,6 +389,9 @@ class TestRevalidationLadder:
             db_session, d, [successor.id, premises[1].id, premises[2].id]
         )
         assert new_d.content == "General claim."  # D's text, not the re-synthesis
+        (event,) = await _retirement_events(db_session, d.id)
+        assert (event.payload["rung"], event.payload["outcome"]) == (3, "refreshed_paraphrase")
+        assert event.payload["successor_id"] == new_d.id
 
     @pytest.mark.asyncio
     async def test_refresh_recomputes_confidence_upward(self, db_session) -> None:
@@ -584,6 +591,10 @@ class TestRevalidationLadder:
         assert ab.is_derived(new_d)
         assert new_d.supersedes == d.id
         assert new_d.tags is None  # a different claim: no tag carry-over
+        (event,) = await _retirement_events(db_session, d.id)
+        assert (event.payload["rung"], event.payload["outcome"]) == (3, "superseded")
+        assert event.payload["successor_id"] == new_d.id
+        assert event.payload["decided_by"].startswith("paraphrase_judge@")
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_defers(self, db_session) -> None:
@@ -899,7 +910,13 @@ class TestTemporalEligibility:
 
 class TestPromotion:
     @pytest.mark.asyncio
-    async def test_propose_mode_records_candidate_event(self, db_session) -> None:
+    async def test_propose_mode_records_candidate_event(
+        self,
+        db_session,
+        bow_encoder: None,  # noqa: F811
+    ) -> None:
+        # The duplicate gate only needs an encoder to be present (``_duplicate_of``
+        # is stubbed); the stand-in spares loading the real model, about 5 s.
         _enable()
         premises = [
             _specific("specific a", value=0.9),
@@ -997,7 +1014,11 @@ class TestPromotion:
         assert await get_active_derived_particles(db_session) == []
 
     @pytest.mark.asyncio
-    async def test_auto_mode_asserts_via_reconcile(self, db_session) -> None:
+    async def test_auto_mode_asserts_via_reconcile(
+        self,
+        db_session,
+        bow_encoder: None,  # noqa: F811
+    ) -> None:
         _enable(mode="auto")
         premises = [_specific("a"), _specific("b"), _specific("c")]
         for p in premises:
@@ -1272,3 +1293,79 @@ class TestAcceptRejectCandidate:
             result = await apply_gesture(db_session, card, "accept")
         assert result.startswith("Accepted")
         assert len(await get_active_derived_particles(db_session)) >= 1
+
+
+# Security review 2026-10-25-2, R29, adopted from the review's proofs: every
+# claim the revalidation ladder moves out of ACTIVE is named by an event. Rungs
+# 1 and 4 need no model call.
+
+
+async def _retirement_events(db_session, particle_id: str) -> list[object]:
+    events = await list_events(
+        db_session, event_type=OperatorEventType.ABSTRACTION_RETIRED, ref_id=particle_id
+    )
+    return list(events)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_supersession_is_in_the_event_log(db_session) -> None:
+    _enable()
+    d, premises = await _seed_derived(db_session)
+    await _supersede_premise(db_session, premises[0], premises[0].content)
+    await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+    old = await get_particle(db_session, d.id)
+    assert old is not None and old.status is Status.SUPERSEDED
+    (event,) = await _retirement_events(db_session, d.id)
+    successor = await get_superseding_particle(db_session, d.id)
+    assert successor is not None
+    assert event.payload["successor_id"] == successor.id
+    assert event.payload["rung"] == 1
+    assert event.payload["outcome"] == "refreshed_structural"
+    assert event.payload["decided_by"].startswith("abstraction_structural@")
+
+
+@pytest.mark.asyncio
+async def test_a_floor_retirement_is_in_the_event_log(db_session) -> None:
+    _enable()
+    d, premises = await _seed_derived(db_session)
+    for p in premises[:2]:
+        await update_particle_status(db_session, p.id, Status.RETRACTED)
+    await ab._revalidate(db_session, ab.AbstractionReport(), ab._Budget(5))
+    old = await get_particle(db_session, d.id)
+    assert old is not None and old.status is Status.PROVENANCE_STALE
+    (event,) = await _retirement_events(db_session, d.id)
+    assert event.payload["successor_id"] is None
+    assert event.payload["rung"] == 4
+    assert event.payload["status"] == Status.PROVENANCE_STALE.value
+
+
+# ---------------------------------------------------------------------------
+# Security review 2026-10-26-1, W44: the ladder re-reads D before it writes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_belief_retired_during_the_judge_call_stays_retired(db_session) -> None:
+    """A derived belief leaving ACTIVE while its rung-2 judge call runs gets no ACTIVE successor."""
+    _enable()
+    d, premises = await _seed_derived(db_session)
+    await _supersede_premise(db_session, premises[0], "a revised specific claim 0")
+    await db_session.commit()
+
+    async def _judge_while_another_writer_retires(claim: str, contents: list[str]) -> bool:
+        await update_particle_status(
+            db_session, d.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
+        )
+        await db_session.commit()
+        return True
+
+    report = ab.AbstractionReport()
+    with patch.object(ab, "_check_entailment", _judge_while_another_writer_retires):
+        await ab._revalidate(db_session, report, ab._Budget(5))
+
+    successor = await get_superseding_particle(db_session, d.id)
+    old = await get_particle(db_session, d.id)
+    assert old is not None and old.status is Status.PROVENANCE_STALE
+    assert successor is None or successor.status is not Status.ACTIVE
+    assert report.revalidation.refreshed_entailed == 0
+    assert report.revalidation.deferred == 1

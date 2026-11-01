@@ -41,7 +41,13 @@ assert through the §6.6 ladder — under the façade's own asserting principal,
 a façade claim is attributable and trust-weighted below an operator's. Nothing
 is ever hard-deleted (§6).
 
-Callers own the transaction: these functions never commit.
+The write operations commit their own writes under the store's writer lock,
+so the caller opens a plain session. Each runs gather / apply
+(D2): it reads the graph, makes its refusals and writes its deposit,
+Subjects and retractions in one block under the lock, then asserts each claim
+with the lock taken for that claim's writes alone, so no assertion's embedding
+or model probe runs while the lock is held (security review 2026-10-31-1, AD3,
+AD5). The read operations never commit.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from typing import Any
 
 from particles.config import get_config
 from particles.core.status import Status
+from particles.db import write_transaction
 from particles.mcp.memory_compat.graph import (
     OBSERVATION_TAG,
     TOMBSTONE_TAG,
@@ -127,6 +134,23 @@ def _granularity() -> tuple[int, int]:
     return (_cfg().max_observation_chars, 0)
 
 
+def _check_claims(contents: list[str]) -> None:
+    """Refuse a call any of whose claims an assertion would refuse on its body.
+
+    Run before the call writes anything, so a refused claim leaves nothing of
+    the call behind, as when the whole call ran in one transaction.
+    """
+    from particles.operations.agent_write import check_belief_body
+
+    for content in contents:
+        check_belief_body(
+            content=content,
+            subject_names=[],
+            uncertainty_nature="EPISTEMIC",
+            granularity=_granularity(),
+        )
+
+
 async def _deposit(session: Any, tool: str, payload: Any) -> str:
     """Deposit the verbatim tool payload; return the corpus entry id.
 
@@ -155,7 +179,11 @@ async def _assert(
     corpus_entry_id: str,
     tags: list[str],
 ) -> Any:
-    """Assert one façade claim; return the ``AgentWriteResult`` verdict."""
+    """Assert one façade claim; return the ``AgentWriteResult`` verdict.
+
+    Its writes commit under the store's writer lock, which its embedding and
+    model probes run before (AD3, AD5).
+    """
     from particles.operations.agent_write import assert_belief
 
     return await assert_belief(
@@ -169,6 +197,7 @@ async def _assert(
         tags=tags,
         identity=_cfg().asserter_identity,
         granularity=_granularity(),
+        commit_under_lock=True,
     )
 
 
@@ -244,48 +273,52 @@ async def create_entities(
     is left out of its entity's ``observations`` and disclosed in ``notes``;
     see the module docstring.
     """
-    sub = await load_subgraph(session)
-    pending: list[dict[str, Any]] = []
-    claimed: set[str] = set()
-    for entity in entities:
-        name = str(entity.get("name", ""))
-        # The reference also skips a name repeated earlier in the same batch.
-        # The key is the façade's own name identity (``Subgraph`` matches names
-        # case-insensitively), so one batch can never mint two Subjects that
-        # every later lookup would treat as the same entity.
-        key = name.lower()
-        if key in claimed or sub.subject_by_name(name) is not None:
-            continue
-        claimed.add(key)
-        pending.append(entity)
-    if not pending:
-        return [], []
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
+        pending: list[dict[str, Any]] = []
+        claimed: set[str] = set()
+        for entity in entities:
+            name = str(entity.get("name", ""))
+            # The reference also skips a name repeated earlier in the same batch.
+            # The key is the façade's own name identity (``Subgraph`` matches names
+            # case-insensitively), so one batch can never mint two Subjects that
+            # every later lookup would treat as the same entity.
+            key = name.lower()
+            if key in claimed or sub.subject_by_name(name) is not None:
+                continue
+            claimed.add(key)
+            pending.append(entity)
+        if not pending:
+            return [], []
+        _check_claims([str(o) for entity in pending for o in entity.get("observations", []) or []])
 
-    entry_id = await _deposit(session, "create_entities", entities)
+        entry_id = await _deposit(session, "create_entities", entities)
+        prepared: list[tuple[str, str, Any, list[str]]] = []
+        for entity in pending:
+            name = str(entity.get("name", ""))
+            entity_type = str(entity.get("entityType", "") or "")
+            observations = [str(o) for o in entity.get("observations", []) or []]
+
+            subject = sub.raw_subject_by_name(name)
+            if subject is None:
+                subject = await _create_subject(session, name, entity_type)
+            else:
+                # Re-creating a deleted entity: retract its tombstones so it reads
+                # live again, and refresh its class from the new payload.
+                for tombstone in sub.tombstone_particles_for(subject.id):
+                    await _retract(session, store=store, particle_id=tombstone.id)
+                # Only a Subject the façade created takes the payload's class: the
+                # setter records no event, and another principal's classification
+                # is not the façade's to change (N30).
+                if entity_type and subject.subject_class != entity_type and _owns(subject):
+                    from particles.store.subject_store import set_subject_class
+
+                    await set_subject_class(session, subject.id, entity_type)
+            prepared.append((name, entity_type, subject, observations))
+
     created: list[dict[str, Any]] = []
     held: list[tuple[str, Any]] = []
-
-    for entity in pending:
-        name = str(entity.get("name", ""))
-        entity_type = str(entity.get("entityType", "") or "")
-        observations = [str(o) for o in entity.get("observations", []) or []]
-
-        subject = sub.raw_subject_by_name(name)
-        if subject is None:
-            subject = await _create_subject(session, name, entity_type)
-        else:
-            # Re-creating a deleted entity: retract its tombstones so it reads
-            # live again, and refresh its class from the new payload.
-            for tombstone in sub.tombstone_particles_for(subject.id):
-                await _retract(session, store=store, particle_id=tombstone.id)
-            # Only a Subject the façade created takes the payload's class: the
-            # setter records no event, and another principal's classification
-            # is not the façade's to change (N30).
-            if entity_type and subject.subject_class != entity_type and _owns(subject):
-                from particles.store.subject_store import set_subject_class
-
-                await set_subject_class(session, subject.id, entity_type)
-
+    for name, entity_type, subject, observations in prepared:
         landed: list[str] = []
         for text in observations:
             result = await _assert(
@@ -322,31 +355,33 @@ async def create_relations(
             for the whole batch before writing anything, ``from`` checked
             before ``to``. A deleted (tombstoned) entity counts as absent.
     """
-    sub = await load_subgraph(session)
-    endpoints: dict[str, Any] = {}
-    for relation in relations:
-        for endpoint in (str(relation.get("from", "")), str(relation.get("to", ""))):
-            subject = sub.subject_by_name(endpoint)
-            if subject is None:
-                raise ValueError(f"Entity with name {endpoint} not found")
-            endpoints[endpoint] = subject
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
+        endpoints: dict[str, Any] = {}
+        for relation in relations:
+            for endpoint in (str(relation.get("from", "")), str(relation.get("to", ""))):
+                subject = sub.subject_by_name(endpoint)
+                if subject is None:
+                    raise ValueError(f"Entity with name {endpoint} not found")
+                endpoints[endpoint] = subject
 
-    pending: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for relation in relations:
-        src = str(relation.get("from", ""))
-        dst = str(relation.get("to", ""))
-        kind = str(relation.get("relationType", ""))
-        key = (src, dst, kind)
-        if key in seen or sub.find_relation(src, dst, kind) is not None:
-            continue
-        seen.add(key)
-        pending.append({"from": src, "to": dst, "relationType": kind})
+        pending: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for relation in relations:
+            src = str(relation.get("from", ""))
+            dst = str(relation.get("to", ""))
+            kind = str(relation.get("relationType", ""))
+            key = (src, dst, kind)
+            if key in seen or sub.find_relation(src, dst, kind) is not None:
+                continue
+            seen.add(key)
+            pending.append({"from": src, "to": dst, "relationType": kind})
 
-    if not pending:
-        return [], []
+        if not pending:
+            return [], []
+        _check_claims([relation_content(r["from"], r["to"], r["relationType"]) for r in pending])
 
-    entry_id = await _deposit(session, "create_relations", relations)
+        entry_id = await _deposit(session, "create_relations", relations)
     created: list[dict[str, Any]] = []
     held: list[tuple[str, Any]] = []
     for relation in pending:
@@ -382,25 +417,27 @@ async def add_observations(
         ValueError: If a named entity does not exist — the reference throws
             ``Entity with name X not found`` and clients depend on that.
     """
-    sub = await load_subgraph(session)
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
 
-    targets: list[tuple[Any, list[str]]] = []
-    for item in observations:
-        name = str(item.get("entityName", ""))
-        subject = sub.subject_by_name(name)
-        if subject is None:
-            raise ValueError(f"Entity with name {name} not found")
-        existing = set(sub.observation_texts(subject.id))
-        fresh: list[str] = []
-        for content in item.get("contents", []) or []:
-            text = str(content)
-            if text not in existing and text not in fresh:
-                fresh.append(text)
-        targets.append((subject, fresh))
+        targets: list[tuple[Any, list[str]]] = []
+        for item in observations:
+            name = str(item.get("entityName", ""))
+            subject = sub.subject_by_name(name)
+            if subject is None:
+                raise ValueError(f"Entity with name {name} not found")
+            existing = set(sub.observation_texts(subject.id))
+            fresh: list[str] = []
+            for content in item.get("contents", []) or []:
+                text = str(content)
+                if text not in existing and text not in fresh:
+                    fresh.append(text)
+            targets.append((subject, fresh))
+        _check_claims([text for _, fresh in targets for text in fresh])
 
-    entry_id: str | None = None
-    if any(fresh for _, fresh in targets):
-        entry_id = await _deposit(session, "add_observations", observations)
+        entry_id: str | None = None
+        if any(fresh for _, fresh in targets):
+            entry_id = await _deposit(session, "add_observations", observations)
 
     results: list[dict[str, Any]] = []
     held: list[tuple[str, Any]] = []
@@ -439,43 +476,44 @@ async def delete_entities(
     Subject the façade did not create (N30): tombstoning it would hide another
     principal's Subject from every façade read.
     """
-    sub = await load_subgraph(session)
-    deleted: list[str] = []
-    not_found: list[str] = []
-    doomed: list[Any] = []
-    foreign: list[str] = []
-    for raw in entity_names:
-        name = str(raw)
-        subject = sub.subject_by_name(name)
-        if subject is None:
-            not_found.append(name)
-            continue
-        if not _owns(subject):
-            foreign.append(name)
-            continue
-        deleted.append(name)
-        if subject not in doomed:
-            doomed.append(subject)
-    if foreign:
-        raise ValueError(
-            "Not deleted: these entities were not created through the memory-compat "
-            f"façade and can be changed only by an operator: {', '.join(foreign)}"
-        )
-    if not doomed:
-        return deleted, not_found
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
+        deleted: list[str] = []
+        not_found: list[str] = []
+        doomed: list[Any] = []
+        foreign: list[str] = []
+        for raw in entity_names:
+            name = str(raw)
+            subject = sub.subject_by_name(name)
+            if subject is None:
+                not_found.append(name)
+                continue
+            if not _owns(subject):
+                foreign.append(name)
+                continue
+            deleted.append(name)
+            if subject not in doomed:
+                doomed.append(subject)
+        if foreign:
+            raise ValueError(
+                "Not deleted: these entities were not created through the memory-compat "
+                f"façade and can be changed only by an operator: {', '.join(foreign)}"
+            )
+        if not doomed:
+            return deleted, not_found
 
-    entry_id = await _deposit(session, "delete_entities", entity_names)
-    doomed_ids = {s.id for s in doomed}
-    doomed_names = {s.canonical_name for s in doomed}
+        entry_id = await _deposit(session, "delete_entities", entity_names)
+        doomed_ids = {s.id for s in doomed}
+        doomed_names = {s.canonical_name for s in doomed}
 
-    for subject in doomed:
-        for particle in sub.observation_particles(subject.id):
-            await _retract(session, store=store, particle_id=particle.id)
+        for subject in doomed:
+            for particle in sub.observation_particles(subject.id):
+                await _retract(session, store=store, particle_id=particle.id)
 
-    # Cascade: the reference drops every relation with EITHER endpoint deleted.
-    for rel, particle in sub.relation_triples():
-        if rel["from"] in doomed_names or rel["to"] in doomed_names:
-            await _retract(session, store=store, particle_id=particle.id)
+        # Cascade: the reference drops every relation with EITHER endpoint deleted.
+        for rel, particle in sub.relation_triples():
+            if rel["from"] in doomed_names or rel["to"] in doomed_names:
+                await _retract(session, store=store, particle_id=particle.id)
 
     # Tombstone the Subject itself, so an entity with no observations still
     # disappears from reads while the record survives. Each
@@ -511,24 +549,25 @@ async def delete_observations(
     of every listed string, repeats included; ``deleted_count`` is what was
     actually retracted, so a string listed twice counts once.
     """
-    sub = await load_subgraph(session)
-    deleted_count = 0
-    requested = 0
-    missing_entities: list[str] = []
-    retracted: set[str] = set()
-    for item in deletions:
-        name = str(item.get("entityName", ""))
-        unwanted = [str(o) for o in item.get("observations", []) or []]
-        requested += len(unwanted)
-        subject = sub.subject_by_name(name)
-        if subject is None:
-            missing_entities.append(name)
-            continue
-        for particle in sub.observation_particles(subject.id):
-            if particle.content in unwanted and particle.id not in retracted:
-                await _retract(session, store=store, particle_id=particle.id)
-                retracted.add(particle.id)
-                deleted_count += 1
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
+        deleted_count = 0
+        requested = 0
+        missing_entities: list[str] = []
+        retracted: set[str] = set()
+        for item in deletions:
+            name = str(item.get("entityName", ""))
+            unwanted = [str(o) for o in item.get("observations", []) or []]
+            requested += len(unwanted)
+            subject = sub.subject_by_name(name)
+            if subject is None:
+                missing_entities.append(name)
+                continue
+            for particle in sub.observation_particles(subject.id):
+                if particle.content in unwanted and particle.id not in retracted:
+                    await _retract(session, store=store, particle_id=particle.id)
+                    retracted.add(particle.id)
+                    deleted_count += 1
     return deleted_count, requested, missing_entities
 
 
@@ -542,17 +581,18 @@ async def delete_relations(
     triple listed twice is requested twice and deleted once, as in the
     reference.
     """
-    sub = await load_subgraph(session)
-    retracted: set[str] = set()
-    for relation in relations:
-        particle = sub.find_relation(
-            str(relation.get("from", "")),
-            str(relation.get("to", "")),
-            str(relation.get("relationType", "")),
-        )
-        if particle is not None and particle.id not in retracted:
-            await _retract(session, store=store, particle_id=particle.id)
-            retracted.add(particle.id)
+    async with write_transaction(session, store):
+        sub = await load_subgraph(session)
+        retracted: set[str] = set()
+        for relation in relations:
+            particle = sub.find_relation(
+                str(relation.get("from", "")),
+                str(relation.get("to", "")),
+                str(relation.get("relationType", "")),
+            )
+            if particle is not None and particle.id not in retracted:
+                await _retract(session, store=store, particle_id=particle.id)
+                retracted.add(particle.id)
     return len(retracted), len(relations)
 
 

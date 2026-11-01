@@ -65,12 +65,10 @@ This also works against an engine running with a real `PARTICLES_API_KEY`
 (including the container): the shell loads unauthenticated and the
 app prompts for the bearer, which it then sends on every call.
 
-Without a key the engine still serves the queue and every read, but the
-curation gestures (affirm, snooze, dismiss, resolve, edit, retract, assign
-subject, relink, whole-source retract, merge) are refused with a 503: they are
-operator writes, which never ride the dev-key loopback skip. To
-curate, start the engine with `PARTICLES_API_KEY` set and paste the same value
-into settings.
+Without a key the engine still serves the queue and every read, but it serves
+reads only: every write (the curation gestures, a deposit, an edit) is refused
+with a 503 whose message names the fix. To curate or deposit, start
+the engine with `PARTICLES_API_KEY` set and paste the same value into settings.
 
 The engine mounts `/app` only when `clients/web-ui/dist/` is present (it is,
 in a source checkout; an installed wheel does not ship it and simply skips
@@ -98,7 +96,9 @@ exporter embeds; same-origin asset, no CDN).
 OpenAPI contract) must commit the rebuilt `dist/` in the same change.** The
 build stamp is deterministic — package version + a hash of the build inputs,
 no timestamp — so rebuilding identical sources is a no-op diff, and the
-committed bundle changes exactly when the code does. That holds only for the
+committed bundle changes exactly when the code does. CI's `docs` job installs
+from the lockfile, runs the typecheck, rebuilds, and fails on any difference in
+`dist/`. That holds only for the
 toolchain pinned exactly in `package.json` and `package-lock.json`: a
 different esbuild minifies differently, so build from `npm ci`, never from a
 stale `node_modules`. To move a pin, edit its exact version in `package.json`,
@@ -117,10 +117,15 @@ published in the last seven days), and commit both files with the rebuilt
 
 The app presents the **client bearer** on every call. On first launch
 it shows a settings screen; the engine base URL and bearer token are entered
-there and persisted client-side (browser storage) — secrets never leave the
-device and are never compiled in. Fail-closed both ways (posture,
-mirrored client-side): with no token configured the app makes no call at all,
-and the engine refuses to serve an unauthenticated non-loopback request. No
+there and kept in the browser's `localStorage` for the app's origin; they are
+never compiled in, and the token is sent only to that engine. With no token
+configured the app calls only `GET /health` and an unauthenticated
+`GET /events?limit=1`, which asks the engine whether it needs a token. When
+the engine answers that probe (a keyless engine serving a loopback client),
+the app continues without a token, and every call it makes from then on
+carries none. An engine with no key refuses every non-loopback request. An engine with
+a key serves its open read routes to an unauthenticated client unless
+`api.require_auth_for_reads` is set; the write routes always need a key. No
 cookies, no sessions — bearer-only, the mobile-parity rule (see
 `PARITY.md`).
 

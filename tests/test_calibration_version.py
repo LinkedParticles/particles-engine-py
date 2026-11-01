@@ -38,7 +38,11 @@ from particles.core.schema import (
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
-from particles.extraction.calibration import TRANSFORM_LOGIT, version_mismatch_reason
+from particles.extraction.calibration import (
+    TRANSFORM_ISOTONIC,
+    TRANSFORM_LOGIT,
+    version_mismatch_reason,
+)
 from particles.extraction.general import (
     CandidateParticle,
     ExtractionResult,
@@ -300,3 +304,38 @@ class TestPipelineVersionGate:
         )
         assert kept is not None
         assert kept.extractor_version == "0.15.0"
+
+
+class TestUnappliableRecordWarning:
+    """The warning for a record the pipeline will not apply says what it is."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_record_is_described_as_an_old_fit(
+        self, db_session: Any, offline_pipeline: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="particles.ingest.pipeline")
+        legacy = _record("0.16.0").model_copy(update={"transform": None})
+        particles = await _extract_with(db_session, legacy)
+        assert {p.confidence.calibration_source for p in particles} == {
+            CalibrationSource.EXTRACTOR_DIRECT
+        }
+        (warning,) = _warnings_about_calibration(caplog)
+        assert "fitted before a format change (transform=None, T=2.0000)" in warning
+        assert "--regenerate" in warning
+
+    @pytest.mark.asyncio
+    async def test_isotonic_record_without_breakpoints_is_named_as_such(
+        self, db_session: Any, offline_pipeline: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="particles.ingest.pipeline")
+        empty = _record("0.16.0").model_copy(
+            update={"transform": TRANSFORM_ISOTONIC, "temperature": 1.0, "breakpoints": []}
+        )
+        particles = await _extract_with(db_session, empty)
+        assert {p.confidence.calibration_source for p in particles} == {
+            CalibrationSource.EXTRACTOR_DIRECT
+        }
+        (warning,) = _warnings_about_calibration(caplog)
+        assert "an isotonic record with no breakpoints" in warning
+        assert "format change" not in warning
+        assert "T=" not in warning

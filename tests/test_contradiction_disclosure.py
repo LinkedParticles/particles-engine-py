@@ -626,6 +626,62 @@ class TestExtractTimeRecords:
         assert event.payload["successor"] == successor.id
         assert [c["cause"] for c in report.closed] == ["withdrawn"]
 
+    async def test_a_withdrawal_never_restores_the_newcomer_beside_a_claim_it_was_not_read_against(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The withdrawal searches again under the lock (security review 2026-10-31-3, AF1).
+
+        A claim committed while the newcomer was held, here during the reading,
+        was never reconciled against it: the newcomer stays quarantined behind
+        a new record naming that claim, not ACTIVE beside it.
+        """
+        from particles import embeddings as ep
+        from particles.core.conflict_review import conflict_pair_ids
+        from particles.ingest import second_reading
+        from particles.ingest.second_reading import ProbeVerdict
+        from particles.store.particle_store import insert_particle
+        from tests.test_update_supersession import DENVER, _by_content
+
+        record = await self._record(db_session)
+        [quarantined] = await _by_content(db_session, DENVER)
+        lisbon_text = "The user's home city is Lisbon."
+        committed: list[Any] = []
+
+        async def read(a: Any, b: Any) -> ProbeVerdict:
+            if not committed:
+                # Another writer commits a claim the newcomer was never read against.
+                lisbon = quarantined.model_copy(
+                    update={
+                        "id": "lisbon-" + quarantined.id[7:],
+                        "content": lisbon_text,
+                        "status": Status.ACTIVE,
+                        "status_reason": None,
+                    }
+                )
+                [vector] = ep.get_embedding_model().encode([lisbon_text])  # type: ignore[union-attr]
+                await insert_particle(db_session, lisbon, [float(x) for x in vector])
+                await db_session.commit()
+                committed.append(lisbon)
+            return ProbeVerdict(usable=True, contradicts=False, description="not the same slot")
+
+        monkeypatch.setattr(second_reading, "_llm_verify_contradiction", read)
+        report = await run_disclosure(db_session, confirmed=[], mint=True, reread=True)
+
+        assert committed and report.extract_reread["withdrawn"] == 1
+        closed = await get_particle(db_session, record.id)
+        assert closed is not None and closed.status is Status.RETRACTED
+        [still] = await _by_content(db_session, DENVER)
+        assert still.id == quarantined.id
+        assert (still.status, still.status_reason) == (
+            Status.PROVENANCE_STALE,
+            StatusReason.CONFLICT_PENDING,
+        )
+        [event] = await list_events(db_session, event_type=OperatorEventType.INCONSISTENCY_CLOSED)
+        assert event.payload is not None and "successor" not in event.payload
+        held_behind = await get_particle(db_session, event.payload["held_behind"])
+        assert held_behind is not None and held_behind.status is Status.INCONSISTENCY
+        assert conflict_pair_ids(held_behind) == (committed[0].id, quarantined.id)
+
     async def test_a_verbatim_active_duplicate_takes_the_newcomers_provenance(
         self, db_session: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:

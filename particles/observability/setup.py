@@ -27,15 +27,17 @@ not crash. mypy treats the optional submodules as untyped (``follow_imports =
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
+import re
 import threading
 from typing import TYPE_CHECKING, Any
 
 from particles import egress
 from particles.config import get_config
 from particles.secrets import get_otel_exporter_headers_optional
-from particles.url_safety import is_cleartext_remote
+from particles.url_safety import is_cleartext_remote, url_without_userinfo
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -113,6 +115,12 @@ def instrument_fastapi_app(app: FastAPI) -> None:
         # D19: the server span keeps the route template, never the query or
         # the concrete ids in the path (see _scrub_server_span).
         FastAPIInstrumentor.instrument_app(app, server_request_hook=_scrub_server_span)
+        # The instrumentor records an unhandled exception on the server span
+        # itself, so the provider serving it must carry the type-only scrub
+        # even when another component installed it (G12).
+        from opentelemetry import trace
+
+        _keep_exception_type_only(trace.get_tracer_provider())
         _fastapi_instrumented = True
 
 
@@ -142,6 +150,7 @@ def _install_traces(cfg: ObservabilityConfig, resource: Any) -> None:
 
     sampler = ParentBased(TraceIdRatioBased(cfg.sample_ratio))
     provider = TracerProvider(resource=resource, sampler=sampler)
+    _keep_exception_type_only(provider)
 
     if cfg.exporter == "console":
         # Synchronous export so the diagnose-now CLI prints each span as it closes.
@@ -154,6 +163,81 @@ def _install_traces(cfg: ObservabilityConfig, resource: Any) -> None:
 
     trace.set_tracer_provider(provider)
     _providers.append(provider)
+    # set_tracer_provider keeps a provider installed earlier (an embedding
+    # application's, or the auto-instrumentation agent's); the spans go there.
+    _keep_exception_type_only(trace.get_tracer_provider())
+
+
+# The exception-event attributes a span keeps: the type, never the message or
+# the stacktrace, which carry a failed request's URL or a statement's text.
+_KEPT_EXCEPTION_ATTRIBUTES = frozenset({"exception.type", "exception.escaped"})
+_scrubbed_providers: list[Any] = []
+
+
+class _ExceptionTypeOnly:
+    """Span processor: every span records an exception's type, never its text (R7).
+
+    The hand-rolled spans open with ``record_exception=False``, but the library
+    instrumentors open theirs with the defaults: the FastAPI server span records
+    an unhandled route exception's message and stacktrace as an event and as
+    the status description, and a store error's message quotes the request it
+    served (G12, G67, SECURITY_REVIEW_20261027-1). ``on_start`` wraps each new
+    span's ``add_event`` and ``set_status``, so every later recording is
+    reduced before any exporter sees the span, whatever processor order the
+    provider holds: an ``exception`` event keeps ``exception.type`` and
+    ``exception.escaped``, and a status keeps its code without a description.
+    """
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        add_event = span.add_event
+        set_status = span.set_status
+
+        def add_event_type_only(
+            name: str, attributes: Any = None, timestamp: int | None = None
+        ) -> None:
+            if name == "exception" and attributes:
+                attributes = {
+                    key: value
+                    for key, value in attributes.items()
+                    if key in _KEPT_EXCEPTION_ATTRIBUTES
+                }
+            add_event(name, attributes, timestamp)
+
+        def set_status_code_only(status: Any, description: str | None = None) -> None:
+            from opentelemetry.trace import Status
+
+            if isinstance(status, Status):
+                status = Status(status.status_code)
+            set_status(status)
+
+        span.add_event = add_event_type_only
+        span.set_status = set_status_code_only
+
+    def _on_ending(self, span: Any) -> None:
+        return None
+
+    def on_end(self, span: Any) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return True
+
+
+def _keep_exception_type_only(provider: Any) -> None:
+    """Add the :class:`_ExceptionTypeOnly` processor to ``provider``, once.
+
+    A provider with no ``add_span_processor`` (the API's no-op or proxy
+    provider) records nothing, so it needs none.
+    """
+    if not hasattr(provider, "add_span_processor"):
+        return
+    if any(seen is provider for seen in _scrubbed_providers):
+        return
+    provider.add_span_processor(_ExceptionTypeOnly())
+    _scrubbed_providers.append(provider)
 
 
 def _install_metrics(cfg: ObservabilityConfig, resource: Any) -> None:
@@ -202,6 +286,89 @@ def _install_logging() -> None:
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
     LoggingInstrumentor().instrument(set_logging_format=True, log_level=logging.WARNING)
+    handler = getattr(LoggingInstrumentor, "_logging_handler", None)
+    if handler is None:
+        # The instrumentor keeps its handler on a private attribute; should a
+        # release move it, find the exporting handler on the root logger rather
+        # than leave it unscrubbed (security review 2026-10-30-1, AA9).
+        handler = next(
+            (
+                h
+                for h in logging.getLogger().handlers
+                if type(h).__name__ == "LoggingHandler"
+                and type(h).__module__.startswith("opentelemetry")
+            ),
+            None,
+        )
+    if handler is not None:
+        _keep_exception_type_only_in_logs(handler)
+
+
+def _keep_exception_type_only_in_logs(handler: logging.Handler) -> None:
+    """Make ``handler`` export a logged exception's type and no message or stacktrace.
+
+    The instrumentor's ``LoggingHandler`` copies ``exception.message`` and
+    ``exception.stacktrace`` from a record's ``exc_info``, and that text carries
+    deposited URLs and request content, to whatever ``LoggerProvider`` an
+    embedding application installed. The handler gets a copy of each record
+    without the exception, carrying ``exception.type`` only, as spans do; the
+    console's handlers still see the record whole (security review
+    2026-10-28-1).
+
+    A call that formats the exception into its message (``log.error("failed:
+    %s", exc)``) carries the same text in its arguments, so the copy also drops
+    the arguments and exports the message template alone, naming the type of
+    an exception argument (security review 2026-10-28-2).
+
+    The handler exports every attribute a record carries beyond the standard
+    ones, so a field a log call attaches with ``extra=`` (an endpoint, a
+    response body) would be shipped too. The copy keeps only the standard
+    record attributes and the trace correlation the instrumentor adds
+    (2026-10-30-1). A message a caller formatted before the call is exported as
+    written: nothing tells its text apart from the template.
+    """
+    emit = handler.emit
+
+    def _emit_without_exception_text(record: logging.LogRecord) -> None:
+        extra = [k for k in vars(record) if k not in _EXPORTED_RECORD_ATTRIBUTES]
+        if not (record.exc_info or record.exc_text or record.stack_info or record.args or extra):
+            emit(record)
+            return
+        exctype: type[BaseException] | None = record.exc_info[0] if record.exc_info else None
+        if exctype is None and record.args:
+            exctype = _first_exception_type(record.args)
+        exported = copy.copy(record)
+        for key in extra:
+            del exported.__dict__[key]
+        exported.exc_info = None
+        exported.exc_text = None
+        exported.stack_info = None
+        exported.args = ()
+        if not isinstance(exported.msg, str):
+            exported.msg = type(exported.msg).__name__
+        if exctype is not None:
+            exported.__dict__["exception.type"] = exctype.__name__
+        emit(exported)
+
+    handler.emit = _emit_without_exception_text  # type: ignore[method-assign]
+
+
+#: The record attributes the exporting handler is given: those every
+#: ``LogRecord`` has (without ``message`` and ``asctime``, which a console
+#: formatter fills with the formatted text), plus the instrumentor's trace
+#: correlation.
+_EXPORTED_RECORD_ATTRIBUTES = frozenset(
+    vars(logging.LogRecord("", logging.NOTSET, "", 0, "", (), None))
+) | {"otelTraceID", "otelSpanID", "otelServiceName", "otelTraceSampled"}
+
+
+def _first_exception_type(args: Any) -> type[BaseException] | None:
+    """The type of the first exception among a log record's arguments, if any."""
+    values = args.values() if isinstance(args, dict) else args or ()
+    for value in values:
+        if isinstance(value, BaseException):
+            return type(value)
+    return None
 
 
 def _scrub_httpx_url(span: Any, request: Any) -> None:
@@ -346,18 +513,53 @@ def _otlp_endpoint(cfg: ObservabilityConfig, signal: str) -> str:
     return f"{base.rstrip('/')}/v1/{signal}"
 
 
+#: The item delimiter of an OTLP-headers string, as the OpenTelemetry parser splits it.
+_HEADER_DELIMITER = re.compile(r"[ \t]*,[ \t]*")
+
+
+def _drop_record(_record: logging.LogRecord) -> bool:
+    """A log filter that passes nothing."""
+    return False
+
+
 def _otlp_headers() -> dict[str, str]:
     """``PARTICLES_OTEL_EXPORTER_HEADERS`` parsed into the mapping the exporter takes.
 
     The secret is the W3C OTLP-headers string (``key=value,…``); the exporter's
     ``headers=`` argument is a mapping, and a raw string fails its construction.
+
+    The OpenTelemetry parser logs a rejected item verbatim at WARNING, and an
+    item written in HTTP-header form (``x-api-key: <secret>``) is rejected, so
+    each item is parsed on its own with that log suppressed, and a rejected
+    one is reported by its position only (security review 2026-10-25, Q45).
     """
     raw = get_otel_exporter_headers_optional()
     if not raw:
         return {}
     from opentelemetry.util.re import parse_env_headers
 
-    return dict(parse_env_headers(raw, liberal=True))
+    parser_log = logging.getLogger("opentelemetry.util.re")
+    headers: dict[str, str] = {}
+    rejected: list[int] = []
+    parser_log.addFilter(_drop_record)
+    try:
+        for position, item in enumerate(_HEADER_DELIMITER.split(raw), start=1):
+            if not item.strip():
+                continue
+            parsed = parse_env_headers(item, liberal=True)
+            if parsed:
+                headers.update(parsed)
+            else:
+                rejected.append(position)
+    finally:
+        parser_log.removeFilter(_drop_record)
+    if rejected:
+        log.warning(
+            "PARTICLES_OTEL_EXPORTER_HEADERS: item(s) %s are not name=value and were "
+            "ignored (their text is not logged)",
+            ", ".join(str(p) for p in rejected),
+        )
+    return headers
 
 
 def _sdk_env_headers(signal: str) -> bool:
@@ -380,7 +582,9 @@ def _otlp_kwargs(cfg: ObservabilityConfig, signal: str) -> dict[str, Any] | None
     * Headers (the ``PARTICLES_OTEL_EXPORTER_HEADERS`` secret, or the SDK's own
       ``OTEL_EXPORTER_OTLP_*HEADERS``) are not sent over a non-loopback
       ``http://`` endpoint unless ``observability.allow_plaintext_headers`` is
-      set (N12; the engine token's rule).
+      set (N12; the engine token's rule). Headers bound for a
+      loopback ``http://`` collector travel on a session that honours no
+      environment proxy (Q47).
 
     A refusal installs no exporter for that signal and logs one WARNING.
     """
@@ -402,19 +606,136 @@ def _otlp_kwargs(cfg: ObservabilityConfig, signal: str) -> dict[str, Any] | None
                 "Refusing to send the OTLP exporter headers to %s over unencrypted "
                 "http://; no OTLP exporter is installed. Use https://, or a loopback "
                 "collector, or set observability.allow_plaintext_headers: true.",
-                endpoint,
+                url_without_userinfo(endpoint),
             )
             return None
         _warn_otlp_once(
             f"plaintext:{endpoint}",
             "The OTLP exporter headers are being sent over an unencrypted "
             "connection to %s (observability.allow_plaintext_headers is set).",
-            endpoint,
+            url_without_userinfo(endpoint),
         )
     kwargs: dict[str, Any] = {"endpoint": endpoint}
     if headers:
         kwargs["headers"] = headers
+    if headers or _sdk_env_headers(signal):
+        # The headers are judged against this endpoint only, and an exporter
+        # older than 1.45.1 follows a collector's redirect with them, to an
+        # origin neither check saw. Every header-carrying exporter therefore
+        # gets a session that follows no redirect, whatever exporter version
+        # is installed (security review 2026-10-25-2, R8).
+        kwargs["session"] = _session_following_no_redirect(
+            # The plaintext rule admits a loopback http:// collector, and the
+            # exporter's session would still send the headers in clear to an
+            # HTTP_PROXY the rule never judged (security review 2026-10-25,
+            # Q47). A loopback collector never needs a proxy, so its session
+            # reads none from the environment.
+            trust_env=not _is_loopback_http(endpoint)
+        )
+    else:
+        # The SDK's own session honours an inherited SSLKEYLOGFILE as well, so
+        # a header-less exporter gets one that writes no key log either
+        # (security review 2026-10-28-1).
+        kwargs["session"] = _session_writing_no_key_log()
     return kwargs
+
+
+def _is_loopback_http(endpoint: str) -> bool:
+    """Whether ``endpoint`` is an ``http://`` URL the plaintext rule admits (loopback)."""
+    return endpoint.lower().startswith("http://") and not is_cleartext_remote(endpoint)
+
+
+def _session_following_no_redirect(*, trust_env: bool) -> Any:
+    """A ``requests`` session that returns a 3xx as it is instead of following it.
+
+    ``trust_env=False`` also makes it read no proxy (or other setting) from the
+    environment.
+    """
+    import requests
+
+    class _NoRedirectSession(requests.Session):
+        def get_redirect_target(self, resp: Any) -> None:
+            return None
+
+    session = _NoRedirectSession()
+    session.trust_env = trust_env
+    _mount_no_key_log_adapter(session)
+    return session
+
+
+def _session_writing_no_key_log() -> Any:
+    """A plain ``requests`` session whose TLS connections write no key log."""
+    import requests
+
+    session = requests.Session()
+    _mount_no_key_log_adapter(session)
+    return session
+
+
+def _mount_no_key_log_adapter(session: Any) -> None:
+    """Make every TLS connection ``session`` opens write no TLS key log.
+
+    urllib3 sets ``keylog_filename`` from an inherited ``SSLKEYLOGFILE`` on
+    every context it creates, so each session's secrets, the collector bearer
+    and the span content included, would go to the file it names. The context
+    here is urllib3's own with the key log turned off, the reset
+    ``particles.http.tls_context`` applies to the httpx clients (security
+    review 2026-10-28-1).
+
+    ``requests`` builds the pool for an environment ``HTTPS_PROXY`` or
+    ``ALL_PROXY`` in ``proxy_manager_for``, apart from ``init_poolmanager``, so
+    the adapter hands that pool the same contexts: one for the tunnelled
+    connection to the collector and one for the TLS hop to an ``https://``
+    proxy (security review 2026-10-28-2).
+
+    The adapter serves ``http://`` too: a plaintext collector reached through
+    an ``https://`` proxy still has a TLS session, with the proxy. ``requests``
+    turns verification off for a plain ``http://`` URL, which would leave that
+    session unverified, so the adapter verifies the proxy against the bundle
+    ``requests`` verifies with (2026-10-30-1).
+    """
+    from requests.adapters import HTTPAdapter
+
+    class _NoKeyLogAdapter(HTTPAdapter):
+        def cert_verify(self, conn: Any, url: str, verify: Any, cert: Any) -> None:
+            super().cert_verify(conn, url, verify, cert)
+            if verify and getattr(conn, "scheme", None) == "https" and url[:6].lower() != "https:":
+                # The pool is the one to an ``https://`` proxy, forwarding a
+                # plain ``http://`` request.
+                from requests.utils import DEFAULT_CA_BUNDLE_PATH
+
+                conn.cert_reqs = "CERT_REQUIRED"
+                conn.ca_certs = DEFAULT_CA_BUNDLE_PATH
+                conn.ca_cert_dir = None
+
+        def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["ssl_context"] = _context_writing_no_key_log()
+            super().init_poolmanager(*args, **kwargs)
+
+        def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+            if proxy not in self.proxy_manager:
+                proxy_kwargs["ssl_context"] = _context_writing_no_key_log()
+                if not proxy.lower().startswith("socks"):
+                    # urllib3 loads no CA into a supplied proxy context, so it
+                    # gets the bundle requests verifies the collector with.
+                    from requests.utils import DEFAULT_CA_BUNDLE_PATH
+
+                    proxy_context = _context_writing_no_key_log()
+                    proxy_context.load_verify_locations(DEFAULT_CA_BUNDLE_PATH)
+                    proxy_kwargs["proxy_ssl_context"] = proxy_context
+            return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+    session.mount("https://", _NoKeyLogAdapter())
+    session.mount("http://", _NoKeyLogAdapter())
+
+
+def _context_writing_no_key_log() -> Any:
+    """urllib3's default client TLS context with the inherited key log turned off."""
+    from urllib3.util.ssl_ import create_urllib3_context
+
+    context = create_urllib3_context()
+    context.keylog_filename = None  # type: ignore[assignment]
+    return context
 
 
 def _reset_for_tests() -> None:
@@ -429,4 +750,5 @@ def _reset_for_tests() -> None:
         _configured = False
         _fastapi_instrumented = False
         _providers.clear()
+        _scrubbed_providers.clear()
         _otlp_refusals_logged.clear()

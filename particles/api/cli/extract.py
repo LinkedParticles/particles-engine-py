@@ -21,6 +21,7 @@ from particles.api.cli._output import (
     current_output,
 )
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_field
 from particles.api.client import get_backend
 from particles.core.schema import Particle
 from particles.db import session_scope
@@ -254,7 +255,9 @@ def extract_cmd(
         indent="  ",
     )
     for p in particles:
-        typer.echo(f"  [{p.status}] {p.id[:8]}… {p.content[:80]}")
+        # Claim text a source chose: one line, no live control (security
+        # review 2026-10-30-1, AB38).
+        typer.echo(f"  [{p.status}] {p.id[:8]}… {terminal_field(p.content[:80])}")
     _echo_usage(llm_usage)
 
 
@@ -516,6 +519,19 @@ async def _extract_all_pending(
                         outcome_out=outcome,
                     )
                     await session.commit()
+                    if outcome.skipped == "waiting" and outcome.waiting_on_memory_file:
+                        held = (outcome.waiting_on or "")[:8]
+                        remedy = (
+                            "it is FAILED: restore its blob, or run `particles reindex` "
+                            "on its entry"
+                            if outcome.waiting_on_failed
+                            else "the absence is processed once that file is extracted"
+                        )
+                        typer.echo(
+                            f"  {id_prefix}  skipped (waiting on {held}…, an unextracted "
+                            f"memory file of the same project; {remedy})"
+                        )
+                        continue
                     if outcome.skipped == "waiting":
                         held = (outcome.waiting_on or "")[:8]
                         remedy = (
@@ -739,16 +755,15 @@ def entry_has_tag(tags_json: str | None, tag: str) -> bool:
 def _is_pdf_entry(entry_id: str) -> bool:
     """Quick check whether an entry is PDF-sourced, for CLI label selection."""
     try:
-        import asyncio
-
         from particles.corpus.store import get_entry
+        from particles.egress import run_armed
 
         async def _get() -> bool:
             async with session_scope() as s:
                 e = await get_entry(s, entry_id)
                 return e is not None and e.source_type == "PDF"
 
-        return asyncio.run(_get())
+        return run_armed(_get())
     except Exception:
         return False
 

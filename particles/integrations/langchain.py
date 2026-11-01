@@ -31,9 +31,9 @@ write-enablement are all inherited from the backend.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
+from particles import egress
 from particles.api.client import get_backend
 from particles.core.schema import AudienceHint, QueryRequest
 from particles.db import DEFAULT_STORE
@@ -250,8 +250,9 @@ def _build_retriever_cls() -> type[Any]:
         def _get_relevant_documents(
             self, query: str, *, run_manager: CallbackManagerForRetrieverRun
         ) -> list[Document]:
-            # Sync delegates to the async-first path.
-            response = asyncio.run(
+            # Sync delegates to the async-first path, on a loop
+            # the no-egress backstop covers (G51).
+            response = egress.run_armed(
                 _run_query(
                     query,
                     tags=self.tags,

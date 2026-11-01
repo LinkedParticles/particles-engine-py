@@ -31,10 +31,14 @@ underlying modules import each other except :mod:`layer_b` and
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from particles.core.schema import LintFinding, Particle
-from particles.render.article_synthesis.cache import _PROMPT_VERSION
+from particles.render.article_synthesis.cache import (
+    _PROMPT_VERSION,
+    split_rendered_article,
+)
 from particles.render.article_synthesis.layer_a import (
     _short_id,
     _strip_inline_footnote_defs,
@@ -52,6 +56,7 @@ from particles.render.article_synthesis.render import (
     render_synthesised_article,
 )
 from particles.render.article_synthesis.topic import SynthesisTopic
+from particles.render.escape import prose_text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +105,99 @@ def _is_fatal_llm_error(exc: BaseException) -> bool:
         return True
     message = str(exc).lower()
     return any(marker in message for marker in _FATAL_LLM_MARKERS)
+
+
+#: The ``quality_notes`` an earlier Obsidian export wrote on a shared-cache row
+#: it filled from a vault note rather than from a synthesis.
+_VAULT_BACKFILL_NOTE = "backfilled-from-obsidian-vault"
+
+
+async def _read_back_from_a_vault(session: AsyncSession, subject_id: str, input_hash: str) -> bool:
+    """Whether the cached row for this key was read back from an Obsidian vault note."""
+    from sqlalchemy import select
+
+    from particles.store.synthesis_cache_store import SynthesisCacheRow
+
+    result = await session.execute(
+        select(SynthesisCacheRow.quality_notes).where(
+            SynthesisCacheRow.subject_id == subject_id,
+            SynthesisCacheRow.input_hash == input_hash,
+            SynthesisCacheRow.prompt_version == _PROMPT_VERSION,
+        )
+    )
+    return result.scalar_one_or_none() == _VAULT_BACKFILL_NOTE
+
+
+def _rebuild_cached_article(
+    cached: str,
+    *,
+    subject: SynthesisTopic,
+    particles: list[Particle],
+    eff: dict[str, float],
+    input_hash: str,
+    corpus_uris: dict[str, str | None],
+    min_particle_confidence: float | None,
+    dropped_below_threshold: int | None,
+) -> str | None:
+    """A shared-cache body rebuilt around its prose from the engine's own data.
+
+    Only the prose comes from the cache. The frontmatter, the H1 (the
+    subject's name) and the References section are rendered again from the
+    subject and the particles,
+    as a fresh synthesis renders them, so text that reached the cache from
+    somewhere other than the engine (a vault note an earlier export read back)
+    is never served as the engine's title or citations. The prose is held to
+    the fresh path's Layer A rule (every cited id is an input particle, and at
+    least one is cited) and to its neutralization. ``None`` when the cached
+    body is no synthesis or fails the rule, so the caller synthesises afresh
+    (security review 2026-10-28-2, AA30).
+    """
+    frontmatter, _h1, prose, _references = split_rendered_article(cached)
+    if frontmatter.get("synthesis") != "llm":
+        return None
+    prose = _strip_inline_footnote_defs(prose)
+    seen, invalid = validate_citations(prose, {_short_id(p.id) for p in particles})
+    if invalid or not seen:
+        return None
+
+    def _flag(key: str) -> bool | None:
+        value = frontmatter.get(key)
+        return value if isinstance(value, bool) else None
+
+    def _count(key: str) -> int | None:
+        value = frontmatter.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    # The time the body was synthesised, kept so a hit renders the same bytes;
+    # anything that is not a timestamp is replaced by the time of this render.
+    generated_at = frontmatter.get("generated_at")
+    if isinstance(generated_at, str):
+        try:
+            generated_at = datetime.fromisoformat(generated_at)
+        except ValueError:
+            generated_at = None
+    if not isinstance(generated_at, datetime):
+        generated_at = None
+
+    # The title is the subject's name, as the synthesis prompt asks the model
+    # to write it, never the H1 the cached body carried.
+    title = f"# {prose_text(subject.canonical_name)}\n\n"
+    return render_synthesised_article(
+        subject,
+        particles,
+        body=title + prose,
+        cited_short_ids=seen,
+        corpus_uris=corpus_uris,
+        effective_confidences=eff,
+        input_hash=input_hash,
+        layer_a_passed=True,
+        layer_b_passed=_flag("layer_b_passed"),
+        layer_b_unrelated_count=_count("layer_b_unrelated_count"),
+        layer_b_contradicts_count=_count("layer_b_contradicts_count"),
+        min_particle_confidence=min_particle_confidence,
+        dropped_below_threshold=dropped_below_threshold,
+        generated_at=generated_at,
+    )
 
 
 async def render_article(
@@ -202,13 +300,36 @@ async def render_article(
     # used_synthesis=True is the honest answer.
     if session is not None:
         cached = await lookup_cached_article(session, subject.id, input_hash, _PROMPT_VERSION)
+        if cached is not None and await _read_back_from_a_vault(session, subject.id, input_hash):
+            # An earlier Obsidian export stored a vault note here. A vault
+            # another party can edit holds prose the engine never wrote, so
+            # the row is a miss and a fresh render replaces it (security
+            # review 2026-10-30-1, AB34).
+            cached = None
         if cached is not None:
             log.info(
                 "Article synthesis cache hit for %r (input_hash=%s)",
                 subject.canonical_name,
                 input_hash[:8],
             )
-            return cached, True
+            rebuilt = _rebuild_cached_article(
+                cached,
+                subject=subject,
+                particles=particles,
+                eff=eff,
+                input_hash=input_hash,
+                corpus_uris=corpus_uris,
+                min_particle_confidence=min_particle_confidence,
+                dropped_below_threshold=dropped_below_threshold,
+            )
+            if rebuilt is not None:
+                return rebuilt, True
+            log.warning(
+                "Cached article for %r (input_hash=%s) is not an engine-written synthesis; "
+                "synthesising afresh",
+                subject.canonical_name,
+                input_hash[:8],
+            )
 
     allowed = {_short_id(p.id) for p in particles}
 
@@ -370,6 +491,9 @@ async def render_article(
             min_particle_confidence=min_particle_confidence,
             dropped_below_threshold=dropped_below_threshold,
         )
+        # ``render_synthesised_article`` has neutralized the model's body
+        # whole: a claim that steered it must not reach an exported note as
+        # live markup (security review 2026-10-24-2, P31; 2026-10-25-1, Q8).
         # Populate the cross-exporter cache so the next exporter
         # asking for the same (subject, input_hash, prompt_version)
         # gets this rendered body without re-running the LLM.

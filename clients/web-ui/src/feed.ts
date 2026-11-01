@@ -63,6 +63,8 @@ export class CurationFeed {
   private openCount = 0;
   private options: QueueOptions = {};
   private readOnly = false;
+  /** The engine's reason for the 403 that made the feed read-only. */
+  private readOnlyReason = "This engine is read-only (belief writes disabled).";
   private semanticSkipped = false;
   private loaded = false;
   private loading = false;
@@ -147,10 +149,7 @@ export class CurationFeed {
 
     if (this.readOnly) {
       this.root.appendChild(
-        banner(
-          "readonly",
-          "This engine is read-only (belief writes disabled). Reviewing without write gestures.",
-        ),
+        banner("readonly", `${this.readOnlyReason} Reviewing without write gestures.`),
       );
     }
 
@@ -610,8 +609,10 @@ export class CurationFeed {
       }
     } catch (e) {
       if (e instanceof ApiError && e.kind === "forbidden") {
-        // Read-only engine: degrade the whole feed (§5).
+        // Read-only engine, or a key that cannot write: degrade the whole feed
+        // (§5) and say why, in the engine's words.
         this.readOnly = true;
+        this.readOnlyReason = e.message;
         this.render();
         return;
       }

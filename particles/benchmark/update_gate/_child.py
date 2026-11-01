@@ -25,13 +25,14 @@ off, and its store is not the parent's and lies inside its run directory.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import shutil
 import typing
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from particles import egress
 
 #: Exit codes: a finished run, and a refusal before any call.
 EXIT_DONE = 0
@@ -115,7 +116,9 @@ def run(
     if refusal is not None:
         return {"refused": refusal}
 
-    asyncio.run(_init_store())
+    # Armed like every entry point that starts its own loop (security review
+    # 2026-10-28-2).
+    egress.run_armed(_init_store())
     log = None
     overrides: dict[str, Any] = {}
     if arm == "scripted":
@@ -160,7 +163,7 @@ def run(
                 result["output"] = output[-4000:]
                 break
         result["usage"] = usage.snapshot().model_dump(mode="json")
-    asyncio.run(_dispose())
+    egress.run_armed(_dispose())
     if log is not None:
         result["requests"] = log.entries
         result["refused_calls"] = log.refused_by_purpose()

@@ -143,7 +143,8 @@ path with the last segment stripped:
 
 Deposit it. The local-file importer recognises the top-level
 `name` / `version` / `tags` keys and tags the corpus entry with
-`source_type = TAXONOMY_DEFINITION` automatically:
+`source_type = TAXONOMY_DEFINITION` automatically, for a file of at most
+1 MiB; deposit a larger taxonomy with `--source-type TAXONOMY_DEFINITION`:
 
 ```bash
 uv run particles deposit ./cloud-native-taxonomy.json

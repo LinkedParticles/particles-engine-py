@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.api.client import Backend, get_backend
 from particles.core.schema import (
     AnswerFailureCause,
@@ -59,15 +60,15 @@ def _render_attribution(result: QueryResponse) -> None:
     handles = particle_handles(shown)
     by_id = {p.id: p for p in shown}
     counts = " · ".join(f"{attribution.count(kind)} {kind.value}" for kind in AttributionKind)
-    typer.echo(f"\nAttribution: {counts}")
+    terminal_echo(f"\nAttribution: {counts}")
     cited = dict.fromkeys(pid for s in attribution.sentences for pid in s.cited_ids)
     for pid in cited:
         particle = by_id.get(pid)
         if particle is not None:
-            typer.echo(f"  [{handles[pid]}] {particle.content[:80]}")
+            terminal_echo(f"  [{handles[pid]}] {terminal_field(particle.content[:80])}")
     invalid = attribution.invalid_citation_count
     if invalid:
-        typer.echo(
+        terminal_echo(
             f"⚠  {invalid} citation(s) named a particle that was not retrieved for this "
             "answer. A sentence left with no valid citation is labelled [unattributed].",
             err=True,
@@ -261,10 +262,10 @@ def query_cmd(
     from datetime import datetime
 
     if output_format not in ("table", "json"):
-        typer.echo(f"Unknown --format {output_format!r}. Valid: table, json.", err=True)
+        terminal_echo(f"Unknown --format {output_format!r}. Valid: table, json.", err=True)
         raise typer.Exit(1)
     if output_format == "json" and not vocabulary:
-        typer.echo("--format json applies to --vocabulary only.", err=True)
+        terminal_echo("--format json applies to --vocabulary only.", err=True)
         raise typer.Exit(1)
     backend = get_backend()
     window = _parse_window(during, on)
@@ -273,7 +274,7 @@ def query_cmd(
         try:
             as_of_dt = datetime.fromisoformat(as_of)
         except ValueError:
-            typer.echo(
+            terminal_echo(
                 f"Invalid --as-of value {as_of!r}: expected an ISO-8601 date or "
                 "datetime (e.g. 2000-01-01 or 2006-08-24T12:00:00+00:00).",
                 err=True,
@@ -289,10 +290,12 @@ def query_cmd(
             try:
                 s = run(backend.subject_show(subject, by_name=True))
             except ValueError as exc:
-                typer.echo(str(exc), err=True)
+                terminal_echo(str(exc), err=True)
                 raise typer.Exit(1) from None
             if s is None:
-                typer.echo(f"No subject matches {subject!r} by ID, ID prefix, or name.", err=True)
+                terminal_echo(
+                    f"No subject matches {subject!r} by ID, ID prefix, or name.", err=True
+                )
                 raise typer.Exit(1)
             resolved_subject = s.id
     modality: AssertionModality | None = None
@@ -301,7 +304,7 @@ def query_cmd(
             modality = AssertionModality(assertion_modality.strip().upper())
         except ValueError:
             valid = ", ".join(m.value for m in AssertionModality)
-            typer.echo(
+            terminal_echo(
                 f"Unknown assertion modality {assertion_modality!r}. Valid: {valid}.", err=True
             )
             raise typer.Exit(1) from None
@@ -311,7 +314,7 @@ def query_cmd(
             group_by_val = StructuralGroupBy(group_by.strip().lower())
         except ValueError:
             valid = ", ".join(g.value for g in StructuralGroupBy)
-            typer.echo(f"Unknown --group-by axis {group_by!r}. Valid: {valid}.", err=True)
+            terminal_echo(f"Unknown --group-by axis {group_by!r}. Valid: {valid}.", err=True)
             raise typer.Exit(1) from None
     try:
         req = QueryRequest(
@@ -344,11 +347,11 @@ def query_cmd(
         # Pydantic validation — e.g. a future --as-of instant,
         # a question combined with an aggregate, or a non-comparable
         # --object-gt/--object-lt bound.
-        typer.echo(f"Invalid query request: {exc}", err=True)
+        terminal_echo(f"Invalid query request: {exc}", err=True)
         raise typer.Exit(1) from None
     if store and show_source:
         # Hydration reads one store's corpus; federated hits span several.
-        typer.echo(
+        terminal_echo(
             "--show-source is not available with --store federation; run "
             "`particles particle source <id>` against the store holding the hit.",
             err=True,
@@ -356,7 +359,7 @@ def query_cmd(
         raise typer.Exit(1)
     if store:
         if backend.remote:
-            typer.echo(
+            terminal_echo(
                 "--store federation runs locally and is not available against a remote engine.",
                 err=True,
             )
@@ -368,7 +371,12 @@ def query_cmd(
         result = run(backend.query(req))
     if req.list_vocabulary and output_format == "json":
         if result.vocabulary_report is not None:
-            typer.echo(result.vocabulary_report.model_dump_json(indent=2))
+            # ASCII JSON, so a stored control or format character in a
+            # predicate never reaches the terminal raw (security review
+            # 2026-10-30-1, AB37).
+            import json
+
+            typer.echo(json.dumps(result.vocabulary_report.model_dump(mode="json"), indent=2))
         return
     if req.is_window_listing:
         _render_window_listing(result)
@@ -389,9 +397,9 @@ def query_cmd(
         from datetime import UTC, datetime
 
         if result.answer_refused:
-            typer.echo("Nearest beliefs — likely unrelated:")
-        typer.echo(f"{'CONF':>5}  {'EFF':>5}  {'AGE':>6}  {'EXTRACTOR':<28}  CONTENT")
-        typer.echo("-" * 100)
+            terminal_echo("Nearest beliefs — likely unrelated:")
+        terminal_echo(f"{'CONF':>5}  {'EFF':>5}  {'AGE':>6}  {'EXTRACTOR':<28}  CONTENT")
+        terminal_echo("-" * 100)
         for p, eff, pub_at in zip(
             result.particles,
             result.effective_confidences,
@@ -406,22 +414,24 @@ def query_cmd(
                 age_str = f"{age_days}d"
             else:
                 age_str = "—"
-            typer.echo(
+            terminal_echo(
                 f"{p.confidence.value:>5.2f}  {eff:>5.2f}  {age_str:>6}  "
-                f"{extractor:<28}  {p.content[:60]}"
+                f"{extractor:<28}  {terminal_field(p.content[:60])}"
             )
-        typer.echo("")
+        terminal_echo("")
     if contestedness and result.contestedness:
-        typer.echo("Contestedness (spread of effective confidence across your policy set):")
+        terminal_echo("Contestedness (spread of effective confidence across your policy set):")
         for p, reading in zip(result.particles, result.contestedness, strict=False):
             renderings = sorted(
                 reading.renderings, key=lambda r: (-r.effective_confidence, r.policy)
             )
             attributed = ", ".join(f"{r.policy}:{r.effective_confidence:.2f}" for r in renderings)
-            typer.echo(f"  {reading.spread:>5.2f}  {p.content[:50]:<50}  [{attributed}]")
-        typer.echo("")
+            terminal_echo(
+                f"  {reading.spread:>5.2f}  {terminal_field(p.content[:50]):<50}  [{attributed}]"
+            )
+        terminal_echo("")
     elif contestedness:
-        typer.echo(
+        terminal_echo(
             "Contestedness unavailable: fewer than two policies configured "
             "(adopt a lens with `particles trust lens adopt`).\n",
             err=True,
@@ -429,13 +439,13 @@ def query_cmd(
     if result.ranking_degraded:
         # disclosed degradation (warnings to stderr). The
         # hits below were not selected by the question at all.
-        typer.echo(f"⚠  {result.ranking_degraded}", err=True)
+        terminal_echo(f"⚠  {result.ranking_degraded}", err=True)
     if result.answer_generation_error:
         # Disclosed degradation (warnings to stderr): the "answer"
         # below is the deterministic fallback listing, not generated prose.
         for line in _answer_failure_lines(result):
-            typer.echo(line, err=True)
-    typer.echo(result.answer)
+            terminal_echo(line, err=True)
+    terminal_echo(result.answer)
     if result.answer_attribution is not None:
         _render_attribution(result)
     # on a claim-prefiltered semantic query, the coverage
@@ -443,9 +453,9 @@ def query_cmd(
     if result.claim_coverage is not None:
         from particles.operations.query.structural import coverage_line, disclosure_lines
 
-        typer.echo(coverage_line(result.claim_coverage))
+        terminal_echo(coverage_line(result.claim_coverage))
         for line in disclosure_lines(result.claim_coverage):
-            typer.echo(f"⚠  {line}", err=True)
+            terminal_echo(f"⚠  {line}", err=True)
     # the composed contested badge — one basis-carrying line per
     # badged result, on by default (contestedness.badge_enabled). Disclosure
     # only; --contestedness above remains the divergence drill-down.
@@ -454,11 +464,13 @@ def query_cmd(
         if badge is None:
             continue
         versus = f" (vs. p-{badge.inconsistency_id[:8]})" if badge.inconsistency_id else ""
-        typer.echo(f"⚠ contested ({', '.join(badge.bases)}) — {p.content[:60]}{versus}")
+        terminal_echo(
+            f"⚠ contested ({', '.join(badge.bases)}) — {terminal_field(p.content[:60])}{versus}"
+        )
         if badge.caveat:
             badge_caveat = badge.caveat
     if badge_caveat:
-        typer.echo(f"  note: {badge_caveat}")
+        terminal_echo(f"  note: {badge_caveat}")
     if as_of_dt is not None:
         # one line per hit whose belief has since ended — the
         # supersession crossing (current status, the retirement instant + its
@@ -468,15 +480,15 @@ def query_cmd(
             if note is None:
                 continue
             line = (
-                f"↳ {p.content[:60]} — now {note.status.value}"
+                f"↳ {terminal_field(p.content[:60])} — now {note.status.value}"
                 f"{f' ({note.status_reason.value})' if note.status_reason else ''}, "
                 f"retired {note.retired_at.isoformat()} [basis: {note.basis}]"
             )
             if note.successor is not None:
                 line += f"; superseded by {note.successor.id[:8]}: {note.successor.content[:60]}"
-            typer.echo(line)
+            terminal_echo(line)
         if result.as_of_excluded_undatable:
-            typer.echo(
+            terminal_echo(
                 f"\n⚠  {result.as_of_excluded_undatable} retired particle(s) whose "
                 "retirement time is not reconstructible were excluded from this "
                 "as-of view.",
@@ -484,9 +496,9 @@ def query_cmd(
             )
     _render_window_notes(result)
     if result.truncation_warning:
-        typer.echo(f"\n⚠  {result.truncation_warning}", err=True)
+        terminal_echo(f"\n⚠  {result.truncation_warning}", err=True)
     if result.coverage_gaps:
-        typer.echo(
+        terminal_echo(
             f"\n⚠  Coverage gap: {len(result.coverage_gaps)} entries not yet extracted.",
             err=True,
         )
@@ -501,18 +513,18 @@ def _parse_window(during: str | None, on: str | None) -> TimeWindow | None:
     from particles.core.validity import window_end_of_day, window_for_day
 
     if during is not None and on is not None:
-        typer.echo("--during and --on are alternatives; pass one.", err=True)
+        terminal_echo("--during and --on are alternatives; pass one.", err=True)
         raise typer.Exit(1)
     if on is not None:
         try:
             return window_for_day(datetime.fromisoformat(on))
         except ValueError:
-            typer.echo(f"Invalid --on value {on!r}: expected an ISO-8601 date.", err=True)
+            terminal_echo(f"Invalid --on value {on!r}: expected an ISO-8601 date.", err=True)
             raise typer.Exit(1) from None
     if during is None:
         return None
     if ".." not in during:
-        typer.echo(
+        terminal_echo(
             f"Invalid --during value {during!r}: expected START..END (either side may "
             "be empty, e.g. 2026-10-10..2026-10-16 or 2026-10-10..).",
             err=True,
@@ -523,14 +535,14 @@ def _parse_window(during: str | None, on: str | None) -> TimeWindow | None:
         start = datetime.fromisoformat(raw_start) if raw_start else None
         end = window_end_of_day(datetime.fromisoformat(raw_end)) if raw_end else None
     except ValueError:
-        typer.echo(
+        terminal_echo(
             f"Invalid --during value {during!r}: the bounds must be ISO-8601 dates.", err=True
         )
         raise typer.Exit(1) from None
     try:
         return TimeWindow(start=start, end=end)
     except ValueError as exc:
-        typer.echo(f"Invalid --during value: {exc}", err=True)
+        terminal_echo(f"Invalid --during value: {exc}", err=True)
         raise typer.Exit(1) from None
 
 
@@ -546,8 +558,8 @@ def _window_hit_label(hit: WindowHit) -> str:
 
 def _render_window_listing(result: QueryResponse) -> None:
     """Render the deterministic window listing: date order, readings."""
-    typer.echo(f"{'FROM':<10}  {'READING':<9}  {'KIND':<6}  {'EFF':>5}  CONTENT")
-    typer.echo("-" * 100)
+    terminal_echo(f"{'FROM':<10}  {'READING':<9}  {'KIND':<6}  {'EFF':>5}  CONTENT")
+    terminal_echo("-" * 100)
     for p, eff, hit in zip(
         result.particles, result.effective_confidences, result.window_hits, strict=False
     ):
@@ -560,12 +572,12 @@ def _render_window_listing(result: QueryResponse) -> None:
             marker = f"  [retired {hit.retired.status.value}]"
         if hit.restates is not None:
             marker += f"  [restates p-{hit.restates[:8]}]"
-        typer.echo(
+        terminal_echo(
             f"{hit.valid_from.date().isoformat():<10}  {reading:<9}  {kind:<6}  "
-            f"{eff:>5.2f}  {p.content[:55]}{marker}"
+            f"{eff:>5.2f}  {terminal_field(p.content[:55])}{marker}"
         )
-    typer.echo("")
-    typer.echo(result.answer)
+    terminal_echo("")
+    terminal_echo(result.answer)
     _render_window_notes(result)
 
 
@@ -587,10 +599,10 @@ def _render_window_notes(result: QueryResponse) -> None:
                     line += f", superseded by {hit.retired.successor.id[:8]}"
             if hit.restates is not None:
                 line += f"; restates p-{hit.restates[:8]}"
-            typer.echo(line)
+            terminal_echo(line)
     cov = result.window_coverage
     if cov is not None:
-        typer.echo(
+        terminal_echo(
             f"Window: {cov.admitted} of {cov.candidates} dated claims admitted; "
             f"{cov.undated} ACTIVE claims undated, {cov.unkinded} unkinded, "
             f"{cov.retired_admitted} retired admitted, {cov.restated} restated."
@@ -614,16 +626,16 @@ def _render_sources(backend: Backend, result: QueryResponse) -> None:
     async def _hydrate() -> list[SourcePassage | None]:
         return [await backend.particle_source(p.id) for p in hits]
 
-    typer.echo(f"\nSources behind the top {len(hits)} of {len(result.particles)} hit(s):")
+    terminal_echo(f"\nSources behind the top {len(hits)} of {len(result.particles)} hit(s):")
     for p, passage in zip(hits, run(_hydrate()), strict=True):
-        typer.echo(f"\n▸ p-{p.id[:8]}  {p.content[:80]}")
+        terminal_echo(f"\n▸ p-{p.id[:8]}  {terminal_field(p.content[:80])}")
         if passage is None:
-            typer.echo("  Match:     unavailable")
+            terminal_echo("  Match:     unavailable")
             continue
         for line in header_lines(passage):
-            typer.echo(f"  {line}")
+            terminal_echo(f"  {line}")
         for text_line in passage.text.splitlines():
-            typer.echo(f"  │ {text_line}")
+            terminal_echo(f"  │ {text_line}")
 
 
 #: The vocabulary table's column heading for each object shape.
@@ -650,65 +662,67 @@ def _joined(pairs: list[tuple[str, int]], limit: int | None = None) -> str:
 def _render_vocabulary(report: VocabularyReport) -> None:
     """Render the vocabulary report: the store header, then one block per predicate."""
     if report.as_of is not None:
-        typer.echo(
+        terminal_echo(
             f"As of {report.as_of.isoformat()}: subjects created and decisions "
             "recorded by then; classes and links as they stand now."
         )
-    typer.echo(
+    terminal_echo(
         f"Subjects: {report.subjects_total:,} · aligned {report.subjects_aligned:,} · "
         f"classed {report.subjects_classed:,}"
     )
     if report.aligned_by_namespace:
         bands = " / ".join(band.value for band in LinkBand)
-        typer.echo(
+        terminal_echo(
             f"  aligned by namespace, by link band ({bands}; suppress threshold "
             f"{report.link_suppress_threshold:g}):"
         )
         for ns in report.aligned_by_namespace:
             counts = " / ".join(f"{ns.bands.get(band, 0):,}" for band in LinkBand)
-            typer.echo(f"    {ns.namespace:<16} {ns.subjects:>7,}   {counts}")
+            terminal_echo(f"    {ns.namespace:<16} {ns.subjects:>7,}   {counts}")
     if report.classed_by_namespace:
         pairs = [(c.subject_class, c.count) for c in report.classed_by_namespace]
-        typer.echo(f"  classed by namespace: {_joined(pairs)}")
+        terminal_echo(f"  classed by namespace: {_joined(pairs)}")
         pairs = [(c.subject_class, c.count) for c in report.classed_by_class]
-        typer.echo(f"  classed by class: {_joined(pairs)}")
-    typer.echo(
+        terminal_echo(f"  classed by class: {_joined(pairs)}")
+    terminal_echo(
         f"Structured claims: {report.structured_claims_total:,} in store · "
         f"{report.claims_in_view:,} in view"
     )
     kinds = [(k.value, n) for k, n in report.object_kinds.items()]
-    typer.echo(f"  object kinds: {_joined(kinds)}")
+    terminal_echo(f"  object kinds: {_joined(kinds)}")
     shapes = [(k.value, n) for k, n in report.object_shapes.items()]
-    typer.echo(f"  object shapes: {_joined(shapes)}")
-    typer.echo(
+    terminal_echo(f"  object shapes: {_joined(shapes)}")
+    terminal_echo(
         f"Predicates: {report.predicates_distinct:,} distinct terms in "
         f"{report.predicates_canonical:,} canonical forms"
     )
     if report.alignment_source is None:
-        typer.echo("Alignment: no vocabulary document adopted; every predicate is unaligned.")
+        terminal_echo("Alignment: no vocabulary document adopted; every predicate is unaligned.")
     else:
-        typer.echo(f"Alignment: from {report.alignment_source}")
+        terminal_echo(f"Alignment: from {report.alignment_source}")
     recorded = [(t, n) for t, n in report.modelling_decisions.items() if n]
     line = f"Modelling decisions in the operator log: {sum(n for _, n in recorded):,}"
-    typer.echo(f"{line} ({_joined(recorded)})" if recorded else line)
-    typer.echo("")
+    terminal_echo(f"{line} ({_joined(recorded)})" if recorded else line)
+    terminal_echo("")
     header = "".join(f"{_SHAPE_COLUMNS[s]:>7}" for s in ObjectShape)
-    typer.echo(f"{'CLAIMS':>7}{header}  {'ALN':>3}  PREDICATE  [canonical]")
-    typer.echo("-" * 100)
+    terminal_echo(f"{'CLAIMS':>7}{header}  {'ALN':>3}  PREDICATE  [canonical]")
+    terminal_echo("-" * 100)
     pad = " " * (7 + 7 * len(ObjectShape) + 7)
     for row in report.predicates:
         cells = "".join(f"{row.object_shapes.get(s, 0):>7,}" for s in ObjectShape)
         aligned = f"{len(row.alignments)}" if row.alignments else "—"
         canonical = f"  [{row.canonical}]" if row.canonical != row.label else ""
-        typer.echo(f"{row.claim_count:>7,}{cells}  {aligned:>3}  {row.label}{canonical}")
+        terminal_echo(
+            f"{row.claim_count:>7,}{cells}  {aligned:>3}  {terminal_field(row.label)}{canonical}"
+        )
         if len(row.surface_forms) > 1:
-            forms = [(f.value, f.claim_count) for f in row.surface_forms]
-            typer.echo(f"{pad}forms: {_joined(forms)}")
-        classes = [(c.subject_class, c.count) for c in row.subject_classes]
-        typer.echo(f"{pad}classes: {_joined(classes, _VOCAB_CLASSES_SHOWN)}")
+            forms = [(terminal_field(f.value), f.claim_count) for f in row.surface_forms]
+            terminal_echo(f"{pad}forms: {_joined(forms)}")
+        classes = [(terminal_field(c.subject_class), c.count) for c in row.subject_classes]
+        terminal_echo(f"{pad}classes: {_joined(classes, _VOCAB_CLASSES_SHOWN)}")
         if row.alignments:
-            typer.echo(f"{pad}aligned: {', '.join(row.alignments)}")
-    typer.echo("")
+            terminal_echo(f"{pad}aligned: {terminal_field(', '.join(row.alignments))}")
+    terminal_echo("")
 
 
 def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
@@ -723,30 +737,34 @@ def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
         if result.vocabulary_report is not None:
             _render_vocabulary(result.vocabulary_report)
     elif req.list_predicates:
-        typer.echo(f"{'COUNT':>6}  {'KIND':<7}  PREDICATE")
-        typer.echo("-" * 70)
+        terminal_echo(f"{'COUNT':>6}  {'KIND':<7}  PREDICATE")
+        terminal_echo("-" * 70)
         for info in result.predicate_vocabulary:
-            typer.echo(f"{info.claim_count:>6}  {info.kind.value:<7}  {info.value}")
-        typer.echo("")
+            terminal_echo(
+                f"{info.claim_count:>6}  {info.kind.value:<7}  {terminal_field(info.value)}"
+            )
+        terminal_echo("")
     elif result.structural_aggregate is not None:
         agg = result.structural_aggregate
         if agg.group_by is not None:
-            typer.echo(f"{'CLAIMS':>6}  {'MIN':>5}  {'MED':>5}  {'MAX':>5}  {agg.group_by.upper()}")
-            typer.echo("-" * 80)
+            terminal_echo(
+                f"{'CLAIMS':>6}  {'MIN':>5}  {'MED':>5}  {'MAX':>5}  {agg.group_by.upper()}"
+            )
+            terminal_echo("-" * 80)
             for bucket in agg.buckets:
                 label = f"{bucket.label}  [{bucket.key}]" if bucket.label else bucket.key
-                typer.echo(
+                terminal_echo(
                     f"{bucket.claim_count:>6}  {bucket.min_effective_confidence:>5.2f}  "
                     f"{bucket.median_effective_confidence:>5.2f}  "
                     f"{bucket.max_effective_confidence:>5.2f}  {label[:60]}"
                 )
-            typer.echo("")
+            terminal_echo("")
         elif (
             agg.min_effective_confidence is not None
             and agg.median_effective_confidence is not None
             and agg.max_effective_confidence is not None
         ):
-            typer.echo(
+            terminal_echo(
                 "effective confidence "
                 f"min {agg.min_effective_confidence:.2f} / "
                 f"median {agg.median_effective_confidence:.2f} / "
@@ -755,29 +773,29 @@ def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
     elif req.has_claim_filters:
         # Deterministic listing — the --show-particles table with the claim
         # terms in place of the age/extractor columns.
-        typer.echo(f"{'CONF':>5}  {'EFF':>5}  {'PREDICATE':<24}  {'OBJECT':<20}  CONTENT")
-        typer.echo("-" * 100)
+        terminal_echo(f"{'CONF':>5}  {'EFF':>5}  {'PREDICATE':<24}  {'OBJECT':<20}  CONTENT")
+        terminal_echo("-" * 100)
         for p, eff in zip(result.particles, result.effective_confidences, strict=False):
             claim = p.structured_claim
-            pred = claim.predicate.value if claim else ""
-            obj = claim.object.value if claim else ""
-            typer.echo(
+            pred = terminal_field(claim.predicate.value) if claim else ""
+            obj = terminal_field(claim.object.value) if claim else ""
+            terminal_echo(
                 f"{p.confidence.value:>5.2f}  {eff:>5.2f}  {pred[:24]:<24}  "
-                f"{obj[:20]:<20}  {p.content[:40]}"
+                f"{obj[:20]:<20}  {terminal_field(p.content[:40])}"
             )
-        typer.echo("")
+        terminal_echo("")
     if result.ranking_degraded:
-        typer.echo(f"⚠  {result.ranking_degraded}", err=True)
+        terminal_echo(f"⚠  {result.ranking_degraded}", err=True)
     if result.answer_generation_error:
         for line in _answer_failure_lines(result):
-            typer.echo(line, err=True)
-    typer.echo(result.answer)
+            terminal_echo(line, err=True)
+    terminal_echo(result.answer)
     if result.claim_coverage is not None:
-        typer.echo(coverage_line(result.claim_coverage))
+        terminal_echo(coverage_line(result.claim_coverage))
         for line in disclosure_lines(result.claim_coverage):
-            typer.echo(f"⚠  {line}", err=True)
+            terminal_echo(f"⚠  {line}", err=True)
     if result.as_of is not None and result.as_of_excluded_undatable:
-        typer.echo(
+        terminal_echo(
             f"\n⚠  {result.as_of_excluded_undatable} retired particle(s) whose "
             "retirement time is not reconstructible were excluded from this "
             "as-of view.",

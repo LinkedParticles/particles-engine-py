@@ -549,3 +549,56 @@ def test_per_subject_exporters_never_pass_flowing(relpath: str) -> None:
         f"{relpath} passes `flowing=` at line(s) {offenders}; per-subject "
         "synthesis must ride render_article's own False default"
     )
+
+
+def _aliased_manifest(tmp_path: Path) -> Path:
+    lines = ["a0: &a0 [x, x, x, x, x, x, x, x, x]"]
+    for i in range(1, 8):
+        lines.append(f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 9) + "]")
+    lines += ["name: bomb", "sections: *a7"]
+    manifest = tmp_path / "bomb.yaml"
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest
+
+
+def test_a_small_projection_manifest_with_aliased_sections_is_refused_quickly(
+    tmp_path: Path,
+) -> None:
+    """A sub-KiB manifest fanning out through aliases is refused, and rendered, fast (G21, G64)."""
+    import time
+
+    from particles.operations.projection.manifest import load_manifest, manifest_error_text
+
+    manifest = _aliased_manifest(tmp_path)
+    assert manifest.stat().st_size < 1024
+    start = time.perf_counter()
+    with pytest.raises(Exception) as refused:  # noqa: B017 - any refusal is the safe outcome
+        load_manifest(manifest, follow_symlinks=False, max_bytes=1024 * 1024)
+    assert manifest_error_text(refused.value)
+    assert time.perf_counter() - start < 0.5
+
+
+def test_a_manifest_whose_aliases_expand_past_a_linear_budget_is_refused(tmp_path: Path) -> None:
+    import yaml
+
+    from particles.operations.projection.manifest import load_manifest
+
+    levels = ["  l0: &l0 [x, x, x, x, x, x, x, x, x]"]
+    for i in range(1, 9):
+        levels.append(f"  l{i}: &l{i} [" + ", ".join([f"*l{i - 1}"] * 9) + "]")
+    text = "junk:\n" + "\n".join(levels) + "\nname: m\nsections:\n  - title: t\n    tags: [a]\n"
+    path = tmp_path / "m.yaml"
+    path.write_text(text)
+    with pytest.raises((ValueError, OSError, yaml.YAMLError)):
+        load_manifest(path)
+
+
+def test_a_manifest_validation_refusal_renders_no_input_value() -> None:
+    """The rendered refusal names locations and types, never the file's values."""
+    from particles.operations.projection.manifest import DocManifest, manifest_error_text
+
+    with pytest.raises(ValidationError) as refused:
+        DocManifest.model_validate({"name": "m", "sections": [{"secret-value-xyz": 1}]})
+    text = manifest_error_text(refused.value)
+    assert text
+    assert "secret-value-xyz" not in text

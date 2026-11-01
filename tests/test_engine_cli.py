@@ -123,6 +123,9 @@ class TestEngineServe:
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["host"] == "127.0.0.1"
         assert mock_run.call_args.kwargs["port"] == 8124
+        # Security review 2026-10-24-2, P8: api.trusted_proxies is the one reader
+        # of X-Forwarded-For, so uvicorn must not rewrite the client beneath it.
+        assert mock_run.call_args.kwargs["proxy_headers"] is False
 
     def test_serve_writes_bind_host_into_the_process_env(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

@@ -38,6 +38,7 @@ from particles.api.web_app import (
     WebUIStaticFiles,
     build_web_ui_static_app,
 )
+from tests._upstream import upstream_only
 
 
 def _write_bundle(directory: Path) -> None:
@@ -192,7 +193,8 @@ def test_committed_bundle_inline_scripts_are_all_hashed() -> None:
         pytest.skip("no committed web-UI bundle in this tree")
     blocks = re.findall(r"<script>(.*?)</script>", index.read_text(encoding="utf-8"), re.DOTALL)
     assert blocks, "the bundle's theme stamp is an inline script"
-    assert content_security_policy(index.parent).count("'sha256-") == len(blocks)
+    script_src = content_security_policy(index.parent).split(";", 1)[0]
+    assert script_src.count("'sha256-") == len(blocks)
 
 
 def test_every_data_href_sink_is_scheme_checked() -> None:
@@ -220,3 +222,82 @@ def test_every_data_href_sink_is_scheme_checked() -> None:
                 f"{path.name}:{number + 1} assigns {match.group(1)} to an href unchecked"
             )
     assert sinks >= 3
+
+
+def _build_stamp(web: Path) -> str:
+    """The build stamp `esbuild.config.mjs` derives from the inputs under ``web``."""
+    import hashlib
+    import json
+
+    files: list[str] = []
+
+    def walk(rel: str) -> None:
+        p = web / rel
+        if p.is_dir():
+            for name in sorted(x.name for x in p.iterdir()):
+                walk(f"{rel}/{name}")
+        else:
+            files.append(rel)
+
+    for root in (
+        "src",
+        "public",
+        "package.json",
+        "../../artifacts/graph/cytoscape.min.js",
+        "../../design/tokens.css",
+    ):
+        walk(root)
+    digest = hashlib.sha256()
+    # JavaScript's default sort compares UTF-16 code units.
+    for f in sorted(files, key=lambda s: s.encode("utf-16-be")):
+        digest.update(f.encode())
+        digest.update(b"\0")
+        digest.update((web / f).read_bytes())
+    version = json.loads((web / "package.json").read_text(encoding="utf-8"))["version"]
+    return f"{version}+{digest.hexdigest()[:12]}"
+
+
+@upstream_only  # reads the design tokens and vendored graph build this tree alone holds
+def test_the_committed_build_stamp_matches_the_build_inputs(tmp_path: Path) -> None:
+    """G48: the committed dist carries the stamp its build inputs produce, so the
+    bundle the engine serves is the build of this tree's source.
+
+    The stamp hashes the typed client that `npm run gen-api` writes, so this
+    needs the web UI's installed toolchain. Where it is absent, CI's
+    `Browser clients` job, which the required `Unit tests` check needs, runs
+    the full rebuild-and-compare (security review 2026-10-28-1, O54; the need
+    restored in 2026-10-28-2, G48).
+    """
+    import re
+    import shutil
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    web = root / "clients" / "web-ui"
+    if not (web / "dist" / "app.js").is_file():
+        pytest.skip("no committed web-UI bundle in this tree")
+    if (
+        shutil.which("npm") is None
+        or not (web / "node_modules" / ".bin" / "openapi-typescript").exists()
+    ):
+        pytest.skip("the web UI's toolchain is not installed (npm ci in clients/web-ui)")
+    copy = tmp_path / "clients" / "web-ui"
+    shutil.copytree(web / "src", copy / "src", ignore=shutil.ignore_patterns("openapi.d.ts"))
+    shutil.copytree(web / "public", copy / "public")
+    shutil.copy(web / "package.json", copy / "package.json")
+    (copy / "node_modules").symlink_to(web / "node_modules")
+    for rel in ("artifacts/openapi.json", "artifacts/graph/cytoscape.min.js", "design/tokens.css"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(root / rel, tmp_path / rel)
+    subprocess.run(
+        ["npm", "run", "--silent", "gen-api"],
+        cwd=copy,
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    (copy / "node_modules").unlink()
+    committed = set(
+        re.findall(r"\d+\.\d+\.\d+\+[0-9a-f]{12}", (web / "dist" / "app.js").read_text())
+    )
+    assert committed == {_build_stamp(copy)}

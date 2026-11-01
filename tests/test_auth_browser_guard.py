@@ -174,11 +174,23 @@ class TestRebindingWithoutBrowserMarkers:
         assert engine.get("/corpus", headers={"Host": "eviltail.example"}).status_code == 403
 
 
+def _past_the_guard(resp: Any) -> None:
+    """The browser guard admitted the request, and the keyless engine then refused the write.
+
+    A guard refusal is a 403 naming the cross-site request; a keyless engine
+    answers every write with its read-only 503, so that answer
+    proves the request got past the guard.
+    """
+    from particles.api.auth import KEYLESS_WRITE_REFUSAL
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == KEYLESS_WRITE_REFUSAL
+
+
 class TestLegitimateCallersStillServed:
     def test_web_ui_same_origin_deposit_served(self, engine: TestClient) -> None:
-        resp = _deposit(engine, _SAME_ORIGIN)
-        assert resp.status_code == 200, resp.text
-        assert _corpus_size(engine) == 1
+        _past_the_guard(_deposit(engine, _SAME_ORIGIN))
+        assert _corpus_size(engine) == 0
 
     def test_web_ui_on_localhost_served(
         self, cli_db: object, monkeypatch: pytest.MonkeyPatch
@@ -194,8 +206,7 @@ class TestLegitimateCallersStillServed:
         assert resp.status_code == 200, resp.text
 
     def test_same_origin_by_origin_header_alone_served(self, engine: TestClient) -> None:
-        resp = _deposit(engine, {"Origin": _ENGINE})
-        assert resp.status_code == 200, resp.text
+        _past_the_guard(_deposit(engine, {"Origin": _ENGINE}))
 
     def test_typed_url_served(self, engine: TestClient) -> None:
         # Sec-Fetch-Site: none is the user opening the URL themselves.
@@ -204,8 +215,7 @@ class TestLegitimateCallersStillServed:
 
     def test_non_browser_client_served(self, engine: TestClient) -> None:
         # The CLI, the MCP HTTP backend and curl send no Origin and no fetch metadata.
-        resp = _deposit(engine, {})
-        assert resp.status_code == 200, resp.text
+        _past_the_guard(_deposit(engine, {}))
 
     def test_non_browser_client_with_a_foreign_host_refused(
         self, cli_db: object, monkeypatch: pytest.MonkeyPatch
@@ -245,7 +255,7 @@ class TestLegitimateCallersStillServed:
             engine,
             {"Origin": "https://notes.example.org", "Sec-Fetch-Site": "cross-site"},
         )
-        assert resp.status_code == 200, resp.text
+        _past_the_guard(resp)
 
 
 class TestCrossSiteWithRealKey:
@@ -254,6 +264,8 @@ class TestCrossSiteWithRealKey:
         from particles.api.app import app
 
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        # A deployed engine a tailnet peer reaches is bound wider than loopback.
+        monkeypatch.setattr(get_config().api, "bind_host", "0.0.0.0")
         yield TestClient(app, base_url="http://engine.tailnet:8000", client=("100.64.0.9", 50000))
 
     def test_verified_bearer_served_whatever_the_origin(self, keyed: TestClient) -> None:
@@ -274,7 +286,7 @@ class TestCrossSiteWithRealKey:
         assert keyed.get("/corpus", headers=bearer).status_code == 200
 
     def test_open_read_same_origin_served_on_a_named_host(self, keyed: TestClient) -> None:
-        # The loopback Host rule is the dev-key skip's alone.
+        # On a wider bind with api.allowed_hosts empty, any Host is served.
         resp = keyed.get(
             "/corpus",
             headers={"Origin": "http://engine.tailnet:8000", "Sec-Fetch-Site": "same-origin"},
@@ -332,6 +344,28 @@ class TestAllowedHostsValidation:
 
         hosts = ApiConfig(allowed_hosts=["Engine.Example", "*.tail.example", "[fd00::5]"])
         assert hosts.allowed_hosts == ["engine.example", "*.tail.example", "[fd00::5]"]
+
+    @pytest.mark.parametrize(
+        "entry", ["*.com", "*.io", "*.example", "*.co.uk", "*.com.au", "*.ts.net", "*.nip.io."]
+    )
+    def test_rejects_a_wildcard_over_a_shared_suffix(self, entry: str) -> None:
+        # Security review 2026-10-24-2, P40: under the dev-key skip the entry
+        # admits every rebinding page whose name it matches.
+        from pydantic import ValidationError
+
+        from particles.config import ApiConfig
+
+        with pytest.raises(ValidationError, match="other parties register"):
+            ApiConfig(allowed_hosts=[entry])
+
+    @pytest.mark.parametrize(
+        "entry", ["*.example.com", "*.tail1234.ts.net", "*.engine.co.uk", "com", "ts.net"]
+    )
+    def test_accepts_a_wildcard_over_a_domain_you_control(self, entry: str) -> None:
+        # A bare name matches only itself, so only the wildcard form is judged.
+        from particles.config import ApiConfig
+
+        assert ApiConfig(allowed_hosts=[entry]).allowed_hosts == [entry]
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +438,6 @@ class TestStartupGateReadsTheUvicornCommandLine:
         [
             ["/venv/bin/uvicorn", "particles.api.app:app", "--reload", "--port", "8000"],
             ["/venv/bin/uvicorn", "particles.api.app:app", "--host", "localhost"],
-            ["/venv/bin/uvicorn", "particles.api.app:app", "--uds", "/tmp/particles.sock"],
         ],
     )
     def test_loopback_bind_boots(self, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
@@ -479,6 +512,8 @@ class TestContainerConfigRequiresReadAuth:
         monkeypatch.setenv("PARTICLES_CONFIG", str(_REPO_ROOT / "deploy" / "config.container.yaml"))
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
         reset_config()
+        # The image's `engine serve 0.0.0.0:8000` sets api.bind_host from its bind.
+        monkeypatch.setattr(get_config().api, "bind_host", "0.0.0.0")
         yield TestClient(app, client=("172.17.0.1", 50000))
 
     def test_baked_config_sets_the_flag(self, container: TestClient) -> None:

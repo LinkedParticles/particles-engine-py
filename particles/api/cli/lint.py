@@ -11,6 +11,7 @@ import json
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo
 from particles.api.client import get_backend
 from particles.core.schema import LintReport
 
@@ -59,7 +60,7 @@ def lint_cmd(
     if category is not None:
         if category not in report.summary:
             available = ", ".join(sorted(report.summary.keys())) or "(none)"
-            typer.echo(
+            terminal_echo(
                 f"No findings with finding_type={category!r}. Categories in this run: {available}",
                 err=True,
             )
@@ -70,25 +71,25 @@ def lint_cmd(
         if verbose:
             typer.echo(report.model_dump_json(indent=2))
         else:
-            typer.echo(_lint_summary_json(report))
+            terminal_echo(_lint_summary_json(report))
         return
 
     if verbose:
         from particles.render.markdown import render_lint_report
 
-        typer.echo(
+        terminal_echo(
             render_lint_report(
                 _cap_findings_for_render(report, limit_per_category),
             )
         )
     else:
-        typer.echo(_lint_summary_text(report, fix_applied=fix))
+        terminal_echo(_lint_summary_text(report, fix_applied=fix))
     if report.semantic_skipped:
         reason = {
             "egress": "network.egress does not allow the semantic_lint endpoint",
             "llm_unavailable": "the LLM is unavailable (circuit breaker open)",
         }.get(report.semantic_skipped_reason or "", "the LLM was unavailable")
-        typer.echo(f"Semantic checks skipped: {reason}. This is not a clean bill.", err=True)
+        terminal_echo(f"Semantic checks skipped: {reason}. This is not a clean bill.", err=True)
 
 
 def _filter_report_by_category(report: LintReport, category: str) -> LintReport:

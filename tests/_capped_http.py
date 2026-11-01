@@ -15,7 +15,11 @@ their mock client to expose a working ``.stream`` instead.
 responses flow through ``get_capped`` unchanged. The response mocks keep their
 existing ``.content`` / ``.json()`` / ``.status_code`` / ``.raise_for_status``
 attributes — only the streaming seam (``.headers`` dict + ``.aiter_bytes``) is
-added.
+added. A mock whose ``.json()`` was given a payload streams that payload's
+JSON bytes, and every response's ``.json`` decodes the streamed bytes as
+``httpx.Response`` does, so the byte cap and the real parser run on every
+importer test (security review 2026-10-28-2, AA18; security review
+2026-10-30, AB62).
 
 Assertion mapping for converted tests:
 
@@ -25,9 +29,12 @@ Assertion mapping for converted tests:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
+
+import httpx
 
 
 async def _aiter(chunks: list[bytes]) -> Any:
@@ -41,19 +48,59 @@ def _streamify(resp: MagicMock) -> AsyncMock:
     ``get_capped`` reads ``resp.headers.get("content-length")`` and iterates
     ``resp.aiter_bytes()``, so both must be real (a bare ``MagicMock`` header
     would make ``int(...)`` raise ``TypeError``). The streamed body is the mock's
-    own ``.content`` when it is ``bytes``; otherwise an empty body (the test set
-    ``.json`` directly and never populates ``.content``).
+    own ``.content`` when it is ``bytes``. Otherwise it is the payload the test
+    gave ``.json``, serialized: its ``return_value``, or what a callable
+    ``side_effect`` returns. A ``.json`` whose ``side_effect`` is an exception
+    streams an empty body, which the real decoder refuses. Either way ``.json``
+    then becomes a real decode of the bytes streamed, so the importer under
+    test parses exactly what it was sent (security review 2026-10-30, AB62).
+
+    Raises:
+        TypeError: a ``.json`` payload ``json.dumps`` cannot serialize, or a
+            ``side_effect`` sequence, which no single streamed body answers.
     """
     if not isinstance(getattr(resp, "headers", None), dict):
         resp.headers = {}
     body = getattr(resp, "content", b"")
     if not isinstance(body, bytes | bytearray):
-        body = b""
+        body = _payload_bytes(getattr(resp, "json", None))
+    # A Mock still, so a test's call assertions keep working. It carries the
+    # bytes it decodes, so a response wired into several calls keeps its body.
+    resp.json = MagicMock(side_effect=httpx.Response(200, content=bytes(body)).json)
+    resp.json.streamed_body = bytes(body)
     resp.aiter_bytes = lambda: _aiter([bytes(body)])
     cm = AsyncMock()
     cm.__aenter__ = AsyncMock(return_value=resp)
     cm.__aexit__ = AsyncMock(return_value=False)
     return cm
+
+
+def _payload_bytes(decoder: Any) -> bytes:
+    """The JSON bytes of the payload a test gave a response's ``.json`` mock."""
+    if not isinstance(decoder, Mock):
+        return b""
+    streamed = getattr(decoder, "streamed_body", None)
+    if isinstance(streamed, bytes):
+        return streamed
+    effect = decoder.side_effect
+    if effect is None:
+        if isinstance(decoder.return_value, Mock):
+            return b""
+        payload = decoder.return_value
+    elif isinstance(effect, BaseException) or (
+        isinstance(effect, type) and issubclass(effect, BaseException)
+    ):
+        return b""
+    elif callable(effect):
+        payload = effect()
+    else:
+        raise TypeError(
+            "a .json side_effect sequence cannot stream one body; give each response its own mock"
+        )
+    try:
+        return json.dumps(payload).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"the .json payload is not JSON-serializable: {exc}") from exc
 
 
 def set_capped_responses(

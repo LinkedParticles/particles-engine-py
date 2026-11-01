@@ -600,6 +600,10 @@ that way by a version before 1.195 is examined and released like the others,
 provided the note has not changed again since. A note that has moved on keeps
 its record for review, because the store cannot tell whether the newer text
 still states the held claim.
+Both the withdrawal and the release first search the store again under the
+writer lock: when it now holds a claim committed meanwhile that conflicts with
+the held claim, the withdrawal keeps the held claim behind a new record, and
+the release pass leaves its record open for a later run.
 Neither asks a person, so this is the number to watch to
 see what the nightly cycle decided on its own.
 

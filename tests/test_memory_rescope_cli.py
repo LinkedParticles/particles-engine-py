@@ -215,6 +215,18 @@ class TestMarkAgentWrites:
         assert undone.exit_code == 0, undone.output
         assert asyncio.run(_tags(agent)) == []
 
+    def test_a_stored_depositor_name_prints_with_its_controls_escaped(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        """A depositor name is stored text, so the report shows a control as an escape."""
+        asyncio.run(_agent_deposit("a note", "mcp:x\x1b[2Jy"))
+
+        dry = runner.invoke(app, ["memory", "rescope", "--mark-agent-writes", "--dry-run"])
+
+        assert dry.exit_code == 0, dry.output
+        assert "\x1b" not in dry.output
+        assert "mcp:x\\x1b[2Jy (not matched)" in dry.output
+
     def test_the_marking_flags_are_separate_steps(
         self, runner: CliRunner, cli_db: Path, home: Path
     ) -> None:

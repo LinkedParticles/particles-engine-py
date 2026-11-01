@@ -45,6 +45,15 @@ def stub_subjects(monkeypatch: pytest.MonkeyPatch) -> None:
     import particles.ingest.subject_resolver as sr
 
     monkeypatch.setattr(sr, "resolve_subjects", AsyncMock(return_value=["sid-test"]))
+    # The gather's read-only half agrees, so the apply's search under the lock
+    # runs on the subject set the gather searched.
+    monkeypatch.setattr(
+        sr,
+        "prefetch_subjects",
+        AsyncMock(
+            return_value=sr.SubjectPrefetch(answers=sr.LiveAnswers(), known_ids=["sid-test"])
+        ),
+    )
 
 
 @pytest.fixture

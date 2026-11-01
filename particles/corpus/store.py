@@ -825,7 +825,10 @@ async def list_file_entries_under(session: AsyncSession, root_uri: str) -> list[
         (
             await session.execute(
                 select(CorpusEntryRow)
-                .where(CorpusEntryRow.uri_r.is_not(None), CorpusEntryRow.uri_r.startswith(prefix))
+                .where(
+                    CorpusEntryRow.uri_r.is_not(None),
+                    CorpusEntryRow.uri_r.startswith(prefix, autoescape=True),
+                )
                 .order_by(CorpusEntryRow.uri_r)
             )
         )

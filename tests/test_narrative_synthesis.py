@@ -148,3 +148,72 @@ async def test_synthesis_happy_path_uses_llm(
     assert f"p-{claims[0].id[:8]}" in article.body
     assert article.narrative.id == narrative.id
     assert len(article.constituents) == 3
+
+
+# ---------------------------------------------------------------------------
+# Security review 2026-10-26-1, W47: the synthesis cache write is persisted
+# ---------------------------------------------------------------------------
+
+
+async def _model_calls_per_request(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, **kwargs: bool
+) -> list[int]:
+    """Model calls made by two identical requests, each on its own never-committed session."""
+    import anthropic
+
+    from particles.config import get_config
+    from particles.db import get_session
+    from particles.llm import set_client
+
+    narrative, claims = await _build_narrative(session)
+    await session.commit()
+    monkeypatch.setattr(get_config().wiki, "layer_b_enabled", False)
+
+    content = MagicMock()
+    content.text = f"# {narrative.content}\n\nThe author woke up tired.[^p-{claims[0].id[:8]}]\n"
+    resp = MagicMock()
+    resp.content = [content]
+    client = MagicMock(spec=anthropic.Anthropic)
+    client.messages = MagicMock()
+    client.messages.create = MagicMock(return_value=resp)
+    set_client(client)
+    calls: list[int] = []
+    try:
+        for _ in range(2):
+            before = client.messages.create.call_count
+            gen = get_session()
+            request_session = await gen.__anext__()
+            try:
+                article = await synthesize_narrative(request_session, narrative.id, **kwargs)
+                assert article is not None and article.used_synthesis
+            finally:
+                await gen.aclose()
+            calls.append(client.messages.create.call_count - before)
+    finally:
+        set_client(None)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_narrative_request_is_served_from_the_cache(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second identical request on the route's own read session makes no model call."""
+    calls = await _model_calls_per_request(db_session, monkeypatch)
+    assert calls[0] >= 1
+    assert calls[1] == 0, f"model calls per request: {calls}"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_may_not_write_persists_no_cache_row(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``persist_cache=False`` (a keyless engine's route) nothing is written."""
+    from sqlalchemy import func, select
+
+    from particles.store.synthesis_cache_store import SynthesisCacheRow
+
+    calls = await _model_calls_per_request(db_session, monkeypatch, persist_cache=False)
+    assert calls[1] >= 1
+    rows = await db_session.execute(select(func.count()).select_from(SynthesisCacheRow))
+    assert rows.scalar_one() == 0

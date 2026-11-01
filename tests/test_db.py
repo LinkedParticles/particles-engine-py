@@ -12,9 +12,11 @@ was previously bound at module-import time and could not be retargeted.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -498,6 +500,88 @@ async def test_write_transaction_rolls_back_a_failure_before_releasing_the_lock(
     assert p.id not in await get_particles_by_ids(file_db_session, [p.id])
 
 
+def _named_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "storage:\n"
+        f"  database_url: sqlite+aiosqlite:///{tmp_path / 'default.db'}\n"
+        f"  blob_dir: {tmp_path / 'blobs'}\n"
+        "  write_lock:\n    enabled: true\n    timeout_seconds: 5\n"
+        "  stores:\n"
+        f"    work: sqlite+aiosqlite:///{tmp_path / 'work.db'}\n"
+    )
+    monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("PARTICLES_BLOB_DIR", raising=False)
+    reset_config()
+
+
+def test_write_transaction_locks_the_sessions_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4, W18: a write on a named store's session waits for that store's writer lock.
+
+    It held the default store's lock instead, so two writers on one named
+    store interleaved outside the advisory lock.
+    """
+    _named_store(tmp_path, monkeypatch)
+
+    async def go() -> tuple[bool, bool]:
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def holder() -> None:
+            async with db.write_lock("work"):
+                held.set()
+                await release.wait()
+
+        task = asyncio.create_task(holder())
+        await held.wait()
+        entered = False
+        try:
+            async with db.session_scope("work") as session:
+
+                async def writer() -> None:
+                    nonlocal entered
+                    async with db.write_transaction(session):
+                        entered = True
+
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(writer(), timeout=0.5)
+        finally:
+            release.set()
+            await task
+        # Once the holder is gone, the same write proceeds.
+        async with db.session_scope("work") as session, db.write_transaction(session):
+            after = True
+        return entered, after
+
+    entered_while_held, entered_after = asyncio.run(go())
+    assert not entered_while_held, "a write to 'work' ran while another writer held its lock"
+    assert entered_after
+
+
+def test_store_of_names_the_store_a_session_is_bound_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    _named_store(tmp_path, monkeypatch)
+
+    async def go() -> list[str]:
+        out = []
+        for handle in ("work", db.DEFAULT_STORE):
+            async with db.session_scope(handle) as session:
+                out.append(db.store_of(session))
+        stray = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with AsyncSession(stray) as session:
+            out.append(db.store_of(session))
+        await stray.dispose()
+        return out
+
+    assert asyncio.run(go()) == ["work", db.DEFAULT_STORE, db.DEFAULT_STORE]
+
+
 class TestSchemaState:
     """``schema_state`` compares the store's revision with this install's head, both ways."""
 
@@ -548,3 +632,30 @@ class TestSchemaState:
     ) -> None:
         self._store_at(tmp_path, monkeypatch, None)
         assert asyncio.run(db.schema_state()) is None
+
+
+def test_a_write_transaction_that_fails_keeps_nothing_written_in_an_earlier_savepoint(
+    cli_db: Path,
+) -> None:
+    """O52: on the store's aiosqlite engine a savepoint opened first nests in a real transaction."""
+    from sqlalchemy import text
+
+    from particles.db import get_engine, session_scope, write_transaction
+
+    async def go() -> list[Any]:
+        try:
+            async with get_engine().begin() as conn:
+                await conn.execute(text("create table sp_probe (x int)"))
+            try:
+                async with session_scope() as s, write_transaction(s):
+                    async with s.begin_nested():
+                        await s.execute(text("insert into sp_probe values (1)"))
+                    raise RuntimeError("a later write fails")
+            except RuntimeError:
+                pass
+            async with session_scope() as s:
+                return list((await s.execute(text("select x from sp_probe"))).all())
+        finally:
+            await get_engine().dispose()
+
+    assert asyncio.run(go()) == []

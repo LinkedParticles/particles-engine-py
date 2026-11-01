@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -53,37 +54,57 @@ from particles.api.cli._claude_code import (
     claude_project_slug,
     command_env_pins,
     distill_transcript,
+    enclosing_work_tree,
     filter_memory_file_for_deposit,
     hook_log_path,
     install_report,
     kept_prefix_length,
+    local_harvest_roots,
     memory_load_window_warning,
     observer_project_for,
     particles_hook_commands,
     particles_mcp_executables,
     particles_mcp_registrations,
     pinned_default_dsn,
+    pinned_store_dsn,
     projection_enabled,
     projection_refusal,
     read_hook_log_tail,
+    read_memory_files,
     record_project_root,
     redact_secrets,
     repository_root,
     resolve_session_project,
+    session_start_budget,
     stray_memory_dirs,
     transcript_started_at,
     truncate_on_line_boundary,
     untimed_session_end_hooks,
+    walk_memory_dir,
 )
-from particles.api.cli._memory_projection import DigestDecision, bullet_beliefs
-from particles.config import config_resolution_warnings, get_config
+from particles.api.cli._memory_projection import (
+    DigestDecision,
+    _read_memory_md,
+    bullet_beliefs,
+)
+from particles.config import (
+    config_resolution_warnings,
+    environment_engine_url,
+    get_config,
+    relative_config_pin,
+    reset_config,
+    sqlite_file_path,
+)
 from particles.corpus.rule_sources import refresh_policy_for
-from particles.egress import ensure_backstop
+from particles.egress import run_armed
+from particles.secrets import get_engine_token_optional, redact_known_secrets
 from particles.store.session_exposure_store import SessionExposure, ShownBelief
-from particles.url_safety import GIT_LOCAL_ARGS
+from particles.url_safety import GIT_LOCAL_ARGS, pinned_subprocess_env, url_without_userinfo
 
 if TYPE_CHECKING:
+    from particles.api.cli._claude_code import MemoryDirWalk
     from particles.api.client.base import TextDepositOutcome
+    from particles.operations.memory_absence import MemoryAbsenceReport
 
 log = logging.getLogger(__name__)
 
@@ -120,19 +141,46 @@ def _run_hook(event: str, store: str, impl: _HookImpl) -> None:
         "store": store,
     }
     output: str | None = None
+    explicit = relative_config_pin()
+    if explicit is not None:
+        # The hook runs in the session's directory, where a relative pin is a file
+        # a cloned repository can ship (security review N15, P14). Nothing reads
+        # it: the pin is dropped for this process, so even the log goes where
+        # the user file says, and the body does not run.
+        os.environ.pop("PARTICLES_CONFIG", None)
+        reset_config()
+        record["outcome"] = "refused"
+        record["error"] = (
+            f"PARTICLES_CONFIG names a relative path ({explicit}); set an absolute path "
+            "in the hook command or re-run `particles init claude-code`"
+        )
+        record["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
+        append_hook_log(record)
+        return
+    refusal = _working_directory_store_refusal(store)
+    if refusal is not None:
+        record["outcome"] = "refused"
+        record["error"] = refusal
+        record["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
+        append_hook_log(record)
+        return
     try:
         payload = _read_stdin_json()
         record["session_id"] = payload.get("session_id")
         record["source"] = payload.get("source") or payload.get("reason")
         deadline = get_config().claude_code.hook_deadline_seconds
-        # Arm the no-egress backstop (D18): a hook runs its body
-        # under its own asyncio.run, not the CLI's run(), which arms it there.
-        ensure_backstop()
-        output = asyncio.run(asyncio.wait_for(impl(store, payload, record), timeout=deadline))
+
+        async def _body() -> str | None:
+            return await asyncio.wait_for(impl(store, payload, record), timeout=deadline)
+
+        # Arm the no-egress backstop and refuse a loop it cannot see (
+        # §3; D18, U13): a hook runs its body under its own loop, not the CLI's
+        # run(). A refusal is an error like any other, so the hook still exits 0.
+        output = run_armed(_body())
         record["outcome"] = "ok"
     except Exception as exc:  # noqa: BLE001 — the degrade-to-nothing contract
         record["outcome"] = "error"
-        record["error"] = f"{type(exc).__name__}: {exc}"
+        record["error"] = redact_known_secrets(f"{type(exc).__name__}: {exc}")
         if _looks_like_uninitialized_store(exc):
             # The single most common silent failure: the hook ran
             # from a directory where the store's DB does not resolve. Name the
@@ -154,6 +202,50 @@ def _run_hook(event: str, store: str, impl: _HookImpl) -> None:
     if output:
         typer.echo(output)
     # Fall through: exit 0. Exit 2 is never used.
+
+
+def _working_directory_store_refusal(store: str) -> str | None:
+    """Why a hook must not open ``store``, when its SQLite path is relative; else ``None``.
+
+    Claude Code runs the hooks in the session's directory, which a cloned
+    repository supplies, so a relative store there is whatever file the clone
+    ships: SessionStart would push its beliefs into the session and SessionEnd
+    would harvest into it instead of the real store (security review
+    2026-10-25, Q5). The stdio MCP servers already refuse such a store.
+    A hook has no zero-config launch to keep, so it refuses whichever
+    pin named the path, a relative ``DATABASE_URL`` included, and the body does
+    not run. The config has already expanded a leading ``~`` (P13). A thin
+    client reads no local store, but only an engine the config file names makes
+    one: ``PARTICLES_ENGINE_BASE_URL`` can come from the harness's environment
+    rather than the hook command, so it does not lift the rule (security
+    review 2026-10-25-2, R41).
+    """
+    from particles.db import DEFAULT_STORE
+
+    inherited = environment_engine_url()
+    if get_config().engine.base_url and inherited is None:
+        return None
+    dsn = _resolve_store_dsn(store)
+    db_file = sqlite_file_path(dsn) if dsn is not None else None
+    if db_file is None or Path(db_file).is_absolute():
+        return None
+    if store == DEFAULT_STORE:
+        fix = (
+            "set an absolute DATABASE_URL in the hook command or re-run "
+            "`particles init claude-code`"
+        )
+    else:
+        fix = f"write an absolute path under storage.stores.{store} in the config file"
+    if inherited is not None:
+        fix += (
+            f"; PARTICLES_ENGINE_BASE_URL ({url_without_userinfo(inherited)}) lifts this "
+            "rule only when the "
+            "pinned config names the engine as engine.base_url"
+        )
+    return (
+        f"the store {store!r} ({dsn}) resolves against the session's working directory, "
+        f"so the hook would open whatever file that directory holds; {fix}"
+    )
 
 
 def _read_stdin_json() -> dict[str, Any]:
@@ -248,6 +340,8 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
     observer = observer_project_for(project_key)
     decision = await _digest_decision(store, payload)
     shown: list[ShownBelief] = list(decision.loaded)
+    # deletions the hook held back are named at session start.
+    notice = await _absence_notice(store, payload, record)
     if decision.action == "skip":
         # The MEMORY.md projected region the harness just loaded IS the
         # current view (trailer fingerprint matched) — injecting the digest
@@ -256,9 +350,13 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
         await _record_exposure(
             store, payload, record, "skip", shown, project_key, observer, started
         )
-        return None
+        return _session_start_output(notice.lstrip("\n")) if notice else None
 
-    max_bytes = get_config().claude_code.digest_max_bytes
+    # Clamped under Claude Code's additionalContext cap: over it the model
+    # sees only a 2 KB preview, and `shown` would credit lines it never read.
+    # The notice is kept out of the budget the digest may fill.
+    max_bytes = session_start_budget(get_config().claude_code.digest_max_bytes)
+    max_bytes = max(0, max_bytes - len(notice.encode("utf-8")))
     if decision.action == "diff" and decision.content is not None:
         # Mismatch: the store moved since the last render — top up with only
         # the difference (new / changed / newly-contested lines).
@@ -276,6 +374,8 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
         kept = kept_prefix_length(rendered.markdown, max_bytes)
         digest = truncate_on_line_boundary(rendered.markdown, max_bytes)
         action = "full"
+        # A belief is credited as shown only when its whole line was delivered,
+        # not merely its start (security review 2026-10-26-1, W33).
         shown += [
             ShownBelief(
                 particle_id=line.particle_id,
@@ -283,19 +383,31 @@ async def _session_start(store: str, payload: dict[str, Any], record: dict[str, 
                 contested_bases=line.contested_bases,
             )
             for line in rendered.lines
-            if line.offset < kept
+            if _line_end(rendered.markdown, line.offset) <= kept
         ]
 
     record["digest_bytes"] = len(digest.encode("utf-8"))
+    record["digest_chars"] = len(digest)
     await _record_exposure(store, payload, record, action, shown, project_key, observer, started)
+    return _session_start_output(digest + notice)
+
+
+def _session_start_output(context: str) -> str:
+    """The SessionStart hook's JSON reply carrying ``context``."""
     return json.dumps(
         {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": digest,
+                "additionalContext": context,
             }
         }
     )
+
+
+def _line_end(text: str, offset: int) -> int:
+    """The offset just past the line of ``text`` that starts at ``offset``, its newline included."""
+    newline = text.find("\n", offset)
+    return len(text) if newline < 0 else newline + 1
 
 
 #: The share of the hook deadline the freshness check may spend before it
@@ -414,6 +526,8 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
 
     deposited: list[tuple[str, str]] = []  # (entry_id, snapshot_id) of NEW snapshots
     unchanged = 0
+    # Memory and archive files the engine refused one by one (rule 5).
+    refused: list[dict[str, str]] = []
 
     # (a) The current session's transcript — distilled, not raw (§3a).
     if harvest_cfg.transcripts and session_id and transcript_path.is_file():
@@ -434,16 +548,21 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
     if memory_dir is not None and _memory_dir_refused(store, memory_dir, project_roots, record):
         memory_dir = None
     if memory_dir is not None and memory_dir.is_dir():
-        harvested, skipped, memory_md_text = await _harvest_memory_files(store, memory_dir, project)
+        absence_log: dict[str, Any] = {}
+        harvested, skipped, memory_md_text = await _harvest_memory_files(
+            store, memory_dir, project, refused=refused, absence_log=absence_log
+        )
         deposited.extend(harvested)
         unchanged += skipped
         record["memory_files"] = len(harvested) + skipped
+        if absence_log.get("missing") or "skipped" in absence_log or "error" in absence_log:
+            record["memory_absences"] = absence_log
 
     # (b′) The fold-and-archive file is itself corpus input:
     # lines folded out of MEMORY.md on a *previous* cycle land here, so the
     # archive is harvested level-triggered like everything else.
     if projection_enabled():
-        outcome = await _harvest_archive(store, memory_dir, project)
+        outcome = await _harvest_archive(store, memory_dir, project, refused=refused)
         if outcome is not None:
             if outcome.unchanged:
                 unchanged += 1
@@ -463,6 +582,8 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
 
     record["deposited"] = len(deposited)
     record["unchanged"] = unchanged
+    if refused:
+        record["refused"] = refused
 
     # (§4) Default deferred: the deposit is the hook's whole job and the
     # corpus is the buffer. extract_inline closes the loop at the session
@@ -493,7 +614,11 @@ async def _session_end(store: str, payload: dict[str, Any], record: dict[str, An
     # succeeded (harvest → extract → render → splice), so the splice can never
     # overwrite content that hasn't been harvested. Against a remote engine the
     # engine renders and this client splices.
-    if memory_dir is not None and projection_enabled():
+    # A refused memory or archive file is a deposit that did not succeed, so
+    # the splice waits for a harvest that sends every file.
+    if memory_dir is not None and projection_enabled() and refused:
+        record["projection"] = {"skipped": "a memory or archive file was refused"}
+    elif memory_dir is not None and projection_enabled():
         from particles.api.cli._memory_projection import run_projection_cycle
 
         record["projection"] = await run_projection_cycle(
@@ -550,12 +675,14 @@ async def _mine_utility(
     Re-distills the transcript (deterministic, cheap) and mines it against what
     the session was shown, read as of the session's start: the
     first timestamp in the raw transcript, which the distilled copy drops.
+    The text is masked exactly as the deposit is, since the behavioural judge
+    sends its action lines to a model (security review 2026-10-25-2, R22).
     Returns disclosure counts for the hook log.
     """
     from particles.operations.utility_mining import mine_session_from_transcript
 
     raw = transcript_path.read_text(encoding="utf-8", errors="replace")
-    text = distill_transcript(raw, session_id)
+    text = _distilled_session(raw, session_id)
     if not text:
         return {}
     result = await mine_session_from_transcript(
@@ -624,7 +751,12 @@ async def _harvest_transcript(
 
 
 async def _harvest_memory_files(
-    store: str, memory_dir: Path, project: str
+    store: str,
+    memory_dir: Path,
+    project: str,
+    *,
+    refused: list[dict[str, str]] | None = None,
+    absence_log: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[str, str]], int, str | None]:
     """Deposit each memory-file ``*.md`` (LOCAL_MARKDOWN / MUTABLE, §3b).
 
@@ -634,8 +766,20 @@ async def _harvest_memory_files(
     are content-hash no-ops. Also returns the **raw** (pre-strip) text of the
     top-level ``MEMORY.md``, if present: the projection cycle refuses to
     splice a file that changed after this harvest read it.
+
+    A file the engine refuses (a hook key whose roots miss it) is recorded in
+    ``refused`` and the rest are still sent (rule 5; security review
+    2026-10-30-1, AB49).
+
+    The walk is also the directory's deletion check: after the
+    deposits, each previously harvested memory file it no longer lists gets an
+    ``ABSENT`` record, unless a guard holds the walk's absences back. What the
+    step did lands in ``absence_log``, for the hook log or pass 6's telemetry.
     """
-    from particles.api.client import get_backend
+
+    if refused is None:
+        refused = []
+    refused_before = len(refused)
 
     tags = ["claude-code", "memory-file"]
     if project:
@@ -643,17 +787,20 @@ async def _harvest_memory_files(
     harvested: list[tuple[str, str]] = []
     skipped = 0
     memory_md_text: str | None = None
-    for md in sorted(memory_dir.rglob("*.md")):
-        raw = md.read_text(encoding="utf-8", errors="replace")
+    walk = walk_memory_dir(memory_dir)
+    for md, raw, st in read_memory_files(memory_dir, walk):
         if md.parent == memory_dir and md.name == "MEMORY.md":
             memory_md_text = raw
         text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir, source_dir=md.parent)
         if not text.strip():
             continue
-        mtime = datetime.fromtimestamp(md.stat().st_mtime, tz=UTC)
-        outcome = await get_backend().deposit_text_at_uri(
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=UTC)
+        uri = md.resolve().as_uri()
+        outcome = await _deposit_or_record_refusal(
+            refused,
+            uri,
             text=text,
-            uri_r=md.resolve().as_uri(),
+            uri_r=uri,
             source_type="LOCAL_MARKDOWN",
             mutability="MUTABLE",
             tags=tags,
@@ -675,40 +822,184 @@ async def _harvest_memory_files(
             # this harvest, which applies the same strip.
             fetch_policy=refresh_policy_for(raw, text).value,
         )
+        if outcome is None:
+            continue
         if outcome.unchanged:
             skipped += 1
         else:
             harvested.append((outcome.entry_id, outcome.snapshot_id))
+    absences = await _record_memory_absences(
+        store, memory_dir, project, walk, refused_files=len(refused) - refused_before
+    )
+    if absence_log is not None:
+        absence_log.update(absences)
     return harvested, skipped, memory_md_text
 
 
+async def _record_memory_absences(
+    store: str, memory_dir: Path, project: str, walk: MemoryDirWalk, *, refused_files: int
+) -> dict[str, Any]:
+    """Record what the walk no longer finds; the hook-log record of it.
+
+    Local store only: against a remote engine nothing is recorded and the
+    record says so. A failure here is logged and costs the absences,
+    never the harvest that preceded it.
+    """
+    from particles.api.client import get_backend
+
+    if get_backend().remote:
+        return {"skipped": "remote"}
+    if not project:
+        return {"skipped": "no_project"}
+    from particles.db import session_scope
+    from particles.operations.memory_absence import MemoryWalk, record_memory_absences
+
+    facts = MemoryWalk(
+        directory=memory_dir.resolve(),
+        project_key=project,
+        listed=walk.listed_uris(),
+        errors=walk.errors,
+        refused_files=refused_files,
+    )
+    try:
+        async with session_scope(store) as session:
+            report = await record_memory_absences(session, facts)
+    except Exception as exc:  # noqa: BLE001 — the deposits already landed
+        log.warning("memory absences for %s not recorded: %s", memory_dir, exc)
+        return {"error": redact_known_secrets(str(exc))[:300]}
+    return report.log_record()
+
+
+async def _survey_memory_absences(
+    store: str, memory_dir: Path, project: str | None = None
+) -> MemoryAbsenceReport | None:
+    """The unrecorded deletions in ``memory_dir``, read only; ``None`` against a remote engine.
+
+    ``project`` is the key the harvest stamps on the directory's files: the
+    session's key at session start, else the directory's parent name, which
+    is how pass 6 keys it.
+    """
+    from particles.api.client import get_backend
+
+    if get_backend().remote or not memory_dir.is_dir():
+        return None
+    from particles.db import session_scope
+    from particles.operations.memory_absence import MemoryWalk, survey_memory_absences
+
+    walk = walk_memory_dir(memory_dir)
+    facts = MemoryWalk(
+        directory=memory_dir.resolve(),
+        project_key=project or memory_dir.parent.name,
+        listed=walk.listed_uris(),
+        errors=walk.errors,
+    )
+    async with session_scope(store) as session:
+        return await survey_memory_absences(session, facts)
+
+
+def absence_notice(unrecorded: int) -> str:
+    """The SessionStart line naming deletions the hook held back."""
+    files = "memory file" if unrecorded == 1 else "memory files"
+    verb = "is" if unrecorded == 1 else "are"
+    return (
+        f"\n_{unrecorded} {files} no longer found {verb} not recorded, so their beliefs are "
+        "still listed: run `particles memory absences`._\n"
+    )
+
+
+#: The share of the hook deadline the absence notice may spend.
+_ABSENCE_NOTICE_DEADLINE_SHARE = 0.2
+
+
+async def _absence_notice(store: str, payload: dict[str, Any], record: dict[str, Any]) -> str:
+    """The notice line for the session's memory directory, or ``""``.
+
+    Shown while the hook holds deletions back (the first ever in the
+    directory, or a mass deletion), so the next session's agent sees them and
+    can relay them. A read, no model call, best-effort: any failure or a slow
+    store costs the line, never the digest.
+    """
+    try:
+        session_project = resolve_session_project(payload)
+        memory_dir = session_project.memory_dir
+        if memory_dir is None or projection_refusal(
+            store, memory_dir, _session_project_roots(payload)
+        ):
+            return ""
+        budget = get_config().claude_code.hook_deadline_seconds * _ABSENCE_NOTICE_DEADLINE_SHARE
+        report = await asyncio.wait_for(
+            _survey_memory_absences(store, memory_dir, session_project.key or None), budget
+        )
+    except Exception:  # noqa: BLE001 — the notice is best-effort; the digest must survive
+        log.debug("memory absence survey failed", exc_info=True)
+        return ""
+    if report is None or report.skipped is not None or report.refusal is None:
+        return ""
+    record["absences_unrecorded"] = len(report.missing)
+    return absence_notice(len(report.missing))
+
+
+async def _deposit_or_record_refusal(
+    refused: list[dict[str, str]], uri: str, **kwargs: Any
+) -> TextDepositOutcome | None:
+    """Deposit one harvested file; record and swallow the engine's refusal of it.
+
+    Only a refusal of this one file is swallowed: an engine that cannot be
+    reached, or that refuses the caller outright (503), still ends the harvest.
+    """
+    from particles.api.client import get_backend
+    from particles.api.client.http import (
+        EngineHttpError,
+        EngineRefusedError,
+        EngineUnreachableError,
+    )
+
+    try:
+        return await get_backend().deposit_text_at_uri(**kwargs)
+    except (EngineRefusedError, EngineUnreachableError):
+        raise
+    except EngineHttpError as exc:
+        log.warning("the engine refused %s: %s", uri, exc)
+        refused.append({"uri": uri, "error": redact_known_secrets(str(exc))[:300]})
+        return None
+
+
 async def _harvest_archive(
-    store: str, memory_dir: Path | None, project: str
+    store: str,
+    memory_dir: Path | None,
+    project: str,
+    *,
+    refused: list[dict[str, str]] | None = None,
 ) -> TextDepositOutcome | None:
     """Deposit this project's fold-and-archive file (APPEND_ONLY).
 
     The archive is per project: lines folded out of one
     project's ``MEMORY.md`` are harvested under that project's key, not under
-    whichever project happened to deposit a shared file first.
+    whichever project happened to deposit a shared file first. Its lines are
+    ``MEMORY.md`` lines, so they pass the same mask as that file's deposit
+    (security review 2026-10-25-1, Q30). A refusal is recorded in ``refused``
+    rather than raised, as a memory file's is (AB49).
     """
     from particles.api.cli._claude_code import memory_archive_path
-    from particles.api.client import get_backend
 
     if memory_dir is None:
         return None
     archive = memory_archive_path(memory_dir)
     if not archive.is_file():
         return None
-    text = archive.read_text(encoding="utf-8", errors="replace")
+    text = redact_secrets(archive.read_text(encoding="utf-8", errors="replace"))
     if not text.strip():
         return None
     tags = ["claude-code", "memory-file", "memory-archive"]
     if project:
         tags.append(f"project:{project}")
     mtime = datetime.fromtimestamp(archive.stat().st_mtime, tz=UTC)
-    return await get_backend().deposit_text_at_uri(
+    uri = archive.resolve().as_uri()
+    return await _deposit_or_record_refusal(
+        [] if refused is None else refused,
+        uri,
         text=text,
-        uri_r=archive.resolve().as_uri(),
+        uri_r=uri,
         source_type="LOCAL_MARKDOWN",
         mutability="APPEND_ONLY",
         tags=tags,
@@ -813,6 +1104,190 @@ def hook_doctor_cmd(
     raise typer.Exit(0 if ok else 1)
 
 
+def _engine_line() -> str:
+    """Where the hooks write, and whether a keyless engine would refuse them.
+
+    Reads local state only: ``engine.base_url``, any ``PARTICLES_ENGINE_TOKEN``
+    the installed hook commands pin, and whether this environment holds one.
+    It does not probe the engine, so it cannot
+    say whether the engine has a key; it says what this install would need.
+    """
+    base_url = get_config().engine.base_url
+    if not base_url:
+        return "engine:         none; the hooks write the store in-process (no key needed)"
+    base_url = url_without_userinfo(base_url)
+    from particles.api._keys import Role, client_token_warning, role_from_prefix
+    from particles.secrets import get_particles_api_key
+
+    api_key = get_particles_api_key()
+    legacy = None if api_key == "dev-key" else api_key
+    # The installed hooks run with the token their settings entries carry,
+    # which need not be the one in this shell (security review 2026-10-27-1,
+    # W68): a token pinned there is judged first, and when the hooks pin one
+    # this shell's is not judged at all (security review 2026-10-28-1, O65).
+    pinned_tokens = _hook_pinned_tokens()
+    for pinned in pinned_tokens:
+        warning = client_token_warning(pinned, legacy, agent_side=True)
+        if warning is not None:
+            return (
+                f"engine:         ⚠ {base_url}: the installed hooks pin a PARTICLES_ENGINE_TOKEN "
+                f"in their settings entries, and {warning}"
+            )
+        if role_from_prefix(pinned) is Role.READER:
+            return (
+                f"engine:         ⚠ {base_url}: the installed hooks pin a PARTICLES_ENGINE_TOKEN "
+                "in their settings entries that is a reader key, so the engine refuses the "
+                "SessionEnd harvest and the session exposure; mint the hooks their own key "
+                "with `particles engine keys create --role agent --principal claude-code-hook "
+                "--reserved-principal`"
+            )
+    if pinned_tokens:
+        return (
+            f"engine:         {base_url}, with the PARTICLES_ENGINE_TOKEN the installed hooks "
+            "pin an agent key; the harvest writes memory files only under a harvester "
+            "principal (claude-code-hook)"
+        )
+    if get_engine_token_optional() is None:
+        return (
+            f"engine:         ⚠ {base_url} with no PARTICLES_ENGINE_TOKEN; a keyless "
+            "engine serves this install reads only, so the SessionEnd harvest and the "
+            "session exposure are refused"
+        )
+    token = get_engine_token_optional()
+    # The hooks are agent-side: an agent with a shell reads their environment,
+    # so an operator key there is the operator's authority handed to the agent.
+    # The prefix is read locally; the engine is not asked.
+    warning = client_token_warning(token, legacy, agent_side=True)
+    if warning is not None:
+        return f"engine:         ⚠ {base_url}: {warning}"
+    # The role is read from the prefix of the token in this process's own
+    # environment; the hooks' environment is what settings.json gives them.
+    # Every token past the warning above is a per-client key, so the prefix
+    # names a role (security review 2026-10-26-1, W77).
+    if role_from_prefix(token or "") is Role.READER:
+        return (
+            f"engine:         ⚠ {base_url}: PARTICLES_ENGINE_TOKEN in this environment is "
+            "a reader key, so the engine refuses the SessionEnd harvest and the session "
+            "exposure; mint the hooks their own key with `particles engine keys create "
+            "--role agent --principal claude-code-hook --reserved-principal`"
+        )
+    return (
+        f"engine:         {base_url}, with PARTICLES_ENGINE_TOKEN in this environment an "
+        "agent key; the harvest writes memory files only under a harvester principal "
+        "(claude-code-hook)"
+    )
+
+
+def _harvest_roots_line() -> str | None:
+    """Whether the engine key the harvest uses records this client's directories.
+
+    ``None`` when the hooks write in-process, or the key is not a harvester's.
+    It asks the engine (``/auth/whoami``) for the roots the key records and
+    names any directory this client's harvest writes from that the key lacks,
+    since the engine refuses a memory or archive file outside every recorded
+    root. It judges the key in this environment, so when the installed hooks
+    pin a different one it says so and judges nothing.
+    """
+    if not get_config().engine.base_url:
+        return None
+    token = get_engine_token_optional()
+    pinned = _hook_pinned_tokens()
+    if token is None or (pinned and pinned != [token]):
+        return (
+            "harvest roots: not checked; run the doctor with the PARTICLES_ENGINE_TOKEN the "
+            "installed hooks use"
+        )
+    from particles.api.client.http import EngineHttpError, HttpBackend
+
+    try:
+        who = run_armed(HttpBackend().whoami())
+    except (EngineHttpError, OSError, RuntimeError) as exc:
+        return f"harvest roots: not checked; the engine did not answer ({type(exc).__name__})"
+    if who.get("principal") not in {"claude-code-hook", "audit"} or who.get("role") != "agent":
+        return None
+    memory, archive = local_harvest_roots()
+    missing = [
+        root
+        for wanted, recorded in (
+            (memory, who.get("memory_roots") or []),
+            (archive, who.get("archive_roots") or []),
+        )
+        for root in wanted
+        if root not in recorded
+    ]
+    if not missing:
+        return "harvest roots: the hook key records this client's memory and archive directories"
+    return (
+        f"harvest roots: ⚠ the hook key records none of {', '.join(missing)}, so the engine "
+        "refuses the memory and archive files there; mint the hooks a key with "
+        f"{_harvest_mint_flags()}"
+    )
+
+
+def _harvest_mint_flags() -> str:
+    """The ``keys create`` flags that record this client's harvest directories."""
+    memory, archive = local_harvest_roots()
+    flags = [f"--memory-root {shlex.quote(root)}" for root in memory]
+    flags += [f"--archive-root {shlex.quote(root)}" for root in archive]
+    return " ".join(flags)
+
+
+def _hook_settings_paths() -> list[Path]:
+    """The user settings and this repository's project-scope settings files, without repeats."""
+    root = repository_root(Path.cwd())
+    paths = [Path.home() / ".claude" / "settings.json"] + [
+        root / ".claude" / name for name in ("settings.local.json", "settings.json")
+    ]
+    return list(dict.fromkeys(paths))
+
+
+def _read_doctor_settings(path: Path) -> dict[str, Any] | None:
+    """A settings file's JSON object as the doctor reads it, or ``None``.
+
+    The user file is the operator's own and may be a deliberate link (a
+    dotfiles checkout). A project-scope file sits in a repository a clone may
+    supply, so it is read as the install reads it: through one descriptor that
+    follows no link and never blocks, a regular file of one name that resolves
+    inside the repository, owned by this account, and capped at
+    ``local_files.max_bytes``. Anything else is skipped, so a FIFO or a link
+    a clone ships never holds the doctor and a planted file never stands for
+    the installed hooks (security review 2026-10-28-2, AA20).
+    """
+    from particles.corpus.local_read import read_local_file, within
+
+    try:
+        if path == Path.home() / ".claude" / "settings.json":
+            text = path.read_text(encoding="utf-8")
+        else:
+            read = read_local_file(
+                path,
+                max_bytes=get_config().local_files.max_bytes,
+                allowed=within(path.parent.parent),
+            )
+            getuid = getattr(os, "getuid", None)
+            if getuid is not None and read.stat.st_uid != getuid():
+                return None
+            text = read.content.decode("utf-8")
+        settings = json.loads(text)
+    except (OSError, ValueError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def _hook_pinned_tokens() -> list[str]:
+    """The distinct ``PARTICLES_ENGINE_TOKEN`` values the installed Particles hooks pin."""
+    tokens: dict[str, None] = {}
+    for path in _hook_settings_paths():
+        settings = _read_doctor_settings(path)
+        if settings is None:
+            continue
+        for command in particles_hook_commands(settings):
+            token = command_env_pins(command).get("PARTICLES_ENGINE_TOKEN")
+            if token:
+                tokens[token] = None
+    return list(tokens)
+
+
 def _run_doctor(store: str) -> bool:
     from particles.config import (
         describe_config_resolution,
@@ -856,6 +1331,11 @@ def _run_doctor(store: str) -> bool:
     for line in _check_install():
         typer.echo(f"  {line}")
 
+    typer.echo(f"  {_engine_line()}")
+    roots_line = _harvest_roots_line()
+    if roots_line is not None:
+        typer.echo(f"  {roots_line}")
+
     dsn = _resolve_store_dsn(store)
     if dsn is None:
         typer.echo(f"  store DSN:      MISSING — '{store}' is not declared in storage.stores")
@@ -871,8 +1351,9 @@ def _run_doctor(store: str) -> bool:
         typer.echo(f"  database file:  {location} ({'exists' if exists else 'MISSING'})")
         if cwd_relative:
             typer.echo(
-                "  ✗ DSN path is working-directory-relative — the hook resolves a DIFFERENT "
-                "file from each directory. Bake an absolute path via `init claude-code`."
+                "  ✗ DSN path is working-directory-relative — it names a DIFFERENT file in "
+                "each directory, so the lifecycle hooks refuse this store and do nothing. "
+                "Bake an absolute path via `init claude-code`."
             )
             return False
         if not exists:
@@ -928,50 +1409,76 @@ def _check_config_pins() -> list[str]:
     a pre-upgrade or hand-made install whose config depends on the
     environment it happens to start in. Reported, never fatal.
     """
-    root = repository_root(Path.cwd())
-    paths = [Path.home() / ".claude" / "settings.json"] + [
-        root / ".claude" / name for name in ("settings.local.json", "settings.json")
-    ]
     fix = "Re-run `particles init claude-code` to pin it."
     lines: list[str] = []
-    seen: set[Path] = set()
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(settings, dict):
+    for path in _hook_settings_paths():
+        settings = _read_doctor_settings(path)
+        if settings is None:
             continue
         for command in particles_hook_commands(settings):
             pins = command_env_pins(command)
             problem = _config_pin_problem(pins.get("PARTICLES_CONFIG"))
-            if problem is None and _uses_default_store(command):
-                problem = _store_pin_problem(pins)
+            hook_fix = fix
+            if problem is None:
+                handle = _command_store(command)
+                if handle == "default":
+                    problem = _store_pin_problem(pins)
+                else:
+                    # A named store's path comes from the pinned config, which
+                    # no env pin overrides, so the hook refuses it (security
+                    # review 2026-10-25, Q5) until that config names it absolutely.
+                    problem = _named_store_pin_problem(pins, handle)
+                    hook_fix = (
+                        f"Write an absolute path under storage.stores.{handle} in that config."
+                    )
+            if problem is None:
+                problem = _engine_pin_problem(pins, "writes to")
             if problem is not None:
                 lines.append(f"config pin:     ⚠ a Particles hook in {path} {problem}.")
-                lines.append(f"                {fix}")
+                lines.append(f"                {hook_fix}")
                 break
     for registration in particles_mcp_registrations():
         problem = _config_pin_problem(registration.env.get("PARTICLES_CONFIG"))
         if problem is None:
             # The MCP read tools always read the default store (security review N17).
             problem = _store_pin_problem(registration.env)
+        if problem is None:
+            problem = _engine_pin_problem(registration.env, "reads from and writes to")
         if problem is not None:
             lines.append(f"config pin:     ⚠ the MCP server '{registration.name}' {problem}.")
             lines.append(f"                {fix}")
     return lines
 
 
-def _uses_default_store(command: str) -> bool:
-    """Whether a hook command reaches the ``default`` store (``--store default`` or none)."""
+def _engine_pin_problem(pins: dict[str, str], use: str) -> str | None:
+    """A ``PARTICLES_ENGINE_BASE_URL`` pin that is not the empty one ``init`` writes, if so.
+
+    Unpinned, a hook or server follows an engine the harness's environment
+    names (security review 2026-10-25-2, R41; E2). Pinned to a URL, it follows
+    the engine an install between 1.220.2 and 1.221.3 inherited from its own
+    environment, not the pinned config's (2026-10-27-1, W27).
+    """
+    if "PARTICLES_ENGINE_BASE_URL" not in pins:
+        return (
+            f"does not pin PARTICLES_ENGINE_BASE_URL, so the engine it {use} "
+            "can come from the session's environment"
+        )
+    pinned = pins["PARTICLES_ENGINE_BASE_URL"]
+    if pinned:
+        return (
+            f"pins PARTICLES_ENGINE_BASE_URL={url_without_userinfo(pinned)}, so the engine it "
+            f"{use} is that one, not the pinned config's engine.base_url"
+        )
+    return None
+
+
+def _command_store(command: str) -> str:
+    """The store a hook command names (``--store <handle>``), ``default`` when it names none."""
     tokens = command.split()
     for i, token in enumerate(tokens[:-1]):
         if token == "--store":
-            return tokens[i + 1] == "default"
-    return True
+            return tokens[i + 1]
+    return "default"
 
 
 def _store_pin_problem(env: dict[str, str]) -> str | None:
@@ -982,7 +1489,57 @@ def _store_pin_problem(env: dict[str, str]) -> str | None:
             f"has no DATABASE_URL pin, so its default store ({dsn}) is read from each "
             "session's working directory"
         )
-    return None
+    # An install run inside a clone pins the clone's own ./particles.db
+    # absolutely, as it once did a config file (security review N3, W16). The
+    # judgement is the local refresh's own, on the resolved file, so the doctor
+    # and the refresh agree on a pin that links into a clone and on a store
+    # under a home-directory .git (2026-10-27-1, W16), and word the cause, and
+    # its fix, alike (2026-10-28-1, O60).
+    cause = _store_file_cause(dsn)
+    return None if cause is None else f"pins its default store to {cause}"
+
+
+def _named_store_pin_problem(env: dict[str, str], handle: str) -> str | None:
+    """A named store the local refresh would not trust as the operator's, if it is one.
+
+    One whose path in the hook's config resolves against the working directory,
+    or whose file the refresh refuses: inside a git work tree, writable by other
+    users, or another account's (security review 2026-10-28-1, O30, E23).
+    """
+    dsn = pinned_store_dsn(env, handle)
+    if dsn is None:
+        return None
+    if _dsn_is_cwd_relative(dsn):
+        return (
+            f"names the store '{handle}', whose path ({dsn}) is read from each session's "
+            "working directory, so the hook refuses it"
+        )
+    db_file = sqlite_file_path(dsn)
+    if db_file is None:
+        return None
+    repository = enclosing_work_tree(Path(db_file))
+    if repository is not None and _store_file_cause(dsn) is not None:
+        return (
+            f"names the store '{handle}', whose file {db_file} is inside the git work tree "
+            f"{repository}, which a clone can supply"
+        )
+    # Every other cause is worded as the refresh judges it, with its fix: the
+    # file, a SQLite sidecar or the directory holding it (2026-10-28-1, O60).
+    cause = _store_file_cause(dsn)
+    return None if cause is None else f"names the store '{handle}', whose file is {cause}"
+
+
+def _store_file_cause(dsn: str) -> str | None:
+    """``"<file>, <why>"`` for an absolute SQLite DSN the local refresh refuses, else ``None``."""
+    # Deferred like the doctor's other refresh reads: the lifecycle hooks
+    # import this module and never reach the corpus fetch layer.
+    from particles.corpus.fetch import store_file_judgement
+
+    db_file = sqlite_file_path(dsn)
+    if db_file is None:
+        return None
+    judgement = store_file_judgement(Path(db_file))
+    return None if judgement is None else f"{db_file}, {judgement.cause}"
 
 
 def _config_pin_problem(pin: str | None) -> str | None:
@@ -990,6 +1547,16 @@ def _config_pin_problem(pin: str | None) -> str | None:
         return "has no PARTICLES_CONFIG pin"
     if not Path(pin).is_absolute():
         return f"pins a relative PARTICLES_CONFIG ({pin})"
+    # An install once turned a relative pin into an absolute pin of the
+    # working directory's file (security review 2026-10-25-2, R10, R19). The
+    # config chooses the store, the engine and its endpoints, so it is judged
+    # as the store file is: owner, mode, ACL and directory as well as the work
+    # tree (2026-10-28-1, G55).
+    from particles.corpus.fetch import store_file_judgement
+
+    judgement = store_file_judgement(Path(pin), sidecars=())
+    if judgement is not None:
+        return f"pins PARTICLES_CONFIG={pin}, {judgement.cause}"
     return None
 
 
@@ -1015,11 +1582,8 @@ def _check_hook_timeouts() -> list[str]:
         if path in seen:  # the repository is $HOME; the user-level reading wins
             continue
         seen.add(path)
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(settings, dict) and untimed_session_end_hooks(settings):
+        settings = _read_doctor_settings(path)
+        if settings is not None and untimed_session_end_hooks(settings):
             lines.append(f"hook timeout:   ⚠ the SessionEnd hook in {path} has no timeout.")
             lines.append(
                 "                Claude Code cancels it after 1.5 s, before the harvest runs."
@@ -1031,8 +1595,12 @@ def _check_hook_timeouts() -> list[str]:
 def _git(root: Path, *args: str) -> str | None:
     """One ``git -C root`` query's stripped stdout, or ``None`` when it fails."""
     # Drop a caller's GIT_DIR / GIT_WORK_TREE (set inside git hooks), which
-    # would override ``-C`` and describe some other repository.
+    # would override ``-C`` and describe some other repository. ``PATH`` keeps
+    # only the entries no other user may write, as the projection's and the
+    # subjects' git do, so a relative or shared entry supplies no ``git``
+    # (security review 2026-10-30-1, E31).
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["PATH"] = pinned_subprocess_env({"PATH": os.environ.get("PATH", os.defpath)})["PATH"]
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
             ["git", *GIT_LOCAL_ARGS, "-C", str(root), *args],  # noqa: S607 — git from PATH
@@ -1073,16 +1641,10 @@ def _check_install() -> list[str]:
     """
     import particles
 
-    root = repository_root(Path.cwd())
     commands: list[str] = []
-    for path in [Path.home() / ".claude" / "settings.json"] + [
-        root / ".claude" / name for name in ("settings.local.json", "settings.json")
-    ]:
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(settings, dict):
+    for path in _hook_settings_paths():
+        settings = _read_doctor_settings(path)
+        if settings is not None:
             commands.extend(particles_hook_commands(settings))
     argv0 = Path(sys.argv[0])
     install_root = Path(particles.__file__).resolve().parent.parent
@@ -1111,7 +1673,7 @@ def _check_schema(store: str) -> tuple[bool, list[str]]:
     from particles.db import schema_state
 
     try:
-        state = asyncio.run(schema_state(store))
+        state = run_armed(schema_state(store))
     except Exception:  # noqa: BLE001 — doctor reports, never crashes
         return True, []
     if state is None:
@@ -1158,7 +1720,7 @@ def _check_model(store: str) -> list[str]:
             return await get_calibration(session, EXTRACTOR_ID, pairing)
 
     try:
-        calibration = asyncio.run(_probe())
+        calibration = run_armed(_probe())
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
         lines.append(f"                calibration: could not check the store ({exc})")
         return lines
@@ -1234,26 +1796,26 @@ def _check_refresh_roots(store: str) -> list[str]:
 
     The refresh reads rule files only under recorded roots, so after the
     upgrade that introduced them, and until a ``rules sync``, the project rule
-    files are refused. The line says so and names the command. Reported,
-    never fatal.
+    files are refused. An entry a depositor the refresh does not trust enrolled
+    is refused inside those roots too (security review N21). Each cause gets
+    its own line and fix. Reported, never fatal.
     """
-    from particles.corpus.fetch import count_refused_local_entries
+    from particles.corpus.fetch import RefusalCounts, count_refused_local_entries
     from particles.db import session_scope
 
-    async def _count() -> int:
+    async def _count() -> RefusalCounts:
         async with session_scope(store) as session:
             return await count_refused_local_entries(session)
 
     try:
-        refused = asyncio.run(_count())
+        refused = run_armed(_count())
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
         return [f"refresh roots:  could not check the store: {exc}"]
-    if not refused:
-        return []
+    # One line per cause, each with its own fix (an outside-root entry needs a
+    # root recorded; an untrusted depositor's does not change on re-enrolment).
     return [
-        f"refresh roots:  ⚠ {refused} LAZY local source(s) lie outside every allowed root "
-        "and are not refreshed.",
-        "                Run `particles rules sync` from the project that holds them.",
+        f"{'refresh roots:  ⚠ ' if i == 0 else '                ⚠ '}{line}"
+        for i, line in enumerate(refused.lines())
     ]
 
 
@@ -1276,7 +1838,7 @@ def _check_observer_scope(store: str) -> list[str]:
             return await lens_may_engage(session)
 
     try:
-        rescoped = asyncio.run(_probe())
+        rescoped = run_armed(_probe())
     except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
         return [f"observer scope: project (could not check the store: {exc})"]
     if not rescoped:
@@ -1354,6 +1916,52 @@ def _observer_binding_lines(cwd: Path) -> list[str]:
     return lines
 
 
+def _last_harvest_refusals() -> int:
+    """How many files the engine refused at the newest logged session end (AB49)."""
+    from particles.api.cli._claude_code import read_hook_log_tail
+
+    for raw in reversed(read_hook_log_tail(2000)):
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("event") == "session-end":
+            refused = entry.get("refused")
+            return len(refused) if isinstance(refused, list) else 0
+    return 0
+
+
+def _check_memory_absences(store: str) -> list[str]:
+    """One line per bound memory directory holding unrecorded deletions.
+
+    Read only. Reported, never fatal.
+    """
+    from particles.api.cli._claude_code import discover_memory_dirs
+
+    lines: list[str] = []
+    try:
+        dirs = discover_memory_dirs(store).bound
+        reports = [run_armed(_survey_memory_absences(store, d)) for d in dirs]
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail the doctor
+        return [f"memory absences: could not check the store: {exc}"]
+    for d, report in zip(dirs, reports, strict=True):
+        if report is None or not report.missing:
+            continue
+        if report.skipped == "walk_incomplete":
+            why = "the directory could not be read in full, so none is recorded"
+        elif report.refusal == "first":
+            why = "the first deletion here, which the hook leaves to you"
+        elif report.refusal == "mass":
+            why = f"{report.absent_fraction:.0%} of the directory at once, held back"
+        else:
+            why = "recorded at the next session end"
+        lines.append(
+            f"memory absences: ⚠ {len(report.missing)} file(s) in {d} no longer found ({why}); "
+            "`particles memory absences` lists them"
+        )
+    return lines
+
+
 def _check_memory_dirs(store: str) -> list[str]:
     """Report which memory directory a session here writes to, whether ``store``
     serves it, and any strays.
@@ -1376,13 +1984,13 @@ def _check_memory_dirs(store: str) -> list[str]:
     lines = [f"memory dir:     {memory_dir} ({state})"]
     if claude_project_slug(cwd) != key:
         lines.append("                (a session here shares its repository's memory directory)")
-    memory_md = memory_dir / "MEMORY.md"
-    if memory_md.is_file():
+    # Read as the harvest reads it: no link followed, never blocking, capped
+    # (security review 2026-10-28-2, AA20).
+    _, memory_bytes = _read_memory_md(memory_dir / "MEMORY.md")
+    if memory_bytes is not None:
         # the index sits below the region, so an overgrown file
         # loses its tail from every session with no error anywhere.
-        warning = memory_load_window_warning(
-            memory_md.read_text(encoding="utf-8", errors="replace")
-        )
+        warning = memory_load_window_warning(memory_bytes.decode("utf-8", errors="replace"))
         if warning is not None:
             lines.append(f"memory size:    {warning}")
     refusal = projection_refusal(store, memory_dir, (repository_root(cwd),))
@@ -1390,6 +1998,14 @@ def _check_memory_dirs(store: str) -> list[str]:
         lines.append(f"memory binding: store '{store}' is the store the installed hooks name")
     else:
         lines.append(f"memory binding: NOT SERVED, {refusal}")
+    lines.extend(_check_memory_absences(store))
+    refused = _last_harvest_refusals()
+    if refused:
+        lines.append(
+            f"harvest:        ⚠ the engine refused {refused} file(s) at the last session end; "
+            "`particles hook log` names them (a hook key whose roots miss this client's "
+            "memory directories; mint it with the command `particles init claude-code` prints)"
+        )
     strays = stray_memory_dirs(projects_root)
     if strays:
         lines.append(
@@ -1423,7 +2039,7 @@ def _check_blobs(store: str) -> list[str]:
         return report.warning_lines()
 
     try:
-        return asyncio.run(_probe())
+        return run_armed(_probe())
     except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes
         return [f"blobs:          could not check ({type(exc).__name__}: {exc})"]
 
@@ -1448,7 +2064,7 @@ def _check_tables(store: str) -> tuple[bool, str]:
             return await session.scalar(select(func.count()).select_from(CorpusEntryRow)) or 0
 
     try:
-        count = asyncio.run(_count())
+        count = run_armed(_count())
     except OperationalError:
         return False, "MISSING — run `particles db init` (the harvest target has no tables)"
     except Exception as exc:  # noqa: BLE001 — doctor reports, never crashes

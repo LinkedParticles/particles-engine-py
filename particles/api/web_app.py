@@ -51,6 +51,11 @@ log = logging.getLogger(__name__)
 _INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL | re.I)
 
 
+#: The one inline ``<style>`` the graph view's Cytoscape inserts, allowed by its
+#: hash so the policy needs no ``'unsafe-inline'`` for styles.
+_CYTOSCAPE_STYLE = ".__________cytoscape_container { position: relative; }"
+
+
 def content_security_policy(directory: Path) -> str:
     """The ``Content-Security-Policy`` the bundle is served with (security review 2026-10-24, N7).
 
@@ -58,7 +63,9 @@ def content_security_policy(directory: Path) -> str:
     bundle's ``index.html`` carries, each allowed by its SHA-256 hash, so a
     rebuilt bundle keeps working without a hand-kept list. The bundle keeps the
     operator's bearer in ``localStorage``, which any script on this origin can
-    read; nothing else may run here or frame the page.
+    read; nothing else may run here or frame the page, and the page connects
+    to this origin only, so its settings' engine URL reaches only the engine
+    that served it.
     """
     hashes: list[str] = []
     index = directory / "index.html"
@@ -67,7 +74,16 @@ def content_security_policy(directory: Path) -> str:
             digest = hashlib.sha256(block.encode("utf-8")).digest()
             hashes.append(f"'sha256-{base64.b64encode(digest).decode('ascii')}'")
     script_src = " ".join(["'self'", *hashes])
-    return f"script-src {script_src}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    style_digest = hashlib.sha256(_CYTOSCAPE_STYLE.encode("utf-8")).digest()
+    style_src = f"'self' 'sha256-{base64.b64encode(style_digest).decode('ascii')}'"
+    # Everything the policy does not name falls back to this origin, and the
+    # bundle connects to this origin only, so script running here cannot send
+    # the bearer anywhere else (security review 2026-10-30-1, AB56).
+    return (
+        f"script-src {script_src}; default-src 'self'; connect-src 'self'; "
+        f"style-src {style_src}; img-src 'self' data: blob:; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'"
+    )
 
 
 # Mount path for the web-UI app shell (unchanged by the

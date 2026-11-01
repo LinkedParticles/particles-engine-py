@@ -11,8 +11,10 @@ handling (with a mocked socket.getaddrinfo to keep tests offline + fast).
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -26,7 +28,9 @@ from particles.url_safety import (
     is_cleartext_remote,
     is_network_uri,
     isolated_git_env,
+    pinned_subprocess_env,
     resolve_and_pin,
+    url_without_userinfo,
     validate_fetch_url,
 )
 
@@ -671,3 +675,79 @@ class TestIsolatedGitEnv:
             "GIT_ALLOW_PROTOCOL",
         }
         assert env["GIT_ALLOW_PROTOCOL"] == "https"
+
+
+class TestPinnedSubprocessEnv:
+    """P43: no proxy or CA variable routes a pinned fetch around its pin."""
+
+    _INHERITED = {
+        "PATH": "/usr/bin",
+        "HTTPS_PROXY": "http://proxy.example.test:3128",
+        "https_proxy": "http://proxy.example.test:3128",
+        "All_Proxy": "socks5://proxy.example.test:1080",
+        "http_proxy": "http://proxy.example.test:3128",
+        "NO_PROXY": "*",
+        "SSL_CERT_FILE": "/tmp/evil-ca.pem",
+        "CURL_CA_BUNDLE": "/tmp/evil-ca.pem",
+    }
+
+    def test_drops_every_proxy_and_ca_variable_in_any_case(self) -> None:
+        assert pinned_subprocess_env(self._INHERITED) == {"PATH": "/usr/bin"}
+
+    def test_drops_the_key_log_and_askpass_and_relative_path_entries(self) -> None:
+        """K10 (SECURITY_REVIEW_20261026-1): no inherited variable writes the TLS
+        keys or names a program, and no program is found in the working directory."""
+        env = pinned_subprocess_env(
+            {
+                "PATH": f"bin{os.pathsep}/usr/bin{os.pathsep}{os.pathsep}./tools{os.pathsep}/bin",
+                "SSLKEYLOGFILE": "/tmp/keys.log",
+                "SSH_ASKPASS": "/tmp/askpass",
+            }
+        )
+        assert env == {"PATH": f"/usr/bin{os.pathsep}/bin"}
+        git_env = isolated_git_env({"PATH": "bin:/usr/bin", "SSLKEYLOGFILE": "/k"}, home="/h")
+        assert git_env["PATH"] == "/usr/bin"
+        assert "SSLKEYLOGFILE" not in git_env
+
+    def test_the_gist_clone_env_carries_none_either(self, tmp_path: Path) -> None:
+        env = isolated_git_env(self._INHERITED, home=str(tmp_path))
+        assert env["PATH"] == "/usr/bin"
+        dropped = {k.lower() for k in self._INHERITED} - {"path"}
+        assert not {k.lower() for k in env} & dropped
+
+
+class TestUrlWithoutUserinfo:
+    """R36 (SECURITY_REVIEW_20261025-2): a printed endpoint never carries its userinfo."""
+
+    @pytest.mark.parametrize(
+        ("url", "shown"),
+        [
+            ("http://operator:s3cret-token@198.51.100.7:8080", "http://198.51.100.7:8080"),
+            ("https://tok@gateway.example.test/v1?x=1", "https://gateway.example.test/v1?x=1"),
+            ("http://u:p@ss@host.example.test/", "http://host.example.test/"),
+            ("HTTP://u:p@[::1]:8000", "HTTP://[::1]:8000"),
+            (" http://u:p@host.example.test", " http://host.example.test"),
+            ("http://[bad@host.example.test", "http://host.example.test"),
+            # A password written unescaped with a character that ends the
+            # authority for a parser (SECURITY_REVIEW_20261026-1, R36).
+            ("https://op:pa/ss@host.example.test:8443/v1", "https://host.example.test:8443/v1"),
+            ("https://op:pa?ss@host.example.test", "https://host.example.test"),
+            ("https://op:pa#ss@host.example.test", "https://host.example.test"),
+        ],
+    )
+    def test_the_userinfo_is_removed(self, url: str, shown: str) -> None:
+        assert url_without_userinfo(url) == shown
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://api.anthropic.com",
+            "http://127.0.0.1:8000/path?who=me@example.test",
+            "http://host.example.test/a@b",
+            "http://[::1]:8000/a@b",
+            "not a url",
+            "",
+        ],
+    )
+    def test_a_url_without_userinfo_is_unchanged(self, url: str) -> None:
+        assert url_without_userinfo(url) == url

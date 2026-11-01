@@ -50,9 +50,14 @@ async def belief(
     *sources: tuple[str, str],
     premises: tuple[str, ...] = (),
     status: Status = Status.ACTIVE,
+    calibration_source: CalibrationSource = CalibrationSource.EXTRACTOR_DIRECT,
     **fields: Any,
 ) -> Particle:
-    """Insert a belief attested by ``sources`` — or derived from ``premises`` (particle ids)."""
+    """Insert a belief attested by ``sources`` — or derived from ``premises`` (particle ids).
+
+    ``calibration_source`` is ``AGENT_ASSERTED`` for a belief an agent route
+    must treat as the agent's own (it never mutates an extracted one).
+    """
     from particles.store.particle_store import insert_particle
 
     provenance = [
@@ -64,7 +69,7 @@ async def belief(
     ]
     particle = Particle(
         content=content,
-        confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+        confidence=Confidence(value=0.9, calibration_source=calibration_source),
         uncertainty_nature=UncertaintyNature.EPISTEMIC,
         asserted_by="test-agent",
         status=status,

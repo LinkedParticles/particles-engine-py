@@ -35,6 +35,7 @@ from particles.core.schema import ExtractionStatus, StoreLLMSpend, WarcRecordTyp
 from particles.llm.usage import LLMUsage, UsageRow, render_store_spend_line
 from particles.store.event_store import OperatorEvent, OperatorEventType
 from tests._client_fixtures import stream_via_create
+from tests._engine_client import keyed_engine_client
 
 #: claude-haiku-4-5 lists at $1 / $5 per MTok, so a 100k-in / 10k-out reply
 #: costs exactly $0.15.
@@ -211,14 +212,13 @@ class TestExtractRoutesReportUsage:
         assert "LLM usage:" not in result.output
         assert asyncio.run(_extract_runs()) == []
 
-    def test_post_extract_records_the_run(self, paying_client: Any) -> None:
+    def test_post_extract_records_the_run(
+        self, paying_client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A remote caller's extraction counts toward the engine store's spend."""
-        from fastapi.testclient import TestClient
-
-        from particles.api.app import app
-
         [(entry_id, snapshot_id)] = asyncio.run(_seed_pending(1))
-        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
+        # A keyed engine: a keyless one refuses every write.
+        client = keyed_engine_client(monkeypatch)
         resp = client.post("/extract", json={"entry_id": entry_id, "snapshot_id": snapshot_id})
 
         assert resp.status_code == 200, resp.text
@@ -465,12 +465,9 @@ class TestReindexAndStructureRecordSpend:
     def test_post_reindex_records_the_run(
         self, paying_client: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from fastapi.testclient import TestClient
-
-        from particles.api.app import app
-
         monkeypatch.setattr("particles.api.app.reindex", _paying_reindex(_REINDEX_SUMMARY))
-        client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
+        # A keyed engine: a keyless one refuses every write.
+        client = keyed_engine_client(monkeypatch)
         resp = client.post("/reindex", json={})
 
         assert resp.status_code == 200, resp.text

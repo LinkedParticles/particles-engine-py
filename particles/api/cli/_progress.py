@@ -39,6 +39,7 @@ from typing import Any
 
 import typer
 
+from particles.api.cli._terminal import terminal_safe
 from particles.config import get_config
 
 #: Carriage return + ANSI erase-to-end-of-line.
@@ -120,7 +121,10 @@ def progress_line(message: str) -> None:
     if not settings.narrate_ok():
         return
     prefix = _CLEAR_LINE if settings.show_progress() else ""
-    sys.stderr.write(f"{prefix}{message}\n")
+    # A message can name a stored URI or title, so it is written with every
+    # control character shown as an escape (security review 2026-10-30-1,
+    # AB37); the clear sequence is the helper's own.
+    sys.stderr.write(f"{prefix}{terminal_safe(message)}\n")
     sys.stderr.flush()
 
 

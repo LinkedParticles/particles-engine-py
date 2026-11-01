@@ -48,7 +48,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.config import get_config
 from particles.core.scoring.utility import reinforcement_score
-from particles.db import Base
+from particles.db import Base, _open_sqlite_transaction
 
 _IN_CHUNK = 10_000
 """Ids per ``IN (...)`` query, well under SQLite's 32766-variable ceiling.
@@ -207,6 +207,10 @@ async def record_explicit_utility_event(
     ).first()
     if existing is not None:
         return False
+    # The savepoint nests in a real transaction, so its release commits nothing
+    # and the caller's rollback undoes the credit with its event (security
+    # review 2026-10-28-2, AA5/AA56).
+    await _open_sqlite_transaction(session)
     savepoint = await session.begin_nested()
     session.add(
         UtilityEventRow(

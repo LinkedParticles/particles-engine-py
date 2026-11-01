@@ -15,7 +15,7 @@ performs the writes, in this order:
   1. insert :attr:`ConflictWritePlan.insert` (``ACTIVE``, or born quarantined);
   2. demote :attr:`ConflictWritePlan.demote` to ``PROVENANCE_STALE``;
   3. insert the INCONSISTENCY :attr:`ConflictWritePlan.wrapper`;
-  4. record the dropped-candidate event;
+  4. record the retirement and dropped-candidate events;
   5. record the observer divergence.
 
 The mirror verdicts insert ``ACTIVE`` and *then* demote the row just inserted,
@@ -75,6 +75,8 @@ class ConflictWritePlan:
     """The audited drop of a candidate trust resolution ruled redundant."""
     update_event: PlannedEvent | None = None
     """The rung 2.5 retirement's record of its winner (:func:`plan_update_event`)."""
+    retirement_event: PlannedEvent | None = None
+    """A rung 2 or rung 1.5 retirement's record (:func:`plan_retirement_event`)."""
     record_divergence: bool = False
     """Record the inserted row and ``existing`` as an observer divergence."""
     cache_drop_existing: bool = False
@@ -105,6 +107,33 @@ def plan_update_event(
     return PlannedEvent(
         event_type=OperatorEventType.UPDATE_SUPERSESSION,
         reason=f"Rung 2.5 ({route}): {retired_id[:8]} superseded by {winner_id[:8]}",
+        refs=((EventRefKind.PARTICLE, retired_id), (EventRefKind.PARTICLE, winner_id)),
+        payload=payload,
+    )
+
+
+def plan_retirement_event(
+    retired_id: str,
+    winner_id: str,
+    *,
+    event_type: OperatorEventType,
+    route: str,
+    detail: Mapping[str, object] | None = None,
+) -> PlannedEvent:
+    """The event of one trust-rung or document-supersession retirement.
+
+    ``event_type`` is ``TRUST_SUPERSESSION`` (rung 2) or
+    ``DOCUMENT_SUPERSESSION`` (rung 1.5). ``route`` names where it was decided:
+    ``ladder`` (extraction or the assertion door) or ``sweep`` (the
+    reconcile sweep). ``detail`` adds what the rung decided on: the two trust
+    scores, or the two corpus entries (security review 2026-10-24-2, P34).
+    """
+    rung = "Rung 2" if event_type is OperatorEventType.TRUST_SUPERSESSION else "Rung 1.5"
+    payload: dict[str, object] = {"retired_id": retired_id, "winner_id": winner_id, "route": route}
+    payload.update(detail or {})
+    return PlannedEvent(
+        event_type=event_type,
+        reason=f"{rung} ({route}): {retired_id[:8]} superseded by {winner_id[:8]}",
         refs=((EventRefKind.PARTICLE, retired_id), (EventRefKind.PARTICLE, winner_id)),
         payload=payload,
     )
@@ -265,6 +294,13 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=new,
                 demote=(existing.id, StatusReason.LOWER_TRUST_SOURCE),
+                retirement_event=plan_retirement_event(
+                    existing.id,
+                    new.id,
+                    event_type=OperatorEventType.TRUST_SUPERSESSION,
+                    route="ladder",
+                    detail={"trust_score_new": score_new, "trust_score_existing": score_existing},
+                ),
                 cache_drop_existing=True,
                 cache_add_new=True,
                 result=new,
@@ -304,6 +340,12 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=new,
                 demote=(existing.id, StatusReason.DOCUMENT_SUPERSEDED),
+                retirement_event=plan_retirement_event(
+                    existing.id,
+                    new.id,
+                    event_type=OperatorEventType.DOCUMENT_SUPERSESSION,
+                    route="ladder",
+                ),
                 cache_drop_existing=True,
                 cache_add_new=True,
                 result=new,
@@ -319,6 +361,12 @@ def plan_conflict_writes(
             return ConflictWritePlan(
                 insert=new,
                 demote=(new.id, StatusReason.DOCUMENT_SUPERSEDED),
+                retirement_event=plan_retirement_event(
+                    new.id,
+                    existing.id,
+                    event_type=OperatorEventType.DOCUMENT_SUPERSESSION,
+                    route="ladder",
+                ),
                 result=_demoted(new, StatusReason.DOCUMENT_SUPERSEDED),
                 log_message=(
                     "Document-supersession (rung 1.5): existing %s supersedes new %s"

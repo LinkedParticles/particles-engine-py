@@ -121,7 +121,7 @@ A memory layer is an *input-shaping* attack surface: it does not merely hold
 data, it shapes what the agent believes and does next, so a poisoned claim is
 an instruction on a delay timer.
 
-**Three adversarial audits have covered this code, and each returned
+**Fifteen adversarial audits have covered this code, and each returned
 GO-WITH-FIXES.** The verdicts are quoted as given.
 
 | Audit | Code audited | Verdict | Fixes shipped in |
@@ -129,16 +129,60 @@ GO-WITH-FIXES.** The verdicts are quoted as given.
 | June 2026, before the code was opened: the HTTP, CLI and MCP surfaces, the filesystem writers, the egress layer, the CI and wheel build | `v1.62.0` | GO-WITH-FIXES | `1.62.1` to `1.63.0`; the last open finding closed in `1.128.0` |
 | 2026-10-23: everything changed since `v1.62.0`, including the release and publication pipeline the first audit predates, and the claims on this page | `v1.210.2` | GO-WITH-FIXES | `1.210.3` to `1.211.0` |
 | 2026-10-24: everything changed since the second audit, every earlier finding, and the claims on this page again | `v1.211.0` | GO-WITH-FIXES | `1.211.1` to `1.214.0` |
+| 2026-10-24, the third delta audit: everything changed since the previous audit, every earlier finding still open, and 92 checks of the claims on this page and the pages it links | `v1.214.2` | GO-WITH-FIXES, with five Medium findings and 22 claims that did not hold | `1.214.3` to `1.216.0`; claims restated in `1.216.1` |
+| 2026-10-25, the fourth delta audit: everything changed since the third delta audit, every earlier finding still open, and 125 checks of the claims on this page and the pages it links | `v1.216.1` | GO-WITH-FIXES, with nine Medium findings, one regression and 29 claims that did not hold | `1.217.1` to `1.220.1`; claims restated in `1.219.2` |
+| 2026-10-25, the fifth delta audit: everything changed since the fourth delta audit, every earlier finding still open, and 151 checks of the claims on this page and the pages it links | `v1.220.1` | GO-WITH-FIXES, with three Medium findings and 9 claims that did not hold | `1.220.2` to `1.220.9`; claims restated in `1.220.12` |
+| 2026-10-26, the sixth delta audit: everything changed since the fifth delta audit, per-client engine keys among it, every earlier finding still open, and 233 checks of the claims on this page and the pages it links | `v1.221.1` | GO-WITH-FIXES, with seven Medium findings and 53 claim judgements that did not hold | `1.221.2` to `1.221.5`; claims restated in `1.221.6` |
+| 2026-10-27, the seventh delta audit: the sixth audit's fixes, every earlier finding still open, and 373 judgements of the claims on this page and the pages it links | `v1.221.6` | GO-WITH-FIXES, with six Medium findings, one regression and 46 claim judgements that did not hold | `1.221.7` to `1.221.9`; claims restated in `1.221.10` |
+| 2026-10-28, the eighth delta audit: the seventh audit's fixes, the earlier findings still open, and 131 checks of the claims on this page and the pages it links | `v1.221.10` | GO-WITH-FIXES, with two Medium findings and 31 claim checks that did not hold | `1.221.11` to `1.222.0`; claims restated in `1.222.1` |
+| 2026-10-28, the ninth delta audit: the eighth audit's fixes, the earlier findings still open, and 226 checks of the claims on this page and the pages it links | `v1.222.1` | GO-WITH-FIXES, with three Medium findings and 52 claim checks that did not hold | `1.222.2` to `1.223.0`; claims restated in `1.223.1` |
+| 2026-10-30, the tenth delta audit: the ninth audit's fixes, the earlier findings still open, and 224 checks of the claims on this page and the pages it links | `v1.223.1` | GO-WITH-FIXES, with one Medium finding and 45 claim checks that did not hold | `1.223.2`; claims restated in `1.223.4` |
+| 2026-10-30, the eleventh delta audit: the tenth audit's fixes, the earlier findings still open, and 234 checks of the claims on this page and the pages it links | `v1.223.4` | GO-WITH-FIXES, with four Medium findings and 65 claim checks that did not hold | `1.223.5`; claims restated in `1.223.6` |
+| 2026-10-31, the twelfth delta audit: the eleventh audit's fixes and the claims on this page and the pages it links, with the earlier findings re-checked where their code changed | `v1.223.6` | GO-WITH-FIXES, with five Medium findings and 13 of 69 claim rows that did not hold | `1.223.7`; claims restated in `1.223.8` |
+| 2026-10-31, the thirteenth delta audit: the twelfth audit's fixes and the claims on this page and the pages it links, with the earlier findings re-checked where their code changed | `v1.223.8` | GO-WITH-FIXES, with four Medium findings, one regression and 8 of 69 claim rows that did not hold | `1.223.9`; claims restated in `1.223.10` |
+| 2026-10-31, the fourteenth and last delta audit: the thirteenth audit's fixes and the claims on this page and the pages it links, with the earlier findings re-checked where their code changed | `v1.223.10` | GO-WITH-FIXES, with four Medium findings and 7 of 69 claim rows that did not hold | `1.223.11`; claims restated in `1.223.12` |
 
-Since those fixes, a cloned repository can no longer configure Particles or
-supply the store an MCP server reads, an HTTP caller can no longer make the
-engine read a file on its own disk, and a web page can no longer send writes to
-an engine on loopback or read from one that runs without a key. The job that
-holds the PyPI publishing identity runs no code from a package index: it
-downloads the built files, checks them against the digests the build job
-recorded, and runs the pinned upload action. Not every finding is
-fixed: part of the second audit's finding on automatic retirements remains
-open, and SECURITY.md describes it and the other limits that remain.
+Not every release in those ranges contains the releases numbered before it:
+`1.212.0`, `1.214.8` and `1.215.0` were tagged before their merge. Every
+release from `1.215.1` on contains every lower release. Nor does a release
+number prove its commit passed CI: `1.222.3`, `1.222.4` and `1.222.5` were
+tagged on commits whose CI run failed, and the release tagger now tags a
+version only after its CI run passes.
+
+Three of the fix rounds changed the design rather than a defect. An engine
+with no key serves reads only: it refuses every write, from loopback too, and
+the `particles` command line, the Claude Code hooks and the MCP servers write
+the local store in-process and need no key. Each client can hold a key of its
+own whose role bounds it: a reader key writes nothing, an agent key writes
+only as its own principal, and `PARTICLES_API_KEY` and every per-client
+operator key carry the operator's authority, by design, so give an operator
+key only to clients you would give that authority. The local refresh trusts a
+store, its config file or a rule file only when you alone can write it.
+
+A cloned repository cannot configure Particles, or give a stdio MCP server or
+a Claude Code hook its store, unless a relative path you set points into it (a
+relative `PARTICLES_CONFIG` for the command line, a relative `DATABASE_URL`
+for an MCP server) or `particles init claude-code --store default` runs inside
+it. A store it ships, found by a path relative to the directory, cannot direct
+a refresh to a file on your disk, and that store's blob directory cannot
+direct a blob read or write to another file. No HTTP route reads a file the
+caller names on the engine's disk. A web page cannot send writes to an engine
+on loopback, or read from one that runs without a key, and a request refused
+for its key or its origin takes no lock on the store. The job that holds the
+PyPI publishing identity runs no code from a package index: it downloads the
+built files, checks them against the digests the build job recorded, and runs
+the pinned upload action.
+
+Not every finding is fixed, and this page does not list them all. The latest
+audit's report names what stays open; the Low and Info findings the audits
+deferred are tracked by area until they are fixed; and SECURITY.md states
+each known exception beside the guarantee it qualifies, with the limits we
+have accepted. The fourteenth delta audit was the last: security review now
+runs on each security-relevant change, plus one full audit per release. The standing limits a deployment should plan around are by
+design: the read surface is open by default, an operator key carries the
+operator's authority, every key reads every project's beliefs, keys are not
+scoped to a store, and Particles is a single-operator tool with no
+multi-tenant isolation.
 
 What holds today, and what does not:
 
@@ -147,12 +191,17 @@ What holds today, and what does not:
   keeps its instructions in the system turn and wraps that text in a per-call
   fence marked with a 128-bit random nonce. A test finds every call to the
   model's entry points, including calls through a wrapper that passes a system
-  turn on, and fails the build on one that has not been classified and, if it
-  carries such text, fenced. A call reached another way, such as through a
-  function passed as a value, is outside what that test can find. Behind the
-  fence sit structural checks: a JSON contract enforced at the parser, and a
-  gate that rejects synthesized prose citing a claim it was not given. This
-  raises the bar materially. It is hardening, not immunity.
+  turn on, and fails the build on one that has not been classified, or that is
+  classified as fenced and sends no system turn. A call reached another way,
+  such as through a function passed as a value, is outside what that test can
+  find, and what each fenced prompt keeps inside its fence rests on behavioural
+  tests that drive each prompt builder with a claim trying to close its fence.
+  Behind the fence sit structural checks: a JSON contract enforced at the
+  parser for the probes and extractors, and a gate that rejects synthesized
+  prose citing a claim it was not given. A projection manifest's framing and
+  direction are not fenced: they reach the synthesis instructions as written,
+  so project only with manifests you trust. This raises the bar materially.
+  It is hardening, not immunity.
 - **The model has no tools, but its verdicts change what is stored.** The
   model is never offered function calling, and nothing it emits is run as code
   or SQL or used as a fetch destination. Its output still has effects: subject
@@ -160,44 +209,59 @@ What holds today, and what does not:
   (an older value a newer claim updates, a claim from the same passage that
   the re-anchor pass restates in words the model wrote, the less trusted side
   of a contradiction between sources of different trust) and return held
-  claims to active, each recorded in the event log; and the beliefs it extracts
-  are written into Claude Code's `MEMORY.md`, which an agent with tools reads
-  as instructions. An injection can distort claims, and a distorted claim can
-  steer an agent.
+  claims to active; a document that declares it replaces another retires the
+  claims of the one it names, within a collection an operator key can name;
+  each of these is recorded in the event log; and the beliefs it extracts are
+  written into Claude Code's `MEMORY.md`, which an agent with tools reads as
+  instructions. The exporters write stored text, and the article prose the
+  model writes, with its markup inert. An injection can distort claims, and a
+  distorted claim can steer an agent.
 - **Fetches of URLs from deposited content are checked on every hop.** The
   host is resolved, each address is checked against a blocklist, and the
   connection goes to that vetted address, again on every redirect, which closes
   DNS rebinding and redirect SSRF. The two fetches that run as subprocesses are
   pinned to addresses this process vetted, neither follows a redirect on its
-  own, and the git clone runs under no system or global git config, so no
-  filter driver (git-lfs among them) runs for the cloned files. Endpoints you configure yourself (a model
-  provider, a remote engine, a telemetry collector) are held to the
-  `network.egress` setting but not to the blocklist, since a LAN or local model
-  server is a legitimate target.
-- **Fail-closed auth, and no SQL built from input.** With no bearer key set,
-  the engine refuses to start on a non-loopback bind, reading the bind from the
-  `uvicorn` command line when it is started that way and refusing a launch by
-  another ASGI server whose bind it cannot read. On every path it then serves
-  only a loopback client that names a loopback host or one listed in
-  `api.allowed_hosts`, which turns away a DNS-rebinding page. Routes that act
-  with the operator's authority (subject merges, operator retractions, review
-  rulings, trust policy) need a real key even from loopback. The token
-  comparison is constant-time. The data layer issues typed ORM statements with
-  bound parameters; its few literal SQL statements (a schema-version read and
-  the change-journal triggers) are constants that take no input.
-- **Local by default, with three outbound defaults you should know.** The
+  own, neither inherits a proxy or CA setting, `curl` expands no URL glob, and
+  the git clone runs under no system or global git config, so no filter
+  driver (git-lfs among them) runs for the cloned files; that last point rests
+  on reasoning, since git-lfs was not installed where it was audited.
+  Endpoints you configure yourself (a model provider, a remote engine, a
+  telemetry collector) are held to the `network.egress` setting but not to the
+  blocklist, since a LAN or local model server is a legitimate target.
+- **Fail-closed auth, and no SQL built from input.** With no key
+  (`PARTICLES_API_KEY` unset or empty, and no per-client key), the engine
+  refuses to start on a non-loopback bind, or on a bind it cannot read; a
+  script that calls `uvicorn.run` is not refused at startup and relies on the
+  per-request bounds. It then serves only a loopback client that names a
+  loopback host or one listed in `api.allowed_hosts`, which turns away a
+  DNS-rebinding page, and serves that client reads only. With a key, every
+  write needs a key whose role allows it. The legacy key's comparison is
+  constant-time, and a per-client key is checked by the digest of its secret.
+  The data layer issues typed ORM statements with bound parameters; its few
+  literal SQL statements take no input, and a `LIKE` pattern that carries text
+  is escaped.
+- **Local by default, with outbound defaults you should know.** The
   engine binds to loopback, stores to a local SQLite file, keeps telemetry
   off, and serves MCP as a locally spawned stdio child. Out of the box it also
   contacts the model provider you configure, Wikidata for subject lookups
   during extraction (these carry extracted entity names), and the Hugging Face
   Hub, to download the embedding model and, while outbound traffic is open, to
-  check for a newer copy when a process loads it. Settings come only from the
-  file `PARTICLES_CONFIG` names or `~/.particles/config.yaml`, never from the
-  directory a command runs in. The store is a different matter: when nothing
-  names one, the `particles` command line and `engine serve` open
-  `./particles.db` in the directory they run in, while an MCP server opens
-  `~/.particles/particles.db`. Set `network.egress` to `none` or `allowlist`
-  to restrict outbound traffic.
+  check for a newer copy when a process loads it. A deposited Reddit, Hacker
+  News or Mastodon post is followed to the link it names, and a Reddit deposit
+  reads the Arctic Shift archive. The scheduled consolidation and the daemon,
+  when you turn them on, also re-fetch the URLs you deposited.
+  Settings come only from the file `PARTICLES_CONFIG` names or
+  `~/.particles/config.yaml`, never from a `config.yaml` in the directory a
+  command runs in; a relative `PARTICLES_CONFIG` is read against that
+  directory, and only the command line accepts one. The store is a different
+  matter: when nothing names one, the `particles` command line and
+  `engine serve` open `./particles.db` in the directory they run in, while an
+  MCP server started with neither `DATABASE_URL` nor `PARTICLES_CONFIG` opens
+  the store `~/.particles/config.yaml` names, else
+  `~/.particles/particles.db`, and a Claude Code hook refuses a store with a
+  relative path unless its pinned config points it at a remote engine. Set
+  `network.egress` to `none` or `allowlist` to restrict outbound traffic, and
+  deny network access at the operating system for a guarantee.
 
 The real answer to the residual is epistemic rather than technical: every
 particle carries its provenance, source trust is a read-time lens that
@@ -209,11 +273,15 @@ with the audit trail intact.
 
 The limitations we ask you to read before relying on any of this are in
 [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md):
-the read surface left open by default, verbatim storage of whatever you
-deposit (secrets included), model verdicts that retire claims, project scope
-as a relevance filter rather than isolation, the single-operator trust model,
-and the MCP write boundary. SECURITY.md is also where to report a
-vulnerability; please report privately.
+the read surface left open by default, what each key role may do and the
+operator's authority an operator key carries, what a working directory can
+still supply, verbatim storage of whatever you deposit (secrets included),
+model verdicts that retire claims, project scope as a relevance filter rather
+than isolation, the single-operator trust model, the MCP write boundary, and
+the limits of the release supply chain. To report a vulnerability, use this
+repository's private vulnerability reporting
+([Security, Report a vulnerability](https://github.com/LinkedParticles/particles-engine-py/security/advisories/new));
+SECURITY.md has the other channel.
 
 ## Why Particles?
 

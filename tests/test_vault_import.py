@@ -940,3 +940,84 @@ class TestVaultSymlinks:
         )
         assert results == []
         assert unreadable == [vault / "topic" / "note.md"]
+
+
+class TestRemoteArmReads:
+    """The remote import arm uploads what the local arm would read (security review Q25)."""
+
+    @staticmethod
+    def _record_uploads(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+        import particles.api.cli.import_vault as import_vault
+        from particles.api.client.http import HttpBackend
+
+        sent: list[bytes] = []
+
+        async def _record(self: Any, method: str, path: str, **kwargs: Any) -> Any:
+            _name, fh = kwargs["files"]["file"]
+            sent.append(fh.read())
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"entry_id": "e", "snapshot_id": "s", "unchanged": False}
+            return response
+
+        monkeypatch.setattr(HttpBackend, "_request", _record)
+        monkeypatch.setattr(import_vault, "get_backend", lambda *a, **k: HttpBackend())
+        return sent
+
+    def test_a_hard_linked_note_is_not_uploaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import os
+
+        import particles.api.cli.import_vault as import_vault
+        from particles.corpus.deposit import iter_vault_files
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "note.md").write_text("an ordinary note\n")
+        outside = tmp_path / "private.md"
+        outside.write_text("bytes from outside the vault\n")
+        os.link(outside, vault / "linked.md")
+        sent = self._record_uploads(monkeypatch)
+
+        asyncio.run(
+            import_vault._import_tree_remote(
+                iter_vault_files(vault),
+                root=vault,
+                source_type="LOCAL_MARKDOWN",
+                deposited_by="operator",
+                tags=[],
+                verbose=False,
+            )
+        )
+
+        assert sent == [b"an ordinary note\n"]
+
+    def test_a_note_swapped_for_a_symlink_after_the_walk_is_not_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import particles.api.cli.import_vault as import_vault
+        from particles.corpus.deposit import iter_vault_files
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        note = vault / "note.md"
+        note.write_text("an ordinary note\n")
+        outside = tmp_path / "private.md"
+        outside.write_text("bytes from outside the vault\n")
+        walked = iter_vault_files(vault)
+        note.unlink()
+        note.symlink_to(outside)
+        sent = self._record_uploads(monkeypatch)
+
+        asyncio.run(
+            import_vault._import_tree_remote(
+                walked,
+                root=vault,
+                source_type="LOCAL_MARKDOWN",
+                deposited_by="operator",
+                tags=[],
+                verbose=False,
+            )
+        )
+
+        assert sent == []

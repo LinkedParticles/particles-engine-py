@@ -460,6 +460,21 @@ class TestHarvestPlan:
         assert plan.transcripts == 1
         assert plan.deposits[0].uri_r == "claude-code://session/abc123"
 
+    def test_transcript_dated_to_its_session_start(self, tmp_path: Path) -> None:
+        # the audit dates a transcript as the SessionEnd hook does, so
+        # a session's acts are not anchored at the day of the audit.
+        p = tmp_path / "abc123.jsonl"
+        lines = [
+            {"type": "summary", "summary": "no timestamp"},
+            {"type": "user", "timestamp": "2026-08-22T09:15:00Z", "message": {"content": "hi"}},
+            {"type": "user", "timestamp": "2026-08-23T10:00:00Z", "message": {"content": "x"}},
+        ]
+        p.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        plan = audit_mod.build_harvest_plan([], tmp_path, None)
+        published = plan.deposits[0].content_published_at
+        assert published is not None
+        assert published.isoformat() == "2026-08-22T09:15:00+00:00"
+
     def test_project_tag_derived_from_claude_layout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1149,3 +1164,38 @@ def test_harvest_drops_memory_index_entries(tmp_path: Path) -> None:
     memory = next(p for p in plan.deposits if p.uri_r.endswith("/MEMORY.md"))
     assert "open work" not in memory.text
     assert "Authored fact." in memory.text
+
+
+def test_the_audit_plan_reads_no_memory_index_through_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEMORY.md is read as every other memory file is, never through a symlink planted
+    in its place (security review 2026-10-26-1, W22)."""
+    from particles.api.cli.audit import build_harvest_plan
+    from particles.config import reset_config
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    reset_config()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE-THE-MEMORY-DIRECTORY")
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "note.md").write_text("# A note\n")
+    (memory / "MEMORY.md").symlink_to(outside)
+    plan = build_harvest_plan([memory], None, None)
+    assert plan.memory_dirs == [(memory, None)]
+
+
+def test_the_audit_plan_reads_a_regular_memory_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from particles.api.cli.audit import build_harvest_plan
+    from particles.config import reset_config
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    reset_config()
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "MEMORY.md").write_text("- [Note](note.md)\n")
+    plan = build_harvest_plan([memory], None, None)
+    assert plan.memory_dirs == [(memory, "- [Note](note.md)\n")]

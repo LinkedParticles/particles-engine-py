@@ -897,3 +897,89 @@ class TestSentinelInBeliefText:
             "<!-- END PROJECTED: memory-index -->\n"
         )
         assert strip_projected_regions_for_deposit(text, {}).strip() == "- hand edit"
+
+
+# ---------------------------------------------------------------------------
+# D34 to D36, adopted from the 2026-10-24-2 review's proofs
+# ---------------------------------------------------------------------------
+
+
+def test_d34_a_planted_manifest_does_not_make_the_users_notes_prunable(tmp_path: Path) -> None:
+    import json
+
+    from particles.render.markdown import EXPORT_MANIFEST_NAME, MarkdownExportLedger
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    mine = vault / "My note.md"
+    mine.write_text("My own words.\n", encoding="utf-8")
+    (vault / EXPORT_MANIFEST_NAME).write_text(
+        json.dumps({"exporter": "obsidian", "version": 2, "files": {"My note.md": "0" * 64}}),
+        encoding="utf-8",
+    )
+    ledger = MarkdownExportLedger.claim(vault, exporter="obsidian", recursive=True)
+    ledger.write(vault / "Subject.md", "exported\n")
+    ledger.finish()
+    assert mine.read_text(encoding="utf-8") == "My own words.\n"
+
+
+def test_d35_atomic_write_never_writes_through_a_planted_temp_symlink(tmp_path: Path) -> None:
+    import os
+
+    from particles.render.markdown import atomic_write_text
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched\n", encoding="utf-8")
+    export = tmp_path / "export"
+    export.mkdir()
+    target = export / "note.md"
+    # Every name the pre-fix writer could have used, and a few more.
+    for pid in {os.getpid(), os.getpid() + 1}:
+        (export / f".{target.name}.{pid}.tmp").symlink_to(outside)
+    atomic_write_text(target, "new\n")
+    atomic_write_text(target, "newer\n")
+    assert outside.read_text(encoding="utf-8") == "untouched\n"
+    assert not target.is_symlink() and target.read_text(encoding="utf-8") == "newer\n"
+
+
+def test_d36_claim_text_cannot_open_an_obsidian_comment() -> None:
+    """Obsidian hides everything from an unclosed comment marker to the end of the note."""
+    from particles.render.markdown import render_particle
+    from tests.test_wiki_exporter import _make_particle
+
+    block = render_particle(_make_particle("The port is 8080. %% hidden"))
+    assert "%%" not in block
+
+
+def test_d36_dollar_signs_cannot_open_math() -> None:
+    from particles.render.markdown import neutralize_inline_markdown
+
+    assert neutralize_inline_markdown("costs $5 and $6") == "costs \\$5 and \\$6"
+    assert neutralize_inline_markdown("50% done") == "50% done"
+
+
+def test_synthesized_prose_keeps_citations_and_drops_live_markup() -> None:
+    """Security review 2026-10-24-2, P31: idempotent, citation-preserving."""
+    from particles.render.markdown import neutralize_synthesized_prose
+
+    prose = (
+        "## Storage\n\nThe engine uses SQLite.[^p-0123abcd] See [[Engine]].\n\n"
+        "![x](https://c.example/p.png) ![[Secrets]] <img src=x> {{embed}} %% $x$"
+    )
+    out = neutralize_synthesized_prose(prose)
+    assert "[^p-0123abcd]" in out and "[[Engine]]" in out and "## Storage\n\n" in out
+    for live in ("](https", "![[", "<img", "{{", "%%", "$"):
+        assert live not in out, live
+    assert neutralize_synthesized_prose(out) == out
+
+
+def test_synthesized_prose_escapes_code_fence_openers() -> None:
+    """Security review 2026-10-25-1, Q37: no fence a vault plugin could run survives."""
+    from particles.render.markdown import neutralize_synthesized_prose
+
+    prose = "Text `inline` code.\n\n```dataviewjs\ndv.x()\n```\n\n> ~~~~js\n> y\n> ~~~~\n"
+    out = neutralize_synthesized_prose(prose)
+    assert "```" not in out and "~~~" not in out
+    assert "`inline`" in out
+    assert "&#96;&#96;&#96;dataviewjs" in out and "&#126;" * 4 + "js" in out
+    assert neutralize_synthesized_prose(out) == out

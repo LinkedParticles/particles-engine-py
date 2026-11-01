@@ -1279,6 +1279,68 @@ async def test_extract_snapshot_interrupt_resets_in_progress(cli_db: Path, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_an_interrupted_named_store_extraction_releases_its_claim_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review 2026-10-25-2, R12: the claim goes back in the store it was taken in.
+
+    ``_release_claim`` opened ``session_scope()`` with no store, so an
+    interrupted extraction in a named store reset nothing there (and, given the
+    same snapshot id, would have reset the default store's row). The default
+    store here is the suite's empty ``:memory:`` database.
+    """
+    import asyncio
+
+    import particles._orm_modules  # noqa: F401
+    from particles.config import reset_config
+    from particles.core.schema import ExtractionStatus
+    from particles.corpus.deposit import deposit_file
+    from particles.corpus.store import SnapshotRow
+    from particles.db import Base, get_engine, session_scope
+    from particles.ingest.pipeline import extract_snapshot
+
+    pinned = tmp_path / "config.yaml"
+    pinned.write_text(f"storage:\n  stores:\n    memory: sqlite+aiosqlite:///{tmp_path / 'm.db'}\n")
+    monkeypatch.setenv("PARTICLES_CONFIG", str(pinned))
+    monkeypatch.setenv("PARTICLES_BLOB_DIR", str(tmp_path / "blobs"))
+    reset_config()
+    async with get_engine("memory").begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    doc = tmp_path / "interrupt.txt"
+    doc.write_text("Some extractable claim about something.")
+    async with session_scope("memory") as setup_session:
+        entry_id, snapshot_id = await deposit_file(setup_session, doc, deposited_by="test")
+        await setup_session.commit()
+
+    class _CancellingExtractor:
+        EXTRACTOR_ID = "cancelling"
+        EXTRACTOR_VERSION = "0.0.0"
+        DEFAULT_TRUST_WEIGHT = 0.5
+        APPLICABILITY: list[Any] = []
+
+        def accepts(self, source_type: str) -> bool:  # noqa: ARG002
+            return True
+
+        async def extract(self, *args: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError()
+
+    try:
+        async with session_scope("memory") as session:
+            with pytest.raises(asyncio.CancelledError):
+                await extract_snapshot(
+                    session, entry_id, snapshot_id, extractor=_CancellingExtractor()
+                )
+        async with session_scope("memory") as verify_session:
+            snap = await verify_session.get(SnapshotRow, snapshot_id)
+            assert snap is not None
+            assert snap.extraction_status == ExtractionStatus.PENDING.value
+            assert snap.extraction_started_at is None
+    finally:
+        await get_engine("memory").dispose()
+
+
+@pytest.mark.asyncio
 async def test_api_failure_keeps_snapshot_pending(db_session: object, tmp_path: Path) -> None:
     """A transient Anthropic API failure must leave the snapshot PENDING.
 
@@ -2081,6 +2143,12 @@ class TestConflictWritePath:
         # Exactly one ACTIVE remains — the new winner.
         active = await get_particles_by_status(db_session, Status.ACTIVE)
         assert [p.id for p in active] == [written[0].id]
+        # The retirement is in the event log (security review 2026-10-24-2, P34).
+        from particles.store.event_store import OperatorEventType, list_events
+
+        [event] = await list_events(db_session, event_type=OperatorEventType.TRUST_SUPERSESSION)
+        assert event.payload["retired_id"] == seed_id
+        assert event.payload["winner_id"] == written[0].id
 
     async def test_superseded_by_existing_drops_new_with_audit_event(
         self, db_session: Any, tmp_path: Path
@@ -2214,6 +2282,36 @@ class TestConflictWritePath:
         assert (await get_particle(db_session, seed_id)).status == Status.ACTIVE
         active = await get_particles_by_status(db_session, Status.ACTIVE)
         assert [p.id for p in active] == [seed_id]
+
+    @pytest.mark.parametrize(
+        ("per_store", "enabled"),
+        [({"default": "multi"}, []), ({}, ["default"])],
+        ids=["per-store-entry", "write-enabled-store"],
+    )
+    async def test_extraction_keeps_the_target_stores_consensus_regime(
+        self, db_session: Any, tmp_path: Path, per_store: dict[str, str], enabled: list[str]
+    ) -> None:
+        """Security review 2026-10-26-1, P30: a consensus store stays consensus under extraction.
+
+        The global ``store_mode`` is ``single``; the store the session writes is
+        ``multi`` by its own entry or by being write-enabled, so the trust gap
+        never supersedes there.
+        """
+        from particles.config import get_config
+        from particles.core.status import Status
+        from particles.store.particle_store import get_particle
+
+        cfg = get_config()
+        assert cfg.reconciliation.store_mode == "single"
+        cfg.reconciliation.per_store = per_store
+        cfg.mcp.write.enabled_stores = enabled
+
+        written, seed_id, _ = await _drive_conflict(
+            db_session, tmp_path, has_signal=True, score_new=0.9, score_existing=0.1
+        )
+
+        assert len(written) == 1 and written[0].status == Status.INCONSISTENCY
+        assert (await get_particle(db_session, seed_id)).status == Status.ACTIVE
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,6 @@ strength of a ``stat`` call.
 from __future__ import annotations
 
 import hashlib
-import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config, resolve_store_adjacent_path
 from particles.core.schema import WarcRecordType
-from particles.corpus.deposit import blob_path
+from particles.corpus.deposit import blob_path, save_blob
 from particles.corpus.store import CorpusEntryRow, SnapshotRow
 
 # Read the candidate in chunks: a re-homed blob can be an arbitrarily large
@@ -281,9 +280,10 @@ def rehome_strays(report: FsckReport, *, dry_run: bool = False) -> RehomeOutcome
 
     Copy, never move: the source tree survives, so a wrong ``--search`` costs
     disk rather than data and a re-run finds the hashes present. Every stray
-    here was already digest-verified by :func:`audit_blobs`, and the copy is
-    re-verified at its destination — a truncated write must not be left
-    looking like a recovery.
+    here was already digest-verified by :func:`audit_blobs`, and the bytes are
+    hashed again as they are read and written through :func:`save_blob`, which
+    removes a failed write, so a truncated copy is never left looking like a
+    recovery.
 
     Args:
         report: The audit to act on.
@@ -300,15 +300,15 @@ def rehome_strays(report: FsckReport, *, dry_run: bool = False) -> RehomeOutcome
     copied: list[StrayBlob] = []
     failed: list[tuple[StrayBlob, str]] = []
     for stray in report.elsewhere:
-        destination = blob_path(stray.ref.content_hash)
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(stray.source, destination)
-            written = _digest_file(destination)
+            content = stray.source.read_bytes()
+            written = hashlib.sha256(content).hexdigest()
             if written != stray.ref.content_hash:
-                destination.unlink(missing_ok=True)
                 failed.append((stray, f"copy hashed to {written[:12]}…, expected match"))
                 continue
+            # Through the contained writer, so a symlink at the blob's place is
+            # refused rather than written through (security review 2026-10-25, Q4).
+            save_blob(content, stray.ref.content_hash)
         except OSError as exc:
             failed.append((stray, str(exc)))
             continue

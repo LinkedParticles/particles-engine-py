@@ -48,6 +48,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
+from tests._engine_client import BEARER, keyed_engine_client
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -95,12 +96,12 @@ def api_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, N
 
 
 @pytest.fixture
-def client(api_db: Path) -> TestClient:
+def client(api_db: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Constructing without the context-manager form skips FastAPI startup
-    # events; we don't want create_tables() (alembic) to run.
-    # client=("127.0.0.1", …) presents a loopback peer so the dev-key
-    # non-loopback gate treats these in-process calls as local.
-    return TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 50000))
+    # events; we don't want create_tables() (alembic) to run. The engine has a
+    # real key and the client sends it: a keyless engine serves reads only,
+    # and these tests write.
+    return keyed_engine_client(monkeypatch)
 
 
 _OPERATOR_KEY = "test-operator-key"
@@ -779,6 +780,9 @@ class TestCorpus:
         assert resp.status_code == 200
         assert resp.content == content
         assert resp.headers["X-Snapshot-Id"] == snap_id
+        # Security review 2026-10-24-2, N7: a depositor's bytes are never
+        # sniffed into active content on the origin that holds the bearer.
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
         # Entry selector resolves to the same (only) snapshot's blob.
         resp2 = client.get(f"/corpus/blob/{entry_id}")
         assert resp2.status_code == 200
@@ -794,6 +798,32 @@ class TestCorpus:
         resp = client.get(f"/corpus/blob/{snap_id}")
         assert resp.status_code == 404
         assert "missing" in resp.json()["detail"].lower()
+
+    def test_blob_route_never_serves_a_planted_host_file(
+        self, client: TestClient, tmp_path: Path
+    ) -> None:
+        """A symlink at a blob's place is a missing blob, not a host file (review Q4)."""
+        from particles.corpus.deposit import blob_path
+        from particles.corpus.store import SnapshotRow
+        from particles.db import session_scope
+
+        _, snap_id = _run_async(_add_corpus_entry())
+
+        async def _hash() -> str:
+            async with session_scope() as session:
+                row = await session.get(SnapshotRow, snap_id)
+                assert row is not None
+                return row.content_hash
+
+        digest = _run_async(_hash())
+        host_file = tmp_path / "host-secret.txt"
+        host_file.write_bytes(b"host secret")
+        place = blob_path(digest)
+        place.parent.mkdir(parents=True, exist_ok=True)
+        place.symlink_to(host_file)
+        resp = client.get(f"/corpus/blob/{snap_id}")
+        assert resp.status_code == 404
+        assert b"host secret" not in resp.content
 
     def test_deposit_file_twice_reports_unchanged(self, client: TestClient) -> None:
         """The second upload of the same bytes writes nothing and says so."""
@@ -908,6 +938,9 @@ class TestDepositTextLocalUriRefusal:
     ) -> None:
         """The audited scenario: a real key, a write bearer and a non-loopback peer."""
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().api, "bind_host", "0.0.0.0")
         remote = TestClient(app, client=("203.0.113.7", 5000))
         resp = remote.post(
             "/corpus/deposit/text",
@@ -1301,6 +1334,9 @@ class TestDevKeyLoopbackGate:
         self, api_db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PARTICLES_API_KEY", "prod-secret")
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().api, "bind_host", "0.0.0.0")
         remote = TestClient(app, client=("203.0.113.7", 5000))
         assert remote.get("/health").status_code == 200
 
@@ -1437,7 +1473,8 @@ class TestSubjects:
         assert resp.status_code == 200
         assert resp.json() == []
 
-    def test_create_then_get(self, client: TestClient) -> None:
+    def test_create_then_get(self, client: TestClient, operator_key: None) -> None:
+        # Aliases steer resolution, so they need the operator's key (P7).
         create_resp = client.post(
             "/subjects",
             json={"canonical_name": "Marie Curie", "aliases": ["Skłodowska"]},
@@ -2614,6 +2651,137 @@ class TestGraph:
         assert resp.status_code == 404
         assert "unknown manifest" in resp.text
 
+
+class TestGraphProjectionManifest:
+    """Security review 2026-10-24-2, P1 (and K5's /graph half): GET /graph's
+    projection scope reads no file on the engine host outside graph.manifest_root,
+    and its answer says nothing about the files it refused."""
+
+    _SENTINEL = "SENTINEL-0123abcd"
+
+    def _get(self, client: TestClient, manifest: str) -> Any:
+        return client.get(
+            "/graph", params={"scope": "projection", "manifest": manifest, "section": "x"}
+        )
+
+    def _plant(self, tmp_path: Path) -> Path:
+        # A YAML mapping shaped like a CLI credential file on the engine host.
+        target = tmp_path / "hosts.yml"
+        target.write_text(f"oauth_token: {self._SENTINEL}\n")
+        return target
+
+    def _root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        from particles.config import get_config
+
+        root = tmp_path / "manifests"
+        root.mkdir()
+        (root / "m.yaml").write_text(
+            "name: t\nsections:\n  - title: T\n    region: t\n    tags: [none-such]\n"
+        )
+        monkeypatch.setattr(get_config().graph, "manifest_root", str(root))
+        return root
+
+    def test_no_root_refuses_every_path_alike(self, client: TestClient, tmp_path: Path) -> None:
+        notes = tmp_path / "notes.txt"
+        notes.write_text("just text\n")
+        responses = [
+            self._get(client, str(path))
+            for path in (tmp_path / "absent.yml", notes, tmp_path, self._plant(tmp_path))
+        ]
+        assert {r.status_code for r in responses} == {404}
+        assert len({r.json()["detail"] for r in responses}) == 1
+        assert all(self._SENTINEL not in r.text for r in responses)
+
+    def test_a_root_reads_only_under_itself(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._root(tmp_path, monkeypatch)
+        planted = self._plant(tmp_path)
+        for name in (str(planted), "../hosts.yml", "absent.yml", "."):
+            resp = self._get(client, name)
+            assert resp.status_code == 404, (name, resp.text)
+            assert resp.json()["detail"] == f"unknown manifest: {name!r}"
+
+    def test_an_invalid_manifest_under_the_root_echoes_nothing(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = self._root(tmp_path, monkeypatch)
+        (root / "creds.json").write_text(
+            f'{{"name": "ok", "sections": 3, "token": "{self._SENTINEL}"}}'
+        )
+        resp = self._get(client, "creds.json")
+        # The same answer as a missing name (security review 2026-10-25, Q43).
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "unknown manifest: 'creds.json'"
+        assert self._SENTINEL not in resp.text
+
+    def test_a_root_that_becomes_broad_after_load_reads_nothing(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review 2026-10-25-2, R34: the root is judged again on every read.
+
+        A symlinked root is judged by its target when the config loads; repointed
+        at the home directory afterwards, it must admit no manifest there.
+        """
+        from particles.config import get_config
+
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "m.yaml").write_text(
+            "name: t\nsections:\n  - title: T\n    region: t\n    tags: [none-such]\n"
+        )
+        monkeypatch.setenv("HOME", str(home))
+        real = tmp_path / "manifests"
+        real.mkdir()
+        (real / "m.yaml").write_text((home / "m.yaml").read_text())
+        link = tmp_path / "root-link"
+        link.symlink_to(real)
+        monkeypatch.setattr(get_config().graph, "manifest_root", str(link))
+        params = {"scope": "projection", "manifest": "m.yaml", "section": "t"}
+        control = client.get("/graph", params=params)
+        assert control.status_code == 200, control.text  # the real root is read
+        link.unlink()
+        link.symlink_to(home)
+        resp = client.get("/graph", params=params)
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "unknown manifest: 'm.yaml'"
+
+    def test_a_missing_and_an_invalid_manifest_answer_alike(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review 2026-10-25, Q43: the status does not say which names exist."""
+        root = self._root(tmp_path, monkeypatch)
+        (root / "exists.txt").write_text("not a manifest: [\n")
+        present = self._get(client, "exists.txt")
+        absent = self._get(client, "absent.txt")
+        assert present.status_code == absent.status_code == 404
+        assert present.json()["detail"] == "unknown manifest: 'exists.txt'"
+        assert absent.json()["detail"] == "unknown manifest: 'absent.txt'"
+
+    def test_a_name_under_the_root_renders(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._root(tmp_path, monkeypatch)
+        resp = client.get(
+            "/graph", params={"scope": "projection", "manifest": "m.yaml", "section": "t"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["scope_ref"] == "m.yaml#t"
+
+    def test_a_remote_bearer_gets_no_host_file_either(
+        self, api_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PARTICLES_API_KEY", "real-secret")
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().api, "bind_host", "0.0.0.0")
+        remote = TestClient(app, base_url="http://engine.example:8000", client=("10.0.0.7", 5000))
+        remote.headers["Authorization"] = "Bearer real-secret"
+        self._root(tmp_path, monkeypatch)
+        resp = self._get(remote, str(self._plant(tmp_path)))
+        assert resp.status_code == 404
+        assert self._SENTINEL not in resp.text
+
     def test_unknown_store_is_404(self, client: TestClient) -> None:
         resp = client.get("/graph", params={"scope": "subject", "subject_id": "s", "store": "nope"})
         assert resp.status_code == 404
@@ -2722,6 +2890,76 @@ class TestRateLimit:
         self._set_rate(monkeypatch, 1)
         assert client.post("/reindex", json={"include_failed": False}).status_code == 200
         assert client.post(path, json=body).status_code == 429
+
+    def test_operator_supersede_shares_the_budget(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Security review 2026-10-24-2, N10: the operator supersede runs the same
+        # ladder as the agent route, with writes enabled so the store gate passes.
+        from particles.config import get_config
+        from particles.db import DEFAULT_STORE
+
+        monkeypatch.setenv("PARTICLES_API_KEY", "real-secret")
+        self._set_rate(monkeypatch, 1)
+        get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
+        bearer = {"Authorization": "Bearer real-secret"}
+        body = {
+            "content": "x",
+            "subject_names": ["x"],
+            "confidence": 0.5,
+            "reason": "r",
+            "source_excerpt": "x",
+        }
+        first = client.post("/particles/p-missing/supersede", json=body, headers=bearer)
+        assert first.status_code not in (403, 429), first.text
+        second = client.post("/particles/p-missing/supersede", json=body, headers=bearer)
+        assert second.status_code == 429, second.text
+
+    def test_every_loopback_address_shares_one_bucket(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Security review 2026-10-24-2, P8: a local process can bind any 127/8
+        # address, so each one being its own bucket was a fresh allowance.
+        self._set_rate(monkeypatch, 1)
+        assert client.post("/reindex", json={"include_failed": False}).status_code == 200
+        other = TestClient(
+            app, base_url="http://127.0.0.1:8000", client=("127.0.0.2", 50000), headers=BEARER
+        )
+        assert other.post("/reindex", json={"include_failed": False}).status_code == 429
+
+    @pytest.mark.parametrize(
+        ("proxy_headers", "forwarded"),
+        [
+            # A raw uvicorn launch: its default trusts X-Forwarded-For from
+            # loopback, so a loopback name is all a caller can claim, and that
+            # is the shared bucket.
+            (True, ["127.0.0.2", "127.0.0.3"]),
+            # `engine serve`: uvicorn reads no proxy header at all.
+            (False, ["10.9.9.1", "10.9.9.2"]),
+        ],
+    )
+    def test_forwarded_for_from_loopback_mints_no_bucket(
+        self,
+        api_db: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        proxy_headers: bool,
+        forwarded: list[str],
+    ) -> None:
+        from uvicorn.config import Config
+
+        self._set_rate(monkeypatch, 1)
+        config = Config(app, host="127.0.0.1", port=8000, proxy_headers=proxy_headers)
+        config.load()
+        served = TestClient(
+            config.loaded_app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 5)
+        )
+        # A dry run: this engine is keyless, so a real reindex is a refused write,
+        # while the dry run still draws on the rate limit.
+        body = {"include_failed": False, "dry_run": True}
+        first = served.post("/reindex", json=body, headers={"X-Forwarded-For": forwarded[0]})
+        assert first.status_code == 200, first.text
+        second = served.post("/reindex", json=body, headers={"X-Forwarded-For": forwarded[1]})
+        assert second.status_code == 429
 
     def test_semantic_card_lookup_shares_the_budget(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

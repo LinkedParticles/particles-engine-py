@@ -97,8 +97,14 @@ That one command:
    registration also pins `DATABASE_URL` to the installed store; without it
    the server would open `./particles.db` in whatever directory a session
    starts in. A registration pinned to the same config gains that pin on a
-   re-run, and a server started with a config pin refuses a store in its
-   working directory.
+   re-run unless it already carries a `DATABASE_URL`, which is kept as it is.
+   A server started with a config pin refuses a store its config resolves
+   against its working directory; a `DATABASE_URL` in its environment is used
+   as given, so write one absolute. The registration also pins
+   `PARTICLES_ENGINE_BASE_URL` empty. The registration carries these pins
+   only since `1.221.7`, and a re-run from an earlier release could remove it.
+   If yours is gone, run
+   `particles init claude-code` again.
 3. **Provisions the state directory** `~/.particles/claude-code/` (the hook
    log, the projection manifest `memory.yaml`, and under
    `projects/<project>/` each project's render snapshot, one-deep
@@ -347,9 +353,10 @@ those agree except for a session that moved between checkouts, where the
 hooks fall back to the transcript directory's name. `particles hook doctor`
 lists such sessions, and flags this directory when the two keys differ.
 
-A project's key is its path with every punctuation character turned into a
-dash, the name Claude Code gives its memory directory, so two repositories
-whose paths differ only in punctuation (`/src/a-b` and `/src/a/b`) share one
+A project's key is its path with every character other than an ASCII letter
+or digit turned into a dash, the name Claude Code gives its memory directory,
+so two repositories whose paths differ only in such characters (punctuation,
+spaces, accented or non-Latin letters: `/src/a-b` and `/src/a/b`) share one
 key and see each other's beliefs. Claude Code already gives them one memory
 directory, so Particles keeps the key and says so instead: each session end
 records the repository it came from, a session that finds its key already
@@ -373,7 +380,9 @@ refuses such a link; an operator can still make it with `particles links add`.
 Every server shares one agent identity, so a bound server also changes only
 beliefs in view for its project: retracting, superseding, tagging, untagging or
 linking a belief another project sees is refused, and a server bound to that
-project, or the operator, can make the change. Project scope stays a relevance
+project, or the operator, can make the change. An HTTP agent key minted under
+`mcp:claude-code` shares that identity, and an unbound one names its own
+project ([SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#deployment-posture-authentication-and-the-read-surface)). Project scope stays a relevance
 default rather than access control; the refusal keeps one project's session
 from rewriting another project's memory by accident.
 Leave the flag off and the server behaves exactly as before.
@@ -456,8 +465,10 @@ harvested. Every claim of that disagreement carries the same id, and
 `particle_show <id>` names both sides, their notes and the reason. Correcting
 the wrong note clears the flag on the next run.
 Two budgets bound the injection: `mcp.recall.digest_max_beliefs` (default 200)
-and `claude_code.digest_max_bytes` (default 24 000, truncated on a line
-boundary with a disclosed footer).
+and `claude_code.digest_max_bytes` (default 9 000, truncated on a line
+boundary with a disclosed footer). The hook never injects more than 9 500
+bytes, whatever the setting: Claude Code passes the model only a short
+preview of hook context over 10 000 characters.
 
 The push is deliberately small because rules and facts want different
 treatment. A *rule* ("commit, push, and deploy are separate go-aheads") wants
@@ -475,11 +486,9 @@ material. This is *harvest, don't ask*; the agent took no action to be remembere
 - **The session transcript, distilled, never raw.** A deterministic, LLM-free
   pass keeps user/assistant turns verbatim, elides each tool call to one line
   (`[tool: Bash — git status]`), and **drops tool results** (where payloads
-  and secrets concentrate). A redaction pass then masks common credential
-  shapes (`sk-…` keys, AWS access key IDs, GitHub, Slack and Google tokens,
-  JSON Web Tokens, `Bearer` headers, PEM blocks, and the value of a
-  secret-named assignment such as `password=`); memory files and rule files
-  get the same pass. The
+  and secrets concentrate). A best-effort redaction pass then masks common
+  credential shapes; memory files and rule files get the same pass.
+  [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#the-claude-code-harness-writes-your-sessions-into-the-store-and-the-store-into-your-sessions) states its limits. The
   result lands as **one corpus entry per session**
   (`claude-code://session/<id>`, `CONVERSATION`, `APPEND_ONLY`); a grown
   transcript appends a snapshot, and extraction reads only the turns it adds,
@@ -499,6 +508,20 @@ material. This is *harvest, don't ask*; the agent took no action to be remembere
   deposits carry the repository's `project:` tag. The hook works this out
   from the session's launch directory by reading the worktree's `.git` file;
   it never runs `git`.
+- **Deleted memory files.** When a memory file you or the agent deleted was
+  harvested before, the hook records that it is gone, and its beliefs retire
+  at the next extraction pass, with no model call. A belief another memory
+  file still states is kept, so merging two files into one retires only what
+  the surviving file dropped. Two kinds of deletion are held back for you to
+  confirm: the first deletion the hook ever sees in a directory, and a
+  deletion of more than a quarter of a directory's files at once (and at
+  least five; `claude_code.harvest.max_absent_fraction`). While one is held
+  back, the next session's digest ends with a line naming it, and `particles
+  hook doctor` reports it. Run `particles memory absences` to see the files
+  and the beliefs that would retire, then `particles memory absences
+  --record` to confirm. A directory that could not be read in full records
+  nothing. Against a remote engine nothing is recorded yet. Set
+  `claude_code.harvest.record_absence: false` to turn the hook's half off.
 - **Catch-up sweep.** SessionEnd doesn't fire on a crash or SIGKILL, but the
   transcript persists on disk, so after handling the current session the hook
   re-checks up to `claude_code.harvest.catchup_limit` (default 5) recent
@@ -794,7 +817,12 @@ What to know before running it:
   `*.jsonl` transcripts newest-first, capped at
   `audit.transcript_max_entries` (default 20; `--max-entries` overrides).
   They are large, LLM-priced, and lower-signal than the distilled memory
-  files, so they never ride the first run silently.
+  files, so they never ride the first run silently. Each one is dated to
+  its session's first timestamp, as the SessionEnd hook dates it, so a
+  claim about what a session did carries that session's day. Transcripts
+  audited before 1.223.13 were dated to the day of the audit instead:
+  `particles memory redate --transcripts <dir>` repairs them from the same
+  folder.
 - **No key, no silent clean bill.** With no `ANTHROPIC_API_KEY`, a harvest
   audit refuses before touching the store (extraction is the audit's
   substance); a re-audit of a populated store still runs the structural

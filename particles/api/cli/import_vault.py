@@ -36,9 +36,10 @@ from particles.api.cli import app, run
 from particles.api.cli._estimate_text import duration_text, range_text
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._progress import progress_line
+from particles.api.cli.deposit import refuse_reserved_marks
 from particles.api.client import get_backend
 from particles.core.schema import Mutability, SourceType
-from particles.db import session_scope
+from particles.db import session_scope, write_transaction
 
 if TYPE_CHECKING:
     from particles.extraction.migration_preview import MigrationPreview
@@ -107,6 +108,7 @@ def _deposit_summary(total: int, unchanged: int, root: Path) -> str:
 async def _import_tree_remote(
     paths: list[Path],
     *,
+    root: Path,
     source_type: str,
     deposited_by: str,
     tags: list[str],
@@ -123,35 +125,55 @@ async def _import_tree_remote(
     source-type handling + content-hash dedup), reusing the proven per-file
     ``deposit`` upload path — **no new endpoint**.
 
+    Each file is read through :func:`~particles.corpus.local_read.read_local_file`
+    contained to the walked ``root``, and the bytes that read returned are what
+    is uploaded, so the remote arm reads what the local arm would: no symlink
+    (one swapped in after the walk included), no hard link, nothing over
+    ``local_files.max_bytes`` (security review 2026-10-25-1, Q25). A refused
+    file is skipped like any other per-file failure.
+
     Per-file failures are logged and **skipped** so one bad file does not abort
     the tree; re-running is idempotent (content-hash dedup), so a retry picks up
     only the failures. A lost connection to the engine itself is **not** swallowed
     — it propagates so ``run()`` reports it once instead of logging a skip per
-    remaining file.
+    remaining file — and neither is a 503 refusal, which a keyless engine gives
+    every upload and which no later file would get past.
     """
     import httpx
 
-    from particles.api.client.http import EngineUnreachableError
+    from particles.api.client.http import (
+        EngineRefusedError,
+        EngineUnreachableError,
+        HttpBackend,
+    )
+    from particles.config import get_config
+    from particles.corpus.local_read import read_local_file, within
 
     backend = get_backend()
+    if not isinstance(backend, HttpBackend):
+        raise TypeError("the remote import arm needs the HTTP backend")
+    max_bytes = get_config().local_files.max_bytes
+    allowed = within(root)
     results: list[tuple[str, str]] = []
     total = len(paths)
     for i, path in enumerate(paths, start=1):
         if verbose:
             progress_line(f"[{i}/{total}] depositing {path}")
         try:
+            content = read_local_file(path, max_bytes=max_bytes, allowed=allowed).content
             outcome = await backend.deposit_file(
                 path,
                 deposited_by=deposited_by,
                 source_type=source_type,
                 tags=tags,
                 content_date=None,
+                content=content,
             )
             results.append((outcome.entry_id, outcome.snapshot_id))
             if out_unchanged is not None:
                 out_unchanged.append(outcome.unchanged)
-        except (EngineUnreachableError, httpx.TransportError):
-            raise  # the engine is gone — stop rather than log a skip per file
+        except (EngineUnreachableError, EngineRefusedError, httpx.TransportError):
+            raise  # the engine is gone or refuses us — stop rather than skip per file
         except Exception as exc:  # noqa: BLE001 — per-file isolation is intentional
             typer.echo(f"  skipped {path}: {exc}", err=True)
             log.warning("import: skipped %s: %s", path, exc)
@@ -228,6 +250,7 @@ def import_vault_cmd(
     """
     configure_logging(verbose, debug)
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    refuse_reserved_marks(tag_list, deposited_by)
     unchanged: list[bool] = []
     if confirm_absent and keep_missing:
         typer.echo("Error: --confirm-absent and --keep-missing cannot be combined.", err=True)
@@ -247,6 +270,7 @@ def import_vault_cmd(
         results = run(
             _import_tree_remote(
                 iter_vault_files(vault_dir),
+                root=vault_dir,
                 source_type=SourceType.LOCAL_MARKDOWN,
                 deposited_by=deposited_by,
                 tags=tag_list,
@@ -468,6 +492,7 @@ def import_project_cmd(
     """
     configure_logging(verbose, debug)
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    refuse_reserved_marks(tag_list, deposited_by)
     ext_set = {e.strip() for e in ext.split(",") if e.strip()} if ext else None
     unchanged: list[bool] = []
     if get_backend().remote:
@@ -478,6 +503,7 @@ def import_project_cmd(
         results = run(
             _import_tree_remote(
                 iter_project_files(project_dir, ext_set),
+                root=project_dir,
                 source_type=SourceType.PYTHON_SOURCE,
                 deposited_by=deposited_by,
                 tags=tag_list,
@@ -561,6 +587,7 @@ def import_web_clipper_cmd(
     _refuse_in_remote_mode("web-clipper")
     configure_logging(verbose, debug)
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    refuse_reserved_marks(tag_list, deposited_by)
     results = run(_import_web_clipper(captures_dir, deposited_by, tag_list, verbose))
     typer.echo(f"Deposited {len(results)} capture(s) from {captures_dir}.")
 
@@ -574,7 +601,11 @@ async def _import_web_clipper(
     from particles.corpus.deposit import deposit_web_clipper
 
     progress = progress_line if verbose else None
-    async with session_scope() as session:
+    # The scan's transaction opens and commits under the store's writer lock,
+    # as the daemon's web-clipper tick runs it, so cooperating writers queue on
+    # the lock rather than on SQLite's busy timeout (security review
+    # 2026-10-30-1, AB61). The scan reads local files only.
+    async with session_scope() as session, write_transaction(session):
         results = await deposit_web_clipper(
             session,
             captures_dir,
@@ -582,7 +613,6 @@ async def _import_web_clipper(
             tags=tags,
             progress=progress,
         )
-        await session.commit()
     return results
 
 
@@ -684,6 +714,7 @@ def import_mcp_memory_cmd(
         return
     _refuse_in_remote_mode("mcp-memory")
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    refuse_reserved_marks(tag_list, deposited_by)
     entry_id, _snapshot_id = run(_import_mcp_memory(export_path, deposited_by, tag_list))
     typer.echo(f"Deposited {export_path} as corpus entry {entry_id}.")
     # Said here, at the door, rather than only as a quality note on a later

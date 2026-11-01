@@ -29,6 +29,7 @@ from particles.exporters.obsidian.format import (
     _to_obsidian_block_refs,
 )
 from particles.render.article_synthesis import render_article, split_rendered_article
+from particles.render.escape import md_text
 from particles.render.markdown import SubjectNaming, narrative_as_subject
 
 if TYPE_CHECKING:
@@ -44,7 +45,14 @@ __all__ = ["narrative_as_subject", "render_narrative_note"]
 
 def _build_narrative_note(*, label: str, prose: str, references: str) -> str:
     """Assemble a standalone narrative note: frontmatter + H1 + prose + refs."""
-    parts = ["---", "tags:", "  - particles/narrative", "---", "", f"# {label}", "", prose.rstrip()]
+    # The label is claim text (model-written or imported): one inert line, so
+    # it cannot leave the H1 (security review 2026-10-24-2, P32).
+    parts = [
+        *("---", "tags:", "  - particles/narrative", "---", ""),
+        f"# {md_text(label)}",
+        "",
+        prose.rstrip(),
+    ]
     if references.strip():
         parts += ["", references.rstrip()]
     return "\n".join(parts) + "\n"
@@ -99,7 +107,9 @@ async def render_narrative_note(
         naming=naming,
     )
     note = _build_narrative_note(
-        label=narrative.content or "Narrative", prose=prose, references=references
+        label=narrative.content or "Narrative",
+        prose=prose,
+        references=references,
     )
     note = _annotate_obsidian_frontmatter(
         note,

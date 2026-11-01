@@ -1665,7 +1665,7 @@ class TestUtilityBudget:
             assert not held["now"], "the matcher batch ran under the write lock"
             return [self._reply(r.prompt) for r in requests]
 
-        monkeypatch.setattr(consolidation_mod, "write_lock", fake_write_lock)
+        monkeypatch.setattr("particles.db.write_lock", fake_write_lock)
         monkeypatch.setattr("particles.llm.complete_many", fake_complete_many)
         await consolidation_mod._pass_utility(
             db_session, ConsolidationReport(), watermark=None, behavioural=True
@@ -2258,6 +2258,37 @@ class TestPassExtractPooled:
             yield AsyncMock()
 
         monkeypatch.setattr(db_mod, "session_scope", fake_scope)
+
+    @pytest.mark.asyncio
+    async def test_a_named_store_is_extracted_in_that_store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review 2026-10-25-2, R12: the pooled pass opens the run's own store.
+
+        It opened ``session_scope()`` with no store, so ``memory consolidate
+        --store NAME`` extracted the named store's pending snapshots in the
+        default store. The audit's proof (test_s3_store_routing.py).
+        """
+        from contextlib import asynccontextmanager
+
+        import particles.db as db_mod
+        from particles.operations import extract as extract_mod
+
+        opened: list[str] = []
+
+        @asynccontextmanager
+        async def recording_scope(store: str = "default", **kwargs: Any) -> Any:
+            opened.append(store)
+            yield AsyncMock()
+
+        async def fake_extract(*args: Any, **kwargs: Any) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(db_mod, "session_scope", recording_scope)
+        monkeypatch.setattr(extract_mod, "extract_snapshot", fake_extract)
+        report = ConsolidationReport(store="memory")
+        await consolidation_mod._pass_extract_pooled([("entry-1", "snap-1")], report)
+        assert opened == ["memory"]
 
     @pytest.mark.asyncio
     async def test_one_snapshot_per_entry_and_pool_threading(

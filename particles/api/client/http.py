@@ -20,6 +20,7 @@ degradation whose extras the local backend still populates.
 
 from __future__ import annotations
 
+import io
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -68,7 +69,7 @@ from particles.core.schema import (
 )
 from particles.http import egress_client
 from particles.secrets import get_engine_token_optional
-from particles.url_safety import is_cleartext_remote, is_network_uri
+from particles.url_safety import is_cleartext_remote, is_network_uri, url_without_userinfo
 
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
@@ -98,7 +99,7 @@ def _warn_plaintext_token_once(base_url: str) -> None:
         "The token is exposed to anyone on the network path. Use https://, or "
         "tunnel http:// over loopback (Tailscale / SSH) so the token only "
         "traverses an encrypted hop.",
-        base_url,
+        url_without_userinfo(base_url),
     )
 
 
@@ -119,7 +120,8 @@ def _check_plaintext_token(base_url: str, *, has_token: bool, allow: bool) -> No
         _warn_plaintext_token_once(base_url)
         return
     raise PlaintextTokenRefused(
-        f"Refusing to send the engine token to {base_url} over unencrypted http://. "
+        f"Refusing to send the engine token to {url_without_userinfo(base_url)} over "
+        "unencrypted http://. "
         "Use https://, or reach the engine through a loopback hop (an SSH or "
         "Tailscale forward to http://127.0.0.1). To send it anyway on a network "
         "you trust end to end, set engine.allow_plaintext_token: true."
@@ -148,6 +150,24 @@ class PlaintextTokenRefused(EngineHttpError):
     :class:`EngineHttpError` so the CLI's one ``except EngineHttpError`` prints
     it as an operator-facing error rather than a traceback.
     """
+
+
+class EngineRefusedError(EngineHttpError):
+    """The engine answered 503: it refuses this caller outright, whatever is sent.
+
+    A keyless engine refuses every write, and a keyless engine
+    refuses every request from a non-loopback caller. Neither is
+    about one item, so a batch that meets it stops instead of skipping each
+    remaining item with the same message.
+    """
+
+
+def _http_error(response: httpx.Response, path: str) -> EngineHttpError:
+    """The error for a non-2xx engine response, typed for a 503 refusal."""
+    message = f"{response.status_code} from {path}: {_detail(response)}"
+    if response.status_code == 503:
+        return EngineRefusedError(message)
+    return EngineHttpError(message)
 
 
 class EngineUnreachableError(EngineHttpError):
@@ -229,7 +249,8 @@ class HttpBackend:
         except httpx.TransportError as exc:
             base_url = get_config().engine.base_url
             raise EngineUnreachableError(
-                f"Could not reach the Particles engine at {base_url}: {exc}. "
+                f"Could not reach the Particles engine at {url_without_userinfo(base_url or '')}: "
+                f"{exc}. "
                 f"Check that the engine is running and reachable — e.g. your SSH "
                 f"tunnel is open and the engine is serving — or unset "
                 f"engine.base_url to use the local store."
@@ -240,19 +261,19 @@ class HttpBackend:
     ) -> Any:
         resp = await self._request("POST", path, json=payload, params=params)
         if resp.status_code >= 400:
-            raise EngineHttpError(f"{resp.status_code} from {path}: {_detail(resp)}")
+            raise _http_error(resp, path)
         return resp.json()
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         resp = await self._request("GET", path, params=params)
         if resp.status_code >= 400:
-            raise EngineHttpError(f"{resp.status_code} from {path}: {_detail(resp)}")
+            raise _http_error(resp, path)
         return resp.json()
 
     async def _delete(self, path: str, payload: dict[str, Any] | None = None) -> Any:
         resp = await self._request("DELETE", path, json=payload)
         if resp.status_code >= 400:
-            raise EngineHttpError(f"{resp.status_code} from {path}: {_detail(resp)}")
+            raise _http_error(resp, path)
         return resp.json()
 
     async def _get_optional(self, path: str) -> Any | None:
@@ -266,7 +287,7 @@ class HttpBackend:
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:
-            raise EngineHttpError(f"{resp.status_code} from {path}: {_detail(resp)}")
+            raise _http_error(resp, path)
         return resp.json()
 
     async def deposit_url(
@@ -306,7 +327,17 @@ class HttpBackend:
         content_date: datetime | None,
         mutability: str | None = None,
         fetch_policy: str | None = None,
+        content: bytes | None = None,
     ) -> DepositOutcome:
+        """Upload one file to ``POST /corpus/deposit/file``.
+
+        ``content``, when given, is uploaded under ``path``'s name and the path
+        is not opened: the caller has already read the file through
+        :func:`~particles.corpus.local_read.read_local_file` with its own
+        containment rule, so a name swapped for a symlink or a hard link after
+        that read cannot change what is sent (security review 2026-10-25-1,
+        Q25). Without it the operator-named path is opened and uploaded.
+        """
         # a remote deposit uploads the *bytes*; the engine writes them
         # to a temp path and records that as the URI-R. There is no durable local
         # file for the refresh ladder to re-stat, so opting one in would record a
@@ -322,7 +353,7 @@ class HttpBackend:
             data["source_type"] = source_type
         if content_date is not None:
             data["content_date"] = content_date.isoformat()
-        with path.open("rb") as fh:
+        with io.BytesIO(content) if content is not None else path.open("rb") as fh:
             resp = await self._request(
                 "POST",
                 "/corpus/deposit/file",
@@ -330,7 +361,7 @@ class HttpBackend:
                 data=data,
             )
         if resp.status_code >= 400:
-            raise EngineHttpError(f"{resp.status_code} from /corpus/deposit/file: {_detail(resp)}")
+            raise _http_error(resp, "/corpus/deposit/file")
         body = resp.json()
         return DepositOutcome(
             entry_id=body["entry_id"],
@@ -729,6 +760,8 @@ class HttpBackend:
         entry: str | None,
         event_type: str | None,
         limit: int,
+        principal: str | None = None,
+        key: str | None = None,
     ) -> list[OperatorEvent]:
         from particles.store.event_store import OperatorEvent
 
@@ -741,8 +774,17 @@ class HttpBackend:
             params["entry"] = entry
         if event_type is not None:
             params["type"] = event_type
+        if principal is not None:
+            params["principal"] = principal
+        if key is not None:
+            params["key"] = key
         body = await self._get("/events", params=params)
         return [OperatorEvent.model_validate(e) for e in body]
+
+    async def whoami(self) -> dict[str, Any]:
+        """The engine's view of this client's key (``GET /auth/whoami``)."""
+        body = await self._get("/auth/whoami")
+        return dict(body)
 
     async def event_show(self, event_id: str) -> OperatorEvent | None:
         from particles.store.event_store import OperatorEvent
@@ -1082,28 +1124,28 @@ class HttpBackend:
         source_type: str | None = None,
         project_key: str | None = None,
     ) -> tuple[str, str]:
-        # The agent-attributed deposit reuses the generic corpus deposit endpoint,
-        # carrying the asserter identity as deposited_by + author_id so
-        # the CONVERSATION entry is attributed exactly as the local path attributes
-        # it. The engine governs write-enablement at the belief layer; a deposit is
-        # benign archival, gated by the local offering allowlist + bearer auth.
-        # An explicit deposited_by is the operator path and attributes
-        # to that principal instead — same endpoint, different identity.
-        identity = deposited_by or get_config().mcp.write.asserter_identity
         if deposited_by is None:
-            # Agent path: the project key is the bound server's, never the
-            # caller's — the same rule the local path applies.
-            from particles.operations.agent_write import _scope_tags
-
-            tags = _scope_tags(tags, project_key)
+            # Agent path: the engine's own agent deposit route stamps the
+            # identity and the scope tags and deduplicates only onto the agent's
+            # own same-scope entries, exactly as the local path does. The generic
+            # corpus deposit matched any principal's entry and rescoped it
+            # (security review 2026-10-24-2, P28).
+            body = await self._post(
+                "/particles/deposit",
+                {"text": text, "tags": tags, "project_key": project_key},
+                params={"store": store},
+            )
+            return body["entry_id"], body["snapshot_id"]
+        # An explicit deposited_by is the operator path, which
+        # attributes to that principal on both axes through the corpus endpoint.
         body = await self._post(
             "/corpus/deposit/text",
             {
                 "text": text,
                 "source_type": source_type or "CONVERSATION",
-                "deposited_by": identity,
+                "deposited_by": deposited_by,
                 "tags": tags or [],
-                "author_id": identity,
+                "author_id": deposited_by,
             },
             params={"store": store},
         )

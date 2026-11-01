@@ -126,13 +126,26 @@ api:  # [engine]
   # disable the in-app check (e.g. when a reverse proxy enforces a smaller cap).
   # Default 25 MiB; tune to your largest legitimate file deposit.
   max_request_body_bytes: 26214400
-  # Interface the API is bound to — MUST match uvicorn's --host (the ASGI app
-  # cannot read uvicorn's bind address itself). Fail-closed gate:
-  # when PARTICLES_API_KEY is unset (bearer auth disabled — the "dev-key"
-  # local-dev affordance) AND bind_host is not a loopback address
+  # Interface the API is bound to. `particles engine serve` sets it from the
+  # address it binds, and the gate reads a raw `uvicorn` launch's --host from
+  # its command line; a script that calls uvicorn.run, or `python -c`, gives
+  # the gate no bind to read, so there this value MUST match the real bind.
+  # Fail-closed gate: when the engine has no key (PARTICLES_API_KEY
+  # unset, empty or 'dev-key', and no live per-client key in api.keys_file)
+  # AND bind_host is not a loopback address
   # (127.0.0.0/8 / ::1 / localhost), the app refuses to start rather than
-  # serve unauthenticated traffic beyond loopback. To serve publicly, set
-  # PARTICLES_API_KEY to a real secret first. Default 127.0.0.1.
+  # serve unauthenticated traffic beyond loopback; a raw `uvicorn --uds`
+  # launch is refused the same way, since a UNIX socket carries no peer
+  # address. A launcher whose bind it cannot read (a script calling
+  # uvicorn.run) is logged on its first non-loopback request, not refused.
+  # To serve publicly, set PARTICLES_API_KEY or mint a per-client key first.
+  # Even on loopback, an engine with no key serves reads only: every route
+  # that changes the store answers 503, and a semantic report it
+  # serves records no model verdict in the store. Set PARTICLES_API_KEY (the
+  # operator's key) or mint per-client keys (`particles engine keys create`)
+  # to write over HTTP (the web app, the Obsidian plugin, the CLI or MCP
+  # server with engine.base_url set); the local CLI, hooks and MCP server
+  # write in-process and need none. Default 127.0.0.1.
   bind_host: "127.0.0.1"
   # Reverse-proxy IPs / CIDRs whose X-Forwarded-For the per-request loopback
   # gate may trust (mechanism ii). Behind a proxy the network
@@ -140,31 +153,45 @@ api:  # [engine]
   # loopback and the dev-key skip would wrongly apply to it. List your proxy's
   # address(es); the gate then uses the nearest untrusted X-Forwarded-For hop as
   # the real client. Default empty — X-Forwarded-For is ignored entirely (never
-  # trust a spoofable header unless you opt in). Example:
-  #   trusted_proxies: ["127.0.0.1", "10.0.0.0/8"]
+  # trust a spoofable header unless you opt in). An entry that is or contains a
+  # loopback range, or is broader than /8 (IPv4) or /32 (IPv6), is refused.
+  # SECURITY.md § Deployment posture says how a forwarded hop is read.
+  # Example:
+  #   trusted_proxies: ["10.0.0.0/8"]
   trusted_proxies: []
-  # In-app token-bucket rate limit (requests/minute, per real client host) on
-  # the LLM/embedding-driving endpoints — /query, /extract, /reindex, and the
-  # semantic /lint path (security review F6). Each drives a paid Anthropic
+  # In-app token-bucket rate limit (requests/minute, per key principal, else
+  # per real client host) on the LLM/embedding-driving endpoints, among them
+  # /query, /extract, /reindex, every deposit route (the agents'
+  # POST /particles/deposit and POST /corpus/deposit/{text,file,url}) and the
+  # semantic /lint path
+  # (security review F6). Each drives a paid Anthropic
   # completion and/or an embedding per request, so this blunts token-burning
-  # abuse as a second line of defense behind your reverse proxy + auth. Set to 0
+  # abuse as a second line of defense behind your reverse proxy + auth. For
+  # every request without an operator key (agent and reader keys included) it
+  # also counts model calls: the request's token pays for its first call and
+  # each further call spends another, so one request cannot run a model pass
+  # over the whole store; a refused call is named in the
+  # X-Particles-Model-Calls-Refused response header. An operator key
+  # (PARTICLES_API_KEY or a per-client operator key) is counted per request.
+  # Extraction a deposit queues runs later, outside this limit. Set to 0
   # to disable (e.g. when a proxy already rate-limits). Local CLI / MCP run
   # in-process and never hit this. The PARTICLES_API_RATE_LIMIT_PER_MINUTE env
   # var overrides it. Default 60.
   rate_limit_per_minute: 60
-  # Require the bearer token (PARTICLES_API_KEY) on READ routes too, not just
-  # writes (security review F2). The bearer gates the write verbs only; by
+  # Require a key (any role, a reader key included) on READ routes too, not
+  # just writes (security review F2). Keys gate the write verbs only; by
   # default the read surface (/particles, /corpus, /subjects, /quality,
   # /lint/report, /taxonomies, …) is unauthenticated, so a non-loopback bind
   # (engine serve 0.0.0.0:8000) exposes the full belief store. Set
-  # true to require the same bearer on every read route. Default false keeps
-  # the historical read posture. Independent of this flag, the three
-  # highest-value reads — /query (bills your ANTHROPIC_API_KEY), /events (the
-  # operator audit log) and /digest (the belief digest) — always require the
-  # bearer (the dev-key loopback skip keeps them open for local dev).
+  # true to require a key on every read route. Default false keeps the
+  # historical read posture. Independent of this flag, the three
+  # highest-value reads (/query, which bills your ANTHROPIC_API_KEY; /events,
+  # the operator audit log; /digest, the belief digest) always require a key
+  # once any key exists (a keyless engine serves them to loopback for local
+  # dev).
   require_auth_for_reads: false
   # Browser origins (scheme://host[:port]) whose cross-site requests the engine
-  # serves without a verified bearer. Every gated route refuses a request a web
+  # serves without a verified key. Every gated route refuses a request a web
   # page on another site sends (Sec-Fetch-Site cross-site/same-site, or an
   # Origin that is not the engine's own), so an open browser tab cannot deposit
   # into or spend through a loopback dev-key engine. The web UI at /app is
@@ -176,12 +203,40 @@ api:  # [engine]
   # (localhost, 127.0.0.0/8, ::1), which are always allowed. Checked on every
   # path, /health and /app included; this is what refuses a DNS-rebinding page,
   # which reaches the engine's address under its own hostname. Under the
-  # dev-key skip only loopback names and these entries are served. With a real
-  # PARTICLES_API_KEY and an empty list (the default) no Host is refused: set it
-  # on a non-loopback deployment whose reads are open, including the name your
-  # health probe sends. A "*." prefix matches any subdomain. Example:
+  # dev-key skip only loopback names and these entries are served. With a key
+  # and an empty list (the default), an engine bound to loopback still answers
+  # only the loopback names, so a keyed loopback engine behind a reverse proxy
+  # that forwards its public Host must list that name, as must one in front of a
+  # keyed engine on a UNIX socket; an engine bound and served wider refuses no
+  # Host. SECURITY.md § Deployment posture states the full rule. Set it on a non-loopback deployment whose reads are open,
+  # including the name your health probe sends. A "*." prefix matches any subdomain; a wildcard over a
+  # suffix other parties register under (*.com, *.co.uk, *.ts.net, *.nip.io)
+  # is rejected; that is a fixed list, not the full public-suffix list. Example:
   #   allowed_hosts: ["engine.example.org", "*.tailnet.example"]
   allowed_hosts: []
+  # The engine's per-client keys: each key names a principal and a
+  # role (reader, agent or operator), and the file holds only a SHA-256 digest
+  # of each secret. Manage it on the engine's host with `particles engine keys
+  # create | list | revoke`; no HTTP route writes it. The engine re-reads it on
+  # change, so a revocation applies to the next request. It must be owned by
+  # the engine's user and writable by no one else, or every per-client key
+  # answers 503 (PARTICLES_API_KEY keeps working); SECURITY.md § Deployment
+  # posture says what else makes it unusable, its directory included. Absent
+  # at startup means no per-client keys; once the engine has read a key,
+  # running with none (the file removed, or its last key revoked) takes a
+  # restart. The path must be absolute: a relative one would be read against the
+  # working directory, so it is refused as an unusable key file (the engine
+  # will not start and `keys create` writes nothing). `keys create` writes a
+  # new key to a 0600 file beside this one (--output PATH to choose it) and
+  # prints it only with --print-token. Override with PARTICLES_API_KEYS_FILE.
+  keys_file: "~/.particles/engine-keys.json"
+  # The one group whose setgid, group-writable directory may hold the key file:
+  # a Kubernetes fsGroup volume (the Helm chart sets it to its fsGroup). Unset,
+  # a group-writable key directory is refused, since nothing the engine can
+  # read tells such a volume from a host directory a host group shares. A group
+  # another local account holds is refused even when named, and on macOS every
+  # group is. Override with PARTICLES_API_KEYS_DIR_GROUP.
+  # keys_dir_group: 10001
 
 # Provenance of the artifact this process runs from — normally NOT set by hand.
 # The container image stamps it (deploy/Dockerfile takes --build-arg BUILD_DATE
@@ -220,13 +275,10 @@ engine:  # [engine]
 # "authorization=Bearer ...") rather than putting it here.
 #
 # TRUST BOUNDARY (exporter: otlp). Spans describe outbound work, so they carry
-# operational metadata about your corpus. httpx client spans record the request
-# URL as scheme://host/path — the query string is scrubbed (so subject-search
-# terms like the Wikidata ?search=<name> are NOT exported), but the host/path
-# still reveals which authorities you query. SQLAlchemy spans record the
-# parameterized SQL (placeholders only — no bound user/LLM values, no DSN
-# password). Even so, pointing `endpoint` at a THIRD-PARTY / SaaS collector
-# ships this telemetry off-box. Prefer a collector inside the same trust
+# operational metadata about your corpus: the hosts a client span names
+# reveal which authorities you query. SECURITY.md § Outbound connections
+# states what a span may carry. Pointing `endpoint` at a THIRD-PARTY / SaaS
+# collector ships this telemetry off-box. Prefer a collector inside the same trust
 # boundary as the SDK (a local Alloy/OTel Collector on the same host or
 # network); only forward to an external backend you trust with this metadata.
 observability:  # [engine]
@@ -240,7 +292,11 @@ observability:  # [engine]
   #                                      # using a non-local endpoint.
   # Exporter headers (PARTICLES_OTEL_EXPORTER_HEADERS) are refused over a
   # non-loopback http:// endpoint: no OTLP exporter is installed. Set true to
-  # send them anyway, with a warning, on a network you trust end to end.
+  # send them anyway, with a warning, on a network you trust end to end. Since
+  # 1.220.8 an exporter that carries headers follows no redirect, whatever
+  # exporter version is installed, so a collector's 3xx cannot send them to
+  # another host, and the refusal and the warning name the endpoint without
+  # any userinfo it carries.
   allow_plaintext_headers: false
   traces: true
   metrics: true
@@ -266,9 +322,13 @@ embeddings:  # [client]
 # Read-write MCP surface. Default-deny: with enabled_stores empty the
 # MCP server accepts no writes — only the read tools are exposed.
 mcp:  # [engine]
-  # Per server process: tool calls that can drive a paid model call (a query
-  # with a question, particle_assert / particle_supersede, and every write of
-  # the memory-server facade) allowed per minute, as one token bucket. 0 = off.
+  # Per store: tool calls that can drive a paid model call (a query with a
+  # question, particle_assert / particle_supersede, graph_view) allowed per
+  # minute, as one token bucket every MCP server process on the store shares
+  # (kept beside a file-backed store as <db>.mcp-rate; per process for a store
+  # with no file, or a server routed to engine.base_url). A memory-server facade write is charged one
+  # token per assertion it lists (each observation, relation or deleted entity),
+  # and a call listing more than the cap is refused. 0 = off.
   rate_limit_per_minute: 60
   write:
     # Allowlist of store handles writable over MCP. EMPTY = no MCP writes at all.
@@ -290,6 +350,9 @@ mcp:  # [engine]
     # COMPOUND_ASSERTION lint reads the same knobs. Set either to 0 to disable it.
     max_assertion_chars: 320
     max_assertion_sentences: 3
+    # Most subject names one belief write (assert or supersede) may name; each
+    # unknown name can cost a live authority lookup. 0 disables the bound.
+    max_subject_names: 16
   recall:
     # Session-start recall surface. The compiled memory digest is the
     # MCP resource `particles://digest/<store>` — the MEMORY.md analog, rendered
@@ -343,8 +406,11 @@ claude_code:  # [engine]
   hook_log_path: null
   # Byte cap on the digest injected at session start, truncated on a line
   # boundary with a disclosed footer. Complements mcp.recall.digest_max_beliefs
-  # (a belief line has no fixed width). 0 = no byte cap.
-  digest_max_bytes: 24000
+  # (a belief line has no fixed width). Claude Code shows the model only a
+  # 2,000-character preview of hook context over 10,000 characters, so the
+  # hook never uses more than 9,500 bytes (which is at most 9,500 characters),
+  # whatever this says. 0 = that ceiling.
+  digest_max_bytes: 9000
   # Internal per-hook deadline (seconds), far under Claude Code's own 600 s
   # hook timeout. On expiry the hook logs and exits 0 with no output.
   hook_deadline_seconds: 10.0
@@ -379,6 +445,16 @@ claude_code:  # [engine]
     # current session (covers SIGKILL / crashes / an unreachable store at a
     # prior session end). 0 disables the sweep.
     catchup_limit: 5
+    # Record an ABSENT record for each previously harvested memory file a
+    # completed walk of the memory directory no longer finds, so a deleted
+    # memory file's claims retire at the next extraction pass.
+    # Local store only. The first absence ever under a directory, and a mass
+    # absence (below), are refused and reported in the next session's digest;
+    # `particles memory absences --record` confirms them.
+    record_absence: true
+    # Above this fraction of a directory's previously harvested memory files
+    # (and at least five), the walk records no absence and reports it.
+    max_absent_fraction: 0.25
 
 # Agent-memory product surface — the MEMORY.md projection.
 # Namespace shared with the claude_code hook integration above:
@@ -543,6 +619,11 @@ llm:  # [client]
   # permission, or out-of-credits) before the semantic seam retries, so a dead
   # API is not hammered once per candidate. 0 disables the breaker.
   # unavailable_backoff_seconds: 60
+  #
+  # The Anthropic key is refused, before any request, when ANTHROPIC_BASE_URL
+  # names a non-loopback http:// host. Use https:// or a loopback forward; true
+  # sends it anyway, with a warning, on a network you trust end to end.
+  # anthropic_allow_plaintext_key: false
   #
   # Asynchronous batch completion. The nightly consolidation cycle
   # runs at 03:30 with nobody waiting, so its independent probes — the L-SEM-01
@@ -1744,9 +1825,10 @@ hackernews:  # [client]
 
 mastodon:  # [client]
   # Total cap on context items (ancestors + descendants) the importer
-  # keeps per thread. Ancestors are retained first (the reply chain UP
-  # is typically short); remaining budget goes to descendants. Deep
-  # threads beyond the cap are truncated and the extractor surfaces a
+  # keeps per thread, and the extractor reads. Ancestors are retained
+  # first; past the cap the thread's root and the nearest ancestors are
+  # kept. Remaining budget goes to descendants. Deep threads beyond the
+  # cap are truncated and the extractor surfaces a
   # MASTODON_REPLY_LIMIT_HIT quality note.
   max_replies: 200
   # Replies below this favourites_count are dropped from the LLM
@@ -1912,11 +1994,16 @@ inbox:  # [engine]
   # URL inbox for the iOS-Share-Sheet workflow (see docs/cli.md § Inbox).
   # An iOS Shortcut appends URLs to this file via iCloud Drive; the Mac
   # runs `particles inbox process` (or `inbox watch`) to deposit them.
-  # `~` is expanded. Leave commented out / null to disable.
+  # `~` is expanded; keep it absolute, since a relative path resolves against
+  # the directory the command runs in. Leave commented out / null to disable.
   # file_path: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault/_inbox.txt
   # Seconds between polls for `particles inbox watch`. The check is
   # cheap (mtime stat + file read on change) so default leans fresh.
   poll_interval_seconds: 30
+  # Largest inbox file a pass reads, in bytes. A larger file, or a path that
+  # is not a regular file (a FIFO, a device, a link), is refused rather than
+  # read, so it cannot stall the engine.
+  max_bytes: 1048576
 
 wiki:  # [engine]
   # Minimum ACTIVE particles a subject must have to be rendered as a standalone
@@ -2017,6 +2104,17 @@ graph:  # [engine]
   max_hops: 2
   # Retrieval-set size for --query scope.
   query_top_k: 25
+  # Directory GET /graph?scope=projection reads manifests from; the request's
+  # `manifest` is a relative name under it. Absolute names, `..`, symlinks and
+  # files outside it are refused with one fixed error, and so is a file that is
+  # not a valid manifest. Unset (the default), the HTTP route and the stdio MCP
+  # tool refuse the projection scope; only `export graph` reads the path it is
+  # given. The filesystem root, the home directory and their ancestors are
+  # refused as too broad.
+  # manifest_root: /srv/particles/manifests
+  manifest_root: null
+  # Largest manifest the HTTP projection scope reads, in bytes. Default 1 MiB.
+  manifest_max_bytes: 1048576
 
 source_passage:  # [engine]
   # Source-passage hydration: `particles particle source <id>` and
@@ -2151,7 +2249,8 @@ curation:  # [engine]
   # Projection manifests: paths to documentation-projection manifests
   # (operations.projection) whose selected particles get projection_blocking
   # leverage — a belief feeding a generated doc is worth tending first. Empty
-  # leaves the projection-blocking signal inert. Resolved relative to the CWD.
+  # leaves the projection-blocking signal inert. A relative path is resolved
+  # against this config file's directory, never the working directory.
   projection_manifests: []
   #   - docs/projection/readme.yaml
   # serve the queue from a persisted card collection (built nightly by
@@ -2535,7 +2634,8 @@ daemon:  # [engine]
   # becoming due a run starts.
   consolidation_tick_minutes: 60
   # Web-clipper watcher (intake): captures directory to poll. Leave
-  # unset to disable. `~` is expanded. The inbox watcher has no switch of its
+  # unset to disable. `~` is expanded; keep it absolute, since a relative path
+  # resolves against the daemon's working directory. The inbox watcher has no switch of its
   # own — it is active whenever `inbox.file_path` is set, and it reuses
   # `inbox.poll_interval_seconds`.
   # web_clipper_dir: ~/Obsidian/Clippings

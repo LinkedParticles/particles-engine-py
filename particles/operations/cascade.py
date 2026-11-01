@@ -27,6 +27,7 @@ from particles.core.cascade_gate import apply_cascade_cap, cascade_gate_passes
 from particles.core.conflict_review import (
     CASCADE_ACTOR,
     CLOSED_RECORD,
+    Demotion,
     cascade_pair,
     cascade_review_content,
     conflict_pair_ids,
@@ -43,8 +44,9 @@ from particles.core.schema import (
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
-from particles.core.status import Status, validate_transition
-from particles.operations._quarantine import apply_demotion, promote_quarantined
+from particles.core.status import Status, StatusReason, validate_transition
+from particles.operations._quarantine import apply_demotion, promote_unless_contradicted
+from particles.store.event_store import record_claims_retired
 from particles.store.particle_store import (
     get_inconsistency_particles_by_domain,
     get_particle,
@@ -95,10 +97,28 @@ async def run_trust_cascade(
         )
 
     resolved = 0
+    retired: list[str] = []
     for inconsistency in particles:
-        did_resolve = await _try_resolve_inconsistency(session, inconsistency, statement)
+        did_resolve = await _try_resolve_inconsistency(
+            session, inconsistency, statement, retired=retired
+        )
         if did_resolve:
             resolved += 1
+    # Name every live claim the cascade moved out of ACTIVE, as lint, reindex
+    # and the generation cascade do, so `events list` shows it (security
+    # review 2026-10-28-2, AA35).
+    await record_claims_retired(
+        session,
+        actor="trust",
+        route="trust_cascade",
+        retired_ids=retired,
+        status=Status.PROVENANCE_STALE.value,
+        status_reason=StatusReason.CONFLICT_RESOLVED.value,
+        reason=(
+            f"trust cascade: trust statement {statement.statement_id} decided the conflict "
+            f"against the claim in domain {statement.domain!r}"
+        ),
+    )
 
     if resolved:
         log.info(
@@ -142,8 +162,12 @@ async def _try_resolve_inconsistency(
     session: AsyncSession,
     inconsistency: Particle,
     statement: SourceTrustStatement,
+    *,
+    retired: list[str],
 ) -> bool:
     """Attempt to auto-resolve one INCONSISTENCY particle. Returns True if resolved.
+
+    A losing claim moved out of ACTIVE is appended to ``retired``.
 
     Gather, decide, apply (D2). The structural check runs before the
     trust ranks are looked up, so a wrapper left for a person costs no rank
@@ -180,11 +204,17 @@ async def _try_resolve_inconsistency(
     winner_id, loser_id = verdict.winner.id, verdict.loser.id
 
     await apply_demotion(session, loser_id, verdict.loser_demotion)
+    if verdict.loser_demotion is Demotion.TRANSITION:
+        retired.append(loser_id)
     # Promote a quarantined winner: a cascade resolving in favour
     # of the quarantined candidate mints the new ACTIVE particle exactly as a
-    # PREFER_B review would.
+    # PREFER_B review would, and holds it again behind a new record when §6.6
+    # now pairs it with a claim committed while it was held (security review
+    # 2026-10-31-3, AF1).
     if verdict.promote_winner:
-        await promote_quarantined(session, verdict.winner)
+        await promote_unless_contradicted(
+            session, verdict.winner, exclude=(inconsistency.id, particle_a_id, particle_b_id)
+        )
     # Close the record as review does: RETRACTED / CONFLICT_RESOLVED, the §6.6
     # wrapper-terminal rule. Before 1.192.15 the cascade left it
     # PROVENANCE_STALE, an edge §6.6 does not list for a record.

@@ -33,12 +33,13 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import combinations
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.config import get_config
+from particles.config import get_config, is_broad_root
 from particles.core.schema import (
     AsOfNote,
     ContestedBadge,
@@ -84,6 +85,9 @@ from particles.store.subject_store import (
 )
 from particles.store.utility_store import get_reinforcement_scores
 
+if TYPE_CHECKING:
+    from particles.operations.projection.manifest import DocManifest
+
 log = logging.getLogger(__name__)
 
 
@@ -102,6 +106,8 @@ async def build_graph_data(
     min_particle_confidence: float = 0.0,
     include_non_asserted: bool = False,
     observer_project: str | None = None,
+    manifest_root: Path | None = None,
+    read_any_manifest: bool = False,
 ) -> GraphData:
     """Assemble one scoped subgraph.
 
@@ -124,6 +130,18 @@ async def build_graph_data(
     they never expand the neighbourhood). ``as_of`` renders the graph as
     believed at T (visibility + decay move to T; trust / utility /
     contested stay current). ``max_nodes`` is clamped to ``graph.max_nodes``.
+
+    ``manifest_root`` confines the projection scope's manifest read: when set,
+    ``manifest`` is a relative name under that directory, read as a regular
+    file within ``graph.manifest_max_bytes``, and every refusal, an invalid
+    manifest included, reads as one fixed ``unknown manifest`` error that
+    carries no exception text and no host path. ``GET /graph`` and the
+    in-process MCP backend always set it, since their caller names a path on
+    the engine host (security review 2026-10-24-2, P1; 2026-10-25, Q11).
+    ``read_any_manifest`` reads ``manifest`` as the path it is instead, with
+    the loader's own error detail: only ``export graph`` passes it, because
+    the operator who runs it names the file. With neither, the projection
+    scope reads nothing.
     """
     cfg = get_config().graph
     if (manifest is None) != (section is None):
@@ -180,7 +198,15 @@ async def build_graph_data(
             hit_rank,
             excluded_undatable,
             resolved_section,
-        ) = await _gather_projection_scope(session, manifest, section, view, include_non_asserted)
+        ) = await _gather_projection_scope(
+            session,
+            manifest,
+            section,
+            view,
+            include_non_asserted,
+            manifest_root,
+            read_any_manifest,
+        )
         scope_ref = f"{manifest}#{resolved_section}"
         scope_desc = f"projection section {resolved_section!r} selection"
     else:
@@ -888,12 +914,65 @@ async def _gather_inconsistency_scope(
     )
 
 
+def _load_contained_manifest(root: Path, name: str) -> DocManifest:
+    """Load the manifest ``name`` names under ``root``, or raise one fixed error.
+
+    The name must be a relative path with no ``..`` component and no ``~``; the
+    final component is opened without following a symlink, the opened file must
+    be a regular file inside ``root`` (judged on the descriptor, so a symlinked
+    parent is caught too) and no larger than ``graph.manifest_max_bytes``. A
+    missing file, a refused one and a name outside the root all raise the same
+    ``unknown manifest`` error, and so does a file that is not a valid
+    manifest, so the answer does not say which names exist. It carries no
+    exception text and no host path, so the response says nothing about the
+    engine host's files beyond the root (security review 2026-10-24-2, P1;
+    2026-10-25, Q43). The detail goes to the engine log.
+    """
+    import yaml
+
+    from particles.operations.projection.manifest import load_manifest, manifest_error_text
+
+    unknown = ValueError(f"unknown manifest: {name!r}")
+    rel = Path(name)
+    if not name or name.startswith("~") or rel.is_absolute() or ".." in rel.parts:
+        raise unknown
+    resolved_root = root.expanduser().resolve()
+    if is_broad_root(resolved_root):
+        # Judged at config load too, but a symlinked root can be repointed at
+        # the home directory after it (security review 2026-10-25-2, R34).
+        log.warning("graph: the manifest root now resolves to a broad directory; refused")
+        raise unknown
+
+    def _inside(real: Path) -> bool:
+        return real.is_relative_to(resolved_root)
+
+    try:
+        return load_manifest(
+            resolved_root / rel,
+            follow_symlinks=False,
+            max_bytes=get_config().graph.manifest_max_bytes,
+            allowed=_inside,
+        )
+    except OSError as exc:
+        log.info("graph: manifest %r under the manifest root refused: %s", name, exc)
+        raise unknown from None
+    except (ValueError, yaml.YAMLError) as exc:
+        log.warning(
+            "graph: manifest %r under the manifest root is invalid: %s",
+            name,
+            manifest_error_text(exc),
+        )
+        raise unknown from None
+
+
 async def _gather_projection_scope(
     session: AsyncSession,
     manifest_path: str,
     section_name: str,
     view: AsOfView | None,
     include_non_asserted: bool,
+    manifest_root: Path | None = None,
+    read_any_manifest: bool = False,
 ) -> tuple[dict[str, Particle], dict[str, int], set[str], dict[str, int], int, str]:
     """A projection section's selection rendered as a graph.
 
@@ -908,17 +987,30 @@ async def _gather_projection_scope(
     Returns ``(particles, hop_by_subject, hit_ids, hit_rank,
     excluded_undatable, resolved_section_name)``.
     """
-    from pathlib import Path
+    import yaml
 
-    from particles.operations.projection.manifest import DerivedSection, load_manifest
+    from particles.operations.projection.manifest import (
+        DerivedSection,
+        load_manifest,
+        manifest_error_text,
+    )
     from particles.operations.projection.project import select_section_particles
 
-    try:
-        doc = load_manifest(Path(manifest_path))
-    except FileNotFoundError:
-        raise ValueError(f"unknown manifest: {manifest_path!r} (no such file)") from None
-    except ValueError as exc:
-        raise ValueError(f"invalid manifest {manifest_path!r}: {exc}") from exc
+    if manifest_root is not None:
+        doc = _load_contained_manifest(manifest_root, manifest_path)
+    elif not read_any_manifest:
+        raise ValueError(f"unknown manifest: {manifest_path!r}")
+    else:
+        try:
+            doc = load_manifest(Path(manifest_path))
+        except FileNotFoundError:
+            raise ValueError(f"unknown manifest: {manifest_path!r} (no such file)") from None
+        except OSError as exc:
+            raise ValueError(f"unknown manifest: {manifest_path!r} ({exc.strerror})") from exc
+        except (ValueError, yaml.YAMLError) as exc:
+            raise ValueError(
+                f"invalid manifest {manifest_path!r}: {manifest_error_text(exc)}"
+            ) from None
 
     derived = [s for s in doc.sections if isinstance(s, DerivedSection)]
     target = next((s for s in derived if s.region == section_name), None)

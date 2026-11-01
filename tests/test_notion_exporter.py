@@ -42,7 +42,12 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.db import session_scope
-from particles.exporters.notion import NotionExporter, _is_managed_heading, _subject_properties
+from particles.exporters.notion import (
+    NotionExporter,
+    _is_managed_heading,
+    _particle_block,
+    _subject_properties,
+)
 from particles.exporters.registry import get_exporters, required_secret
 from particles.store.extractor_store import invalidate_trust_cache, upsert_extractor_record
 from particles.store.particle_store import insert_particle
@@ -423,3 +428,16 @@ class TestMappingHelpers:
         assert _is_managed_heading(block, "Particles (managed)") is True
         assert _is_managed_heading(block, "Something else") is False
         assert _is_managed_heading({"type": "paragraph"}, "Particles (managed)") is False
+
+
+@pytest.mark.parametrize(
+    ("uri", "linked"),
+    [("https://example.org/a", True), ("file:///etc/passwd", False), ("javascript:x", False)],
+)
+def test_a_particle_block_links_only_a_web_source(uri: str, linked: bool) -> None:
+    """A stored ``uri_r`` becomes a link only for an http(s) URL (security review
+    2026-10-27-1, R3)."""
+    p = _make_particle("A claim.", confidence_value=0.9, extractor_id="x", subject_ids=[])
+    runs = _particle_block(p, 0.9, uri)["bulleted_list_item"]["rich_text"]
+    links = [r["text"].get("link") for r in runs if r["text"].get("link")]
+    assert bool(links) is linked

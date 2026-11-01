@@ -901,6 +901,48 @@ class TestGraphView:
         assert "url" not in result
 
     @pytest.mark.asyncio
+    async def test_projection_scope_opens_no_host_file_without_a_root(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
+        """Security review 2026-10-25, Q11: served in-process, the projection scope
+        opens no file an MCP client names, and its error carries none of one."""
+        from particles.mcp.tools.graph import graph_view
+
+        secret = "Sk-live-0123456789abcdef"
+        host_file = tmp_path / "elsewhere" / "credentials.yaml"
+        host_file.parent.mkdir()
+        host_file.write_text(f"name: {secret}\nsections: []\n")
+        with pytest.raises(ValueError) as exc:
+            await graph_view(manifest=str(host_file), section="s")
+        assert secret not in str(exc.value)
+        assert "graph.manifest_root" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_projection_scope_reads_only_under_the_manifest_root(
+        self, db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.mcp.tools.graph import graph_view
+
+        secret = "Sk-live-0123456789abcdef"
+        root = tmp_path / "manifests"
+        root.mkdir()
+        (root / "m.yaml").write_text(
+            "name: m\nsections:\n  - title: S\n    region: s\n    tags: [none-such]\n"
+        )
+        (root / "bad.yaml").write_text(f"name: {secret}\nsections: 3\n")
+        outside = tmp_path / "credentials.yaml"
+        outside.write_text(f"name: {secret}\nsections: []\n")
+        monkeypatch.setattr(get_config().graph, "manifest_root", str(root))
+
+        result = await graph_view(manifest="m.yaml", section="s")
+        assert result["scope_type"] == "projection"
+        for name in (str(outside), "../credentials.yaml", "bad.yaml", "absent.yaml"):
+            with pytest.raises(ValueError) as exc:
+                await graph_view(manifest=name, section="s")
+            assert str(exc.value) == f"unknown manifest: {name!r}", name
+
+    @pytest.mark.asyncio
     async def test_graph_view_url_when_engine_configured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

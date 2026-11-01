@@ -234,16 +234,21 @@ class _CacheUnpickler(pickle.Unpickler):
     Pickle runs any callable a file names. Here a name resolves only when it is
     one of :data:`_CACHE_STDLIB_CLASSES` or a ``particles`` class that is an
     enum, a dataclass or a pydantic model, so loading a file builds data and
-    calls nothing else (security review C6).
+    calls nothing else (security review C6). The class must be *defined* in the
+    module the file names, and the name must be a plain attribute: a name read
+    off a ``particles`` module would otherwise reach whatever that module
+    imported, pydantic's own ``BaseModel`` included (2026-10-24-2, P52).
     """
 
     def find_class(self, module: str, name: str) -> Any:
         if (module, name) in _CACHE_STDLIB_CLASSES:
             return super().find_class(module, name)
-        if module == "particles" or module.startswith("particles."):
+        if (module == "particles" or module.startswith("particles.")) and "." not in name:
             found = super().find_class(module, name)
-            if isinstance(found, type) and (
-                issubclass(found, (Enum, BaseModel)) or dataclasses.is_dataclass(found)
+            if (
+                isinstance(found, type)
+                and found.__module__ == module
+                and (issubclass(found, (Enum, BaseModel)) or dataclasses.is_dataclass(found))
             ):
                 return found
         raise pickle.UnpicklingError(f"refused to load {module}.{name} from the cache")

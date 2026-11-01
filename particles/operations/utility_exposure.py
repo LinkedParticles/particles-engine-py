@@ -53,9 +53,11 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.config import get_config
 from particles.core.duplicate_key import content_hash
 from particles.core.observer_scope import project_keys
 from particles.core.schema import ExtractionStatus, ProvenanceRefType, WarcRecordType
+from particles.corpus.harvest_marks import HARVEST_DEPOSITORS
 from particles.corpus.rule_sources import RULE_SOURCE_TAG
 from particles.corpus.store import CorpusEntryRow, SnapshotRow, get_entry_currency
 from particles.operations.query.as_of import (
@@ -430,6 +432,18 @@ async def stated_by(
     return stated
 
 
+def exposure_recorders() -> frozenset[str]:
+    """The HTTP principals whose exposure rows enter a session's frame.
+
+    The harvesters, which record a session's start, and the operator. An agent
+    key names the session it records for in the body, so any key's rows
+    credited beliefs and project keys to any session (security review
+    2026-10-27-1, G40). A row an in-process writer recorded always counts, and
+    one whose writer was never recorded never does (2026-10-28-2, AA44).
+    """
+    return HARVEST_DEPOSITORS | {get_config().curation.operator_identity}
+
+
 async def session_frame(
     session: AsyncSession,
     session_id: str,
@@ -450,7 +464,7 @@ async def session_frame(
     The project keys come from ``project_key``, the recorded rows, and the
     session transcript's entry tags, whichever are present.
     """
-    rows = await session_exposures_for(session, session_id)
+    rows = await session_exposures_for(session, session_id, recorders=exposure_recorders())
     starts = [ensure_utc(t) for t in (started_at, first_captured_at) if t is not None]
     starts.extend(ensure_utc(r.recorded_at) for r in rows)
     if not starts:

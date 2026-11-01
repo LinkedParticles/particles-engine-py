@@ -729,6 +729,24 @@ class TestRulesCli:
         assert "lazy" in report.output
         assert "1 tracked, 1 enrolled" in report.output
 
+    def test_sync_of_a_file_warns_and_records_no_root(self, cli_db: Path, tmp_path: Path) -> None:
+        """a file named on the command line is registered, not recorded."""
+        from typer.testing import CliRunner
+
+        from particles.api.cli import app
+
+        note = tmp_path / "MY_RULES.md"
+        note.write_text("# Rules\n\nRun the gates before every commit.\n")
+        runner = CliRunner()
+
+        synced = runner.invoke(app, ["rules", "sync", str(note)])
+        assert synced.exit_code == 0, synced.output
+        assert "is a file, so it is registered but not recorded as a refresh root" in (
+            synced.output
+        )
+        report = runner.invoke(app, ["rules"])
+        assert "No refresh root recorded yet." in report.output
+
     def test_report_shows_the_scope_exemption(self, cli_db: Path, tmp_path: Path) -> None:
         """whether a tracked source is exempt is reported, not implicit."""
         from typer.testing import CliRunner
@@ -920,3 +938,22 @@ class TestRuleFileSymlinks:
         await db_session.commit()
         assert [p for p, _ in report.deposited] == [(repo / "AGENTS.md").resolve()]
         assert await get_entry_by_uri(db_session, secret.resolve().as_uri()) is None
+
+
+def test_a_root_naming_an_unset_variable_is_not_read_against_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``$VAR`` or relative root never resolves into the working directory (O59)."""
+    from particles.corpus.rule_sources import expand_path, rule_source_roots
+
+    monkeypatch.delenv("PARTICLES_TEST_RULES_ROOT", raising=False)
+    clone = tmp_path / "clone"
+    (clone / "$PARTICLES_TEST_RULES_ROOT" / "rules").mkdir(parents=True)
+    monkeypatch.chdir(clone)
+    assert expand_path("$PARTICLES_TEST_RULES_ROOT/rules") is None
+    assert expand_path("rules") is None
+    assert rule_source_roots(["$PARTICLES_TEST_RULES_ROOT/rules", str(tmp_path)]) == [
+        tmp_path.resolve()
+    ]
+    monkeypatch.setenv("PARTICLES_TEST_RULES_ROOT", str(tmp_path))
+    assert expand_path("$PARTICLES_TEST_RULES_ROOT/rules") == (tmp_path / "rules").resolve()

@@ -20,8 +20,10 @@ import numpy as np
 import pytest
 
 from particles.config import get_config
+from particles.core.scoring.confidence import CalibrationSource
 from particles.db import DEFAULT_STORE
 from particles.mcp.observer import bind_project
+from tests._engine_client import TEST_ENGINE_KEY
 from tests._observer_scope import belief, project_source_tags, rescoped, source
 
 A, B = "-proj-a", "-proj-b"
@@ -36,13 +38,20 @@ def bound_to_a() -> Iterator[None]:
         bind_project(None)
 
 
+AGENT = CalibrationSource.AGENT_ASSERTED
+
+
 async def _world(session: Any, *, rescope: bool = True) -> dict[str, str]:
     in_a = await source(session, "a", project_source_tags(A))
     in_b = await source(session, "b", project_source_tags(B))
-    mine = await belief(session, "Project A deploys on Fridays.", in_a)
-    theirs = await belief(session, "Project B deploys on Mondays.", in_b)
+    # Agent-asserted, as every belief an agent route may change is.
+    mine = await belief(session, "Project A deploys on Fridays.", in_a, calibration_source=AGENT)
+    theirs = await belief(session, "Project B deploys on Mondays.", in_b, calibration_source=AGENT)
     world = await belief(
-        session, "Pluto has five known moons.", await source(session, "p", ["web"])
+        session,
+        "Pluto has five known moons.",
+        await source(session, "p", ["web"]),
+        calibration_source=AGENT,
     )
     if rescope:
         await rescoped(session)
@@ -249,6 +258,7 @@ class TestBoundMcpLinks:
             db_session,
             "Project A deploys weekly.",
             await source(db_session, "a2", project_source_tags(A)),
+            calibration_source=AGENT,
         )
         await db_session.commit()
         out = await self._link(w["mine"], also_mine.id)
@@ -273,7 +283,10 @@ class TestBoundMcpLinks:
 
         w = await _world(db_session)
         keyless = await belief(
-            db_session, "A harvested note.", await source(db_session, "u", ["claude-code"])
+            db_session,
+            "A harvested note.",
+            await source(db_session, "u", ["claude-code"]),
+            calibration_source=AGENT,
         )
         await db_session.commit()
         other = keyless.id if partner == "unattributed" else w[partner]
@@ -371,12 +384,15 @@ def test_the_link_rule_holds_over_the_http_transport(
     from particles.config import reset_config
     from particles.db import session_scope
 
-    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "https://engine.test")
+    # A keyless engine serves reads only: key the engine and send it.
+    monkeypatch.setenv("PARTICLES_API_KEY", TEST_ENGINE_KEY)
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", TEST_ENGINE_KEY)
     reset_config()
     get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
     get_config().mcp.write.asserter_identity = "test-agent"
-    # The in-process engine runs under the dev-key skip, which serves only
-    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    # Served only for loopback names and api.allowed_hosts (security review
+    # 2026-10-24, N1).
     get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app

@@ -255,6 +255,17 @@ class TestRemoteProjectionRefusal:
         assert reason is not None
         assert "http://mini:8000" in reason and "is not the store" in reason
 
+    def test_the_refusal_names_the_engine_without_its_credential(
+        self, memory_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R36 (SECURITY_REVIEW_20261026-1, W58): the projection refusal carries no userinfo."""
+        monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://op:audit6-userinfo-pw@mini:8000")
+        bind_hooks_to_engine(tmp_path, self._config(tmp_path, "http://laptop:8000"))
+        reason = projection_refusal("default", memory_dir)
+        assert reason is not None
+        assert "http://mini:8000" in reason
+        assert "audit6-userinfo-pw" not in reason
+
     def test_another_store_on_this_engine_is_refused(
         self, memory_dir: Path, tmp_path: Path
     ) -> None:

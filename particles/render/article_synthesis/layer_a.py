@@ -32,17 +32,23 @@ def _short_id(particle_id: str) -> str:
 # after the ``p-`` prefix. Layer A is exactly this regex
 # plus a set-membership check. The ``p-`` separator (not ``p:``) keeps the
 # identifier inside the GFM/Pandoc footnote-id character class
-# (``[A-Za-z0-9._-]``); colons broke parsing in Obsidian.
-_CITATION_RE = re.compile(r"\[\^p-([0-9a-fA-F]{8})\]")
+# (``[A-Za-z0-9._-]``); colons broke parsing in Obsidian. GFM renderers fold
+# footnote labels, so the prefix matches in any case (security review
+# 2026-10-27-1, G31).
+_CITATION_RE = re.compile(r"\[\^p-([0-9a-fA-F]{8})\]", re.I)
 
 # Inline footnote *definition* pattern — the lines the LLM keeps emitting
 # despite the prompt forbidding it. Pandoc footnote definitions are a
 # line starting with ``[^id]:`` plus optional indented continuation
 # lines. We strip the whole block; the canonical definition is the one
 # the exporter appends in the References section.
+# A definition may sit up to three spaces in or inside a quote, which renderers
+# still read as one (security review 2026-10-26-1, W42); what this misses, the
+# body's neutralizer demotes to text. A label differing only in case still
+# binds under a renderer that folds labels (security review 2026-10-27-1, G31).
 _INLINE_FOOTNOTE_DEF_RE = re.compile(
-    r"^\[\^p-[0-9a-fA-F]{8}\]:.*(?:\n[ \t]+.*)*\n?",
-    re.MULTILINE,
+    r"^(?:[ \t]*>)*[ ]{0,3}\[\^p-[0-9a-fA-F]{8}\]:.*(?:\n[ \t]+.*)*\n?",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 

@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # The floor interpreter — pyproject says requires-python = ">=3.11",
           # so testing there is what makes that claim true.
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.11"
           enable-cache: false
@@ -166,11 +166,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install the docs toolchain
-        run: python -m pip install -r docs-requirements.txt
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r docs-requirements.txt
       # Strict: an unresolvable link fails the check rather than shipping a
       # 404 to a reader. This is the same build the Pages workflow deploys.
       # The API reference documents both layers, but this tree holds only the
@@ -209,11 +210,25 @@ jobs:
           set -euo pipefail
           v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
           [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
-          if pip install --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
+          if pip install --only-binary=:all: --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
             echo "API reference: exact match, linkedparticles-core==$v"
           else
             python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-req.txt"
-            pip install --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
+            req="$(cat "$RUNNER_TEMP/core-req.txt")"
+            # The reference reads source and imports nothing, so a commit of
+            # the core repository is fetched as files and never built: a
+            # build would run a backend resolved from the index.
+            git_re='^linkedparticles-core @ git\+(https://github\.com/LinkedParticles/particles-core-py)@([0-9a-f]{40})$'
+            if [[ "$req" =~ $git_re ]]; then
+              src="$RUNNER_TEMP/core-src"
+              git init -q "$src"
+              git -C "$src" fetch -q --depth 1 "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+              git -C "$src" checkout -q --detach FETCH_HEAD
+              mkdir -p "$RUNNER_TEMP/core-dist"
+              cp -R "$src/particles" "$RUNNER_TEMP/core-dist/"
+            else
+              pip install --only-binary=:all: --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
+            fi
           fi
           cp -R "$RUNNER_TEMP/core-dist/particles/." particles/
           # Fail here, loudly, rather than 40 lines later inside mkdocs.
@@ -230,7 +245,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.11"
           enable-cache: false
@@ -240,9 +255,9 @@ jobs:
       # published, so a different version can fail on a no-op diff. Needs no
       # project install.
       - name: ruff check
-        run: uvx --from 'ruff==0.17.1' ruff check .
+        run: uvx --from 'ruff==0.17.3' ruff check .
       - name: ruff format --check
-        run: uvx --from 'ruff==0.17.1' ruff format --check .
+        run: uvx --from 'ruff==0.17.3' ruff format --check .
 
   reuse:
     name: REUSE licensing
@@ -251,7 +266,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.11"
           enable-cache: false

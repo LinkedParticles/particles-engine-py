@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
+from particles.config import get_config
 from particles.core.schema import Snapshot, UncertaintyNature
 from particles.extraction.incremental import ChunkUnit
 from particles.extraction.mastodon import (
@@ -21,6 +24,9 @@ from particles.extraction.mastodon import (
     MastodonExtractor,
     _build_mastodon_chunks,
     _build_status_meta_candidate,
+    _cap_context,
+    _fetch_json,
+    _fetch_thread,
     _html_to_text,
     _parse_status_route,
     _render_status_headline,
@@ -950,3 +956,170 @@ class TestRegistryIntegration:
         m_idx = next(i for i, p in enumerate(plugins) if p.EXTRACTOR_ID == "mastodon-extractor")
         general_idx = next(i for i, p in enumerate(plugins) if isinstance(p, GeneralExtractor))
         assert m_idx < general_idx
+
+
+# ---------------------------------------------------------------------------
+# Bounds on what an instance sends (security review 2026-10-28-2: AA15, AA17,
+# AA18, AA19). The fetch walks run through a real ``httpx.AsyncClient`` on an
+# in-process ``MockTransport`` (no network), so ``get_capped`` streams real
+# bytes and the real JSON decoder reads them.
+# ---------------------------------------------------------------------------
+
+
+def _mock_client(handler: Any) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _bound_status(sid: str, text: str = "x", parent: str | None = None) -> dict[str, Any]:
+    status: dict[str, Any] = {"id": sid, "content": f"<p>{text}</p>", "account": {"acct": "b"}}
+    if parent is not None:
+        status["in_reply_to_id"] = parent
+    return status
+
+
+def _bound_chunks(
+    ancestors: list[dict[str, Any]], descendants: list[dict[str, Any]], **overrides: int
+) -> list[Any]:
+    cfg = get_config()
+    kwargs: dict[str, Any] = {
+        "indent_per_level": cfg.mastodon.reply_indent,
+        "min_favourites": 0,
+        "single_call_threshold": cfg.extraction.single_call_threshold_chars,
+        "chunk_chars": cfg.extraction.comment_chunk_chars,
+    }
+    kwargs.update(overrides)
+    return _build_mastodon_chunks(
+        status=_bound_status("1", "focal"),
+        ancestors=ancestors,
+        descendants=descendants,
+        instance="instance.example",
+        **kwargs,
+    )
+
+
+# --- AA17: ancestors count against max_replies ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_mastodon_thread_keeps_no_more_context_items_than_max_replies() -> None:
+    max_replies = 10
+    ancestors = [_bound_status(f"a{i}") for i in range(500)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/context"):
+            return httpx.Response(200, json={"ancestors": ancestors, "descendants": []})
+        return httpx.Response(200, json=_bound_status("1", "focal"))
+
+    async with _mock_client(handler) as client:
+        payload = await _fetch_thread(client, "instance.example", "1", max_replies)
+    kept = payload["context"]["ancestors"]
+    assert len(kept) + len(payload["context"]["descendants"]) <= max_replies
+    # The root stays, so the thread's root id is still the real one, and the
+    # rest are the nearest ancestors.
+    assert kept[0]["id"] == "a0"
+    assert [a["id"] for a in kept[1:]] == [f"a{i}" for i in range(491, 500)]
+
+
+def test_the_context_cap_leaves_descendants_the_budget_ancestors_leave() -> None:
+    ancestors = [_bound_status(f"a{i}") for i in range(3)]
+    descendants = [_bound_status(f"d{i}", parent="1") for i in range(10)]
+    kept_a, kept_d = _cap_context(ancestors, descendants, 5)
+    assert kept_a == ancestors
+    assert [d["id"] for d in kept_d] == ["d0", "d1"]
+    assert _cap_context(ancestors, descendants, 1) == ([ancestors[0]], [])
+    assert _cap_context(ancestors, descendants, 0) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_a_stored_blob_past_the_cap_is_held_to_it_at_extraction() -> None:
+    from particles.extraction.mastodon import MastodonExtractor
+
+    blob = {
+        "status": _bound_status("1", "focal"),
+        "context": {"ancestors": [_bound_status(f"a{i}") for i in range(500)], "descendants": []},
+        "instance": "instance.example",
+    }
+    snapshot = type("S", (), {"author_id": None, "content_published_at": None})()
+    doc, _status_dict, _instance, root_id = MastodonExtractor()._normalise(
+        json.dumps(blob).encode(),
+        snapshot,  # type: ignore[arg-type]
+    )
+    text = "\n".join(c.chunk_text for c in doc.chunks)
+    assert text.count("mastodon/b:") <= get_config().mastodon.max_replies
+    assert root_id == "a0"
+
+
+# --- AA15: the descendant walk renders each reply once ----------------------
+
+
+def test_a_mastodon_reply_that_names_its_own_id_as_parent_renders_without_recursing() -> None:
+    loop = _bound_status("1", "r", parent="1")
+    try:
+        _bound_chunks([], [loop], single_call_threshold=10_000, chunk_chars=4_000)
+    except RecursionError:  # pragma: no cover - the weakness
+        pytest.fail("a self-referencing reply made the thread render recurse until it failed")
+
+
+def test_a_cycle_of_replies_renders_each_reply_once() -> None:
+    replies = [
+        _bound_status("2", "two", parent="1"),
+        _bound_status("3", "three", parent="2"),
+        _bound_status("2", "two again", parent="3"),
+    ]
+    text = "\n".join(c.chunk_text for c in _bound_chunks([], replies))
+    assert text.count("two") == 1
+    assert text.count("three") == 1
+
+
+def test_a_long_reply_chain_renders_in_order_without_recursing() -> None:
+    chain = [_bound_status(str(i), f"r{i}", parent=str(i - 1)) for i in range(2, 3000)]
+    lines = [line for c in _bound_chunks([], chain) for line in c.chunk_text.splitlines()]
+    rendered = [line.strip() for line in lines if line.strip().startswith("mastodon/b: r")]
+    assert len(rendered) == len(chain)
+    assert rendered[0].endswith("r2")
+
+
+# --- AA19: no chunk passes the chunk budget ---------------------------------
+
+
+def test_no_mastodon_chunk_carries_more_text_than_the_chunk_budget() -> None:
+    cfg = get_config()
+    ancestors = [_bound_status(f"a{i}", "w" * 200) for i in range(2000)]
+    chunks = _bound_chunks(ancestors, [])
+    budget = max(cfg.extraction.comment_chunk_chars, cfg.extraction.single_call_threshold_chars)
+    longest = max(len(c.chunk_text) for c in chunks)
+    assert longest <= budget + 1024, f"one chunk of {longest} characters against {budget}"
+    # Every ancestor still reaches the model, the nearest beside the status.
+    text = "\n".join(c.chunk_text for c in chunks)
+    assert text.count("mastodon/b:") == 2000
+    assert "focal" in chunks[-1].chunk_text
+
+
+def test_a_single_oversized_status_line_is_clipped_to_the_chunk_budget() -> None:
+    cfg = get_config()
+    huge = _bound_status("2", "w" * 200_000, parent="1")
+    chunks = _bound_chunks([huge], [huge])
+    budget = cfg.extraction.single_call_threshold_chars
+    assert max(len(c.chunk_text) for c in chunks) <= budget + 1024
+
+
+def test_a_small_thread_keeps_its_single_status_chunk() -> None:
+    chunks = _bound_chunks([_bound_status("a0", "root")], [_bound_status("2", "reply", parent="1")])
+    assert [c.chunk_id for c in chunks] == ["status", "replies"]
+    assert chunks[0].chunk_text.startswith("CONTEXT (ancestors, oldest first):")
+
+
+# --- AA18: a body nested past the decoder reads as no JSON ------------------
+
+
+@pytest.mark.asyncio
+async def test_a_mastodon_body_nested_past_the_decoder_limit_reads_as_no_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"[" * 200_000)
+
+    async with _mock_client(handler) as client:
+        try:
+            result = await _fetch_json(client, "https://instance.example/api/v1/statuses/1")
+        except RecursionError:  # pragma: no cover - the weakness
+            pytest.fail("a deeply nested body raised RecursionError past the decode guard")
+    assert result is None

@@ -6,17 +6,30 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from particles.core.schema import (
     Confidence,
+    ExtractorRef,
     Particle,
     ParticleType,
+    ProvenanceRef,
+    ProvenanceRefType,
     Subject,
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
+
+
+def _frontmatter(note: str) -> dict:  # type: ignore[type-arg]
+    """The note's YAML frontmatter, parsed (security review 2026-10-28-1, O72)."""
+    import yaml
+
+    assert note.startswith("---\n")
+    return yaml.safe_load(note[4 : note.index("\n---\n", 4)]) or {}
 
 
 def _make_subject(name: str, subject_class: str | None = None) -> Subject:
@@ -81,9 +94,10 @@ class TestCoinTemplate:
         }
         p = _make_particle("summary.", [s.id], props)
         out = self._render(s, [p], {s.id: s})
-        assert "Weight: 0.75 g" in out
-        assert "Diameter: 17.0 mm" in out
-        assert "Years: 1948-1950" in out
+        fm = _frontmatter(out)
+        assert fm["Weight"] == "0.75 g"
+        assert fm["Diameter"] == "17.0 mm"
+        assert fm["Years"] == "1948-1950"
 
     def test_catalog_refs_rendered(self) -> None:
         s = _make_subject("1 Pfennig (1948-1950) GDR", "nmo:NumismaticObject")
@@ -263,9 +277,9 @@ class TestTaxonomyTagsInFrontmatter:
         )
         out = _render_subject_note(s, [p1, p2], {s.id: s})
         # Both distinct tags appear once, under the frontmatter tags: list.
-        assert "  - ml/optimizers" in out
-        assert "  - ml/training" in out
-        assert out.count("  - ml/optimizers") == 1
+        tags = _frontmatter(out)["tags"]
+        assert tags.count("ml/optimizers") == 1
+        assert "ml/training" in tags
 
     def test_no_tags_emits_no_extra_frontmatter_lines(self) -> None:
         from particles.exporters.obsidian import _render_subject_note
@@ -285,7 +299,7 @@ class TestTaxonomyTagsInFrontmatter:
             "summary.", [s.id], {"nmo:hasWeight": 0.75}, tags=["coins/by-region/germany"]
         )
         out = _render_coin_note(s, [p], {s.id: s})
-        assert "  - coins/by-region/germany" in out
+        assert "coins/by-region/germany" in _frontmatter(out)["tags"]
 
     def test_pivot_note_emits_taxonomy_tags(self) -> None:
         from particles.exporters.obsidian import _render_pivot_note
@@ -293,7 +307,7 @@ class TestTaxonomyTagsInFrontmatter:
         s = _make_subject("Aluminium", "nmo:Material")
         p = _make_particle("Aluminium is a light metal.", [s.id], tags=["materials/metals"])
         out = _render_pivot_note(s, [p])
-        assert "  - materials/metals" in out
+        assert "materials/metals" in _frontmatter(out)["tags"]
 
 
 class TestSanitize:
@@ -1062,7 +1076,7 @@ class TestDisambiguation:
         note = _render_disambiguation_note(naming.groups[0], [sw, myth], naming, counts)
         assert "# Prometheus (disambiguation)" in note
         # Aliased to the bare name so [[Prometheus]] still resolves.
-        assert "aliases:\n  - Prometheus" in note
+        assert _frontmatter(note)["aliases"] == ["Prometheus"]
         assert "particles/disambiguation" in note
         assert "[[Prometheus (Titan)]] — Titan (1 particle)" in note
         assert "[[Prometheus (software)]] — software (281 particles)" in note
@@ -1138,3 +1152,83 @@ class TestNarrativesSection:
         # A narrative that was gated out (not in the naming map) is not linked —
         # no dangling [[Narratives/…]] target.
         assert _render_narratives_section([self._narr("Ungated.")], {}) == ""
+
+
+class TestStoredFieldsAreInert:
+    """Stored extractor, asserter, URI, description, alias and property text is
+    written with no live HTML tag, image embed or fence opener (security review
+    2026-10-27-1, G5)."""
+
+    _LIVE_HTML = re.compile(r"(?<!\\)<(img|iframe|a|svg|video|audio)\b", re.I)
+    _HOSTILE = '<img src="https://collector.invalid/p.png">'
+    _FENCE = re.compile(r"(?m)^[ \t>]*(`{3,}|~{3,})")
+
+    def _entry(self, particle: Particle, uri_map: dict[str, str | None]) -> str:
+        from particles.exporters.obsidian.format import _render_obsidian_reference_entry
+
+        parent = _make_subject("Storage")
+        return "\n".join(
+            _render_obsidian_reference_entry(
+                ordinal=1,
+                particle=particle,
+                parent_subject=parent,
+                subject_map={},
+                eligible_ids=set(),
+                eff_conf={particle.id: 0.9},
+                entry_uri_map=uri_map,
+            )
+        )
+
+    def _sourced(self, **update: object) -> Particle:
+        p = _make_particle("A plain claim.", []).model_copy(
+            update={
+                "provenance": [
+                    ProvenanceRef(
+                        type=ProvenanceRefType.SOURCE, corpus_entry_id="entry-1", snapshot_id="s"
+                    )
+                ],
+                **update,
+            }
+        )
+        return p
+
+    def test_reference_entry_writes_extractor_and_source_uri_inert(self) -> None:
+        claim = self._sourced(extractor_ref=ExtractorRef(name=f"stub {self._HOSTILE}", version="1"))
+        text = self._entry(
+            claim, {"entry-1": "https://example.org/a)![x](https://collector.invalid/p.png"}
+        )
+        assert not self._LIVE_HTML.search(text), text
+        assert "![x](https://collector.invalid" not in text, text
+        assert "**Source:** [" in text
+
+    def test_reference_entry_writes_asserter_inert(self) -> None:
+        claim = self._sourced(extractor_ref=None, asserted_by=f"agent {self._HOSTILE}")
+        text = self._entry(claim, {})
+        assert not self._LIVE_HTML.search(text), text
+
+    def test_reference_entry_links_only_a_web_source(self) -> None:
+        text = self._entry(self._sourced(), {"entry-1": "file:///etc/passwd"})
+        assert "](file:" not in text, text
+
+    def test_subject_note_writes_description_and_aliases_inert(self) -> None:
+        from particles.exporters.obsidian.vault import _render_subject_note
+
+        subject = Subject(
+            canonical_name="Storage",
+            description=f"An entity {self._HOSTILE}\n```fencedlang\nbody\n```",
+            aliases=[f"alias {self._HOSTILE}"],
+            asserted_by="test",
+        )
+        out = _render_subject_note(subject, [], {subject.id: subject})
+        assert not re.search(r"(?<!\\)<img\b", out, re.I), out
+        assert not self._FENCE.search(out), out
+
+    def test_coin_conflict_callout_writes_property_values_inert(self) -> None:
+        from particles.exporters.obsidian import _render_coin_note
+
+        s = _make_subject("1 Pfennig (1948-1950) GDR", "nmo:NumismaticObject")
+        p1 = _make_particle("summary A.", [s.id], {"nmo:hasWeight": 0.75})
+        p2 = _make_particle("summary B.", [s.id], {"nmo:hasWeight": self._HOSTILE})
+        out = _render_coin_note(s, [p1, p2], {s.id: s})
+        callout = out[out.index("> [!warning]") :]
+        assert not self._LIVE_HTML.search(callout), callout

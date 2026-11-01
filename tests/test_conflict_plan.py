@@ -416,3 +416,101 @@ class TestDecidedBy:
         assert _outcome_decided_by(ConflictVerdict.UPDATE_SUPERSEDES, probe=True, reading=None) == (
             stamped
         )
+
+
+class TestRetirementEvents:
+    """Rung 2 and rung 1.5 retirements are recorded (security review 2026-10-24-2, P34)."""
+
+    @pytest.mark.parametrize(
+        ("verdict", "event_type", "retired", "winner"),
+        [
+            (ConflictVerdict.SUPERSEDES, OperatorEventType.TRUST_SUPERSESSION, EXISTING, NEW),
+            (
+                ConflictVerdict.DOCUMENT_SUPERSEDES,
+                OperatorEventType.DOCUMENT_SUPERSESSION,
+                EXISTING,
+                NEW,
+            ),
+            (
+                ConflictVerdict.DOCUMENT_SUPERSEDED_BY_EXISTING,
+                OperatorEventType.DOCUMENT_SUPERSESSION,
+                NEW,
+                EXISTING,
+            ),
+        ],
+    )
+    def test_the_retirement_names_both_claims(
+        self,
+        verdict: ConflictVerdict,
+        event_type: OperatorEventType,
+        retired: Particle,
+        winner: Particle,
+    ) -> None:
+        plan = _plan(verdict)
+        event = plan.retirement_event
+        assert event is not None and event.event_type is event_type
+        assert plan.demote is not None and plan.demote[0] == retired.id
+        assert event.payload["retired_id"] == retired.id
+        assert event.payload["winner_id"] == winner.id
+        assert event.payload["route"] == "ladder"
+        assert event.refs == (
+            (EventRefKind.PARTICLE, retired.id),
+            (EventRefKind.PARTICLE, winner.id),
+        )
+
+    def test_a_trust_retirement_records_both_scores(self) -> None:
+        event = _plan(ConflictVerdict.SUPERSEDES, scores=(0.9, 0.2)).retirement_event
+        assert event is not None
+        assert event.payload["trust_score_new"] == 0.9
+        assert event.payload["trust_score_existing"] == 0.2
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            ConflictVerdict.CORROBORATES,
+            ConflictVerdict.SUPERSEDED_BY_EXISTING,
+            ConflictVerdict.UPDATE_SUPERSEDES,
+            ConflictVerdict.INCONSISTENT,
+        ],
+    )
+    def test_other_verdicts_plan_no_retirement_event(self, verdict: ConflictVerdict) -> None:
+        assert _plan(verdict).retirement_event is None
+
+
+# ---------------------------------------------------------------------------
+# Adopted from the 2026-10-24-2 review's proofs (P34)
+# ---------------------------------------------------------------------------
+
+
+def _proof_plan(verdict_name: str) -> object:
+    from particles.core.conflict_resolution import ConflictVerdict, LadderOutcome
+    from particles.core.schema import ProvenanceRefType
+    from particles.ingest.conflict_plan import plan_conflict_writes
+    from tests.test_wiki_exporter import _make_particle
+
+    new, existing = _make_particle("Redis."), _make_particle("SQLite.")
+    plan = plan_conflict_writes(
+        LadderOutcome(verdict=ConflictVerdict[verdict_name], record_divergence=False),
+        new,
+        existing,
+        corpus_entry_id="e",
+        snapshot_id="s",
+        trigger_ref_type=ProvenanceRefType.SOURCE,
+        scores=(0.9, 0.5),
+        domain=None,
+    )
+    assert plan.demote is not None and plan.demote[0] == existing.id
+    return plan
+
+
+@pytest.mark.parametrize("verdict_name", ["SUPERSEDES", "DOCUMENT_SUPERSEDES"])
+def test_an_automatic_retirement_is_recorded_in_the_event_log(verdict_name: str) -> None:
+    plan = _proof_plan(verdict_name)
+    events = [
+        e
+        for e in (plan.update_event, plan.retirement_event, plan.dropped_event)  # type: ignore[attr-defined]
+        if e is not None
+    ]
+    assert events, f"{verdict_name} retires a claim but plans no operator event"
+    [event] = events
+    assert event.payload["retired_id"] == plan.demote[0]  # type: ignore[attr-defined]

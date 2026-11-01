@@ -790,3 +790,222 @@ class TestStreamingAboveTheSdkCeiling:
         assert out == "ok"
         bodies = [c.kwargs["extra_body"] for c in client.messages.stream.call_args_list]
         assert bodies == [{"temperature": 0.0}, None]
+
+
+class TestAnthropicClientRedirects:
+    """P9 (SECURITY_REVIEW_20261024-2): the key never follows a redirect off origin.
+
+    anthropic 1.x sends the key as ``X-Api-Key``, which httpx's cross-origin
+    strip leaves in place, so the client must not follow a redirect at all.
+    anthropic 2.x sends it as ``Authorization: Bearer``; the test reads
+    whichever header carries it, so it guards both majors (security review
+    2026-10-25-2, R38). The transport is an in-process mock: no request leaves
+    the process.
+    """
+
+    @staticmethod
+    def _message_body() -> dict[str, object]:
+        return {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-test",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    def test_key_is_not_sent_to_a_cross_origin_redirect_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx2
+
+        from particles.llm import client as client_mod
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-a-real-key")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.test")
+        client_mod.set_client(None)
+        seen: list[tuple[str, dict[str, str]]] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            seen.append((str(request.url), {k.lower(): v for k, v in request.headers.items()}))
+            if request.url.host == "gateway.example.test":
+                return httpx2.Response(
+                    307, headers={"Location": "http://elsewhere.example.test/v1/messages"}
+                )
+            return httpx2.Response(200, json=self._message_body())
+
+        sdk = client_mod.get_client()
+        inner = sdk._client
+        inner._transport = httpx2.MockTransport(handler)
+        inner._mounts = {}
+        try:
+            with pytest.raises(anthropic.APIStatusError):
+                sdk.with_options(max_retries=0).messages.create(
+                    model="claude-test",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "x"}],
+                )
+        finally:
+            client_mod.set_client(None)
+
+        assert [url for url, _ in seen] == ["https://gateway.example.test/v1/messages"]
+        assert {httpx2.URL(url).host for url, _ in seen} == {"gateway.example.test"}
+        sent = seen[0][1]
+        assert "sk-test-not-a-real-key" in (
+            sent.get("x-api-key", "") + " " + sent.get("authorization", "")
+        )
+        assert inner.follow_redirects is False
+
+
+class TestAnthropicClientPlaintext:
+    """Q14 (SECURITY_REVIEW_20261025-1): the key is never sent in clear to a remote host.
+
+    The rule the OpenAI-compatible provider key, the engine token and the OTLP
+    headers already follow. Nothing is sent: the refusal comes before the
+    client is built, and the admitted cases run on a mock transport.
+    """
+
+    _KEY = "sk-ant-plaintext-0000000000000000"
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, base_url: str) -> anthropic.Anthropic:
+        from particles.llm import client as client_mod
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", TestAnthropicClientPlaintext._KEY)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        client_mod.set_client(None)
+        return client_mod.get_client()
+
+    def test_a_remote_http_base_url_is_refused_before_any_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.llm import client as client_mod
+        from particles.llm.registry import CompletionError, PlaintextKeyRefused
+
+        try:
+            with pytest.raises(PlaintextKeyRefused) as refused:
+                self._client(monkeypatch, "http://198.51.100.7:8080")
+        finally:
+            client_mod.set_client(None)
+        message = str(refused.value)
+        assert "llm.anthropic_allow_plaintext_key" in message
+        assert self._KEY not in message
+        # Both a completion failure and the ValueError `extract` fails fast on.
+        assert isinstance(refused.value, CompletionError)
+        assert isinstance(refused.value, ValueError)
+
+    def test_a_refusal_does_not_echo_a_credential_in_the_base_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R36 (SECURITY_REVIEW_20261025-2): the endpoint is named without its userinfo."""
+        from particles.llm import client as client_mod
+        from particles.llm.registry import PlaintextKeyRefused
+
+        try:
+            with pytest.raises(PlaintextKeyRefused) as refused:
+                self._client(
+                    monkeypatch, "http://operator:userinfo-secret-0123456789@198.51.100.7:8080"
+                )
+        finally:
+            client_mod.set_client(None)
+        assert "userinfo-secret-0123456789" not in str(refused.value)
+        assert "http://198.51.100.7:8080" in str(refused.value)
+
+    def test_the_allowed_plaintext_warning_does_not_echo_the_userinfo(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """R36: the warn-once line for an opted-in plaintext endpoint drops the credential too."""
+        from particles.config import get_config
+        from particles.llm import client as client_mod
+
+        client_mod._warn_plaintext_key_once.cache_clear()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", self._KEY)
+        monkeypatch.setenv(
+            "ANTHROPIC_BASE_URL", "http://operator:userinfo-secret-0123456789@198.51.100.7:8080"
+        )
+        monkeypatch.setattr(get_config().llm, "anthropic_allow_plaintext_key", True)
+        with caplog.at_level("WARNING", logger=client_mod.__name__):
+            client_mod._check_plaintext_base_url()
+        assert "unencrypted" in caplog.text
+        assert "userinfo-secret-0123456789" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://gateway.example.test", "http://127.0.0.1:8080", "http://localhost:8080"],
+    )
+    def test_https_and_loopback_are_admitted(
+        self, monkeypatch: pytest.MonkeyPatch, base_url: str
+    ) -> None:
+        from particles.llm import client as client_mod
+
+        try:
+            assert self._client(monkeypatch, base_url) is not None
+        finally:
+            client_mod.set_client(None)
+
+    def test_the_opt_in_sends_it_with_a_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import httpx2
+
+        from particles.config import get_config
+        from particles.llm import client as client_mod
+
+        monkeypatch.setattr(get_config().llm, "anthropic_allow_plaintext_key", True)
+        client_mod._warn_plaintext_key_once.cache_clear()
+        sent: list[tuple[str, str | None]] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            # 1.x sends X-Api-Key, 2.x Authorization: Bearer (R38).
+            key = request.headers.get("x-api-key") or request.headers.get(
+                "authorization", ""
+            ).removeprefix("Bearer ")
+            sent.append((request.url.scheme, key or None))
+            return httpx2.Response(400, json={"type": "error", "error": {"type": "x"}})
+
+        try:
+            with caplog.at_level("WARNING", logger="particles.llm.client"):
+                sdk = self._client(monkeypatch, "http://198.51.100.7:8080")
+            inner = sdk._client
+            inner._transport = httpx2.MockTransport(handler)
+            inner._mounts = {}
+            with pytest.raises(anthropic.APIStatusError):
+                sdk.with_options(max_retries=0).messages.create(
+                    model="claude-test",
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "x"}],
+                )
+        finally:
+            client_mod.set_client(None)
+            client_mod._warn_plaintext_key_once.cache_clear()
+        assert sent == [("http", self._KEY)]
+        assert "allow_plaintext_key is set" in caplog.text
+
+
+def test_live_llm_guard_covers_the_sdk_transport() -> None:
+    """P44: the unit guard patches httpx2, the stack the Anthropic SDK sends on."""
+    import httpx2
+
+    assert httpx2.Client.send.__module__ == "tests._client_fixtures"
+    assert httpx2.AsyncClient.send.__module__ == "tests._client_fixtures"
+
+
+def test_the_native_client_records_metadata_only_whatever_the_environment_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SECURITY_REVIEW_20261026-1 (W60): the SDK's own spans never carry prompt
+    content, and no trace context goes to the provider."""
+    from particles.llm import client as client_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-audit6-telemetry-0123456789")
+    monkeypatch.setenv("ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE", "content")
+    monkeypatch.setenv("ANTHROPIC_OPEN_TELEMETRY_PROPAGATION", "true")
+    client_mod.set_client(None)
+    try:
+        options = client_mod.get_client()._open_telemetry
+    finally:
+        client_mod.set_client(None)
+    assert options["traces"]["content_mode"] == "metadata_only"
+    assert options["propagation"] is False

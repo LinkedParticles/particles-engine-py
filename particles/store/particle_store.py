@@ -39,6 +39,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
+from sqlalchemy.sql.elements import ColumnClause
 
 from particles.core.conflict_review import CASCADE_ACTOR, cascade_reviewed_record_id
 from particles.core.contradiction_disclosure import ORIGIN_KEY, is_census_record
@@ -507,7 +508,14 @@ async def insert_particle(
     if domain_hint is not None:
         row.domain_hint = domain_hint
     session.add(row)
+    # One edge per (particle, corpus entry), the table's key: the INCONSISTENCY
+    # record of a candidate with no SOURCE ref names that candidate twice, as
+    # particle B and as its trigger, and the record keeps both refs.
+    edged: set[str] = set()
     for pref in particle.provenance:
+        if pref.corpus_entry_id in edged:
+            continue
+        edged.add(pref.corpus_entry_id)
         edge = ProvenanceEdgeRow(
             particle_id=particle.id,
             corpus_entry_id=pref.corpus_entry_id,
@@ -536,6 +544,18 @@ async def get_particle(session: AsyncSession, particle_id: str) -> Particle | No
     return row.to_model() if row else None
 
 
+async def get_particle_status(session: AsyncSession, particle_id: str) -> Status | None:
+    """The particle's status as the store holds it now, or ``None`` when there is no such row.
+
+    A column read, so it is not answered from the session's identity map: a
+    writer that read a particle before a model call re-checks it here, inside
+    its write transaction, before it acts on what it read.
+    """
+    result = await session.execute(select(ParticleRow.status).where(ParticleRow.id == particle_id))
+    value = result.scalar_one_or_none()
+    return Status(value) if value is not None else None
+
+
 async def get_active_particle_by_id_or_prefix(
     session: AsyncSession, particle_id: str
 ) -> Particle | None:
@@ -559,7 +579,7 @@ async def get_active_particle_by_id_or_prefix(
     result = await session.execute(
         select(ParticleRow).where(
             ParticleRow.status == Status.ACTIVE.value,
-            ParticleRow.id.startswith(particle_id),
+            ParticleRow.id.startswith(particle_id, autoescape=True),
         )
     )
     rows = result.scalars().all()
@@ -1415,6 +1435,45 @@ async def get_active_particles_with_embeddings(
     return out
 
 
+async def get_active_particles_with_embeddings_by_ids(
+    session: AsyncSession, particle_ids: Collection[str]
+) -> list[tuple[Particle, np.ndarray[Any, np.dtype[np.float32]]]]:
+    """:func:`get_active_particles_with_embeddings`, restricted to ``particle_ids``.
+
+    The same filters (ACTIVE, an embedding, the current embedding model) and
+    the same ``(confidence_value, rowid)`` order, so a search over the result
+    breaks ties as a search over the whole set would. It reads only the named
+    rows: the bounded re-read a belief write runs under the writer lock
+    (security review 2026-10-31-2, AE5).
+    """
+    ids = sorted(set(particle_ids))
+    if not ids:
+        return []
+    rowid: ColumnClause[Any] = literal_column("particles.rowid")
+    found: list[tuple[ParticleRow, int]] = []
+    for i in range(0, len(ids), 500):
+        result = await session.execute(
+            select(ParticleRow, rowid).where(
+                ParticleRow.id.in_(ids[i : i + 500]),
+                ParticleRow.status == Status.ACTIVE.value,
+                ParticleRow.embedding_json.isnot(None),
+            )
+        )
+        found.extend((row, rid) for row, rid in result)
+    found.sort(key=lambda hit: (hit[0].confidence_value, hit[1]))
+    current_id = get_embedding_model_id()
+    out: list[tuple[Particle, np.ndarray[Any, np.dtype[np.float32]]]] = []
+    skipped = 0
+    for row, _rid in found:
+        if (row.embedding_model_id or LEGACY_EMBEDDING_MODEL_ID) != current_id:
+            skipped += 1
+            continue
+        out.append((row.to_model(), decode_embedding(row.embedding_json)))  # type: ignore[arg-type]
+    if skipped:
+        log_skipped_embedding_models(skipped, current_id)
+    return out
+
+
 def decode_embedding(embedding_json: str) -> np.ndarray[Any, np.dtype[np.float32]]:
     """The stored JSON embedding as the ``float32`` vector every loader returns."""
     return np.array(json.loads(embedding_json), dtype=np.float32)
@@ -1734,7 +1793,7 @@ async def get_active_particles_with_extractor_version(
     result = await session.execute(
         select(ParticleRow).where(
             ParticleRow.status == Status.ACTIVE.value,
-            ParticleRow.extractor_ref_json.contains(extractor_version),
+            ParticleRow.extractor_ref_json.contains(extractor_version, autoescape=True),
         )
     )
     particles: list[Particle] = []
@@ -1763,7 +1822,7 @@ async def get_active_particles_with_extractor_id(
     result = await session.execute(
         select(ParticleRow).where(
             ParticleRow.status == Status.ACTIVE.value,
-            ParticleRow.extractor_ref_json.contains(extractor_id),
+            ParticleRow.extractor_ref_json.contains(extractor_id, autoescape=True),
         )
     )
     particles: list[Particle] = []
@@ -1810,7 +1869,7 @@ async def latest_extraction_provider_model(session: AsyncSession, extractor_id: 
         select(ParticleRow.extractor_ref_json, ParticleRow.extraction_provider_model)
         .where(
             ParticleRow.extraction_provider_model.is_not(None),
-            ParticleRow.extractor_ref_json.contains(extractor_id),
+            ParticleRow.extractor_ref_json.contains(extractor_id, autoescape=True),
         )
         .order_by(ParticleRow.asserted_at.desc())
         .limit(200)
@@ -1863,9 +1922,9 @@ async def get_active_particles_for_chunk_hash(
         )
         .where(
             ProvenanceEdgeRow.corpus_entry_id == corpus_entry_id,
-            ParticleRow.provenance_json.contains(chunk_hash),
-            ParticleRow.extractor_ref_json.contains(extractor_id),
-            ParticleRow.extractor_ref_json.contains(extractor_version),
+            ParticleRow.provenance_json.contains(chunk_hash, autoescape=True),
+            ParticleRow.extractor_ref_json.contains(extractor_id, autoescape=True),
+            ParticleRow.extractor_ref_json.contains(extractor_version, autoescape=True),
         )
     )
     particles: list[Particle] = []

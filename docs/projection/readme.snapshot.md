@@ -15,11 +15,11 @@
 <!-- sources: p-21f11766, p-3f71ca93, p-7931228a, p-80f9b726, p-a5a42fe0, p-ba8cfa2c, p-cb10c54c, p-d3fd6c56 -->
 ## Design rationale
 
-- When APPEND_ONLY falls back to MUTABLE handling, PROVENANCE_STALE is set on particles whose provenance.location falls within the changed regions. `p-0296afc0` _(confidence 0.70)_
+- When APPEND\_ONLY falls back to MUTABLE handling, PROVENANCE\_STALE is set on particles whose provenance.location falls within the changed regions. `p-0296afc0` _(confidence 0.70)_
 - The Source Corpus is an append-only archive of all materials from which particles have been or may be extracted. `p-8476c2ac` _(confidence 0.70)_
-- When `as_of` is set to a past instant T, Query evaluates the store on the assertion-time axis — what the store believed at T — never world-time validity. `p-8767ad66` _(confidence 0.70)_
+- When \`as\_of\` is set to a past instant T, Query evaluates the store on the assertion-time axis — what the store believed at T — never world-time validity. `p-8767ad66` _(confidence 0.70)_
 - When two sources or two principals disagree in Particles, the conflict-resolution ladder surfaces an INCONSISTENCY record for review instead of silently overwriting either side. `p-9cf41a46` _(confidence 0.70)_
-- effective_confidence is computed at query time, not stored. `p-c3b1cef6` _(confidence 0.70)_
+- effective\_confidence is computed at query time, not stored. `p-c3b1cef6` _(confidence 0.70)_
 - Contestedness MUST be computed at read time and never stored. `p-cea0186c` _(confidence 0.70)_
 - Trust weighting, recency decay, and the as-of instant are applied per observer at query time in Particles, never baked into the stored record. `p-d0d41702` _(confidence 0.70)_
 - confidence.value is stored immutably, as calibrated at creation time. `p-f1ced6c4` _(confidence 0.70)_
@@ -34,6 +34,6 @@
 - Corpus entries and snapshot metadata are stored in queryable form, either relational or document store. `p-8f670063` _(confidence 0.70)_
 - The extraction pipeline selects the most specific registered extractor whose applicability specification matches the source; the general extractor is used if and only if no domain-specific extractor applies. `p-ac28fba0` _(confidence 0.70)_
 - The Source Corpus store is an append-only object store (local filesystem, S3-compatible, or content-addressed store). `p-cb1cd190` _(confidence 0.70)_
-- Each of the six operations maps to a CLI subcommand and a `POST` API endpoint in the reference SDK. `p-e5639e78` _(confidence 0.70)_
+- Each of the six operations maps to a CLI subcommand and a \`POST\` API endpoint in the reference SDK. `p-e5639e78` _(confidence 0.70)_
 
 <!-- sources: p-3bd3740c, p-5a941962, p-8f670063, p-a4bdde07, p-ac28fba0, p-cb1cd190, p-e5639e78 -->

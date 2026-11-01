@@ -20,6 +20,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.db import session_scope
 
 
@@ -259,7 +260,7 @@ def export_cmd(
 
     exporters = get_exporters()
     if format not in exporters:
-        typer.echo(f"Unknown format: {format!r}. Available: {list(exporters)}", err=True)
+        terminal_echo(f"Unknown format: {format!r}. Available: {list(exporters)}", err=True)
         raise typer.Exit(1)
 
     # Fail-closed pre-flight (generic over REQUIRES_SECRET): if the
@@ -270,7 +271,7 @@ def export_cmd(
     # presence here — never echo the value.
     secret_var = required_secret(exporters[format])
     if secret_var is not None and not os.environ.get(secret_var):
-        typer.echo(
+        terminal_echo(
             f"{secret_var} is required for `export {format}` but is not set. "
             f"Set it in the environment before exporting (the token is never a "
             f"CLI flag). For notion: mint an internal integration at "
@@ -301,7 +302,7 @@ def export_cmd(
         if effective_output is None and format == "obsidian":
             effective_output = obs_cfg.default_output_path
         if effective_output is None:
-            typer.echo(
+            terminal_echo(
                 f"No output path supplied. Pass it as an argument, or set "
                 f"`{format}.default_output_path` in config.yaml.",
                 err=True,
@@ -328,7 +329,7 @@ def export_cmd(
         try:
             as_of_dt = datetime.fromisoformat(as_of)
         except ValueError:
-            typer.echo(
+            terminal_echo(
                 f"Invalid --as-of value {as_of!r}: expected an ISO-8601 date or "
                 f"datetime (e.g. 2006-08-24 or 2006-08-24T12:00:00Z).",
                 err=True,
@@ -412,7 +413,7 @@ def export_cmd(
         # Exporters raise ValueError for usage errors (missing/duplicate graph
         # scope, an unknown --subject id, a missing output path). One clean
         # line on stderr, never a traceback.
-        typer.echo(f"export {format} failed: {exc}", err=True)
+        terminal_echo(f"export {format} failed: {exc}", err=True)
         raise typer.Exit(2) from None
     finally:
         # Always tear the progress handler back down; nested exports in
@@ -431,8 +432,8 @@ def export_cmd(
         else (f"Notion database {summary_dict.get('database_id', '?')}")
     )
     if summary_dict.get("dry_run"):
-        typer.echo(f"Dry-run for {target}")
+        terminal_echo(f"Dry-run for {target}")
     else:
-        typer.echo(f"Exported to {target}")
+        terminal_echo(f"Exported to {target}")
     for key, val in summary_dict.items():
-        typer.echo(f"  {key}: {val}")
+        terminal_echo(f"  {key}: {terminal_field(val)}")

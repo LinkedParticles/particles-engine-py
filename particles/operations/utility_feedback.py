@@ -33,6 +33,12 @@ digest it is shown next session, and containment cannot
 reach it — every §6 defence is confidence-shaped, while utility was made an
 *additive* term on top of effective confidence, so no trust multiplier
 attenuates a rank-lift.
+
+Since per-client engine keys an agent key reaches ``POST
+/memory/useful``. Only a press made with operator authority earns the credit:
+an agent's press is recorded, naming its principal, and credits nothing, so an
+agent can neither multiply the credit nor use up the operator's for the day
+(amended 2026-10-27).
 """
 
 from __future__ import annotations
@@ -67,6 +73,12 @@ CLI_ACTOR = "cli:memory-useful"
 HTTP_ACTOR = "http:/memory/useful"
 """Actor stamped by ``POST /memory/useful``."""
 
+OPERATOR_CREDIT_FIELD = "operator_credit"
+"""Payload field that is ``False`` on a press made without operator authority.
+
+Such an event carries no ``credit_key``, and :func:`rederive_explicit_credits`
+replays nothing from it (amended 2026-10-27)."""
+
 
 class BeliefNotCreditable(ValueError):
     """The target belief does not exist, or is not ACTIVE.
@@ -84,16 +96,18 @@ class MarkUsefulResult:
 
     Attributes:
         particle_id: The credited belief.
-        credit_key: The daily natural key this press folded into.
+        credit_key: The daily natural key this press folded into;
+            ``None`` for a press without operator authority, which earns none.
         counted: ``True`` when a new utility credit was written, ``False`` when
-            this principal had already credited this belief today. The audit
-            event is recorded either way — the log records what the operator
-            did, the index records what it was worth.
+            this principal had already credited this belief today or the press
+            had no operator authority. The audit event is recorded either way —
+            the log records what was pressed, the index records what it was
+            worth.
         event_id: The ``BELIEF_MARKED_USEFUL`` event's id.
     """
 
     particle_id: str
-    credit_key: str
+    credit_key: str | None
     counted: bool
     event_id: str
 
@@ -105,6 +119,7 @@ async def mark_belief_useful(
     actor: str = CLI_ACTOR,
     reason: str | None = None,
     now: datetime | None = None,
+    operator: bool = True,
 ) -> MarkUsefulResult:
     """Credit one belief from the explicit operator channel.
 
@@ -121,6 +136,11 @@ async def mark_belief_useful(
             keyed on, so two interfaces are rate-limited independently.
         reason: Optional operator note, stored on the event.
         now: Override for current time (used in tests).
+        operator: Whether the press was made with operator authority. ``False``
+            (an agent key on the HTTP route) records the event with
+            ``operator_credit: false`` and no ``credit_key``, writes no credit,
+            and leaves the day's key free for the operator's own press
+            (amended 2026-10-27).
 
     Raises:
         BeliefNotCreditable: The belief is missing or not ACTIVE.
@@ -135,23 +155,27 @@ async def mark_belief_useful(
         )
 
     observed_at = now or datetime.now(UTC)
-    credit_key = explicit_credit_key(actor, observed_at)
-    counted = await record_explicit_utility_event(session, particle_id, credit_key, observed_at)
+    # The credit's own timestamp, not the event's. `record_event` stamps
+    # `occurred_at` itself, so the two coincide in production but are
+    # independently sourced — and the §2 invariant is that the row is
+    # reconstructible *from the payload*, not from a coincidence.
+    payload: dict[str, Any] = {"observed_at": observed_at.isoformat()}
+    credit_key: str | None = None
+    counted = False
+    if operator:
+        credit_key = explicit_credit_key(actor, observed_at)
+        counted = await record_explicit_utility_event(session, particle_id, credit_key, observed_at)
+        payload["credit_key"] = credit_key
+    else:
+        payload[OPERATOR_CREDIT_FIELD] = False
+    payload["counted"] = counted
     event = await record_event(
         session,
         actor=actor,
         event_type=OperatorEventType.BELIEF_MARKED_USEFUL,
         reason=reason,
         refs=[(EventRefKind.PARTICLE, particle_id)],
-        payload={
-            "credit_key": credit_key,
-            "counted": counted,
-            # The credit's own timestamp, not the event's. `record_event` stamps
-            # `occurred_at` itself, so the two coincide in production but are
-            # independently sourced — and the §2 invariant is that the row is
-            # reconstructible *from the payload*, not from a coincidence.
-            "observed_at": observed_at.isoformat(),
-        },
+        payload=payload,
     )
     return MarkUsefulResult(
         particle_id=particle_id,
@@ -181,6 +205,8 @@ async def rederive_explicit_credits(session: AsyncSession) -> int:
     for particle_id, occurred_at, payload in await list_particle_events(
         session, OperatorEventType.BELIEF_MARKED_USEFUL
     ):
+        if (payload or {}).get(OPERATOR_CREDIT_FIELD) is False:
+            continue  # a press without operator authority earned nothing
         key = (payload or {}).get("credit_key")
         if not isinstance(key, str) or not key:
             logger.warning(

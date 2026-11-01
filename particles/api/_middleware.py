@@ -8,7 +8,9 @@
 answer on, and under the dev-key skip one from a non-loopback client, before
 any route runs (security review 2026-10-24, N1). The route gates apply the same
 check (``particles.api.auth.request_bound_refusal``); this covers the paths that
-carry no gate: ``/health``, ``/openapi.json`` and the ``/app`` bundle.
+carry no gate: ``/health``, ``/openapi.json`` and the ``/app`` bundle. It also
+refuses, before the body is read, a request its route's gate would refuse
+whatever the body says (security review 2026-10-26, W8).
 
 Defense-in-depth for the HTTP surface (security review F-7): uvicorn and
 Starlette impose no default request-body limit, so an unbounded upload can
@@ -31,23 +33,60 @@ from __future__ import annotations
 
 import json
 
+from fastapi.routing import APIRoute
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from particles.api.auth import request_bound_refusal
+from particles.api.auth import (
+    GATE_DEPENDENCIES,
+    note_served_address,
+    pre_body_refusal,
+    request_bound_refusal,
+)
 from particles.config import get_config
+
+#: Methods whose requests the routes here never read a body from.
+_BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _route_gate(scope: Scope) -> object | None:
+    """The gate of the route ``scope`` resolves to, or ``None`` (no route, or no gate)."""
+    router = getattr(scope.get("app"), "router", None)
+    for route in getattr(router, "routes", ()):
+        match, _ = route.matches(scope)
+        if match is not Match.FULL:
+            continue
+        if isinstance(route, APIRoute):
+            for dependency in route.dependencies:
+                if dependency.dependency in GATE_DEPENDENCIES:
+                    return dependency.dependency
+        return None
+    return None
 
 
 class HostBoundMiddleware:
-    """Refuse a request with a disallowed ``Host``, or a non-loopback dev-key client."""
+    """Refuse a request with a disallowed ``Host``, or a non-loopback dev-key client.
+
+    For a request that may carry a body it also asks the route's gate
+    (:func:`particles.api.auth.pre_body_refusal`) before the body is read, so a
+    request the gate refuses whatever its body says is never parsed (security
+    review 2026-10-26, W8).
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
-            refusal = request_bound_refusal(Request(scope))
+            note_served_address(scope.get("server"))
+            request = Request(scope)
+            refusal = request_bound_refusal(request)
+            if refusal is None and scope["method"] not in _BODYLESS_METHODS:
+                gate = _route_gate(scope)
+                if gate is not None:
+                    refusal = pre_body_refusal(request, gate)
             if refusal is not None:
                 code, detail = refusal
                 await JSONResponse({"detail": detail}, status_code=code)(scope, receive, send)

@@ -38,7 +38,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.config import get_config
+from particles.config import get_config, is_broad_root
 from particles.core.observer_scope import project_tag
 from particles.core.schema import CorpusEntry, FetchPolicy, Mutability
 from particles.corpus.local_read import read_local_file
@@ -77,6 +77,10 @@ class RuleSourceResolution:
     escaped: list[Path] = field(default_factory=list)
     """Rule-file names that resolve outside their root, or onto a file that is not
     a rule file, and so were not taken in (security review D23)."""
+    broad: list[Path] = field(default_factory=list)
+    """Roots refused as too broad (:func:`~particles.config.is_broad_root`):
+    the filesystem root, the home directory, or an ancestor of either (security
+    review K9, P49). They are neither walked nor recorded."""
 
 
 @dataclass
@@ -109,10 +113,16 @@ def discover_default_roots(cwd: Path | None = None) -> list[Path]:
 
     A ``.git`` *file* counts as well as a directory — that is what a worktree
     or submodule checkout has.
+
+    The search stops below the home directory: a ``.git`` there (a dotfiles
+    repository) or at any broader path is not a project root (security review
+    K9, P49), so a directory under such a repository discovers no project root.
     """
     roots: list[Path] = []
     start = (cwd or Path.cwd()).resolve()
     for candidate in (start, *start.parents):
+        if is_broad_root(candidate):
+            break
         if (candidate / ".git").exists():
             roots.append(candidate)
             break
@@ -122,9 +132,31 @@ def discover_default_roots(cwd: Path | None = None) -> list[Path]:
     return roots
 
 
-def expand_path(raw: str) -> Path:
-    """``~`` and ``$VAR`` expansion, then absolutise."""
-    return Path(os.path.expandvars(os.path.expanduser(raw))).resolve()
+def expand_path(raw: str) -> Path | None:
+    """``~`` and ``$VAR`` expansion, then absolutise; ``None`` for an entry that names no root.
+
+    An entry whose expansion still holds a ``$`` (a variable unset in this
+    process) or is not absolute would resolve against the working directory,
+    which may be a clone, and admit a directory of that literal name inside
+    it. It is skipped with a warning instead (security review 2026-10-28-1,
+    O59).
+    """
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    if "$" in expanded or not os.path.isabs(expanded):
+        if raw not in _warned_unexpanded:
+            _warned_unexpanded.add(raw)
+            log.warning(
+                "Skipping the configured root %r: it does not expand to an absolute path "
+                "(an unset variable, or a relative path), so it would resolve against the "
+                "working directory",
+                raw,
+            )
+        return None
+    return Path(expanded).resolve()
+
+
+#: Configured entries already warned about, so a refresh warns once per process.
+_warned_unexpanded: set[str] = set()
 
 
 def rule_source_roots(paths: list[str] | None = None, *, cwd: Path | None = None) -> list[Path]:
@@ -134,7 +166,9 @@ def rule_source_roots(paths: list[str] | None = None, *, cwd: Path | None = None
     so a file ``rules sync`` enrols is a file the refresh will read.
     """
     raw = list(paths) if paths else list(get_config().rule_sources.paths)
-    return [expand_path(p) for p in raw] if raw else discover_default_roots(cwd)
+    if not raw:
+        return discover_default_roots(cwd)
+    return [root for p in raw if (root := expand_path(p)) is not None]
 
 
 def resolve_rule_sources(
@@ -153,10 +187,17 @@ def resolve_rule_sources(
     ``rule_sources.filenames``, skipping any directory named in
     ``exclude_dirs`` at any level. Results are de-duplicated by resolved path
     and sorted, so the set is stable across runs and across root ordering.
+
+    A root that is too broad (the filesystem root, the home directory, or an
+    ancestor of either) is neither walked nor recorded, and lands in
+    :attr:`RuleSourceResolution.broad`.
     """
     cfg = get_config().rule_sources
     discovered = not (paths or cfg.paths)
-    roots = rule_source_roots(paths, cwd=cwd)
+    roots: list[Path] = []
+    broad: list[Path] = []
+    for root in rule_source_roots(paths, cwd=cwd):
+        (broad if is_broad_root(root) else roots).append(root)
 
     filenames = set(cfg.filenames)
     exclude = set(cfg.exclude_dirs)
@@ -185,6 +226,7 @@ def resolve_rule_sources(
         truncated=truncated,
         missing=missing,
         escaped=escaped,
+        broad=broad,
     )
 
 
@@ -341,10 +383,11 @@ async def sync_rule_sources(
     :attr:`RuleSyncReport.failed`. Does not commit — the caller owns the
     transaction.
 
-    Every resolved root that exists is recorded, in the same transaction, as
-    a root the local refresh may read rule files under,
-    including a path passed for this one call: the operator named it. A dry
-    run records nothing.
+    Every resolved root that is an existing directory is recorded, in the same
+    transaction, as a root the local refresh may read rule files under,
+    including a path passed for this one call: the operator
+    named it. A file passed by path is deposited but not recorded.
+    A dry run records nothing.
     """
     from particles.corpus.deposit import deposit_text_versioned
 
@@ -391,7 +434,9 @@ async def sync_rule_sources(
         (report.unchanged if unchanged else report.deposited).append((path, entry_id))
 
     if not dry_run:
+        # Directories only: a recorded root admits rule files beneath it, never
+        # a file by being equal to it.
         await record_rule_source_roots(
-            session, [root for root in resolution.roots if root.exists()], by=deposited_by
+            session, [root for root in resolution.roots if root.is_dir()], by=deposited_by
         )
     return report

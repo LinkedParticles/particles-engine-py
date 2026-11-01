@@ -29,11 +29,10 @@ import logging
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.config import CurationConfig, get_config
+from particles.config import CurationConfig, get_config, resolve_config_relative_path
 from particles.core.schema import JudgeVerdictKind
 from particles.store.particle_store import (
     count_active_dependents,
@@ -252,7 +251,7 @@ async def register_projection_manifests(session: AsyncSession, cfg: CurationConf
 
     required: set[str] = set()
     for raw_path in cfg.projection_manifests:
-        path = Path(raw_path)
+        path = resolve_config_relative_path(raw_path)
         if not path.exists():
             log.warning("curation: projection manifest %s not found; skipping", path)
             continue

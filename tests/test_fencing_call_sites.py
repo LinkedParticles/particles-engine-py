@@ -640,3 +640,172 @@ async def test_the_structurizer_keeps_subject_names_out_of_the_system_turn() -> 
     with patch("particles.llm.complete", complete):
         await structure_content(HOSTILE, [])
     assert_fenced(complete.await_args.kwargs["system"], complete.await_args.args[1])
+
+
+# ---------------------------------------------------------------------------
+# K8: every FENCED builder driven with a hostile claim (security review
+# 2026-10-24-2). Each hands the builder a claim that tries to close its fence
+# and answer for the model, and asserts the shared ``assert_fenced`` property.
+# No model is called; every LLM seam is patched. The last one is the gap the
+# review found (P33): the query answer's coverage note names a stored subject.
+# ---------------------------------------------------------------------------
+
+
+def _k8_particle(content: str) -> Any:
+    from tests.test_wiki_exporter import _make_particle
+
+    return _make_particle(content)
+
+
+def test_general_extractor_request_is_fenced() -> None:
+    from particles.extraction.general import _build_llm_request
+
+    plan = _build_llm_request(HOSTILE)
+    assert_fenced(plan.request.system, plan.request.prompt)
+    plan = _build_llm_request("The port is 8080.", context=HOSTILE)
+    assert_fenced(plan.request.system, plan.request.prompt)
+
+
+@pytest.mark.asyncio
+async def test_journal_extractor_call_is_fenced() -> None:
+    from particles.extraction import journal
+
+    call = AsyncMock(return_value=("[]", "stub/model"))
+    with patch.object(journal, "complete_extraction", call):
+        await journal._call_journal_llm(HOSTILE)
+    assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_modality_classifier_is_fenced() -> None:
+    from particles.extraction.modality import classify_modality
+
+    call = AsyncMock(return_value=('{"assertion_modality": "FALSIFIABLE"}', "stub/model"))
+    with patch("particles.llm.complete_with_provider_model", call):
+        await classify_modality(HOSTILE)
+    assert_fenced(call.await_args.kwargs["system"], call.await_args.args[1])
+
+
+def test_wikidata_judge_request_is_fenced() -> None:
+    from particles.ingest.authorities.wikidata_judge import judge_request
+    from particles.llm import make_nonce
+
+    system, user = judge_request(HOSTILE, HOSTILE, [("Q1", HOSTILE, HOSTILE)], nonce=make_nonce())
+    assert_fenced(system, user)
+
+
+def test_second_reading_request_is_fenced() -> None:
+    from particles.ingest.second_reading import ClaimContext, SourceKind, _verify_request
+
+    hostile = ClaimContext(content=HOSTILE, source=HOSTILE, date="2026-01-01", passage=HOSTILE)
+    plain = ClaimContext(content="The port is 8080.", source="a.md", date="2026-01-01", passage="")
+    request = _verify_request(plain, hostile)
+    assert_fenced(request.system, request.prompt)
+    record = ClaimContext(
+        content=HOSTILE, source=HOSTILE, date="u", passage=HOSTILE, kind=SourceKind.RECORD
+    )
+    request = _verify_request(record, hostile)
+    assert_fenced(request.system, request.prompt)
+
+
+@pytest.mark.asyncio
+async def test_abstraction_calls_are_fenced() -> None:
+    from particles.operations import abstraction
+
+    call = AsyncMock(return_value=None)
+    with patch.object(abstraction, "_llm_call", call):
+        await abstraction._synthesize_claim([HOSTILE, "The port is 8080."])
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+        await abstraction._check_entailment(HOSTILE, [HOSTILE, "a"])
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+        await abstraction._paraphrase_verdict(HOSTILE, "The port is 8080.")
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+
+
+def test_contradiction_lint_probe_is_fenced() -> None:
+    from particles.operations.lint.contradictions import _probe_request
+
+    request = _probe_request("The port is 8080.", HOSTILE)
+    assert_fenced(request.system, request.prompt)
+    assert _probe_request("a", "b").system != _probe_request("a", "b").system
+
+
+@pytest.mark.asyncio
+async def test_query_answer_is_fenced() -> None:
+    from particles.core.schema import AudienceHint
+    from particles.operations.query.respond import _generate_response
+
+    claim = _k8_particle(HOSTILE)
+    for audience in AudienceHint:
+        call = AsyncMock(return_value="An answer.")
+        with patch("particles.llm.complete", call):
+            await _generate_response(HOSTILE, [claim], [0.9], audience, "", "")
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[1])
+
+
+@pytest.mark.asyncio
+async def test_reanchor_probe_and_reading_are_fenced() -> None:
+    from particles.operations import reanchor
+
+    retired = _k8_particle(HOSTILE)
+    candidate = _k8_particle(HOSTILE)
+    call = AsyncMock(return_value=None)
+    with patch.object(reanchor, "_llm_call", call):
+        await reanchor._probe(retired, HOSTILE, "2026-01-01", [candidate])
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+        await reanchor._read(retired, candidate, HOSTILE, HOSTILE, "2026-01-01")
+        assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_reconcile_replacement_probe_is_fenced() -> None:
+    from particles.operations import reconcile
+
+    call = AsyncMock(return_value=None)
+    with patch.object(reconcile, "_llm_call", call):
+        await reconcile._has_contradiction_signal("The port is 8080.", HOSTILE)
+    assert_fenced(call.await_args.kwargs["system"], call.await_args.args[0])
+
+
+def test_layer_b_judge_is_fenced() -> None:
+    from particles.render.article_synthesis.layer_b import _build_layer_b_prompt
+
+    claim = _k8_particle(HOSTILE)
+    sid = claim.id[:8]
+    system, user = _build_layer_b_prompt([(HOSTILE, sid)], {sid: claim})
+    # The builder repr()s both texts, so the hostile text arrives escaped.
+    assert_fenced(system, user, hostile=repr(HOSTILE))
+
+
+@pytest.mark.asyncio
+async def test_query_coverage_note_keeps_the_subject_name_inside_a_fence() -> None:
+    """A stored subject name is untrusted (N33), so it rides a fence here too."""
+    from particles.core.schema import CoverageGapKind, SubjectCoverageGap
+    from particles.operations.query.main import QueryRequest, _build_response
+
+    claim = _k8_particle("The port is 8080.")
+    gap = SubjectCoverageGap(
+        subject_id="s1",
+        subject_name=HOSTILE,
+        kind=CoverageGapKind.SUBJECT_HAS_LOW_COVERAGE,
+        particle_count=1,
+        detail="low",
+    )
+    seen: list[dict[str, Any]] = []
+
+    async def fake(purpose: str, prompt: str, **kwargs: Any) -> str:
+        seen.append({"prompt": prompt, **kwargs})
+        return "An answer."
+
+    with patch("particles.llm.complete", side_effect=fake):
+        await _build_response(
+            QueryRequest(question="What port?"),
+            [(claim, 0.9, 0.9)],
+            {},
+            [],
+            [gap],
+            None,
+            embeddings_used=False,
+        )
+    assert seen, "the answer call must run"
+    assert_fenced(seen[-1]["system"], seen[-1]["prompt"])

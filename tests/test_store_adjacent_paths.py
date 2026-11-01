@@ -22,8 +22,8 @@ def _stub_config(database_url: str) -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def _no_config_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default to the compiled-defaults case: no ``config.yaml`` discovered."""
-    monkeypatch.setattr(config_mod, "_find_config_file", lambda: None)
+    """Default to the compiled-defaults case: no ``config.yaml`` loaded."""
+    monkeypatch.setattr(config_mod, "config_file_path", lambda: None)
 
 
 class TestSqliteFilePath:
@@ -72,7 +72,7 @@ class TestResolveStoreAdjacentPath:
     ) -> None:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("storage: {}\n")
-        monkeypatch.setattr(config_mod, "_find_config_file", lambda: cfg)
+        monkeypatch.setattr(config_mod, "config_file_path", lambda: cfg)
         monkeypatch.setattr(
             config_mod, "get_config", lambda: _stub_config("postgresql+asyncpg://u:p@h/db")
         )

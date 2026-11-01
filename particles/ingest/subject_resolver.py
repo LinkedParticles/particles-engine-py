@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,7 @@ from particles.config import get_config
 from particles.core.schema import ExternalRef, Subject
 from particles.extraction.registry import infer_domain
 from particles.ingest.authorities import (
+    AuthorityResolution,
     ContextualRecognizer,
     RecognizeContext,
     SubjectAuthority,
@@ -38,11 +40,17 @@ from particles.ingest.authorities import (
 )
 from particles.ingest.update_supersession import SpeakerKey, persona_names, speaker_forms
 from particles.store import subject_cache
+from particles.store.probe_verdict_store import (
+    DeferredAnswer,
+    deferring_answers,
+    record_deferred,
+)
 from particles.store.subject_cache import CacheEntry
 from particles.store.subject_store import (
     add_aliases,
     find_by_external_ref,
     find_by_name,
+    get_subject,
     insert_subject,
     is_persona_source,
     persona_alias_guard,
@@ -64,6 +72,39 @@ RESOLVER_ALIAS_ACTOR = "subject-resolver"
 #: pay a name lookup on every mention of the speaker. Process-local: a form
 #: freed later (a merge, a rename) is recorded after the next restart.
 _persona_forms_held_elsewhere: set[str] = set()
+
+
+@dataclass
+class LiveAnswers:
+    """Live-authority answers asked before the store's writer lock (D2).
+
+    A live lookup reaches the network and, for the Wikidata judge, the model,
+    so a write path that holds the writer lock asks none.
+    :func:`prefetch_subjects` asks the authorities first and records each
+    answer by folded name and namespace; ``resolve_subjects(answers=...)``
+    replays them under the lock. An authority the prefetch did not ask for a
+    name is not asked under the lock either: the replay skips it as an
+    authority it could not reach, and records no negative cache entry for it.
+
+    ``ledger`` holds the answers an authority recorded in the probe ledger
+    during the prefetch (the Wikidata judge's pick). The prefetch writes none
+    of them, so it opens no SQLite write transaction before the lock;
+    ``resolve_subjects(answers=...)`` writes them under it (security review
+    2026-10-31-1, AD6).
+    """
+
+    asked: dict[tuple[str, str], AuthorityResolution | None] = field(default_factory=dict)
+    ledger: list[DeferredAnswer] = field(default_factory=list)
+
+
+@dataclass
+class SubjectPrefetch:
+    """What :func:`prefetch_subjects` learned, with no store write."""
+
+    answers: LiveAnswers
+    known_ids: list[str]
+    """The ids of the names that resolve to a Subject the store already holds,
+    in name order. A name that would mint a Subject has none yet."""
 
 
 def clear_cache() -> None:
@@ -250,6 +291,7 @@ async def resolve_subject(
     *,
     source_type: str | None = None,
     source_tags: Collection[str] = (),
+    answers: LiveAnswers | None = None,
 ) -> Subject:
     """Resolve a subject name to a canonical Subject, creating one if needed.
 
@@ -257,7 +299,12 @@ async def resolve_subject(
     decide whether the speaker fold applies. A folded name never goes to a
     live authority: the speaker is a private referent, and Wikidata
     answered "user" with "user account" and so split one person across files.
+    ``answers`` replays a :func:`prefetch_subjects` lookup instead of asking
+    the live authorities; the ledger answers that prefetch kept are written
+    first.
     """
+    if answers is not None and answers.ledger:
+        await record_deferred(session, answers.ledger)
     persona = _persona_fold(name, source_type, source_tags)
     folded = name if persona is None else persona
     subject = await _resolve(
@@ -268,7 +315,9 @@ async def resolve_subject(
         source_type,
         source_tags,
         live=persona is None,
+        answers=answers,
     )
+    assert subject is not None  # only a dry run returns None
     if folded == name:
         return subject
     recorded = await _record_persona_alias(session, subject, name.strip())
@@ -314,11 +363,20 @@ async def _resolve(
     source_tags: Collection[str] = (),
     *,
     live: bool = True,
-) -> Subject:
+    answers: LiveAnswers | None = None,
+    dry: bool = False,
+) -> Subject | None:
     """The resolution cascade for an already-folded ``name``.
 
     ``live=False`` skips the live-authority pass, as a conversational source
     type does for every name.
+
+    ``dry=True`` is :func:`prefetch_subjects`' run: it asks the live
+    authorities, records each answer in ``answers``, and writes nothing (no
+    Subject, alias or cache entry). It returns the Subject the store already
+    holds for ``name``, else ``None`` where the cascade would mint one. With
+    ``dry=False`` and ``answers`` set, the recorded answers stand in for the
+    live authorities, which are not asked.
     """
     cache_key = subject_cache.make_key(session, name)
 
@@ -330,7 +388,8 @@ async def _resolve(
     # Step 1: local alias index
     existing = await _find_local(session, name, source_type, source_tags)
     if existing:
-        subject_cache.cache_set(cache_key, existing)
+        if not dry:
+            subject_cache.cache_set(cache_key, existing)
         log.debug("Subject resolved locally: %r → %s", name, existing.id)
         return existing
 
@@ -346,7 +405,8 @@ async def _resolve(
             continue
         by_ref = await find_by_external_ref(session, ref.namespace, ref.id)
         if by_ref:
-            subject_cache.cache_set(cache_key, by_ref)
+            if not dry:
+                subject_cache.cache_set(cache_key, by_ref)
             return by_ref
         recognized_ref = ref
         recognizing_auth = auth
@@ -373,14 +433,41 @@ async def _resolve(
                 # Refused by network.egress: not asked, so not a
                 # miss. ``searched_live`` stays False and nothing is negative-cached.
                 continue
+            asked = (name, str(auth.NAMESPACE))
+            if answers is not None and not dry:
+                # The replay under the writer lock asks no authority.
+                if asked not in answers.asked:
+                    continue
+                res = answers.asked[asked]
+                if res is not None and res.existing is not None:
+                    # Read again: another writer may have merged it away since.
+                    current = await get_subject(session, res.existing.id)
+                    if current is None:
+                        continue
+                    res = AuthorityResolution(existing=current)
+            elif answers is not None and asked in answers.asked:
+                # A prefetch shared by several claims asks once per name, as the
+                # write loop did when the first claim's mint answered the rest.
+                res = answers.asked[asked]
+            elif answers is not None:
+                # The prefetch writes nothing: an answer the authority records
+                # in the probe ledger is kept for the apply (AD6).
+                with deferring_answers(answers.ledger):
+                    res = await auth.resolve(
+                        session, name, particle_content=particle_content, domain=domain
+                    )
+                answers.asked[asked] = res
+            else:
+                res = await auth.resolve(
+                    session, name, particle_content=particle_content, domain=domain
+                )
             searched_live = True
-            res = await auth.resolve(
-                session, name, particle_content=particle_content, domain=domain
-            )
             if res is None:
                 continue
             all_missed = False
             if res.existing is not None:
+                if dry:
+                    return res.existing
                 attached = await _attach_alias(session, res.existing, name)
                 subject_cache.cache_set(cache_key, attached)
                 return attached
@@ -429,6 +516,8 @@ async def _resolve(
             )
             if dup is None and resolved_name.lower() != name.lower():
                 dup = await _find_local(session, resolved_name, source_type, source_tags)
+            if dry:
+                return dup
             if dup is not None:
                 attached = await _attach_alias(session, dup, name)
                 subject_cache.cache_set(cache_key, attached)
@@ -460,8 +549,11 @@ async def _resolve(
         # miss, and skip recording after an abstention (``all_missed`` False),
         # which is content-dependent and may link on a different particle, or
         # after an unreachable authority, which answered nothing.
-        if searched_live and all_missed:
+        if searched_live and all_missed and not dry:
             subject_cache.negative_set(name)
+
+    if dry:
+        return None
 
     # Step 4: bare local Subject (possibly with the recognised ref).
     # Ask the recognising authority for a better canonical name (e.g. the
@@ -556,6 +648,7 @@ async def resolve_subjects(
     source_type: str | None = None,
     source_tags: Collection[str] = (),
     qualified: Mapping[str, RecognizeContext] | None = None,
+    answers: LiveAnswers | None = None,
 ) -> list[str]:
     """Resolve a list of subject names and return their UUIDs.
 
@@ -565,6 +658,9 @@ async def resolve_subjects(
     two), so a qualified name no contextual authority recognizes is skipped
     only in the case the gate never produces: one with nothing left after
     normalization, the same case a blank name already is.
+
+    ``answers`` (from :func:`prefetch_subjects`) replaces the live lookups, so
+    a caller holding the store's writer lock makes no network or model call.
     """
     ids: list[str] = []
     for name in names:
@@ -583,9 +679,98 @@ async def resolve_subjects(
             particle_content=particle_content,
             source_type=source_type,
             source_tags=source_tags,
+            answers=answers,
         )
         ids.append(subject.id)
     return ids
+
+
+async def prefetch_subjects(
+    session: AsyncSession,
+    names: list[str],
+    particle_content: str | None = None,
+    *,
+    source_type: str | None = None,
+    source_tags: Collection[str] = (),
+    answers: LiveAnswers | None = None,
+) -> SubjectPrefetch:
+    """Ask the live authorities for ``names`` without writing (D2).
+
+    The gather half of :func:`resolve_subjects` for a write path that applies
+    under the store's writer lock: it runs the same cascade read-only, so every
+    network lookup and judge call happens here, before the lock, and an answer
+    an authority records in the probe ledger is kept in ``answers.ledger``
+    rather than written. Pass the result's ``answers`` to
+    :func:`resolve_subjects` under the lock. A qualified name is not
+    prefetched: its recognizers make no live call; the caller leaves it out.
+    ``answers`` accumulates over several calls (the extraction write phase
+    prefetches every claim into one), and a name already asked is not asked
+    again.
+    """
+    answers = LiveAnswers() if answers is None else answers
+    known: list[str] = []
+    for name in names:
+        if not name.strip():
+            continue
+        persona = _persona_fold(name, source_type, source_tags)
+        folded = name.strip() if persona is None else persona
+        found = await _resolve(
+            session,
+            folded,
+            "",
+            particle_content,
+            source_type,
+            source_tags,
+            live=persona is None,
+            answers=answers,
+            dry=True,
+        )
+        if found is not None:
+            known.append(found.id)
+    return SubjectPrefetch(answers=answers, known_ids=list(dict.fromkeys(known)))
+
+
+@dataclass(frozen=True)
+class SplitTargetGather:
+    """What a split's target identity needs from outside the store, asked first.
+
+    ``subjects`` holds a ``new_name``'s live authority answers; ``aliases``
+    holds the Wikidata labels of a ``wikidata:`` id the store does not hold
+    yet. :func:`split_subject_resolving` replays them, so a caller holding the
+    store's writer lock makes no network or model call (security review
+    2026-10-31-1).
+    """
+
+    subjects: SubjectPrefetch | None = None
+    aliases: list[str] | None = None
+
+
+async def gather_split_target(
+    session: AsyncSession, *, new_name: str | None, new_external_id: str | None
+) -> SplitTargetGather:
+    """Ask the network for :func:`split_subject_resolving`'s target, writing nothing.
+
+    Refuses as the split does: a malformed ``new_external_id``, and a
+    ``wikidata:`` id ``network.egress`` does not let the labels be fetched for.
+    """
+    # Deferred: the Wikidata alias helper is authority-internal and only the
+    # by-QID branch needs it; importing it lazily also keeps the by-name and
+    # by-external-id paths free of the authority module's import cost.
+    from particles.ingest.authorities.wikidata import _wikidata_aliases
+
+    if new_external_id is not None:
+        if ":" not in new_external_id:
+            raise ValueError("new_external_id must be NAMESPACE:ID (e.g. wikidata:Q30297735)")
+        ns, ext_id = new_external_id.split(":", 1)
+        if ns != "wikidata" or await find_by_external_ref(session, ns, ext_id) is not None:
+            return SplitTargetGather()
+        # A refusal here would otherwise mint a Subject named by its raw QID
+        # (the alias helper returns [] on any failure); refuse instead.
+        egress.check(*egress.WIKIDATA_HOST, "subjects split (wikidata labels)")
+        return SplitTargetGather(aliases=await _wikidata_aliases(ext_id))
+    if new_name is not None:
+        return SplitTargetGather(subjects=await prefetch_subjects(session, [new_name]))
+    return SplitTargetGather()
 
 
 async def split_subject_resolving(
@@ -596,6 +781,7 @@ async def split_subject_resolving(
     new_name: str | None,
     new_external_id: str | None,
     asserted_by: str = "subjects-split",
+    gathered: SplitTargetGather | None = None,
 ) -> tuple[Subject, list[str], list[str]]:
     """Resolve / construct the split-target Subject, then re-link particles.
 
@@ -606,6 +792,10 @@ async def split_subject_resolving(
     Does **not** manage the transaction: the caller commits, or rolls back for a
     dry run.
 
+    ``gathered`` is :func:`gather_split_target`'s answer for the same identity.
+    With it the split asks no live authority and fetches nothing, so it may run
+    under the store's writer lock; without it the split gathers first itself.
+
     Returns:
         ``(new_subject, relinked_pids, not_bound_pids)``.
 
@@ -613,10 +803,10 @@ async def split_subject_resolving(
         ValueError: ``new_external_id`` is malformed, neither identity field was
             given, or the resolver returned the source Subject (nothing to split).
     """
-    # Deferred: the Wikidata alias helper is authority-internal and only the
-    # by-QID branch needs it; importing it lazily also keeps the by-name and
-    # by-external-id paths free of the authority module's import cost.
-    from particles.ingest.authorities.wikidata import _wikidata_aliases
+    if gathered is None:
+        gathered = await gather_split_target(
+            session, new_name=new_name, new_external_id=new_external_id
+        )
 
     new_subject: Subject
     if new_external_id is not None:
@@ -627,11 +817,8 @@ async def split_subject_resolving(
         if existing is not None:
             new_subject = existing
         elif ns == "wikidata":
-            # A refusal here would otherwise mint a Subject named by its raw QID
-            # (the alias helper returns [] on any failure); refuse instead.
-            egress.check(*egress.WIKIDATA_HOST, "subjects split (wikidata labels)")
-            # Fetch labels + aliases directly from Wikidata by QID.
-            aliases = await _wikidata_aliases(ext_id)
+            # Labels + aliases fetched by QID in the gather.
+            aliases = list(gathered.aliases or [])
             canonical = aliases[0] if aliases else ext_id
             new_subject = Subject(
                 canonical_name=canonical,
@@ -660,7 +847,13 @@ async def split_subject_resolving(
             )
             await insert_subject(session, new_subject)
     elif new_name is not None:
-        new_subject = await resolve_subject(session, new_name, asserted_by=asserted_by)
+        new_subject = await resolve_subject(
+            session,
+            # Stripped as the gather's lookup was, so its answers replay.
+            new_name.strip(),
+            asserted_by=asserted_by,
+            answers=gathered.subjects.answers if gathered.subjects is not None else None,
+        )
     else:
         raise ValueError("provide new_name or new_external_id")
 

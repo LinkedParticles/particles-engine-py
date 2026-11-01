@@ -27,6 +27,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo
 from particles.db import session_scope
 
 inbox_app = typer.Typer(
@@ -45,7 +46,7 @@ def _resolved_inbox_or_exit() -> Any:
 
     path = resolve_inbox_path()
     if path is None:
-        typer.echo(
+        terminal_echo(
             "No `inbox.file_path` configured. Set it in config.yaml (see "
             "docs/cli.md § Inbox) or via the `INBOX_FILE_PATH` env var.",
             err=True,
@@ -59,19 +60,19 @@ def _print_summary(summary: dict[str, list[str]]) -> None:
     refused = summary.get("refused", [])
     total = len(summary["processed"]) + len(summary["failed"]) + len(refused)
     if total == 0:
-        typer.echo("Inbox empty — nothing to process.")
+        terminal_echo("Inbox empty — nothing to process.")
         return
     refused_note = f", {len(refused)} refused by network.egress" if refused else ""
-    typer.echo(
+    terminal_echo(
         f"Processed {len(summary['processed'])} / {total} URL(s) "
         f"({len(summary['failed'])} failed{refused_note})."
     )
     for url in summary["processed"]:
-        typer.echo(f"  + {url}")
+        terminal_echo(f"  + {url}")
     for url in summary["failed"]:
-        typer.echo(f"  x {url}")
+        terminal_echo(f"  x {url}")
     for url in refused:
-        typer.echo(f"  - {url} (refused: network.egress)")
+        terminal_echo(f"  - {url} (refused: network.egress)")
 
 
 @inbox_app.command("process")
@@ -109,7 +110,7 @@ def inbox_watch_cmd(
     effective_interval = (
         interval if interval is not None else get_config().inbox.poll_interval_seconds
     )
-    typer.echo(f"Watching {path} every {effective_interval}s. Ctrl-C to stop.")
+    terminal_echo(f"Watching {path} every {effective_interval}s. Ctrl-C to stop.")
     run(_watch_loop(path, deposited_by, effective_interval))
 
 
@@ -117,16 +118,16 @@ def inbox_watch_cmd(
 def inbox_status_cmd() -> None:
     """Show pending vs processed counts in the inbox file."""
     path = _resolved_inbox_or_exit()
-    typer.echo(f"Inbox: {path}")
+    terminal_echo(f"Inbox: {path}")
     if not path.exists():
-        typer.echo("  (file does not exist yet — will be created on first iOS share)")
+        terminal_echo("  (file does not exist yet — will be created on first iOS share)")
         # Common config-side foot-gun: operators copy-paste the path
         # from a shell command where spaces were escaped as `\ ` and
         # then drop it into config.yaml verbatim. YAML treats the
         # backslash as a literal character, so the resolved path looks
         # right to a human but never matches what's actually on disk.
         if "\\ " in str(path):
-            typer.echo(
+            terminal_echo(
                 "  hint: the resolved path contains '\\ ' (backslash-space). "
                 "That's shell escaping; YAML doesn't need it. Remove the "
                 "backslashes from `inbox.file_path` in config.yaml, or "
@@ -134,7 +135,7 @@ def inbox_status_cmd() -> None:
                 err=True,
             )
         elif not path.parent.exists():
-            typer.echo(
+            terminal_echo(
                 f"  hint: the parent directory does not exist either: "
                 f"{path.parent}. Check the configured path is correct.",
                 err=True,
@@ -147,14 +148,14 @@ def inbox_status_cmd() -> None:
     pending = parse_inbox(text)
     total_lines = sum(1 for line in text.split("\n") if line.strip())
     processed = total_lines - len(pending)
-    typer.echo(f"  Pending:   {len(pending)}")
-    typer.echo(f"  Processed: {processed}")
+    terminal_echo(f"  Pending:   {len(pending)}")
+    terminal_echo(f"  Processed: {processed}")
     if pending:
-        typer.echo("  Next URLs to process:")
+        terminal_echo("  Next URLs to process:")
         for _idx, url in pending[:5]:
-            typer.echo(f"    - {url}")
+            terminal_echo(f"    - {url}")
         if len(pending) > 5:
-            typer.echo(f"    … and {len(pending) - 5} more")
+            terminal_echo(f"    … and {len(pending) - 5} more")
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +171,7 @@ async def _process_once(path: Any, deposited_by: str) -> dict[str, list[str]]:
 
 
 async def _watch_loop(path: Any, deposited_by: str, interval: int) -> None:
-    from particles.operations.inbox import process_inbox
+    from particles.operations.inbox import inbox_has_pending, process_inbox
 
     last_mtime: float | None = None
     while True:
@@ -185,8 +186,11 @@ async def _watch_loop(path: Any, deposited_by: str, interval: int) -> None:
                 summary = await process_inbox(session, path, deposited_by=deposited_by)
             _print_summary(summary)
             # Re-stat after rewriting so the rewrite's own mtime change
-            # doesn't trigger an immediate second pass.
-            if path.exists():
+            # doesn't trigger an immediate second pass, unless a URL shared
+            # while the pass ran is still pending.
+            if inbox_has_pending(path):
+                last_mtime = None
+            elif path.exists():
                 last_mtime = path.stat().st_mtime
         # asyncio.sleep so Ctrl-C propagates cleanly between iterations.
         try:

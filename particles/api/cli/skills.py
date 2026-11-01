@@ -23,8 +23,10 @@ parent; each file is written with ``O_NOFOLLOW`` (security review N27).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import stat
 from pathlib import Path
 
 import typer
@@ -70,11 +72,65 @@ def _refuse_symlinks(owned: Path, root: Path | None) -> None:
             raise SkillsPathError(f"{path} is a symlink; refusing to write or delete through it")
 
 
+def write_replacing(destination: Path, data: bytes) -> None:
+    """Put ``data`` at ``destination`` by atomic replace, never writing into what is there.
+
+    The bytes go to a fresh file beside ``destination`` (``O_EXCL``, so never
+    an existing file or link) and are renamed over it, so a hard link planted
+    at ``destination`` is replaced as a name and the file it shared an inode
+    with is left as it was (security review 2026-10-25-1, Q27: ``O_NOFOLLOW``
+    alone does not stop a hard link). A symlink there is refused outright, as
+    before (N27, P24).
+
+    Raises:
+        SkillsPathError: ``destination`` is a symlink.
+    """
+    if destination.is_symlink():
+        raise SkillsPathError(f"{destination} is a symlink; refusing to write through it")
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.particles-tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(temporary, flags, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_replacing_at(directory_fd: int, name: str, data: bytes) -> None:
+    """:func:`write_replacing` relative to an open directory, never resolving it by name again.
+
+    The temporary file and the rename are both made through ``directory_fd``,
+    so a directory swapped for a link after the caller judged the descriptor
+    receives nothing (security review 2026-10-26-1, W30).
+
+    Raises:
+        SkillsPathError: ``name`` is a symlink in that directory.
+    """
+    try:
+        existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        raise SkillsPathError(f"{name} is a symlink; refusing to write through it")
+    temporary = f".{name}.{os.getpid()}.particles-tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(temporary, flags, 0o644, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.rename(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        raise
+
+
 def _write_no_follow(source: Path, destination: Path) -> None:
-    """Copy ``source`` onto ``destination`` without following a link planted there."""
-    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "wb") as out:
-        out.write(source.read_bytes())
+    """Copy ``source`` onto ``destination`` without writing through a link planted there."""
+    write_replacing(destination, source.read_bytes())
 
 
 def install_skills(
@@ -111,15 +167,55 @@ def remove_skills(
 
     Refuses (:class:`SkillsPathError`) when the owned subdirectory, or a parent
     below ``root``, is a symlink, so a link cannot aim the delete at a real
-    directory elsewhere.
+    directory elsewhere. The delete itself runs through descriptors opened
+    from ``root`` one ``O_NOFOLLOW`` directory at a time, so a parent swapped
+    for a link after the check receives nothing (security review
+    2026-10-27-1, Z31).
     """
     owned = target_dir / OWNED_SUBDIR
     if not owned.is_dir() and not owned.is_symlink():
         return None
     _refuse_symlinks(owned, root)
     if not dry_run:
-        shutil.rmtree(owned)
+        parent_fd = _open_skills_parent(target_dir, root)
+        try:
+            shutil.rmtree(OWNED_SUBDIR, dir_fd=parent_fd)
+        except OSError as exc:
+            if os.path.islink(owned):
+                raise SkillsPathError(
+                    f"{owned} is a symlink; refusing to write or delete through it"
+                ) from exc
+            raise
+        finally:
+            os.close(parent_fd)
     return owned
+
+
+def _open_skills_parent(target_dir: Path, root: Path | None) -> int:
+    """A descriptor on ``target_dir``, reached from ``root`` without following a link.
+
+    Without ``root`` (the user-scope directory) ``target_dir`` is opened by
+    name, as the operator named it; with one, each directory below ``root`` is
+    opened through its parent's descriptor with ``O_NOFOLLOW``.
+
+    Raises:
+        SkillsPathError: a directory below ``root`` is a symlink.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if root is None or not target_dir.is_relative_to(root):
+        return os.open(target_dir, flags)
+    fd = os.open(root, flags)
+    for part in target_dir.relative_to(root).parts:
+        try:
+            child = os.open(part, flags | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError as exc:
+            os.close(fd)
+            raise SkillsPathError(
+                f"{part} under {root} is not a directory; refusing to delete through it"
+            ) from exc
+        os.close(fd)
+        fd = child
+    return fd
 
 
 @skills_app.command("install")

@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import db
 from particles.config import get_config
 from particles.core.consolidation_cadence import CensusDecision, decide_census, is_due
 from particles.core.contradiction_disclosure import ConfirmedPair, census_sides
@@ -68,7 +69,7 @@ from particles.core.progress import ProgressCallback, ProgressEvent
 from particles.core.schema import SuggestMode
 from particles.core.spend_budget import decide_spend
 from particles.core.status import Status
-from particles.db import write_lock, write_transaction
+from particles.db import store_of, write_transaction
 from particles.ingest.absence import absences_last
 from particles.ingest.ladder_shell import rung_tally
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
@@ -154,6 +155,7 @@ from particles.operations.utility_mining import (
     plan_harvested_session,
     record_session_mine,
 )
+from particles.secrets import redact_known_secrets
 from particles.store.curation_snapshot_store import CollectionScope, latest_snapshot
 from particles.store.event_store import (
     OperatorEvent,
@@ -887,9 +889,19 @@ class ConsolidationReport(BaseModel):
     refresh_unchanged_hash: int = 0
     refresh_updated: int = 0
     refresh_missing: int = 0
+    # Missing, and the entry's latest record is already ABSENT: the deletion is
+    # recorded, so ``refresh_missing`` counts only the unrecorded ones.
+    refresh_absent_recorded: int = 0
     # Outside every allowed root, so not read.
     refresh_refused: int = 0
     refresh_remaining: int = 0
+    # Why pass 0.5 read no local source at all: ``"cwd_store"`` when the store
+    # resolves against the working directory or lies in a git work tree
+    # (``fetch.cwd_relative_store``), ``"store_writable_by_others"``
+    # when other users may write the store file (security review 2026-10-27-1,
+    # G16), ``"config_writable_by_others"`` when they may write the config file
+    # that chooses the roots; ``None`` otherwise.
+    refresh_skipped: str | None = None
 
     # Pass 1 — extract catch-up.
     pending_total: int = 0
@@ -2089,8 +2101,10 @@ async def _run_pass(
         with contextlib.suppress(Exception):
             await session.rollback()
         entry.status = "failed"
-        entry.detail = f"{type(exc).__name__}: {exc}"
-        log.warning("consolidation: pass %s failed: %s", name, exc)
+        # Stored in the CONSOLIDATION_RUN payload, so a credential a provider
+        # echoed into the error is redacted first (security review 2026-10-25, Q13).
+        entry.detail = redact_known_secrets(f"{type(exc).__name__}: {exc}")
+        log.warning("consolidation: pass %s failed: %s", name, entry.detail)
     finally:
         entry.duration_seconds = time.monotonic() - start
         if budget is not None and before is not None:
@@ -2156,7 +2170,13 @@ def _pass_summary(
             if report.refresh_missing:
                 parts.append(f"{report.refresh_missing} missing")
             if report.refresh_refused:
-                parts.append(f"{report.refresh_refused} outside the allowed roots")
+                parts.append(f"{report.refresh_refused} refused by the refresh roots")
+            if report.refresh_skipped == "cwd_store":
+                parts = ["skipped: the store may be one a repository shipped"]
+            elif report.refresh_skipped == "store_writable_by_others":
+                parts = ["skipped: other users can write the store"]
+            elif report.refresh_skipped == "config_writable_by_others":
+                parts = ["skipped: other users can write the config file"]
         case "extract":
             _done, attempted = progress.counters.get("extract", (0, 0))
             parts = [f"{report.pending_extracted} of {attempted} extracted"]
@@ -2340,11 +2360,58 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
 
     Returns 0: the pass makes no LLM calls at all — its cost is a ``stat`` per
     entry plus a read + SHA-256 only for the files whose mtime moved.
-    Per-entry failures are disclosed and never fatal (§8).
+    Per-entry failures are disclosed and never fatal (§8). On a store that
+    resolves against the working directory or lies in a git work tree
+    (:func:`~particles.corpus.fetch.cwd_relative_store`) it reads nothing and
+    records ``refresh_skipped``.
     """
+    from particles.corpus.fetch import (
+        RefreshRefusal,
+        config_file_judgement,
+        cwd_relative_store,
+        store_refusal,
+    )
     from particles.corpus.refresh_outcome import RefreshOutcome
     from particles.corpus.store import list_refreshable_local_entries
     from particles.operations.corpus_refresh import refresh_entries
+
+    if (store := cwd_relative_store(session)) is not None and (
+        store_refusal(session) is RefreshRefusal.STORE_WRITABLE_BY_OTHERS
+    ):
+        # Rows other users may have written choose no host file either
+        # (security review 2026-10-27-1, G16).
+        report.refresh_skipped = RefreshRefusal.STORE_WRITABLE_BY_OTHERS.value
+        log.warning(
+            "consolidation: other users can write the store %s, so its local sources are "
+            "not refreshed. Remove group and other write permission from the store file.",
+            store,
+        )
+        return 0
+    if store is not None:
+        # a store found in the working directory, or in a git
+        # work tree, chooses no host file to read (security review
+        # 2026-10-26-1, W15). Every entry this pass lists is a local one, so the pass
+        # reads nothing and says why; the other passes run.
+        report.refresh_skipped = "cwd_store"
+        log.warning(
+            "consolidation: the store %s resolves against the working directory, lies inside "
+            "a git work tree, or is another user's file, so its local sources are not "
+            "refreshed. Name a store of your own outside any repository with an absolute "
+            "DATABASE_URL.",
+            store,
+        )
+        return 0
+
+    if (config := config_file_judgement()) is not None:
+        # The config chooses the roots the refresh reads.
+        report.refresh_skipped = RefreshRefusal.CONFIG_WRITABLE_BY_OTHERS.value
+        log.warning(
+            "consolidation: the config file %s is %s, and it chooses the roots the refresh "
+            "reads, so its local sources are not refreshed.",
+            config[0],
+            config[1].cause,
+        )
+        return 0
 
     entries = await list_refreshable_local_entries(session)
     cap = get_config().local_refresh.max_entries
@@ -2362,6 +2429,8 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
                 )
             case RefreshOutcome.MISSING:
                 report.refresh_missing += 1
+            case RefreshOutcome.ABSENT_RECORDED:
+                report.refresh_absent_recorded += 1
             case RefreshOutcome.UNCHANGED_MTIME:
                 report.refresh_unchanged_mtime += 1
             case RefreshOutcome.UNCHANGED_HASH:
@@ -2582,7 +2651,21 @@ def _record_extraction(
         elif outcome.skipped == "waiting":
             report.pending_waiting += 1
             holder = (outcome.waiting_on or "")[:8]
-            if outcome.waiting_on_failed:
+            if outcome.waiting_on_memory_file:
+                log.warning(
+                    "consolidation: absence %s/%s waits on %s, an unextracted memory file of "
+                    "the same project%s",
+                    entry_id[:8],
+                    snapshot_id[:8],
+                    holder,
+                    (
+                        ", which is FAILED (its blob is missing): restore the blob, or run "
+                        "`particles reindex` on its entry, to release the wait"
+                        if outcome.waiting_on_failed
+                        else "; it is processed once that file is extracted"
+                    ),
+                )
+            elif outcome.waiting_on_failed:
                 log.warning(
                     "consolidation: %s/%s waits on %s, a FAILED snapshot holding a partial "
                     "whole read (its blob is missing): restore the blob, or run "
@@ -2827,8 +2910,10 @@ async def _pass_extract_pooled(batch: list[tuple[str, str]], report: Consolidati
         nonlocal finished
         slot = _StoreSlot(slots)
         try:
+            # The run's own store: a named store's pending snapshots are
+            # extracted there, never in the default store (security review R12).
             async with (
-                session_scope() as task_session,
+                session_scope(report.store) as task_session,
                 pool.participant(idle=slot.idle(task_session)),
                 slot,
             ):
@@ -3373,7 +3458,7 @@ async def _pass_utility(
         replies = await judge_sessions(mines, latency_tolerant=True)
 
     calls = 0
-    async with write_lock():
+    async with db.write_lock(store_of(session)):
         for mine, session_replies in zip(mines, replies, strict=True):
             result = await record_session_mine(session, mine, session_replies)
             report.utility_literal += result.literal
@@ -3626,7 +3711,9 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "refresh_checked": report.refresh_checked,
         "refresh_updated": report.refresh_updated,
         "refresh_missing": report.refresh_missing,
+        "refresh_absent_recorded": report.refresh_absent_recorded,
         "refresh_refused": report.refresh_refused,
+        "refresh_skipped": report.refresh_skipped,
         "reconcile_demoted": report.reconcile_demoted,
         "reconcile_candidate_pairs": report.reconcile_candidate_pairs,
         "reconcile_probes_run": report.reconcile_probes_run,
@@ -4071,6 +4158,24 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
         )
     if report.closure is not None:
         lines.extend(render_closure_lines(report.closure, report.closure_previous))
+    if report.refresh_skipped == "cwd_store":
+        lines.append(
+            "  local sources    not read: the store may be one a repository shipped "
+            "(name a store of your own outside any repository with an absolute "
+            "DATABASE_URL to refresh it)"
+        )
+    elif report.refresh_skipped == "store_writable_by_others":
+        lines.append(
+            "  local sources    not read: other users can write the store "
+            "(remove group and other write permission from the store file, its SQLite "
+            "sidecars and its directory to refresh it)"
+        )
+    elif report.refresh_skipped == "config_writable_by_others":
+        lines.append(
+            "  local sources    not read: other users can write the config file that "
+            "chooses the refresh roots (remove their write access, or move it to a "
+            "directory only you may write, to refresh them)"
+        )
     if report.refresh_checked:
         refresh_line = f"  local sources    {report.refresh_checked} checked"
         if report.refresh_updated:
@@ -4079,9 +4184,12 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             refresh_line += ", none changed"
         if report.refresh_missing:
             refresh_line += f", {report.refresh_missing} missing"
+        if report.refresh_absent_recorded:
+            refresh_line += f", {report.refresh_absent_recorded} recorded as deleted"
         if report.refresh_refused:
             refresh_line += (
-                f", {report.refresh_refused} outside the allowed roots (run `particles rules sync`)"
+                f", {report.refresh_refused} refused by the refresh roots "
+                "(`particles rules` names the cause and the fix)"
             )
         lines.append(refresh_line)
     lines.append(_pending_line(report))
@@ -4126,6 +4234,17 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
     if report.projection is not None:
         rendered = report.projection.get("rendered", 0)
         lines.append(f"  projection       re-rendered ({rendered} memory file(s))")
+        if report.projection.get("absences_recorded"):
+            lines.append(
+                f"  memory files     {report.projection['absences_recorded']} recorded as "
+                "deleted; their claims retire at the next extraction pass"
+            )
+        if report.projection.get("absences_unrecorded"):
+            lines.append(
+                f"  memory files     {report.projection['absences_unrecorded']} no longer "
+                "found and not recorded (a first or mass deletion): run "
+                "`particles memory absences`"
+            )
 
     # --- Disclosures (§6: every skip, cap, and degradation named) ----------
     if report.batch_wait is not None and report.batch_wait.moved_work:

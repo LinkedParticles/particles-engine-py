@@ -219,71 +219,40 @@ async def test_render_article_no_session_does_not_use_cache(
 
 
 @pytest.mark.asyncio
-async def test_obsidian_short_circuit_backfills_db_cache(db_session: object) -> None:
-    """0.42.1 regression fix: when Obsidian's on-disk hash matches and the
-    exporter takes its per-note shortcut (skipping render_article entirely),
-    the DB cache also gets populated from the on-disk body. Without
-    this backfill, vaults synthesised pre-0.41.0 force the next cross-
-    exporter run to re-pay full LLM cost — the shortcut never reaches the
-    cache-write path in ``render_article``.
+async def test_obsidian_cache_hit_leaves_the_shared_cache_empty(db_session: object) -> None:
+    """An Obsidian per-note cache hit never fills the shared cache from the vault note.
+
+    The note on disk may have been edited by another party, so its prose is
+    not the engine's synthesis (security review 2026-10-30-1, AB34).
     """
-    from particles.exporters.obsidian.synthesis import (
-        _backfill_synthesis_cache_if_absent,
-    )
+    from particles.exporters.obsidian.synthesis import _splice_synthesised_article
     from particles.render.article_synthesis.cache import _PROMPT_VERSION
     from particles.store.synthesis_cache_store import lookup_cached_article
 
-    subject_id = str(uuid.uuid4())
+    subject = Subject(canonical_name="A Subject", asserted_by="test")
+    particles = [_make_particle(f"claim {i}") for i in range(3)]
     input_hash = "deadbeef" * 8
     prior_body = (
-        "---\narticle_input_hash: " + input_hash + "\n---\n# A Subject\n\nSynthesised prose body.\n"
+        "---\narticle_input_hash: " + input_hash + "\narticle_synthesis: llm\n---\n"
+        "# A Subject\n\nSynthesised prose body.\n"
     )
-
-    # Pre-condition: DB has no row for this key.
     async with session_scope() as session:
-        assert await lookup_cached_article(session, subject_id, input_hash, _PROMPT_VERSION) is None
-
-        # Backfill from the on-disk body.
-        await _backfill_synthesis_cache_if_absent(
-            session,
-            subject_id=subject_id,
-            input_hash=input_hash,
+        note, outcome = await _splice_synthesised_article(
+            note="# A Subject\n",
+            subject=subject,
+            particles=particles,
+            subject_map={subject.id: subject},
+            eligible_ids={subject.id},
+            eff_conf={},
+            entry_uri_map={},
+            article_hash=input_hash,
+            regenerate=False,
+            lint_findings=[],
+            progress_prefix="[1/1]",
+            session=session,
             prior_body=prior_body,
         )
         await session.commit()
-
-    # Post-condition: DB now has the body.
+    assert (note, outcome) == (prior_body, "cache_hit")
     async with session_scope() as session:
-        cached = await lookup_cached_article(session, subject_id, input_hash, _PROMPT_VERSION)
-    assert cached == prior_body
-
-
-@pytest.mark.asyncio
-async def test_backfill_does_not_overwrite_existing_db_row(db_session: object) -> None:
-    """If the DB cache already has a row for the key, the backfill is a
-    no-op — we don't clobber a freshly-rendered body with stale on-disk
-    content."""
-    from particles.exporters.obsidian.synthesis import (
-        _backfill_synthesis_cache_if_absent,
-    )
-    from particles.render.article_synthesis.cache import _PROMPT_VERSION
-    from particles.store.synthesis_cache_store import (
-        lookup_cached_article,
-        store_cached_article,
-    )
-
-    subject_id = str(uuid.uuid4())
-    input_hash = "0" * 64
-    canonical_body = "canonical body from render_article"
-    stale_body = "stale body from old on-disk vault"
-
-    async with session_scope() as session:
-        await store_cached_article(session, subject_id, input_hash, _PROMPT_VERSION, canonical_body)
-        await _backfill_synthesis_cache_if_absent(
-            session, subject_id=subject_id, input_hash=input_hash, prior_body=stale_body
-        )
-        await session.commit()
-
-    async with session_scope() as session:
-        cached = await lookup_cached_article(session, subject_id, input_hash, _PROMPT_VERSION)
-    assert cached == canonical_body
+        assert await lookup_cached_article(session, subject.id, input_hash, _PROMPT_VERSION) is None

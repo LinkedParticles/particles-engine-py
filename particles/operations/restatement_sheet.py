@@ -17,11 +17,14 @@ verdicts whose 95 % Wilson lower bound on precision is at least 0.95
 (§ Acceptance). ``--summary`` prints that bound for a labelled file.
 
     python -m particles.operations.restatement_sheet > restatements.tsv
-    python -m particles.operations.restatement_sheet --db /path/to/particles.db
+    python -m particles.operations.restatement_sheet --db /path/to/store.db
     python -m particles.operations.restatement_sheet --summary restatements.tsv
 
 The sheet holds claim text from the store it reads: keep it out of the
 repository.
+
+Without ``--db`` the sheet reads the ``default`` store the configuration
+names, the file the CLI opens; the path is never built here.
 """
 
 from __future__ import annotations
@@ -34,7 +37,8 @@ import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-DEFAULT_DB = Path("particles.db")
+from particles.config import get_config, sqlite_file_path
+
 _COLUMNS = ("verdict_id", "recorded_at", "earlier", "later", "label")
 
 
@@ -74,9 +78,26 @@ def summarise(labels: Iterable[str]) -> tuple[int, int, float]:
     return len(filled), correct, wilson_lower(correct, len(filled))
 
 
+def _default_store_file() -> Path | None:
+    """The ``default`` store's SQLite file, as the configuration names it."""
+    path = sqlite_file_path(get_config().storage.database_url)
+    return Path(path) if path is not None else None
+
+
+def read_only_uri(db: Path) -> str:
+    """A read-only SQLite URI for ``db``, its path absolute and percent-encoded.
+
+    A ``?`` or ``#`` in the path stays part of the file name, so no path can
+    add a URI parameter or drop ``mode=ro`` (security review U9).
+    """
+    return f"{db.resolve().as_uri()}?mode=ro"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="SQLite store to read")
+    parser.add_argument(
+        "--db", type=Path, default=None, help="SQLite store to read (default: the default store)"
+    )
     parser.add_argument("--summary", type=Path, help="a labelled sheet to summarise instead")
     args = parser.parse_args(argv)
 
@@ -90,7 +111,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    db = args.db or _default_store_file()
+    if db is None:
+        sys.stderr.write("The default store is not a SQLite file; pass --db.\n")
+        return 2
+    conn = sqlite3.connect(read_only_uri(db), uri=True)
     try:
         rows = sheet_rows(conn)
     finally:

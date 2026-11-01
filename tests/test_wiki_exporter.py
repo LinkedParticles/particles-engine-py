@@ -27,6 +27,7 @@ What's covered here:
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2256,6 +2257,27 @@ class TestWithoutSynthesis:
         fm = _parse_frontmatter((tmp_path / "GDR.md").read_text())
         assert fm is not None
         assert fm["synthesis"] == "structured-listing"
+
+    @pytest.mark.asyncio
+    async def test_export_writes_the_listing_with_claim_markup_inert(
+        self, db_session: object, tmp_path: Path
+    ) -> None:
+        # Security review 2026-10-25-2, R3: the listing writes stored claim
+        # text, which a hostile source can put markup in.
+        await _persist_subject_with_particles(
+            "GDR",
+            [
+                _make_particle('claim <img src="https://collector.invalid/p.png"> 0'),
+                _make_particle("claim ![x](https://collector.invalid/x.png) 1"),
+                _make_particle("claim 2\n```dataviewjs\ndv.el('b','x')\n```"),
+            ],
+        )
+        async with session_scope() as session:
+            await WikiExporter().export(session, tmp_path, without_synthesis=True)
+        text = (tmp_path / "GDR.md").read_text()
+        assert "<img" not in text
+        assert "![x](https://" not in text
+        assert not re.search(r"^\s*```", text, re.M), text
 
 
 # ---------------------------------------------------------------------------

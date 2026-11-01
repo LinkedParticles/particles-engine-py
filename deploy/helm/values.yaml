@@ -44,6 +44,11 @@ auth:
   existingSecret: ""
   apiKeySecretKey: PARTICLES_API_KEY
   apiKey: ""
+  # true runs the engine on per-client keys alone: no PARTICLES_API_KEY is
+  # required (with existingSecret its entry becomes optional). A live key in
+  # /data/engine-keys.json then satisfies the gate; mint one into the volume
+  # before the first start, or the pod refuses to start as above.
+  keysFileOnly: false
   # Optional. Without it, LLM-priced work (extraction, semantic lint, the
   # consolidation cycle's semantic passes) degrades to a disclosed
   # structural-only run rather than failing.
@@ -86,9 +91,9 @@ env: {}
 # `config.create: true` and put the file body in `config.content`, or point
 # `config.existingConfigMap` at a ConfigMap whose `config.yaml` key holds it.
 # Your file replaces the baked one entirely, so keep its floor: the absolute
-# /data pins and `api: {require_auth_for_reads: true}` (without that line every
-# read route, raw corpus bytes included, is open to anything that reaches the
-# Service).
+# /data pins. The read routes stay closed whatever the file says, because the
+# image's environment sets PARTICLES_API_REQUIRE_AUTH_FOR_READS=true and the
+# environment outranks the file; only `env` above can open them.
 config:
   create: false
   existingConfigMap: ""

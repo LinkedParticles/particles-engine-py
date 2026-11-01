@@ -42,6 +42,7 @@ from particles.benchmark.query_latency.schema import (
     Mode,
     Variant,
 )
+from particles.url_safety import pinned_subprocess_env
 
 #: The child module the orchestrator starts per cell.
 CELL_MODULE = "particles.benchmark.query_latency.cell"
@@ -146,6 +147,7 @@ async def _rss_bytes(pid: int) -> int | None:
             str(pid),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=pinned_subprocess_env(os.environ),
         )
         out, _ = await proc.communicate()
     except OSError:
@@ -185,7 +187,11 @@ def swap_used_bytes() -> int | None:
 
         try:
             raw = subprocess.run(
-                ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5
+                ["sysctl", "-n", "vm.swapusage"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=pinned_subprocess_env(os.environ),
             ).stdout
         except (OSError, subprocess.SubprocessError):
             return None
@@ -223,8 +229,12 @@ async def _run_child(
     t0 = time.perf_counter()
     swap0 = swap_used_bytes()
     with log_path.open("w") as log:
+        # ``-P``: under ``-m`` the interpreter would put the working directory
+        # first on the module path, so a ``particles`` package there would run
+        # instead of the installed one (security review 2026-10-30-1).
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
+            "-P",
             "-m",
             CELL_MODULE,
             str(spec_path),

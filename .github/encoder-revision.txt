@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# The embedding encoder's pinned hub commit (EMBEDDING_MODEL_REVISION in
+# particles/embeddings.py, which this tree does not carry). publish-image.yml
+# refuses to tag an image that baked any other commit, and refuses to sign an
+# SBOM that names one (security review Q40). Authored in the private upstream
+# under publish/overlays/; a test there keeps it equal to the pin.
+1110a243fdf4706b3f48f1d95db1a4f5529b4d41

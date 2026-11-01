@@ -47,9 +47,21 @@ from typing import Any
 import yaml
 
 from particles.core.schema import Particle
-from particles.render.article_synthesis.cache import _FRONTMATTER_RE
+from particles.render.article_synthesis.cache import (
+    _FRONTMATTER_RE,
+    REFERENCES_HEADING,
+    demote_model_structure,
+)
 from particles.render.article_synthesis.layer_a import _short_id
 from particles.render.article_synthesis.topic import SynthesisTopic
+from particles.render.escape import (
+    identifier,
+    md_link_label,
+    md_text,
+    prose_code_span,
+    prose_text,
+    synthesized_prose,
+)
 
 # Frontmatter tag every generated article carries. Used by
 # Obsidian property indexing and by future tooling that wants to find the
@@ -100,12 +112,16 @@ def _render_lint_callouts(findings: list[Any]) -> str:
         callout = _LINT_CALLOUT_TYPES.get(ft)
         if callout is None:
             continue
+        # A finding's detail and action carry stored text (a subject's name and
+        # description, an asserter), so each line is written inert (security
+        # review 2026-10-26-1, W46) as a paragraph of its own: a line cannot
+        # open a nested quote, a callout, a heading, a list or a table inside
+        # the engine's callout (security review 2026-10-28-1, O37).
         detail = str(getattr(f, "detail", "")).strip() or ft
         action = getattr(f, "recommended_action", None)
-        body = detail if not action else f"{detail}\n> {action}"
-        by_severity[callout].append(
-            f"> [!{callout}] {ft}\n> {body.replace(chr(10), chr(10) + '> ')}\n"
-        )
+        lines = [*detail.splitlines(), *(str(action).splitlines() if action else [])]
+        body = "\n>\n> ".join(md_text(line) for line in lines if line.strip())
+        by_severity[callout].append(f"> [!{callout}] {ft}\n> {body}\n")
     out: list[str] = []
     for sev in ("danger", "warning", "info"):
         out.extend(by_severity[sev])
@@ -126,6 +142,7 @@ def _render_frontmatter(
     min_particle_confidence: float | None = None,
     dropped_below_threshold: int | None = None,
     taxonomy_tags: list[str] | None = None,
+    generated_at: datetime | None = None,
 ) -> str:
     """Emit the YAML frontmatter every article opens with.
 
@@ -154,7 +171,7 @@ def _render_frontmatter(
     """
     fm: dict[str, Any] = {
         "particle_count": particle_count,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": (generated_at or datetime.now(UTC)).isoformat(),
         "input_hash": input_hash,
         "sources": sources,
         "contradictions": contradictions,
@@ -178,6 +195,17 @@ def _render_frontmatter(
 # ---------------------------------------------------------------------------
 # Structured-listing render — the synthesis-failure fallback
 # ---------------------------------------------------------------------------
+
+
+def _attribution(p: Particle) -> str:
+    """Who a References line credits, as one inert line.
+
+    The extractor's name and version and an asserter are stored text, which an
+    imported bundle chooses (security review 2026-10-26-1, W46).
+    """
+    if p.extractor_ref:
+        return prose_text(f"extractor: {p.extractor_ref.name} {p.extractor_ref.version}")
+    return prose_text(f"asserted by: {p.asserted_by or '?'}")
 
 
 def render_structured_listing(
@@ -228,9 +256,12 @@ def render_structured_listing(
         taxonomy_tags=_taxonomy_tags(particles),
     )
 
-    lines: list[str] = [head, f"# {subject.canonical_name}\n"]
+    # The subject's name and description and every claim are stored text, which
+    # an extraction from a hostile source can carry markup in: each is written
+    # as one inert line (security review 2026-10-25-2, R3).
+    lines: list[str] = [head, f"# {prose_text(subject.canonical_name)}\n"]
     if subject.description:
-        lines.append(f"\n_{subject.description}_\n")
+        lines.append(f"\n_{prose_text(subject.description)}_\n")
 
     # lint callouts are applied fresh at write time, not baked
     # into the cached listing. ``lint_findings`` still drives the
@@ -247,9 +278,11 @@ def render_structured_listing(
     lines.append("\n## Claims\n\n")
     for p in particles:
         eff = effective_confidences.get(p.id, p.confidence.value)
-        lines.append(f"- {p.content} [^p-{_short_id(p.id)}] _(effective confidence {eff:.2f})_\n")
+        claim = prose_text(p.content)
+        sid = identifier(_short_id(p.id))
+        lines.append(f"- {claim} [^p-{sid}] _(effective confidence {eff:.2f})_\n")
 
-    lines.append("\n## References\n\n")
+    lines.append(f"{REFERENCES_HEADING}\n\n")
     for p in particles:
         # First SOURCE-type provenance entry is the corpus entry the claim
         # originated from; later REVISIT entries are downstream snapshots.
@@ -257,14 +290,10 @@ def render_structured_listing(
         # Extractor-produced claims are attributed to the extractor; a direct
         # assertion (no extractor_ref) to its asserting principal —
         # never a phantom "extractor: ?".
-        attribution = (
-            f"extractor: {p.extractor_ref.name} {p.extractor_ref.version}"
-            if p.extractor_ref
-            else f"asserted by: {p.asserted_by or '?'}"
-        )
+        attribution = _attribution(p)
         ts = p.asserted_at.date().isoformat() if p.asserted_at else "?"
-        corpus_id = first_source.corpus_entry_id if first_source else "?"
-        sid = _short_id(p.id)
+        corpus_id = prose_code_span(first_source.corpus_entry_id) if first_source else "?"
+        sid = identifier(_short_id(p.id))
         # Anchor heading + footnote definition. The heading lets readers
         # navigate the References section as a per-particle TOC and
         # enables cross-article wikilinks of the form
@@ -273,7 +302,7 @@ def render_structured_listing(
         # markdown-footnote-aware renderers.
         lines.append(
             f"### p-{sid}\n\n"
-            f"[^p-{sid}]: corpus entry `{corpus_id}` "
+            f"[^p-{sid}]: corpus entry {corpus_id} "
             f"(confidence: {p.confidence.value:.2f}, {attribution}, "
             f"asserted {ts})\n\n"
         )
@@ -684,6 +713,21 @@ def _build_synthesis_prompt(
 # ---------------------------------------------------------------------------
 
 
+def neutralize_model_body(body: str) -> str:
+    """The model's article body made inert before the engine appends to it.
+
+    The whole body is the model's, so all of it goes through
+    :func:`~particles.render.escape.synthesized_prose`, and the
+    structure only the engine may write is demoted to text
+    (:func:`~particles.render.article_synthesis.cache.demote_model_structure`):
+    a References heading, which an exporter that splits the article would
+    otherwise take for the start of the engine's citations (security review
+    2026-10-25-1, Q8), and a footnote definition for a cited id (security
+    review 2026-10-26-1, W42). Idempotent.
+    """
+    return synthesized_prose(demote_model_structure(body))
+
+
 def render_synthesised_article(
     subject: SynthesisTopic,
     particles: list[Particle],
@@ -700,6 +744,7 @@ def render_synthesised_article(
     lint_findings: list[Any] | None = None,
     min_particle_confidence: float | None = None,
     dropped_below_threshold: int | None = None,
+    generated_at: datetime | None = None,
 ) -> str:
     """Wrap the LLM body in frontmatter + a deterministic References section.
 
@@ -708,6 +753,10 @@ def render_synthesised_article(
     identity, extraction timestamp — cannot be hallucinated.
     Only particles the LLM actually cited get a footnote entry; this keeps
     the article tight when the synthesis only used a subset of the input.
+    The section is built from ``cited_short_ids`` and the particles, and the
+    body is neutralized whole (:func:`neutralize_model_body`) before it is
+    appended, so nothing locates the model's prose by its heading text
+    (security review 2026-10-25-1, Q8).
 
     ``lint_findings``: article-relevant findings are surfaced as ``>
     [!type]`` callouts inserted between the H1 and the synthesised body;
@@ -730,6 +779,7 @@ def render_synthesised_article(
         min_particle_confidence=min_particle_confidence,
         dropped_below_threshold=dropped_below_threshold,
         taxonomy_tags=_taxonomy_tags(particles),
+        generated_at=generated_at,
     )
 
     # lint callouts are NOT spliced into the cached body here.
@@ -750,14 +800,10 @@ def render_synthesised_article(
         eff = effective_confidences.get(p.id, p.confidence.value)
         # See the Claims-section note: attribute direct assertions (no
         # extractor_ref) to the asserting principal, not "extractor: ?".
-        attribution = (
-            f"extractor: {p.extractor_ref.name} {p.extractor_ref.version}"
-            if p.extractor_ref
-            else f"asserted by: {p.asserted_by or '?'}"
-        )
+        attribution = _attribution(p)
         ts = p.asserted_at.date().isoformat() if p.asserted_at else "?"
-        uri_str = uri if uri else "(no public URI)"
-        sid = _short_id(p.id)
+        uri_str = prose_text(md_link_label(uri)) if uri else "(no public URI)"
+        sid = identifier(_short_id(p.id))
         # Anchor heading + footnote definition. The ``### p-{sid}``
         # heading lets readers navigate the References section as a
         # per-particle TOC, and (more importantly) lets *other* wiki
@@ -772,7 +818,7 @@ def render_synthesised_article(
             f"{attribution}, extracted {ts})\n\n"
         )
 
-    parts = [head, body.rstrip(), "\n\n## References\n\n"]
+    parts = [head, neutralize_model_body(body).rstrip(), f"\n{REFERENCES_HEADING}\n\n"]
     parts.extend(refs)
     return "".join(parts)
 

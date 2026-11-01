@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.core.schema import Particle, TrustLensDefinition
 from particles.extraction.registry import infer_domain
 from particles.store.lens_store import get_adopted_lenses
-from particles.store.trust_store import SourceTrustRow, TrustStatementRow
+from particles.store.trust_store import SourceTrustRow, TrustStatementRow, domain_rows_apply
 
 
 @dataclass(frozen=True)
@@ -99,13 +99,19 @@ class TrustPolicy:
         matches return ``None``. A URL-pattern modifier with no configured
         domain baseline applies against neutral 1.0 — an explicit operator
         assertion bites even without a baseline row.
+
+        A harness's own URI (``claude-code://session/<id>``) names no web
+        host, so no domain row scores it (:func:`domain_rows_apply`, the
+        decision the §6.6 ladder takes too): the ``*`` "unknown domain"
+        default halved every transcript belief before this check.
         """
         if uri_r is None or uri_r.startswith("file://"):
             return None
-        netloc = urlparse(uri_r).netloc or uri_r
-        base = self.domain_scores.get(netloc)
-        if base is None:
-            base = self.domain_scores.get("*")
+        base: float | None = None
+        if domain_rows_apply(uri_r):
+            base = self.domain_scores.get(urlparse(uri_r).netloc or uri_r)
+            if base is None:
+                base = self.domain_scores.get("*")
 
         modifier_total = 0.0
         modifier_matched = False

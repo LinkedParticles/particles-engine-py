@@ -357,7 +357,12 @@ async def run_projection_cycle(
         body = region.body
         manifest_ref = str(memory_manifest_path())
         memory_md = memory_dir / "MEMORY.md"
-        current = memory_md.read_text(encoding="utf-8") if memory_md.is_file() else None
+        present, raw = _read_memory_md(memory_md)
+        if present and raw is None:
+            # A link or a file the capped, contained read refuses is never
+            # read through or replaced (security review 2026-10-28-1, W22).
+            return {"skipped": "memory-md-not-readable"}
+        current = raw.decode("utf-8") if raw is not None else None
 
         if current is None and harvested_text is not None:
             return {"skipped": "file-vanished-since-harvest"}
@@ -550,7 +555,9 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     - **mismatch** → ``diff``: inject only the difference — the fresh bullet
       lines (new / changed / newly-contested) absent from the loaded region;
     - **anything unparseable** (projection disabled, no MEMORY.md, no
-      region, no trailer) → ``full``: the plain digest push.
+      region, no trailer) → ``full``: the plain digest push;
+    - **a region that is not the last render** (edited since, or no render
+      snapshot) → ``full``, crediting nothing as loaded.
 
     The memory directory is always this machine's; the fresh render it is
     compared against comes through the backend, so on a remote engine the
@@ -565,16 +572,23 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     memory_dir = resolve_session_project(payload).memory_dir
     if memory_dir is None:
         return DigestDecision("full")
-    memory_md = memory_dir / "MEMORY.md"
-    if not memory_md.is_file():
+    _present, raw = _read_memory_md(memory_dir / "MEMORY.md")
+    if raw is None:
         return DigestDecision("full")
 
-    text = memory_md.read_text(encoding="utf-8", errors="replace")
+    text = raw.decode("utf-8", errors="replace")
     region = next((r for r in find_projected_regions(text) if r.region == MEMORY_REGION), None)
     if region is None:
         return DigestDecision("full")
     loaded_ids = parse_sources_trailers(region.body)
     if loaded_ids is None:
+        return DigestDecision("full")
+    # The trailer vouches for the region only while the region is the body the
+    # projection last rendered into this file. An edited region (or one with no
+    # recorded render) is not the store's view: push the full digest, and
+    # credit none of its bullets as shown (security review 2026-10-26-1, W34).
+    snapshot = load_projection_snapshots(memory_dir).get(MEMORY_REGION)
+    if snapshot is None or region.body.strip("\n") != snapshot.strip("\n"):
         return DigestDecision("full")
 
     # The harness loaded this region whatever is decided below, so every
@@ -607,3 +621,31 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
         "its last render:_\n\n"
     )
     return DigestDecision("diff", content=header + "\n".join(diff) + "\n", loaded=loaded)
+
+
+def _read_memory_md(memory_md: Path) -> tuple[bool, bytes | None]:
+    """``(present, bytes)`` of a memory directory's ``MEMORY.md``.
+
+    Read as the harvest reads a memory file: one descriptor that follows no
+    symbolic link, contained to the memory directory, a regular file of one
+    link, capped at ``local_files.max_bytes`` (security review 2026-10-28-1,
+    W22). ``(False, None)`` when there is no such name; ``(True, None)`` when
+    the name exists but that read refuses it, so a caller neither reads
+    through a link nor writes a file over it.
+    """
+    from particles.corpus.local_read import read_local_file, within
+
+    if not memory_md.is_symlink() and not memory_md.exists():
+        return False, None
+    try:
+        read = read_local_file(
+            memory_md,
+            max_bytes=get_config().local_files.max_bytes,
+            allowed=within(memory_md.parent),
+        )
+    except FileNotFoundError:
+        return False, None
+    except OSError as exc:
+        log.warning("MEMORY.md at %s not read (%s)", memory_md, exc)
+        return True, None
+    return True, read.content

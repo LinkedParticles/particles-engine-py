@@ -22,7 +22,19 @@ judging that descriptor, never the name:
   refused too;
 * the descriptor's own path (``F_GETPATH`` on macOS, ``/proc/self/fd`` on
   Linux) is what the caller's containment predicate judges, so a parent swapped
-  after any earlier check is caught here.
+  after any earlier check is caught here;
+* when the caller judges containment, a file with more than one link is
+  refused: the kernel names a hard link by the name it was opened through, so
+  a link planted inside a root to a file outside it would pass the predicate
+  (security review K10, P18);
+* when the caller names an ``owner``, the descriptor must pass the one
+  operator-only-writable predicate for that uid
+  (:func:`~particles.corpus.operator_only.writable_only_by_operator`):
+  its owner, its mode and ACL, and every directory above it, so a file
+  another user wrote beneath a root is refused however the root came to hold
+  it. The caller may name the uid as a function of the
+  descriptor's own path, so which uid applies is decided by the file opened,
+  never by the route its name took (security review 2026-10-25-2, R15).
 
 A refusal raises :class:`LocalReadRefused`, an ``OSError``, so every caller's
 existing "the file is unreadable" branch handles it unchanged.
@@ -36,6 +48,25 @@ import stat as stat_module
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from particles.corpus.operator_only import (
+    WRITABLE_BY_OTHERS,
+    ExposureKind,
+    acl_lets_others_write,
+    writable_only_by_operator,
+)
+from particles.corpus.operator_only import acl_line_grants_write as _acl_line_grants_write
+
+__all__ = [
+    "WRITABLE_BY_OTHERS",
+    "LocalRead",
+    "LocalReadRefused",
+    "_acl_line_grants_write",
+    "acl_lets_others_write",
+    "descriptor_path",
+    "read_local_file",
+    "within",
+]
 
 #: The read block size. The last block may run one byte past the cap.
 _CHUNK = 1024 * 1024
@@ -93,6 +124,7 @@ def read_local_file(
     follow_symlinks: bool = False,
     max_bytes: int | None = None,
     allowed: Callable[[Path], bool] | None = None,
+    owner: int | Callable[[Path], int | None] | None = None,
 ) -> LocalRead:
     """Read ``path`` through one descriptor, judged as described in the module docstring.
 
@@ -103,10 +135,22 @@ def read_local_file(
             actually opened.
         max_bytes: Refuse a file larger than this. ``None`` reads any size.
         allowed: Containment predicate over the opened file's resolved path.
+            Given, a file with ``st_nlink > 1`` is refused as well, since no
+            path can say where its other names lie. Git checkouts and the
+            common archivers create no hard links, so a legitimate root holds
+            none.
+        owner: Refuse a file that fails the operator-only-writable predicate
+            for this uid: another owner, a mode or ACL entry
+            letting others write it, or a directory above it they may write
+            into. A function is called with the opened file's resolved path
+            and returns the uid, or ``None`` for any owner. ``None`` reads a
+            file whoever owns it.
 
     Raises:
         LocalReadRefused: a symlink with ``follow_symlinks`` off, a non-regular
-            file, a file over ``max_bytes``, or a path ``allowed`` rejects.
+            file, a file over ``max_bytes``, a hard-linked file under
+            ``allowed``, a path ``allowed`` rejects, or a file ``owner`` does
+            not own or others may write.
         OSError: the file is missing or cannot be opened.
     """
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -127,6 +171,28 @@ def read_local_file(
                 errno.EFBIG, f"{st.st_size} bytes is over the {max_bytes}-byte cap", str(path)
             )
         real = descriptor_path(fd, path, st)
+        uid = owner(real) if callable(owner) else owner
+        if uid is not None and (
+            exposure := writable_only_by_operator(
+                path, fd=fd, resolved=real, named_ahead=False, operator_uid=uid
+            )
+        ):
+            # The uid says who owns the file, not who wrote its bytes or put it
+            # at this name (security review 2026-10-26-1, W23; 2026-10-27-1,
+            # G20): one predicate judges all three on this descriptor.
+            if exposure.kind is ExposureKind.FILE_NOT_OWNED:
+                reason = f"refusing a file owned by uid {st.st_uid}"
+            elif exposure.kind is ExposureKind.PLACE_OPEN:
+                reason = f"refusing a file in {exposure.at}, which other users can write into"
+            else:
+                reason = "refusing a file other users can write"
+            raise LocalReadRefused(errno.EPERM, reason, str(path))
+        if allowed is not None and st.st_nlink > 1:
+            raise LocalReadRefused(
+                errno.EMLINK,
+                f"refusing a file with {st.st_nlink} links under a contained read",
+                str(path),
+            )
         if allowed is not None and not allowed(real):
             raise LocalReadRefused(
                 errno.EACCES, f"opened file {real} is outside the root", str(path)

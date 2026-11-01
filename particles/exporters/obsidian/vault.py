@@ -26,7 +26,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import LintFinding, Particle, ParticleType, Subject
+from particles.core.schema import ExternalRef, LintFinding, Particle, ParticleType, Subject
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.status import Status
 from particles.exporters.obsidian.format import (
@@ -48,6 +48,15 @@ from particles.render.article_synthesis import (
     apply_lint_callouts,
     compute_input_hash,
 )
+from particles.render.escape import (
+    md_code_span,
+    md_link,
+    md_table_cell,
+    md_text,
+    wikilink,
+    wikilink_target,
+    yaml_scalar,
+)
 from particles.render.markdown import (
     DisambiguationGroup,
     MarkdownExportLedger,
@@ -56,7 +65,6 @@ from particles.render.markdown import (
     build_subject_naming,
     disambiguation_name,
     is_within_directory,
-    neutralize_inline_markdown,
     sanitize_filename,
     subject_slug,
 )
@@ -126,13 +134,20 @@ def _taxonomy_tag_lines(particles: list[Particle]) -> list[str]:
     export format. The Obsidian native tag axis is the per-note frontmatter
     ``tags:`` list, so a subject note carries the union of taxonomy tags across
     all its rendered particles. Returns ``["  - <tag>", …]`` (sorted, deduped)
-    or ``[]`` when no particle carries a tag.
+    or ``[]`` when no particle carries a tag. Each tag is a quoted scalar, so a
+    stored tag adds no key and cannot end the frontmatter (security review
+    2026-10-28-1, O2).
     """
     seen: set[str] = set()
     for p in particles:
         if p.tags:
             seen.update(p.tags)
-    return [f"  - {tag}" for tag in sorted(seen)]
+    return [f"  - {yaml_scalar(tag)}" for tag in sorted(seen)]
+
+
+def _external_ref_tag_lines(refs: list[ExternalRef]) -> list[str]:
+    """YAML ``tags:`` entries for a subject's external refs, each a quoted scalar."""
+    return [f"  - {yaml_scalar(f'{ref.namespace}-{ref.id}')}" for ref in refs]
 
 
 # _sanitize and _subject_slug live in particles.render.markdown as
@@ -191,11 +206,13 @@ def _render_coin_note(
     lines: list[str] = []
 
     # --- YAML frontmatter ---
+    # Every value is stored text (a property value, a tag, an external id), so
+    # each is one quoted scalar: it adds no key and cannot end the frontmatter
+    # (security review 2026-10-28-1, O2).
     lines.append("---")
     lines.append("tags:")
     lines.append("  - particles/coin")
-    for ref in subject.external_ids:
-        lines.append(f"  - {ref.namespace}-{ref.id}")
+    lines.extend(_external_ref_tag_lines(subject.external_ids))
     lines.extend(_taxonomy_tag_lines(particles))
     lines.append('Instance of: "[[Coin]]"')
 
@@ -204,21 +221,22 @@ def _render_coin_note(
         if val is None:
             continue
         if is_link and isinstance(val, str):
-            lines.append(f'{yaml_label}: "[[{val}]]"')
+            lines.append(f"{yaml_label}: {yaml_scalar(wikilink(val))}")
         elif unit:
-            lines.append(f"{yaml_label}: {val} {unit}")
+            lines.append(f"{yaml_label}: {yaml_scalar(f'{val} {unit}')}")
         else:
-            lines.append(f"{yaml_label}: {val}")
+            lines.append(f"{yaml_label}: {yaml_scalar(val)}")
 
     # Catalog references (list → comma-separated string)
     refs = props.get("nuds:references")
     if isinstance(refs, list) and refs:
-        lines.append(f'References: "{", ".join(refs)}"')
+        lines.append(f"References: {yaml_scalar(', '.join(str(r) for r in refs))}")
 
-    # Numista URL
+    # Numista URL: only an http(s) URL is written; any other stored value
+    # falls back to the URL built from the id.
     numista_url = props.get("numista:url")
-    if isinstance(numista_url, str):
-        lines.append(f"Numista URL: {numista_url}")
+    if isinstance(numista_url, str) and re.match(r"https?://", numista_url, re.I):
+        lines.append(f"Numista URL: {yaml_scalar(numista_url)}")
     else:
         # Fallback: construct from id
         nid = props.get("numista:id")
@@ -227,18 +245,21 @@ def _render_coin_note(
 
     lines.append("---")
     lines.append("")
-    lines.append(f"# {display}")
+    lines.append(f"# {md_text(display)}")
     lines.append("")
 
     # Conflict callouts
     conflicts = _find_property_conflicts(structured)
     for nmo_key, competing in sorted(conflicts.items()):
         yaml_label = next((label for k, label, _, _ in _COIN_PROPS if k == nmo_key), nmo_key)
-        lines.append(f"> [!warning] Conflicting {yaml_label}")
+        lines.append(f"> [!warning] Conflicting {md_text(yaml_label)}")
         for p, val in competing:
-            src = _provenance_label(p)
+            # A property value and the asserter a provenance label falls back
+            # to are stored text (security review 2026-10-27-1, G5).
+            shown = md_text(str(val))
+            src = md_text(_provenance_label(p))
             conf = eff_conf.get(p.id, p.confidence.value)
-            lines.append(f"> **{val}** — {src} (confidence {conf:.2f})")
+            lines.append(f"> **{shown}** — {src} (confidence {conf:.2f})")
         lines.append("")
 
     # --- Descriptive body sections ---
@@ -246,7 +267,7 @@ def _render_coin_note(
     for p in descriptive:
         section = _desc_section(p.content)
         if section != "catalog":  # catalog refs already in frontmatter
-            sections[section].append(neutralize_inline_markdown(p.content))
+            sections[section].append(md_text(p.content))
 
     _section_order = ["obverse", "reverse", "edge", "mints", "comments"]
     _section_titles = {
@@ -317,12 +338,11 @@ def _render_pivot_note(
     lines.append("---")
     lines.append("tags:")
     lines.append(f"  - particles/{tag}")
-    for ref in subject.external_ids:
-        lines.append(f"  - {ref.namespace}-{ref.id}")
+    lines.extend(_external_ref_tag_lines(subject.external_ids))
     lines.extend(_taxonomy_tag_lines(particles))
     lines.append("---")
     lines.append("")
-    lines.append(f"# {display}")
+    lines.append(f"# {md_text(display)}")
     lines.append("")
 
     # Per-particle audit trail in Format C — same shape the generic
@@ -373,19 +393,21 @@ def _render_subject_note(
     trusted_refs = [r for r in subject.external_ids if r.confidence >= suppress_threshold]
     unverified_refs = [r for r in subject.external_ids if r.confidence < suppress_threshold]
 
-    ext_tags = [f"{r.namespace}-{r.id}" for r in trusted_refs]
     lines += ["---"]
+    # The subject's own id, which the Obsidian plugin's subject link checks, so
+    # a stored name that resolves to another subject's note never opens it
+    # (security review 2026-10-30-1, AB71).
+    lines += [f"subject_id: {yaml_scalar(subject.id)}"]
     lines += ["tags:"]
     lines += ["  - particles/subject"]
-    for t in ext_tags:
-        lines += [f"  - {t}"]
+    lines += _external_ref_tag_lines(trusted_refs)
     lines += _taxonomy_tag_lines(particles)
     lines += [f"particle_count: {len(particles)}"]
     lines += [f"phantom: {str(len(particles) == 0).lower()}"]
     lines += ["---"]
     lines += [""]
 
-    lines += [f"# {display}"]
+    lines += [f"# {md_text(display)}"]
     lines += [""]
 
     # Only show the description as an authoritative definition when it comes from
@@ -395,18 +417,23 @@ def _render_subject_note(
     all_wikidata_unverified = (
         any(r.namespace == "wikidata" for r in unverified_refs) and not has_trusted_wikidata
     )
+    # A subject's description, aliases and external refs are stored text (an
+    # imported bundle or a weak authority match chooses them), so each is
+    # written as one inert line (security review 2026-10-27-1, G5).
     if subject.description and not all_wikidata_unverified:
-        lines += [f"_{subject.description}_", ""]
+        lines += [f"_{md_text(subject.description)}_", ""]
 
     if subject.aliases:
-        lines += [f"**Aliases:** {', '.join(subject.aliases)}", ""]
+        aliases = ", ".join(md_text(a) for a in subject.aliases)
+        lines += [f"**Aliases:** {aliases}", ""]
 
     for ref in trusted_refs:
         label = f"{ref.namespace}:{ref.id}"
+        namespace = md_text(ref.namespace.title())
         if ref.uri:
-            lines += [f"**{ref.namespace.title()}:** [{ref.id}]({ref.uri})"]
+            lines += [f"**{namespace}:** {md_link(ref.id, ref.uri)}"]
         else:
-            lines += [f"**{ref.namespace.title()}:** `{label}`"]
+            lines += [f"**{namespace}:** {md_code_span(label)}"]
     if trusted_refs:
         lines += [""]
 
@@ -415,19 +442,21 @@ def _render_subject_note(
         sid = subject.id[:8]
         name = subject.canonical_name
         desc_line = (
-            [f"> Wikidata description: _{subject.description}_"]
+            [f"> Wikidata description: _{md_text(subject.description)}_"]
             if subject.description and ref.namespace == "wikidata"
             else []
         )
         lines += [
-            f"> [!warning] Unverified {ref.namespace.title()} link",
-            f"> Candidate: `{label}` (confidence {ref.confidence:.2f})"
+            f"> [!warning] Unverified {md_text(ref.namespace.title())} link",
+            f"> Candidate: {md_code_span(label)} (confidence {ref.confidence:.2f})"
             " — context mismatch detected.",
             *desc_line,
-            f"> **To confirm this link is correct:** `particles subjects confirm {sid} {label}`",
-            f"> **If the link is wrong, remove it:** `particles subjects unlink {sid} {label}`",
-            f"> **To inspect:** `particles subjects show {sid}`",
-            f"> **To find a better match:** `particles subjects search {name}`",
+            "> **To confirm this link is correct:** "
+            + md_code_span(f"particles subjects confirm {sid} {label}"),
+            "> **If the link is wrong, remove it:** "
+            + md_code_span(f"particles subjects unlink {sid} {label}"),
+            f"> **To inspect:** {md_code_span(f'particles subjects show {sid}')}",
+            f"> **To find a better match:** {md_code_span(f'particles subjects search {name}')}",
             "",
         ]
 
@@ -483,12 +512,17 @@ def _render_index(
         "| Subject | Class | Particles | External IDs |",
         "|---|---|---|---|",
     ]
+    # Every cell but the count is stored text, so each is one line whose pipes
+    # are escaped: a name keeps to its own column (security review 2026-10-28-1,
+    # O2).
     for s in subjects:
         count = particle_counts.get(s.id, 0)
         phantom = " *(phantom)*" if count == 0 else ""
-        cls = s.subject_class or ""
-        ext = ", ".join(f"`{r.namespace}:{r.id}`" for r in s.external_ids)
-        name = naming.display_name(s) if naming is not None else s.canonical_name
+        cls = md_table_cell(s.subject_class or "")
+        ext = ", ".join(
+            md_code_span(f"{r.namespace}:{r.id}").replace("|", "\\|") for r in s.external_ids
+        )
+        name = md_table_cell(naming.display_name(s) if naming is not None else s.canonical_name)
         lines.append(f"| {name}{phantom} | {cls} | {count} | {ext} |")
 
     return "\n".join(lines)
@@ -511,21 +545,21 @@ def _render_disambiguation_note(
         "tags:",
         "  - particles/disambiguation",
         "aliases:",
-        f"  - {group.base_name}",
+        f"  - {yaml_scalar(group.base_name)}",
         "---",
         "",
-        f"# {disambiguation_name(group.base_name)}",
+        f"# {md_text(disambiguation_name(group.base_name))}",
         "",
-        f'"{group.base_name}" refers to multiple subjects:',
+        f'"{md_text(group.base_name)}" refers to multiple subjects:',
         "",
     ]
     for s in sorted(members, key=lambda m: naming.display_name(m)):
         slug = subject_slug(naming.display_name(s))
-        qualifier = naming.qualifier_by_id.get(s.id, "")
+        qualifier = md_text(naming.qualifier_by_id.get(s.id, ""))
         count = particle_counts.get(s.id, 0)
         noun = "particle" if count == 1 else "particles"
         suffix = f" — {qualifier} ({count} {noun})" if qualifier else f" — {count} {noun}"
-        lines.append(f"- [[{slug}]]{suffix}")
+        lines.append(f"- {wikilink(slug)}{suffix}")
     lines.append("")
     return "\n".join(lines)
 
@@ -690,6 +724,9 @@ async def export_vault(
         # note with a backlink is spuriously invalidated each run.
         for nslug in narrative_naming.values():
             known_names.add(f"Narratives/{nslug}")
+        # The engine writes each link's target through ``wikilink_target``, so
+        # that form of every name is a valid target too.
+        known_names |= {wikilink_target(name) for name in known_names}
         invalidated_paths = invalidate_stale_link_articles(
             output_dir,
             known_names,

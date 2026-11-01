@@ -324,7 +324,11 @@ class TestOperatorSupersede:
     @pytest.mark.asyncio
     async def test_agent_supersede_is_unchanged(self, db_session: Any, stub_resolver: Any) -> None:
         _enable_writes(max_asserted_confidence=0.9)
-        own = await _insert_extracted(db_session, asserted_by="mcp:test-agent")
+        # The agent's own belief is agent-asserted; the agent path never
+        # changes an extracted one (security review 2026-10-26-1, W5).
+        own = await _insert_extracted(
+            db_session, asserted_by="mcp:test-agent", calib=CalibrationSource.AGENT_ASSERTED
+        )
         result = await supersede_belief(
             db_session,
             store=DEFAULT_STORE,
@@ -676,7 +680,8 @@ class TestSupersedeWideningIsNotCarried:
             await insert_particle(session, held)
             return held  # stands in for the INCONSISTENCY record
 
-        monkeypatch.setattr(pipeline, "reconcile_and_insert", _quarantined)
+        # The write half of the ladder (security review 2026-10-30-2, AC1).
+        monkeypatch.setattr(pipeline, "apply_reconcile", _quarantined)
         result = await supersede_belief(
             db_session,
             store=DEFAULT_STORE,

@@ -47,6 +47,7 @@ from typing import Any, NamedTuple
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles import db
 from particles.config import get_config
 from particles.core.conflict_review import CLOSED_RECORD, is_quarantined, is_retired_value
 from particles.core.contradiction_disclosure import (
@@ -76,7 +77,7 @@ from particles.core.observer_scope import GLOBAL_SCOPE, BeliefScope, share_an_ob
 from particles.core.schema import Particle, ProvenanceRefType
 from particles.core.status import Status, StatusReason, validate_transition
 from particles.corpus.store import get_entry, get_entry_currency, get_snapshot
-from particles.db import write_lock
+from particles.db import store_of
 from particles.extraction.registry import infer_domain
 from particles.ingest.second_reading import (
     ClaimContext,
@@ -86,7 +87,13 @@ from particles.ingest.second_reading import (
     snapshot_claim_context,
 )
 from particles.llm.breaker import llm_circuit_open
-from particles.operations._quarantine import restore_held_claim
+from particles.operations._quarantine import (
+    HeldSearch,
+    conflict_under_lock,
+    gather_held_search,
+    hold_behind,
+    restore_held_claim,
+)
 from particles.operations.lint.contradictions import RereadOutcome, reread_stale_pairs
 from particles.operations.lint.open_inconsistency import record_sides
 from particles.store.event_store import (
@@ -555,6 +562,9 @@ class _ExtractReading:
     #: ``None`` when the reading failed; a later night reads it again.
     confirmed: bool | None = None
     reason: str = ""
+    #: The §6.6 search's inputs for B, read before the lock (``None`` when B
+    #: was not held): a withdrawal searches again under it before restoring B.
+    search: HeldSearch | None = None
 
 
 @dataclass
@@ -614,7 +624,9 @@ async def _reread_extract_records(session: AsyncSession, budget: int) -> Extract
         (r for r in await get_inconsistency_particles(session) if _awaits_reading(r)),
         key=lambda r: r.asserted_at,
     )
-    planned: list[tuple[Particle, Particle, Particle, ClaimContext, ClaimContext]] = []
+    planned: list[
+        tuple[Particle, Particle, Particle, ClaimContext, ClaimContext, HeldSearch | None]
+    ] = []
     for record in records:
         a_ids, b_ids = record_sides(record)
         if len(a_ids) != 1 or len(b_ids) != 1:
@@ -628,16 +640,21 @@ async def _reread_extract_records(session: AsyncSession, budget: int) -> Extract
             continue
         ctx_a = await claim_context(session, a, b)
         ctx_b = await snapshot_claim_context(session, b, a)
-        planned.append((record, a, b, ctx_a, ctx_b))
+        search = (
+            await gather_held_search(session, b, exclude=(a.id, record.id))
+            if is_quarantined(b)
+            else None
+        )
+        planned.append((record, a, b, ctx_a, ctx_b, search))
     await session.commit()
 
-    for index, (record, a, b, ctx_a, ctx_b) in enumerate(planned):
+    for index, (record, a, b, ctx_a, ctx_b, search) in enumerate(planned):
         if llm_circuit_open():
             out.deferred += len(planned) - index
             break
         verdict = await read_pair(ctx_a, ctx_b)
         out.read += 1
-        reading = _ExtractReading(record, a, b, reading_for(ctx_a, ctx_b))
+        reading = _ExtractReading(record, a, b, reading_for(ctx_a, ctx_b), search=search)
         if verdict is None:
             out.failed += 1
             continue
@@ -672,8 +689,13 @@ async def _apply_extract_reading(
     event's payload. A newcomer an ACTIVE claim already states verbatim with
     the same subjects (the exact-duplicate index) has its provenance
     folded into that claim; otherwise :func:`promote_quarantined` mints a
-    successor, which enters without a §6.6 check. The existing claim is not
-    touched.
+    successor. The existing claim is not touched.
+
+    The reading compared the newcomer with claim A alone, and nothing
+    reconciled it while it was held. So before it is restored, the §6.6
+    search runs again under the lock; a claim it chooses keeps the newcomer
+    quarantined behind a new record naming that claim, and the payload names
+    the record as ``held_behind`` (security review 2026-10-31-3, AF1).
     """
     record = await get_particle(session, r.record.id)
     if record is None or record.status is not Status.INCONSISTENCY:
@@ -686,9 +708,18 @@ async def _apply_extract_reading(
     restored: dict[str, Any] = {}
     refs: list[str] = [r.a.id, r.b.id]
     if newcomer is not None and is_quarantined(newcomer):
-        key, landed = await restore_held_claim(session, newcomer)
-        restored = {key: landed}
-        refs.append(landed)
+        search = r.search or await gather_held_search(
+            session, newcomer, exclude=(r.a.id, record.id)
+        )
+        conflict = await conflict_under_lock(session, newcomer, search)
+        if conflict is not None:
+            held_behind = await hold_behind(session, newcomer, conflict)
+            restored = {"held_behind": held_behind.id}
+            refs.extend((conflict.id, held_behind.id))
+        else:
+            key, landed = await restore_held_claim(session, newcomer)
+            restored = {key: landed}
+            refs.append(landed)
     payload: dict[str, Any] = {
         "record_id": record.id,
         "cause": CloseCause.WITHDRAWN.value,
@@ -762,7 +793,7 @@ async def run_disclosure(
             for p in pairs
         ]
 
-    async with write_lock():
+    async with db.write_lock(store_of(session)):
         # -- 0b. extract-time records the re-reading settled --
         for reading in extract_rereads.readings:
             closed = await _apply_extract_reading(session, reading)

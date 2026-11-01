@@ -37,6 +37,7 @@ from particles.corpus.deposit import (
     deposit_vault,
     deposit_web_clipper,
     split_file_by_date,
+    writes_committed_under_lock,
 )
 
 __all__ = [
@@ -48,4 +49,5 @@ __all__ = [
     "deposit_vault",
     "deposit_web_clipper",
     "split_file_by_date",
+    "writes_committed_under_lock",
 ]

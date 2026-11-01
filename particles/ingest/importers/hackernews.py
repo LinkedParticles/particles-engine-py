@@ -54,7 +54,9 @@ class HackerNewsImporter:
         """
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # RecursionError: a body nested past the decoder's depth
+            # (security review 2026-10-30, AB17).
             return None
         story = _get_story(data)
         if not story:

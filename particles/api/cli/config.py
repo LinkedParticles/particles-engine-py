@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -79,6 +79,12 @@ def config_validate_cmd() -> None:
     for note in environment_notes():
         typer.echo(f"Environment: {note}")
     typer.echo(f"Default store: {describe_default_store()}")
+    # Deferred: the auth module loads FastAPI, which most verbs never need.
+    from particles.api.auth import http_write_posture
+
+    typer.echo(http_write_posture())
+    for line in _client_token_lines(_cfg):
+        typer.echo(line)
 
     for line in model_lines(_cfg.llm):
         typer.echo(line)
@@ -87,6 +93,16 @@ def config_validate_cmd() -> None:
 
     for line in blob_reachability_lines():
         typer.echo(line, err=True)
+    # Deferred, as this module defers its other corpus reads.
+    from particles.corpus.fetch import broad_allowed_roots
+
+    for raw in broad_allowed_roots():
+        typer.echo(
+            f"Warning: local_refresh.allowed_roots entry {raw!r} is the filesystem root, the "
+            "home directory or an ancestor of either, and admits nothing. Name the "
+            "directory that holds the files instead.",
+            err=True,
+        )
 
     if errors:
         raise typer.Exit(1)
@@ -141,11 +157,10 @@ def blob_reachability_lines() -> list[str]:
     unreadable store — is swallowed, so `config validate` keeps working on a
     fresh install where there is nothing to check.
     """
-    import asyncio
-
     from particles.config import get_config
     from particles.corpus.blob_health import check_blob_reachability, store_file_missing
     from particles.db import session_scope
+    from particles.egress import run_armed
 
     if store_file_missing(get_config().storage.database_url):
         # Nothing deposited yet, and opening the session would create the file.
@@ -157,6 +172,27 @@ def blob_reachability_lines() -> list[str]:
         return report.warning_lines()
 
     try:
-        return asyncio.run(_probe())
+        return run_armed(_probe())
     except Exception:  # noqa: BLE001 — a diagnostic must never fail the caller
         return []
+
+
+def _client_token_lines(cfg: Any) -> list[str]:
+    """The client-side half of the key check, when this environment is a thin client.
+
+    Names the role ``PARTICLES_ENGINE_TOKEN``'s prefix claims, and warns when the
+    token is the legacy shared key or this environment's own ``PARTICLES_API_KEY``.
+    Reads local state only; the engine is never asked.
+    """
+    from particles.api._keys import client_token_warning, role_from_prefix
+    from particles.secrets import get_engine_token_optional, get_particles_api_key
+
+    token = get_engine_token_optional()
+    if not cfg.engine.base_url or token is None:
+        return []
+    legacy = get_particles_api_key()
+    warning = client_token_warning(token, None if legacy == "dev-key" else legacy, agent_side=False)
+    if warning is not None:
+        return [f"client token: ⚠ {warning}"]
+    role = role_from_prefix(token)
+    return [f"client token: a per-client {role.value if role else 'unknown'} key"]

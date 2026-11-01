@@ -59,6 +59,7 @@ from particles.extraction.scope import is_excluded_document_meta
 from particles.store.particle_store import (
     get_active_particles_by_content_hashes,
     get_particles_by_content_hashes_and_state,
+    get_retired_at,
 )
 
 log = logging.getLogger(__name__)
@@ -184,6 +185,28 @@ PENDING_HOLD: tuple[tuple[Status, StatusReason], ...] = (
 )
 
 
+#: The asserter an interchange import stamps on every unit it stores
+#: (``particles.interchange.store.IMPORT_ASSERTER``, which imports this package,
+#: so the value is repeated here; a test pins the two equal).
+IMPORTED_BY = "interchange-import"
+
+
+async def _status_came_with_a_bundle(session: AsyncSession, particle: Particle) -> bool:
+    """Whether ``particle``'s non-ACTIVE status is the one an import kept, not this store's.
+
+    An import keeps each unit's lifecycle status, so a bundle's
+    author chose it, and its reason names nobody's judgment here. Such a row
+    was stored non-ACTIVE and never left ACTIVE in this store, so it carries no
+    ``retired_at``; an imported claim this store later retired does (security
+    review 2026-10-31-3, AF3). A hold this store's reconciliation opened on an
+    imported unit is born the same way and is left out too: a re-assertion
+    then meets the claim the unit was held behind, and is held again there.
+    """
+    return (
+        particle.asserted_by == IMPORTED_BY and await get_retired_at(session, particle.id) is None
+    )
+
+
 def is_judgment_retired(particle: Particle) -> bool:
     """True when the particle left ACTIVE by a judgment about its value."""
     return (particle.status, particle.status_reason) in JUDGMENT_RETIREMENTS
@@ -211,11 +234,18 @@ async def build_retired_value_index(
     Consulted *after* the ACTIVE index: a claim that is currently believed
     somewhere absorbs the observation before any retired twin is
     considered — the value is not in dispute if the store holds it ACTIVE.
+
+    A row whose status an interchange import kept is left out: its retirement
+    or hold is the bundle's, not a judgment made here, and registering it
+    would let a bundle hold or absorb every later assertion of its text
+    (security review 2026-10-31-3, AF3, AF4). An imported claim this store
+    later retired is registered as any other.
     """
     hashes = [content_hash(c) for c in contents]
     pending = await get_particles_by_content_hashes_and_state(session, hashes, PENDING_HOLD)
     retired = await get_particles_by_content_hashes_and_state(session, hashes, JUDGMENT_RETIREMENTS)
-    return DuplicateIndex([*pending, *retired], exclude_ids=exclude_ids)
+    rows = [p for p in [*pending, *retired] if not await _status_came_with_a_bundle(session, p)]
+    return DuplicateIndex(rows, exclude_ids=exclude_ids)
 
 
 def retired_value_note(quarantined: int, absorbed: int) -> str:
