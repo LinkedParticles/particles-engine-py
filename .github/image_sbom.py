@@ -154,6 +154,13 @@ def snapshot_problems(hub: Path, *, revision: str, files: dict[str, str]) -> lis
     ``blobs/`` holding only the files the snapshot's links reach, and
     ``.no_exist/<pin>/`` markers for files the pinned commit does not hold
     (a load writes those for the optional files it asks for).
+
+    A hub that ``huggingface_hub`` marks as sharing blobs
+    (``blobs/.huggingface-shared-blobs``) keeps a large file once, in that
+    hub-level store, and the repository's own blob is a link to it: the
+    image's bake does this for the weights. A file may then resolve into
+    that store instead, and its bytes are checked against the pin the same
+    way; anything else outside the repository's directory is still refused.
     """
     name = "models--" + ENCODER_REPO.replace("/", "--")
     repo = hub / name
@@ -169,6 +176,7 @@ def snapshot_problems(hub: Path, *, revision: str, files: dict[str, str]) -> lis
         return [f"{repo} holds snapshots {found}, expected only the pin {revision}"]
     snap = snapshots / revision
     root = repo.resolve()
+    shared = _shared_store(hub)
     problems: list[str] = []
     seen: list[str] = []
     reached: set[Path] = set()
@@ -181,7 +189,10 @@ def snapshot_problems(hub: Path, *, revision: str, files: dict[str, str]) -> lis
             entry = here / f
             rel = entry.relative_to(snap).as_posix()
             target = entry.resolve()
-            if not target.is_relative_to(root) or not target.is_file():
+            inside = target.is_relative_to(root) or (
+                shared is not None and target.is_relative_to(shared)
+            )
+            if not inside or not target.is_file():
                 problems.append(f"{rel} does not resolve to a file in the encoder's cache")
                 continue
             reached.add(target)
@@ -195,16 +206,32 @@ def snapshot_problems(hub: Path, *, revision: str, files: dict[str, str]) -> lis
         problems.append(f"{snap} holds no weights file")
     for rel in sorted((REQUIRED_FILES & set(files)) - set(seen)):
         problems.append(f"{rel} is missing from the snapshot")
-    problems += _cache_problems(repo, revision=revision, files=files, reached=reached)
+    problems += _cache_problems(
+        repo, revision=revision, files=files, reached=reached, shared=shared
+    )
     return problems
 
 
+def _shared_store(hub: Path) -> Path | None:
+    """The hub's shared blob store, resolved, when ``huggingface_hub`` marks one."""
+    store = hub / "blobs"
+    if store.is_symlink() or not (store / ".huggingface-shared-blobs").is_file():
+        return None
+    return store.resolve()
+
+
 def _cache_problems(
-    repo: Path, *, revision: str, files: dict[str, str], reached: set[Path]
+    repo: Path,
+    *,
+    revision: str,
+    files: dict[str, str],
+    reached: set[Path],
+    shared: Path | None = None,
 ) -> list[str]:
     """What in ``repo`` outside its pinned snapshot a load could read instead.
 
-    ``reached`` holds the resolved files the snapshot's entries name.
+    ``reached`` holds the resolved files the snapshot's entries name; a blob
+    may be a link into ``shared``, the hub's shared store, to one of them.
     """
     problems: list[str] = []
     for entry in sorted(repo.iterdir()):
@@ -224,7 +251,15 @@ def _cache_problems(
             for f in filenames:
                 path = here / f
                 rel = path.relative_to(repo).as_posix()
-                if path.is_symlink() or not path.is_file():
+                if (
+                    sub == "blobs"
+                    and path.is_symlink()
+                    and shared is not None
+                    and path.resolve().is_relative_to(shared)
+                ):
+                    if path.resolve() not in reached:
+                        problems.append(f"{rel} is not a file of the pinned snapshot")
+                elif path.is_symlink() or not path.is_file():
                     problems.append(f"{rel} is not a regular file")
                 elif sub == ".no_exist":
                     rev, _, marked = path.relative_to(top).as_posix().partition("/")
