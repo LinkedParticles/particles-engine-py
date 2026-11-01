@@ -347,6 +347,13 @@ jobs:
             --output-format JSON \
             --output-reproducible \
             --output-file "$out"
+          # `actions/attest` reads CycloneDX only when it carries a
+          # serialNumber, and `--output-reproducible` dropped the random one,
+          # so no SBOM attestation reached the 1.224.4 Releases. The serial
+          # added here is derived from the document itself, so the file stays
+          # byte-identical. Standard library only, run by the hash-locked
+          # generator's interpreter in isolated mode: no closure code runs.
+          /tmp/sbom-tool/bin/python -I .github/sbom_serial.py "$out"
           echo "Wrote $out ($(wc -c < "$out") bytes)"
 
       # The provenance job checks the file it downloads against this.
