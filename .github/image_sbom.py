@@ -436,6 +436,27 @@ def enrich(
     return bom
 
 
+#: Where the image bakes its Hugging Face cache (the Dockerfile's ``HF_HOME``).
+BAKED_HF_HOME = "/opt/huggingface"
+
+
+def _scanned_weights(component: dict[str, Any]) -> bool:
+    """Whether a model component is syft's own scan of a file in the baked cache.
+
+    syft's safetensors cataloger lists the weights file it finds as an
+    anonymous ``machine-learning-model``, named after its directory (``78`` in
+    the shared blob store) with no purl. It describes the same bytes the
+    encoder component names, so it may stand beside it, but only if it is
+    syft's and points into the baked cache.
+    """
+    props = {str(p.get("name")): str(p.get("value")) for p in component.get("properties") or []}
+    return (
+        not component.get("purl")
+        and props.get("syft:package:foundBy", "").endswith("-cataloger")
+        and props.get("syft:location:0:path", "").startswith(f"{BAKED_HF_HOME}/")
+    )
+
+
 def check(
     bom: dict[str, Any],
     *,
@@ -467,13 +488,23 @@ def check(
     if purl != image_purl(image, platform_digest, arch):
         problems.append(f"the subject purl {purl!r} names another image")
     models = [c for c in bom.get("components") or [] if c.get("type") == "machine-learning-model"]
-    if len(models) != 1:
-        problems.append(f"expected one encoder component, found {len(models)}")
+    encoders = [c for c in models if str(c.get("purl") or "").startswith("pkg:huggingface/")]
+    for other in models:
+        if other not in encoders and not _scanned_weights(other):
+            problems.append(
+                f"model component {other.get('name')!r} is neither the encoder "
+                "nor syft's scan of the baked cache"
+            )
+    if len(encoders) != 1:
+        problems.append(f"expected one encoder component, found {len(encoders)}")
     else:
         pin = encoder_revision or pinned_revision()
-        named = models[0].get("version")
+        named = encoders[0].get("version")
         if str(named or "").lower() != pin:
             problems.append(f"the encoder component names commit {named!r}, not the pin {pin}")
+        purl = str(encoders[0].get("purl"))
+        if not purl.startswith(f"pkg:huggingface/{ENCODER_REPO}@"):
+            problems.append(f"the encoder component {purl!r} is not {ENCODER_REPO}")
     return problems
 
 
