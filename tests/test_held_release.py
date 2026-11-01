@@ -636,6 +636,57 @@ class TestRaces:
         reread = await _one(db_session, ONE_FILE)
         assert reread.id == held.id and reread.status_reason is StatusReason.CONFLICT_PENDING
 
+    async def test_a_held_claim_is_never_restored_beside_a_claim_committed_during_the_pass(
+        self, db_session: Any, probes: _Probes
+    ) -> None:
+        """The release searches again under the lock (security review 2026-10-31-3, AF1).
+
+        A contradicting claim another writer commits after the pass loaded its
+        candidates is one no check asked about: the record stays open, counted
+        incomplete, and the held claim is not returned beside it.
+        """
+        from particles.operations import held_release
+
+        ex = _Sessions()
+        await _held(db_session, ex)
+        held = await _one(db_session, ONE_FILE)
+        await _update(db_session, ex)
+        real_check = held_release._check
+        fired: list[bool] = []
+
+        async def commit_then_check(
+            session: Any, item: Any, pairs: Any, gate: Any, report: Any
+        ) -> Any:
+            if not fired:
+                fired.append(True)
+                await _session(session, ex, [SERVER], day=25)
+            return await real_check(session, item, pairs, gate, report)
+
+        with patch.object(held_release, "_check", commit_then_check):
+            report = await _release(db_session)
+
+        assert fired
+        assert report.released == [] and report.incomplete == 1
+        assert len(await _open_records(db_session)) == 1
+        reread = await _one(db_session, ONE_FILE)
+        assert reread.id == held.id and reread.status_reason is StatusReason.CONFLICT_PENDING
+        assert await _one(db_session, SERVER, Status.ACTIVE) is not None
+
+        # The next run loads the claim, checks it, and finds it blocks the release.
+        report = await _release(db_session)
+        assert report.released == [] and len(report.blocked) == 1
+
+    async def test_a_contradiction_stored_before_the_pass_blocks_the_release(
+        self, db_session: Any, probes: _Probes
+    ) -> None:
+        """Control for the test above: the same claim committed before the pass."""
+        ex = _Sessions()
+        await _held(db_session, ex)
+        await _update(db_session, ex)
+        await _session(db_session, ex, [SERVER], day=25)
+        report = await _release(db_session)
+        assert report.released == [] and len(report.blocked) == 1
+
 
 @pytest.mark.asyncio
 class TestAfterRelease:

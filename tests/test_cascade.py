@@ -655,6 +655,73 @@ class TestRunTrustCascade:
         assert inc_after.status_reason == StatusReason.CONFLICT_RESOLVED
 
     @pytest.mark.asyncio
+    async def test_a_cascade_never_mints_its_winner_beside_a_claim_committed_while_it_was_held(
+        self, db_session: object
+    ) -> None:
+        """The cascade settles the record the winner was held behind, and no other
+        (security review 2026-10-31-3, AF1): a claim §6.6 now pairs with the held
+        winner keeps it quarantined behind a new record naming both."""
+        from particles.core.conflict_review import conflict_pair_ids
+        from particles.core.status import Status, StatusReason
+        from particles.operations.cascade import run_trust_cascade
+        from particles.store.particle_store import (
+            ParticleRow,
+            get_active_particles,
+            get_inconsistency_particles,
+            get_particle,
+            insert_particle,
+        )
+        from particles.store.trust_store import insert_trust_statement
+
+        particle_a, particle_b, inc = await _seed_quarantined_conflict(db_session)
+        # B was stored with its vector; a claim near it is committed while it is held.
+        row = await db_session.get(ParticleRow, particle_b.id)  # type: ignore[attr-defined]
+        stored = ParticleRow.from_model(particle_b, [1.0, 0.0, 0.0, 0.0])
+        row.embedding_json, row.embedding_model_id = (
+            stored.embedding_json,
+            stored.embedding_model_id,
+        )
+        meanwhile = particle_b.model_copy(
+            update={
+                "id": "meanwhile-" + particle_b.id[10:],
+                "content": "Weight: 3.9 g (web)",
+                "status": Status.ACTIVE,
+                "status_reason": None,
+            }
+        )
+        await insert_particle(db_session, meanwhile, [0.99, 0.141, 0.0, 0.0])  # type: ignore[arg-type]
+        await db_session.flush()  # type: ignore[attr-defined]
+
+        b_entry_id = particle_b.provenance[0].corpus_entry_id
+        stmt = SourceTrustStatement(
+            domain="numismatics",
+            source_ref=SourceRef(type=SourceRefType.CORPUS_ENTRY, value=b_entry_id),
+            trust_rank=0.95,
+            policy_provenance=PolicyProvenance.OPERATOR_DIRECT,
+            asserted_by="operator",
+        )
+        await insert_trust_statement(db_session, stmt)  # type: ignore[arg-type]
+
+        assert await run_trust_cascade(db_session, stmt) == 1  # type: ignore[arg-type]
+
+        still = await get_particle(db_session, particle_b.id)  # type: ignore[arg-type]
+        assert still is not None
+        assert (still.status, still.status_reason) == (
+            Status.PROVENANCE_STALE,
+            StatusReason.CONFLICT_PENDING,
+        )
+        active = await get_active_particles(db_session)  # type: ignore[arg-type]
+        assert not any(p.supersedes == particle_b.id for p in active)
+        inc_after = await get_particle(db_session, inc.id)  # type: ignore[arg-type]
+        assert inc_after is not None and inc_after.status == Status.RETRACTED
+        open_records = [
+            p
+            for p in await get_inconsistency_particles(db_session)  # type: ignore[arg-type]
+            if p.id != inc.id
+        ]
+        assert [conflict_pair_ids(r) for r in open_records] == [(meanwhile.id, particle_b.id)]
+
+    @pytest.mark.asyncio
     async def test_cascade_no_match_different_domain(self, db_session: object) -> None:
         """Cascade should not affect INCONSISTENCY particles in a different domain."""
 

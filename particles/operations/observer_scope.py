@@ -27,9 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.observer_scope import (
+    PROJECT_TAG_PREFIX,
     UNATTRIBUTED_MARKER,
     EntryScope,
+    canonical_project_key,
     classify_entry,
+    lookalike_reason,
+    names_a_project,
     project_keys,
     project_tag,
 )
@@ -47,6 +51,23 @@ from particles.store.particle_store import get_particle
 
 #: ``(entry_id, uri_r, tags) -> project key``, or ``None`` to leave the entry alone.
 KeyResolver = Callable[[str, str | None, list[str]], str | None]
+
+
+def _key_to_write(key: str) -> str:
+    """``key`` in the canonical spelling every read compares, refused if it is no fit key.
+
+    The repair verbs write and compare the NFC, stripped spelling, so a tag
+    they store is the project a binding names, and a key that names no
+    project or reads as another is refused before anything is written
+    (security review 2026-10-30-1, AB33).
+    """
+    canonical = canonical_project_key(key)
+    if not names_a_project(canonical):
+        raise ValueError(f"{key!r} names no project. Nothing was changed.")
+    reason = lookalike_reason(canonical)
+    if reason is not None:
+        raise ValueError(f"The project key {key!r} {reason}. Nothing was changed.")
+    return canonical
 
 
 @dataclass
@@ -90,6 +111,9 @@ def plan_rescope(
             report.marked.append(entry_id)
             continue
         key = key_for(entry_id, uri_r, tags)
+        if key is not None:
+            # Stored as reads compare it (security review 2026-10-30-1, AB33).
+            key = canonical_project_key(key) if names_a_project(key) else None
         if (
             key is None
             and default_key
@@ -126,6 +150,8 @@ async def rescope(
 
     Does not commit; the caller owns the transaction.
     """
+    if default_key is not None:
+        default_key = _key_to_write(default_key)
     report = plan_rescope(
         await list_entry_tag_rows(session),
         key_for=key_for,
@@ -159,7 +185,11 @@ async def assign_key(session: AsyncSession, entry_id: str, key: str, *, actor: s
     Refuses a **global** entry: adding a key to a hand deposit would take it out
     of view for every other project, which is narrowing — a different
     judgement, and not one a repair verb should make as a side effect.
+
+    ``key`` is stored in its canonical spelling, and refused when it names no
+    project or reads as another (:func:`_key_to_write`).
     """
+    key = _key_to_write(key)
     entry = await get_entry(session, entry_id)
     if entry is None:
         raise ValueError(f"No corpus entry {entry_id!r}.")
@@ -332,13 +362,24 @@ async def withdraw_key(
     last key may go and the entry is left unattributed: a harness entry keeps
     its harness tag, and any other entry gains the ``scope:unattributed``
     marker. No correction verb makes an entry global; that is ``widen``.
+
+    ``key`` is compared in its canonical spelling, and every stored tag that
+    spells it, in any normalisation form or padded, is removed, so a key
+    reported withdrawn is out of view (security review 2026-10-30-1, AB33).
     """
+    key = canonical_project_key(key)
     entry = await get_entry(session, entry_id)
     if entry is None:
         raise ValueError(f"No corpus entry {entry_id!r}.")
     keys = project_keys(entry.tags)
     if key not in keys:
         return False
+    spellings = [
+        tag
+        for tag in entry.tags
+        if tag.startswith(PROJECT_TAG_PREFIX)
+        and canonical_project_key(tag[len(PROJECT_TAG_PREFIX) :]) == key
+    ]
     marked = False
     if keys == {key}:
         if not leave_unattributed:
@@ -349,10 +390,11 @@ async def withdraw_key(
                 "Nothing was changed."
             )
         harness_tags = get_config().observer_scope.harness_tags
-        without = [tag for tag in entry.tags if tag != project_tag(key)]
+        without = [tag for tag in entry.tags if tag not in spellings]
         if classify_entry(without, harness_tags) is EntryScope.GLOBAL:
             marked = bool(await add_entry_tags(session, entry_id, [UNATTRIBUTED_MARKER]))
-    await remove_entry_tags(session, entry_id, [project_tag(key)])
+    if not await remove_entry_tags(session, entry_id, spellings):
+        return False
     await record_event(
         session,
         actor=actor,

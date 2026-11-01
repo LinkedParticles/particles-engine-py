@@ -876,6 +876,102 @@ class TestFetchWithCurl:
         assert captured_argv[captured_argv.index("--max-time") + 1] == str(cfg.timeout_seconds)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("which", ["fetch", "share_link"])
+    async def test_curl_reads_no_curlrc_and_inherits_no_proxy(
+        self, monkeypatch: pytest.MonkeyPatch, which: str
+    ) -> None:
+        """P43: a proxy (env or ~/.curlrc) would resolve the host itself, past the pin."""
+        from particles.extraction import reddit
+
+        for var in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "CURL_CA_BUNDLE"):
+            monkeypatch.setenv(var, "http://proxy.example.test:3128")
+        seen: dict[str, Any] = {}
+
+        async def _fake_exec(*argv: str, **kwargs: Any) -> MagicMock:
+            seen["argv"] = argv
+            seen["env"] = kwargs.get("env")
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(
+                return_value=(
+                    b"HTTP/2 301\r\nlocation: https://www.reddit.com/r/x/comments/abc/t/\r\n",
+                    b"",
+                )
+            )
+            return proc
+
+        monkeypatch.setattr(
+            "particles.extraction.reddit.asyncio.create_subprocess_exec", _fake_exec
+        )
+        if which == "fetch":
+            await reddit._fetch_with_curl(
+                "https://www.reddit.com/r/x/comments/abc/t/.json",
+                resolve=_stub_resolver(_PUBLIC_ADDR),
+            )
+        else:
+            await reddit._resolve_reddit_redirect(
+                "https://www.reddit.com/r/x/s/AbCdEf", resolve=_stub_resolver(_PUBLIC_ADDR)
+            )
+        argv, env = seen["argv"], seen["env"]
+        assert argv[:2] == ("curl", "-q"), "-q must be curl's first argument"
+        assert argv[argv.index("--noproxy") + 1] == "*"
+        assert env is not None and "PATH" in env
+        assert not {k.lower() for k in env} & {"https_proxy", "all_proxy", "curl_ca_bundle"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("which", ["fetch", "share_link"])
+    async def test_curl_never_expands_a_url_glob(
+        self, monkeypatch: pytest.MonkeyPatch, which: str
+    ) -> None:
+        """Q18 (SECURITY_REVIEW_20261025-1): one URL makes curl issue one request.
+
+        curl reads ``[a-b]`` and ``{a,b}`` in a URL as a glob and fetches every
+        expansion, each with its own time and size budget, unless it is given
+        ``--globoff``. The resolver now also caps the body it buffers.
+        """
+        from particles.config import get_config
+        from particles.extraction import reddit
+
+        argv: list[str] = []
+
+        async def _fake_exec(*args: str, **kwargs: Any) -> MagicMock:
+            argv.extend(args)
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(
+                return_value=(b"location: https://www.reddit.com/r/x/comments/abc/t/\r\n", b"")
+            )
+            return proc
+
+        monkeypatch.setattr(
+            "particles.extraction.reddit.asyncio.create_subprocess_exec", _fake_exec
+        )
+        if which == "fetch":
+            url = "https://www.reddit.com/r/x/comments/abc/t/.json"
+            await reddit._fetch_with_curl(url, resolve=_stub_resolver(_PUBLIC_ADDR))
+        else:
+            url = "https://www.reddit.com/r/[1-100000]/s/abcdef"
+            await reddit._resolve_reddit_redirect(url, resolve=_stub_resolver(_PUBLIC_ADDR))
+        assert argv[:3] == ["curl", "-q", "--globoff"]
+        assert url in argv
+        assert argv[argv.index("--max-filesize") + 1] == str(get_config().http.max_bytes)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.reddit.com/r/[1-100000]/s/abcdef",
+            "https://www.reddit.com/r/x/s/{a,b,c}",
+            "https://www.reddit.com/r/x/s/abcdef?x=[1-9]",
+            "https://www.reddit.com/r/{a,b}/comments/abc/t/",
+            "https://www.reddit.com/r/x/comments/[1-9]/t/",
+            "https://www.reddit.com/r/x/comments/abc/[1-9]/",
+        ],
+    )
+    def test_the_importer_refuses_a_url_glob(self, url: str) -> None:
+        """Q18: no URL pattern the importer accepts carries a curl glob."""
+        assert not RedditImporter().accepts_url(url)
+
+    @pytest.mark.asyncio
     async def test_403_raises_source_fetch_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A 403 (Reddit's bot-wall) is a typed SourceFetchError with status 403
         that points at the archive backend — not a bare RuntimeError/traceback."""
@@ -1624,3 +1720,37 @@ class TestRegistryIntegration:
         ).get_extractors()
         ids = [p.EXTRACTOR_ID for p in plugins]
         assert "reddit-extractor" in ids
+
+
+def test_reddit_self_post_body_stays_within_the_single_call_threshold() -> None:
+    """No chunk the Reddit builder emits passes the threshold plus a header (AB18).
+
+    Reddit accepts a self-post body of 40,000 characters, past the default
+    threshold, and the body went to the model in one call (security review
+    2026-10-30, AB18).
+    """
+    from particles.config import get_config
+
+    ext = get_config().extraction
+    threshold, chunk_chars = ext.single_call_threshold_chars, ext.comment_chunk_chars
+    post = {"subreddit": "s", "title": "t", "author": "a", "score": 1, "selftext": "z" * 40_000}
+    chunks = _build_reddit_chunks(post, [], 10_000, threshold, chunk_chars)
+    assert max(len(c.chunk_text) for c in chunks) <= threshold + 400
+    joined = "".join(c.chunk_text for c in chunks)
+    assert joined.count("z") == 40_000
+
+
+def test_reddit_short_self_post_keeps_its_single_body_chunk() -> None:
+    """A body under the threshold stays one ``body`` chunk, so carry-forward still matches."""
+    post = {"subreddit": "s", "title": "t", "author": "a", "score": 1, "selftext": "hello"}
+    chunks = _build_reddit_chunks(post, [], 1000, 30_000, 10_000)
+    assert [c.chunk_id for c in chunks] == ["body"]
+    assert chunks[0].chunk_text == _render_reddit_body(post)
+
+
+def test_reddit_one_long_comment_stays_within_the_chunk_budget() -> None:
+    """A comment past the chunk budget is clipped to it, whatever the body limit (AB18)."""
+    post = {"subreddit": "s", "title": "t", "author": "a", "score": 1, "selftext": ""}
+    comments = [{"score": 1, "author": "b" * 50_000, "body": "c" * 50_000}]
+    chunks = _build_reddit_chunks(post, comments, 50_000, 30_000, 10_000)
+    assert max(len(c.chunk_text) for c in chunks) <= 30_000 + 400

@@ -15,9 +15,11 @@ Each entry commits on its own, and a failure rolls back that entry only and is
 reported on its result, so one bad source never stops the sweep. Results are
 yielded as they land, which lets a caller stream progress.
 
-A local entry outside every allowed root is not handed to the ladder at all: it
-yields ``REFUSED``, and the loop logs one warning per run with the count and
-the fix, rather than a line per entry.
+A local entry the root allowlist refuses is not handed to the ladder at all: it
+yields ``REFUSED`` with the cause, and the loop logs one warning per cause per
+run with the count and the fix that matches it, rather than a
+line per entry. On a store that resolves against the working directory every
+local entry is refused that way, unread.
 """
 
 from __future__ import annotations
@@ -29,7 +31,14 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.corpus.fetch import is_entry_refused, maybe_refetch
+from particles.core.schema import WarcRecordType
+from particles.corpus.fetch import (
+    RefreshRefusal,
+    RefusalCounts,
+    entry_refusal,
+    maybe_refetch,
+    store_refusal,
+)
 from particles.corpus.refresh_outcome import RefreshOutcome, classify_refresh
 from particles.corpus.rule_roots import list_rule_source_roots
 from particles.corpus.store import CorpusEntryRow, list_snapshots_for_entry
@@ -40,12 +49,16 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RefreshResult:
-    """One entry's refresh: an outcome, or the error that stopped it."""
+    """One entry's refresh: an outcome, or the error that stopped it.
+
+    ``refusal`` names the cause when ``outcome`` is ``REFUSED``.
+    """
 
     entry_id: str
     outcome: RefreshOutcome | None
     snapshot_id: str | None = None
     error: Exception | None = None
+    refusal: RefreshRefusal | None = None
 
 
 async def refresh_entries(
@@ -65,16 +78,19 @@ async def refresh_entries(
     """
     importers = get_importers()
     recorded = await list_rule_source_roots(session)
-    refused = 0
+    cwd_store = store_refusal(session) or False
+    refused: list[RefreshRefusal] = []
     for entry_id in entry_ids:
         try:
-            if await _is_refused(session, entry_id, recorded):
-                refused += 1
-                yield RefreshResult(entry_id=entry_id, outcome=RefreshOutcome.REFUSED)
+            if (reason := await _refusal(session, entry_id, recorded, cwd_store)) is not None:
+                refused.append(reason)
+                yield RefreshResult(
+                    entry_id=entry_id, outcome=RefreshOutcome.REFUSED, refusal=reason
+                )
                 continue
-            before_id = await _latest_snapshot_id(session, entry_id)
+            before_id, before_absent = await _latest_snapshot(session, entry_id)
             snap = await maybe_refetch(session, entry_id, force=force, importers=importers)
-            outcome = classify_refresh(before_id, snap)
+            outcome = classify_refresh(before_id, snap, before_absent=before_absent)
             await session.commit()
         except Exception as exc:  # noqa: BLE001 — one bad source must not stop the sweep
             await session.rollback()
@@ -85,24 +101,28 @@ async def refresh_entries(
             outcome=outcome,
             snapshot_id=snap.snapshot_id if snap is not None else None,
         )
-    if refused:
-        log.warning(
-            "%d local source(s) lie outside every allowed root and were not read. Run "
-            "`particles rules sync` from the project that holds them to record its root, "
-            "or add their directory to local_refresh.allowed_roots.",
-            refused,
-        )
+    for line in RefusalCounts.tally(refused).lines():
+        log.warning("%s", line)
 
 
-async def _is_refused(session: AsyncSession, entry_id: str, recorded: Sequence[Path]) -> bool:
-    """Whether the local tier would refuse this entry's ``file://`` source."""
+async def _refusal(
+    session: AsyncSession,
+    entry_id: str,
+    recorded: Sequence[Path],
+    cwd_store: bool | RefreshRefusal,
+) -> RefreshRefusal | None:
+    """Why the local tier would refuse this entry's ``file://`` source."""
     row = await session.get(CorpusEntryRow, entry_id)
-    return row is not None and is_entry_refused(row, recorded)
+    return entry_refusal(row, recorded, cwd_store=cwd_store) if row is not None else None
 
 
-async def _latest_snapshot_id(session: AsyncSession, entry_id: str) -> str | None:
-    """The newest snapshot id for an entry, or None when it has none yet."""
+async def _latest_snapshot(session: AsyncSession, entry_id: str) -> tuple[str | None, bool]:
+    """The newest snapshot id for an entry and whether it is an ``ABSENT`` record.
+
+    ``(None, False)`` when the entry has no snapshot yet.
+    """
     snapshots = await list_snapshots_for_entry(session, entry_id)
     if not snapshots:
-        return None
-    return max(snapshots, key=lambda s: s.captured_at).snapshot_id
+        return None, False
+    latest = max(snapshots, key=lambda s: s.captured_at)
+    return latest.snapshot_id, latest.warc_record_type is WarcRecordType.ABSENT

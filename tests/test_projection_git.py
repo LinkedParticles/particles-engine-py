@@ -268,3 +268,125 @@ def test_a_repository_filter_driver_skips_the_commit(tmp_path: Path) -> None:
 
     assert _commit(memory_dir, body=_BODY_V1, snapshot=None) == "skipped: command-driver-configured"
     assert not marker.exists()
+
+
+def _repo_with_included_driver(tmp_path: Path, *, conditional: bool) -> tuple[Path, Path]:
+    """A repository whose filter driver lives in a file its config includes."""
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "driver-ran"
+    driver = tmp_path / "driver.sh"
+    driver.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n", encoding="utf-8")
+    driver.chmod(0o755)
+    included = tmp_path / "included.cfg"
+    included.write_text(f'[filter "planted"]\n\tclean = {driver}\n', encoding="utf-8")
+    if conditional:
+        _git(repo, "config", f"includeIf.gitdir:{repo.resolve()}/.git.path", str(included))
+    else:
+        _git(repo, "config", "include.path", str(included))
+    (repo / ".gitattributes").write_text("*.md filter=planted\n", encoding="utf-8")
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+    return memory_dir, marker
+
+
+@pytest.mark.parametrize("conditional", [False, True], ids=["include.path", "includeIf"])
+def test_an_included_filter_driver_skips_the_commit(tmp_path: Path, conditional: bool) -> None:
+    """A driver reached through include.path or includeIf is seen and never run.
+
+    Security review 2026-10-24-2 (the D27 include bypass): the check read
+    ``--local`` and ``--worktree``, which follow no include, while ``git add``
+    does, so the included driver ran.
+    """
+    memory_dir, marker = _repo_with_included_driver(tmp_path, conditional=conditional)
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None) == "skipped: command-driver-configured"
+    assert not marker.exists()
+
+
+def test_a_global_filter_driver_is_the_operators_and_is_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A driver in the operator's own global config (``git lfs install``) does not skip."""
+    repo = _init_repo(tmp_path / "memrepo")
+    global_cfg = tmp_path / "global.cfg"
+    global_cfg.write_text('[filter "operator"]\n\tclean = cat\n', encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_cfg))
+    (repo / ".gitattributes").write_text("*.md filter=operator\n", encoding="utf-8")
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None).startswith("committed ")
+
+
+def test_a_repository_signing_program_skips_a_signed_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With signing on, a repository-named ``gpg.program`` is never run."""
+    from particles.config import reset_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent_memory:\n  projection:\n    git:\n      sign: true\n", encoding="utf-8")
+    monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+    reset_config()
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "gpg-ran"
+    _git(repo, "config", "gpg.program", f"sh -c 'touch {marker}'")
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None) == "skipped: command-driver-configured"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("gpg.ssh.defaultKeyCommand", "{program}"),
+        ("gpg.ssh.program", "{program}"),
+        ("gpg.x509.program", "{program}"),
+        ("gpg.format", "ssh"),
+    ],
+)
+def test_any_repository_gpg_setting_skips_a_signed_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, value: str
+) -> None:
+    """With signing on, no signing program or format the repository names is used (Q31).
+
+    The audit's proof is the first case: ``gpg.format=ssh`` with a repository
+    ``gpg.ssh.defaultKeyCommand`` ran the key command, since only
+    ``gpg.*.program`` was refused.
+    """
+    from particles.config import reset_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent_memory:\n  projection:\n    git:\n      sign: true\n", encoding="utf-8")
+    monkeypatch.setenv("PARTICLES_CONFIG", str(cfg))
+    reset_config()
+    repo = _init_repo(tmp_path / "memrepo")
+    marker = tmp_path / "program-ran"
+    program = tmp_path / "program.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    program.chmod(0o755)
+    _git(repo, "config", "gpg.format", "ssh")
+    _git(repo, "config", "commit.gpgSign", "true")
+    _git(repo, "config", key, value.format(program=program))
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None) == "skipped: command-driver-configured"
+    assert not marker.exists()
+
+
+def test_a_repository_gpg_setting_does_not_block_an_unsigned_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With signing off the commit passes --no-gpg-sign, so a gpg setting is harmless."""
+    repo = _init_repo(tmp_path / "memrepo")
+    _git(repo, "config", "gpg.ssh.defaultKeyCommand", "false")
+    memory_dir = repo / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text(_BODY_V1, encoding="utf-8")
+    assert _commit(memory_dir, body=_BODY_V1, snapshot=None).startswith("committed ")

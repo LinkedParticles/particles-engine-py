@@ -41,15 +41,27 @@
 # on GHCR refuses to be re-pushed (recovery is the next patch release).
 # `latest` follows the newest published version.
 #
+# ENCODER PIN: before any tag is applied, the `verify` job reads the encoder
+# each pushed platform image baked and fails unless it is the commit this tree
+# pins in .github/encoder-revision.txt, holding that commit's bytes as listed
+# in .github/encoder-files.txt, and the signing job refuses an SBOM naming any
+# other (security review Q40, R46). The `sbom` job repeats the byte check
+# before it describes an image, so a `sbom_only` backfill, which skips
+# `verify`, also signs only a release that baked the current pin's bytes.
+#
 # SBOM: after the tagged image exists, the `sbom` job scans each platform image
-# by digest (syft, CycloneDX 1.6), adds the baked embedding encoder — which no
-# scanner can see — via .github/image_sbom.py, attests the result as a signed
-# referrer on the image, and attaches it to this version's GitHub Release. It
-# is a separate job on purpose: `merge` succeeding means "published", and an
-# inventory failure must not make that false. Because version tags are
-# immutable, re-running the whole workflow cannot recover a failed SBOM; the
-# `sbom_only` dispatch re-runs just that job against an existing tag, and
-# `version` lets it backfill an earlier release.
+# by digest (syft, CycloneDX 1.6) and adds the baked embedding encoder, which
+# no scanner can see, via .github/image_sbom.py. Reading the encoder means
+# running the image, so that job holds no write or attestation identity. The
+# `sbom-attest` job holds them and runs nothing the image or an index
+# supplied: it resolves the digests from the registry itself, checks that the
+# SBOM names exactly those, then attests it as a signed referrer on the image
+# and attaches it to this version's GitHub Release (security review P38).
+# Both are separate from `merge` on purpose: `merge` succeeding means
+# "published", and an inventory failure must not make that false. Because
+# version tags are immutable, re-running the whole workflow cannot recover a
+# failed SBOM; the `sbom_only` dispatch re-runs just those jobs against an
+# existing tag, and `version` lets it backfill an earlier release.
 name: Publish image
 
 on:
@@ -194,8 +206,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The builder runs privileged beside this job's packages: write token,
+      # so its image is pinned by digest like every action here, never the
+      # default `moby/buildkit:buildx-stable-1` tag (security review Q55).
+      # Dependabot does not read driver-opts: move it by hand, to a release at
+      # least two weeks old, with the tag beside the digest.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       # Push by digest only — the merge job below stitches the two
       # architectures into one manifest list and applies the tags.
@@ -225,42 +244,124 @@ jobs:
       # Matrix job *outputs* clobber each other nondeterministically, so the
       # per-arch digest travels as an artifact instead.
       - name: Record the digest for the merge job
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/digest
-          printf '%s' "${{ steps.build.outputs.digest }}" > "/tmp/digest/${{ matrix.arch }}"
+          printf '%s' "$DIGEST" > "/tmp/digest/$ARCH"
 
       - name: Upload the digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.arch }}
           path: /tmp/digest/${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
 
+  # Each pushed platform image is checked against the encoder pin before
+  # `merge` applies any tag: an image that baked other weights then fails here
+  # and is never tagged `v<version>` or `latest` (security review Q40). The
+  # check reads the encoder by running the image, which runs code an index
+  # supplied, so this job can read and nothing more, like `sbom`. The pin it
+  # compares with comes from this tree, not from the image.
+  verify:
+    name: verify encoder (${{ matrix.arch }})
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read # pull the untagged image by digest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download this platform's digest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digest
+
+      - name: Read the digest
+        id: digest
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          diff <(cd /tmp/digest && ls -A) <(printf '%s\n' "$ARCH")
+          d="$(cat "/tmp/digest/$ARCH")"
+          [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "the artifact holds no image digest" >&2; exit 1; }
+          echo "digest=$d" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same offline, read-only reader the sbom job runs, then a
+      # comparison with the pin that runs on the runner. The reader's output
+      # is the image's account of itself, so the runner also copies the hub
+      # cache out of a container that never starts and hashes every file
+      # under the pinned snapshot against encoder-files.txt (security review
+      # R46).
+      - name: Check the baked encoder against the pin
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          img="$IMAGE@$DIGEST"
+          docker pull -q "$img"
+          docker run --rm --network none -v "$PWD/.github:/sbom-tools:ro" \
+            --entrypoint python "$img" /sbom-tools/image_sbom.py baked-model > /tmp/model.json
+          cat /tmp/model.json
+          cid="$(docker create --network none "$img")"
+          docker cp "$cid:/opt/huggingface/hub" /tmp/baked-hub
+          docker rm "$cid" >/dev/null
+          python3 .github/image_sbom.py check-model /tmp/model.json --hub /tmp/baked-hub
+
   merge:
     name: merge manifest, tag, attest
-    needs: build
+    needs: [build, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write # sigstore identity for the provenance attestation
       attestations: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
     steps:
       - name: Download the per-arch digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-*
           path: /tmp/digest
           merge-multiple: true
 
+      # Exactly the two files the build legs wrote, each one image digest and
+      # nothing else, before either value becomes an output. Later steps read
+      # them from the environment, never as `${{ }}` in a script, so a value
+      # cannot become shell source (security review P57).
       - name: Read the digests
         id: digests
         run: |
           set -euo pipefail
+          diff <(cd /tmp/digest && ls -A) <(printf 'amd64\narm64\n')
           amd64="$(cat /tmp/digest/amd64)"; arm64="$(cat /tmp/digest/arm64)"
-          [ -n "$amd64" ] && [ -n "$arm64" ] || { echo "missing a per-arch digest" >&2; exit 1; }
+          for d in "$amd64" "$arm64"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "a per-arch artifact holds no image digest" >&2; exit 1; }
+          done
           echo "amd64=$amd64" >> "$GITHUB_OUTPUT"
           echo "arm64=$arm64" >> "$GITHUB_OUTPUT"
 
@@ -271,8 +372,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # imagetools talks to the registry only, so the daemon's own builder
+      # serves and no BuildKit container starts beside the token (Q55).
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver: docker
 
       # The authoritative immutability check, immediately before the tagging
       # write it protects.
@@ -290,14 +395,16 @@ jobs:
         id: manifest
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          AMD64: ${{ steps.digests.outputs.amd64 }}
+          ARM64: ${{ steps.digests.outputs.arm64 }}
         run: |
           set -euo pipefail
           v="$VERSION"
           docker buildx imagetools create \
             --tag "$IMAGE:v$v" \
             --tag "$IMAGE:latest" \
-            "$IMAGE@${{ steps.digests.outputs.amd64 }}" \
-            "$IMAGE@${{ steps.digests.outputs.arm64 }}"
+            "$IMAGE@$AMD64" \
+            "$IMAGE@$ARM64"
           digest="$(docker buildx imagetools inspect "$IMAGE:v$v" --format '{{ json .Manifest }}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Published $IMAGE:v$v ($digest)"
@@ -311,19 +418,42 @@ jobs:
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
-      # Post-publish smoke: pull the tagged image and assert the code inside
-      # is the released version — the property the whole SOURCE=pypi design
-      # exists to guarantee.
+  # Post-publish smoke, in a job of its own: it runs code from the image just
+  # published, so it holds no write, attestation or OIDC identity, unlike
+  # `merge`, and each container runs with no network, like `verify`
+  # (security review R32). It pulls the manifest list `merge` tagged, by the
+  # digest `merge` recorded.
+  smoke:
+    name: post-publish smoke
+    needs: [build, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # pull the tagged image by digest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull the tagged image and assert the code inside is the released
+      # version: the property the whole SOURCE=pypi design exists to
+      # guarantee.
       - name: Post-publish smoke — pull and verify the baked version
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
         run: |
           set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "merge recorded no manifest digest" >&2; exit 1; }
           v="$VERSION"
-          docker pull "$IMAGE:v$v"
-          got="$(docker run --rm --entrypoint python "$IMAGE:v$v" -c 'import particles; print(particles.__version__)')"
+          img="$IMAGE@$DIGEST"
+          docker pull "$img"
+          got="$(docker run --rm --network none --entrypoint python "$img" -c 'import particles; print(particles.__version__)')"
           [ "$got" = "$v" ] || { echo "baked version $got != $v" >&2; exit 1; }
-          echo "smoke OK: $IMAGE:v$v carries linkedparticles $got"
+          echo "smoke OK: $IMAGE:v$v ($DIGEST) carries linkedparticles $got"
 
       # The image has no GPU, so torch must be the CPU build: the CUDA closure
       # (43 nvidia-* wheels + triton) is ~3 GB of unreachable weight on every
@@ -331,11 +461,10 @@ jobs:
       # only the tree builder honoured the CPU-index routing.
       - name: Post-publish smoke — assert CPU-only torch
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
         run: |
           set -euo pipefail
-          v="$VERSION"
-          docker run --rm --entrypoint python "$IMAGE:v$v" -c '
+          docker run --rm --network none --entrypoint python "$IMAGE@$DIGEST" -c '
           import importlib.metadata as md, torch
           assert not torch.cuda.is_available(), "torch reports CUDA available"
           assert torch.version.cuda is None, f"CUDA torch build: {torch.__version__}"
@@ -349,7 +478,8 @@ jobs:
   # One native runner per architecture: the two platform closures differ
   # (different torch wheels), and reading the baked encoder means running the
   # image. Scans the pushed digest, not the build output, so the SBOM describes
-  # the exact bytes a consumer pulls.
+  # the exact bytes a consumer pulls. Running the image runs code an index
+  # supplied, so this job can read and nothing more; `sbom-attest` signs.
   sbom:
     name: sbom (${{ matrix.arch }})
     needs: merge
@@ -366,10 +496,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write # attach the SBOM to the Release
-      packages: write # push the attestation referrer to GHCR
-      id-token: write # sigstore identity for the SBOM attestation
-      attestations: write
+      contents: read
+      packages: read # pull the image to read its encoder
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -400,8 +528,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # imagetools talks to the registry only, so the daemon's own builder
+      # serves and no BuildKit container starts beside the token (Q55).
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver: docker
 
       # Always resolved from the published tag — the same path whether this
       # follows a merge or backfills an older release.
@@ -441,37 +573,172 @@ jobs:
       # the pull below so the scan's unpacked layers are cleaned up before the
       # image lands on disk a second time (the image is several GB).
       - name: Scan the platform image
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          PLATFORM: ${{ steps.digests.outputs.platform }}
+          SBOM: ${{ steps.digests.outputs.path }}
         run: |
           set -euo pipefail
           mkdir -p sbom
-          "${{ steps.syft.outputs.cmd }}" scan "$IMAGE@${{ steps.digests.outputs.platform }}" \
-            --from registry -o "cyclonedx-json@1.6=${{ steps.digests.outputs.path }}"
+          "$SYFT" scan "$IMAGE@$PLATFORM" --from registry -o "cyclonedx-json@1.6=$SBOM"
           df -h / | tail -1
 
       # No scanner catalogs model weights, so ask the image itself which
       # encoder revision it baked. Offline and read-only: the script is
       # mounted in, and nothing reaches the network.
       - name: Read the baked encoder
+        env:
+          PLATFORM: ${{ steps.digests.outputs.platform }}
         run: |
           set -euo pipefail
-          img="$IMAGE@${{ steps.digests.outputs.platform }}"
+          img="$IMAGE@$PLATFORM"
           docker pull -q "$img"
           docker run --rm --network none -v "$PWD/.github:/sbom-tools:ro" \
             --entrypoint python "$img" /sbom-tools/image_sbom.py baked-model > sbom/model.json
           cat sbom/model.json
 
+      # The verify job's byte check, run again here because a `sbom_only`
+      # backfill skips verify: the hub cache is copied out of a container
+      # that never starts and every pinned file is hashed, so the SBOM never
+      # names an encoder only the image's self-report vouches for (security
+      # review W75).
+      - name: Check the baked encoder against the pin
+        env:
+          PLATFORM: ${{ steps.digests.outputs.platform }}
+        run: |
+          set -euo pipefail
+          img="$IMAGE@$PLATFORM"
+          cid="$(docker create --network none "$img")"
+          docker cp "$cid:/opt/huggingface/hub" /tmp/baked-hub
+          docker rm "$cid" >/dev/null
+          python3 .github/image_sbom.py check-model sbom/model.json --hub /tmp/baked-hub
+
       - name: Add the encoder and image identity to the SBOM
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          SBOM: ${{ steps.digests.outputs.path }}
+          PLATFORM: ${{ steps.digests.outputs.platform }}
+          INDEX: ${{ steps.digests.outputs.index }}
         run: |
           set -euo pipefail
-          python3 .github/image_sbom.py enrich "${{ steps.digests.outputs.path }}" \
+          python3 .github/image_sbom.py enrich "$SBOM" \
             --model sbom/model.json \
             --image "$IMAGE" \
             --tag "v$VERSION" \
-            --arch "${{ matrix.arch }}" \
-            --platform-digest "${{ steps.digests.outputs.platform }}" \
-            --index-digest "${{ steps.digests.outputs.index }}"
+            --arch "$ARCH" \
+            --platform-digest "$PLATFORM" \
+            --index-digest "$INDEX"
+
+      - name: Hand the SBOM to the signing job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-sbom-${{ matrix.arch }}
+          path: ${{ steps.digests.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Signs and publishes what the sbom job wrote. It holds the write and
+  # attestation identities, so it runs nothing the image or an index
+  # supplied: the subjects are resolved from the registry here, not taken
+  # from the job that ran the image, and the SBOM is checked to name exactly
+  # those before it is signed (security review P38).
+  sbom-attest:
+    name: sbom attest (${{ matrix.arch }})
+    needs: sbom
+    if: ${{ !cancelled() && needs.sbom.result != 'skipped' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the SBOM to the Release
+      packages: write # push the attestation referrer to GHCR
+      id-token: write # sigstore identity for the SBOM attestation
+      attestations: write
+    steps:
+      # For pyproject.toml and .github/image_sbom.py, both from this tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the version to describe
+        id: ver
+        env:
+          REQUESTED: ${{ inputs.sbom_only && inputs.version || '' }}
+        run: |
+          set -euo pipefail
+          v="$REQUESTED"
+          [ -n "$v" ] || v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
+          [ -n "$v" ] || { echo "could not determine the version to describe" >&2; exit 1; }
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*$ ]]; then
+            echo "not a release version: refusing to describe it" >&2
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # imagetools talks to the registry only, so the daemon's own builder
+      # serves and no BuildKit container starts beside the token (Q55).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver: docker
+
+      - name: Resolve the published digests
+        id: digests
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE:v$VERSION"
+          index="$(docker buildx imagetools inspect "$ref" --format '{{ json .Manifest }}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')" \
+            || { echo "$ref is not published — nothing to describe" >&2; exit 1; }
+          platform="$(docker buildx imagetools inspect "$ref" --raw | python3 -c '
+          import json, os, sys
+          m = [d["digest"] for d in json.load(sys.stdin)["manifests"]
+               if d.get("platform", {}).get("os") == "linux"
+               and d["platform"].get("architecture") == os.environ["ARCH"]]
+          assert len(m) == 1, m
+          print(m[0])')"
+          for d in "$index" "$platform"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "unexpected digest: $d" >&2; exit 1; }
+          done
+          echo "index=$index" >> "$GITHUB_OUTPUT"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
+          echo "path=sbom/engine-$VERSION-linux-$ARCH.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Download the SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image-sbom-${{ matrix.arch }}
+          path: sbom/
+
+      - name: Check the SBOM names exactly this image
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          SBOM: ${{ steps.digests.outputs.path }}
+          PLATFORM: ${{ steps.digests.outputs.platform }}
+          INDEX: ${{ steps.digests.outputs.index }}
+        run: |
+          set -euo pipefail
+          diff <(cd sbom && ls -A) <(basename "$SBOM")
+          python3 .github/image_sbom.py check "$SBOM" \
+            --image "$IMAGE" \
+            --tag "v$VERSION" \
+            --arch "$ARCH" \
+            --platform-digest "$PLATFORM" \
+            --index-digest "$INDEX"
 
       # Signed with the same sigstore identity as the provenance above, and
       # pushed beside it as a referrer. Twice: on the platform image, which is
@@ -502,7 +769,7 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           GH_TOKEN: ${{ github.token }}
+          SBOM: ${{ steps.digests.outputs.path }}
         run: |
           set -euo pipefail
-          gh release upload "v$VERSION" \
-            "${{ steps.digests.outputs.path }}" --clobber --repo "${{ github.repository }}"
+          gh release upload "v$VERSION" "$SBOM" --clobber --repo "$GITHUB_REPOSITORY"

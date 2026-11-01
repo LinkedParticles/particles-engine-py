@@ -195,7 +195,9 @@ particles trust statement-set numismatics AUTHOR some-author 0.9 \
 
 Instead of hand-building every rule, you can adopt a published **lens**:
 a community's bundled trust policy, deposited as a
-`TrustLensDefinition` JSON:
+`TrustLensDefinition` JSON. A lens file is recognised by its contents when it
+is at most 1 MiB; deposit a larger one with
+`--source-type TRUST_LENS_DEFINITION`:
 
 ```bash
 particles deposit ./acme-numismatics.json   # publish / materialise

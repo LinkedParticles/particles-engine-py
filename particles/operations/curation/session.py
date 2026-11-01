@@ -970,6 +970,7 @@ async def _assign_subject(
         subject_id=sval if existing is not None else None,
         subject_name=None if existing is not None else sval,
         actor=actor,
+        commit_under_lock=True,
     )
     return f"Assigned subject to {pid[:8]}…"
 
@@ -1060,6 +1061,10 @@ async def _supersede(
         actor=actor,
         reason=reason,
         card_key=card.key,
+        # The gesture made only reads before this call, so its writes commit
+        # under the store's writer lock and the guards are read again under it
+        # (security review 2026-10-31-1, AD25).
+        commit_under_lock=True,
     )
     successor = (result.asserted_particle_id or "?")[:8]
     line = f"Superseded {pid[:8]}… → successor {successor}… ({result.verdict})"

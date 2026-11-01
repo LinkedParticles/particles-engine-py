@@ -117,6 +117,7 @@ async def cascade_superseded_generation(
     exclude_ids: frozenset[str] = frozenset(),
     include_unsnapshotted: bool = False,
     late_out: list[str] | None = None,
+    actor: str = "extract",
 ) -> list[str]:
     """Demote ACTIVE particles anchored to a superseded snapshot of ``entry_id``.
 
@@ -144,6 +145,9 @@ async def cascade_superseded_generation(
             absence.
         late_out: When the snapshot was extracted late, the demoted ids are
             also appended here, so the caller can disclose the pass.
+        actor: The verb the pass's ``CLAIMS_RETIRED`` event names. Every
+            claim the cascade demotes is named in one event per call
+            (security review 2026-10-28-1, O36).
 
     A candidate some entry's *current* snapshot still attests is skipped—
     a claim a live source states is not ``PROVENANCE_STALE``
@@ -159,6 +163,7 @@ async def cascade_superseded_generation(
         transaction.
     """
     from particles.corpus.store import get_entry
+    from particles.store.event_store import record_claims_retired
     from particles.store.particle_store import (
         get_active_particle_ids_from_other_snapshots,
         update_particle_status,
@@ -187,6 +192,20 @@ async def cascade_superseded_generation(
             session, particle_id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
         )
         demoted.append(particle_id)
+    await record_claims_retired(
+        session,
+        actor=actor,
+        route="generation_cascade",
+        retired_ids=demoted,
+        status=Status.PROVENANCE_STALE.value,
+        status_reason=StatusReason.RETRACTED_DEPENDENCY.value,
+        reason=(
+            "generation cascade: no current snapshot of the entry states the claim"
+            + (" (an older snapshot was extracted late)" if current.late else "")
+        ),
+        entry_id=entry_id,
+        snapshot_id=current_snapshot_id,
+    )
 
     if demoted:
         log.info(
@@ -285,6 +304,7 @@ async def backfill_superseded_generations(
                     entry_id=entry_id,
                     current_snapshot_id=current,
                     include_unsnapshotted=currency.absent,
+                    actor="corpus-refresh-backfill",
                 )
             )
         if count:
@@ -300,6 +320,65 @@ async def backfill_superseded_generations(
             report.entries_affected,
         )
     return report
+
+
+async def claims_absences_would_retire(
+    session: AsyncSession, entry_ids: Collection[str]
+) -> list[str]:
+    """The ``ACTIVE`` claims processing an absence on every entry in ``entry_ids`` would retire.
+
+    A read, for a dry run: the cascade's candidates for an
+    ``ABSENT`` current generation (every ``ACTIVE`` claim with an edge to the
+    entry), less the claims some entry *outside* ``entry_ids`` currently attests.
+    The entries are taken together, as processing them one by
+    one ends: a claim two deleted files both stated is kept by the first
+    absence and retired by the second. Only ``MUTABLE`` entries count, since the
+    cascade is a no-op on any other. Sorted.
+    """
+    from particles.corpus.store import get_entry_currency
+    from particles.store.observer_scope_join import SourceRef, attests
+    from particles.store.particle_store import (
+        get_active_particle_ids_from_other_snapshots,
+        get_particles_by_ids,
+    )
+
+    absent = set(entry_ids)
+    if not absent:
+        return []
+    mutable = {
+        entry_id for entry_id, c in (await get_entry_currency(session, absent)).items() if c.mutable
+    }
+    candidates: set[str] = set()
+    for entry_id in sorted(mutable):
+        # No snapshot has an empty id, so every edge of the entry is a candidate.
+        candidates.update(
+            await get_active_particle_ids_from_other_snapshots(
+                session, entry_id, "", include_unsnapshotted=True
+            )
+        )
+    if not candidates:
+        return []
+    particles = await get_particles_by_ids(session, sorted(candidates))
+    refs = {
+        p.id: [
+            SourceRef(r.corpus_entry_id, r.snapshot_id)
+            for r in p.provenance
+            if r.type is ProvenanceRefType.SOURCE
+        ]
+        for p in particles.values()
+    }
+    others = {r.entry_id for rs in refs.values() for r in rs if r.entry_id not in absent}
+    currency = await get_entry_currency(session, others)
+    return sorted(
+        pid
+        for pid in candidates
+        if not any(
+            ref.entry_id not in absent
+            and ref.entry_id in currency
+            and attests(ref, currency[ref.entry_id])
+            for ref in refs.get(pid, ())
+        )
+    )
 
 
 async def _unattested(

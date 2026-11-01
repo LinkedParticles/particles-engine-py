@@ -1035,3 +1035,50 @@ class TestRealPairs:
         )
         assert result.exit_code == 1
         assert "not found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# C6 residual: the cache resolves only classes defined where named (2026-10-24-2, P52)
+# ---------------------------------------------------------------------------
+
+
+def _global_pickle(module: str, name: str) -> bytes:
+    """A protocol-4 pickle whose whole content is one global lookup."""
+    return (
+        b"\x80\x04"
+        + b"\x8c"
+        + bytes([len(module)])
+        + module.encode()
+        + b"\x8c"
+        + bytes([len(name)])
+        + name.encode()
+        + b"\x93."
+    )
+
+
+def test_c6_a_planted_cache_cannot_name_a_callable() -> None:
+    import io
+    import os
+    import pickle
+
+    from particles.benchmark.rot.runner import _CacheUnpickler
+
+    payload = pickle.dumps(os.system, protocol=4)
+    with pytest.raises(pickle.UnpicklingError):
+        _CacheUnpickler(io.BytesIO(payload)).load()
+
+
+def test_c6_a_planted_cache_resolves_no_class_from_outside_particles() -> None:
+    """The allowlist says a particles class; a name read through a particles
+    module's attributes reaches whatever that module imported."""
+    import io
+    import pickle
+
+    from particles.benchmark.rot.runner import _CacheUnpickler
+
+    found = None
+    with pytest.raises(pickle.UnpicklingError):
+        found = _CacheUnpickler(
+            io.BytesIO(_global_pickle("particles.benchmark.rot.runner", "BaseModel"))
+        ).load()
+    assert found is None

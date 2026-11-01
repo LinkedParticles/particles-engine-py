@@ -38,7 +38,6 @@ export type SubjectMergeResponse = Schemas["SubjectMergeResponse"];
 export type DepositTextRequest = Schemas["DepositTextRequest"];
 export type DepositUrlRequest = Schemas["DepositUrlRequest"];
 export type DepositResponse = Schemas["DepositResponse"];
-export type ParticleSupersedeRequest = Schemas["ParticleSupersedeRequest"];
 export type AgentWriteResult = Schemas["AgentWriteResult"];
 export type CorpusRetractRequest = Schemas["CorpusRetractRequest"];
 export type CorpusRetractResponse = Schemas["CorpusRetractResponse"];
@@ -76,8 +75,9 @@ export type GraphParticleInfo = Schemas["GraphParticleInfo"];
  * - `unauthorized` (401): the engine rejected the bearer token.
  * Surfaced as a clear "engine rejected the token" error.
  * - `forbidden` (403): belief writes are disabled on this store
- *   (`mcp.write.enabled_stores` default-deny). The feed degrades to
- *   a read-only review mode (write gestures hidden).
+ *   (`mcp.write.enabled_stores` default-deny), or the key's role
+ *   cannot call the route. The message is the engine's detail.
+ *   The feed degrades to a read-only review mode (write gestures hidden).
  * - `unavailable` (503): the engine is in dev-key mode and refuses a
  *   non-loopback caller. Surfaced as "engine refuses unauthenticated
  *   non-loopback access".
@@ -297,9 +297,11 @@ export class ParticlesApiClient {
       );
     }
     if (resp.status === 403) {
+      // The engine's detail names the cause: belief writes disabled for the
+      // store, or a key whose role cannot call this route.
       throw new ApiError(
         "forbidden",
-        "Belief writes are disabled on this engine (read-only).",
+        await this.detail(resp, "Belief writes are disabled on this engine (read-only)."),
         403,
       );
     }
@@ -550,14 +552,6 @@ export class ParticlesApiClient {
       tags: [],
     };
     return this.request<DepositResponse>("POST", "/corpus/deposit/url", req);
-  }
-
-  /**
-   * supersede / edit → POST /particles/supersede (own-beliefs-only
-   * §4a/§6: rejects HUMAN_REVIEW + other identities; 403 when writes disabled).
-   */
-  async supersede(req: ParticleSupersedeRequest): Promise<AgentWriteResult> {
-    return this.request<AgentWriteResult>("POST", "/particles/supersede", req);
   }
 
   /**

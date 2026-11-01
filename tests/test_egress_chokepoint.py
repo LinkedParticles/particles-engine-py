@@ -38,6 +38,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ import pytest
 import particles
 from particles.http import ResponseTooLarge
 from particles.ingest.importers.nomisma import NomismaImporter
+from tests import _source_tree
 from tests._capped_http import set_capped_responses
 
 # A minimal valid Nomisma JSON-LD document (one concept node).
@@ -281,7 +283,7 @@ def _files_with_raw_client_calls(subdirs: list[str] | None = None) -> dict[str, 
                 for i, line in enumerate(text.splitlines(), start=1)
                 if _RAW_CLIENT_CALL.search(line)
             }
-            lines.update(_aliased_client_call_lines(ast.parse(text)))
+            lines.update(_aliased_client_call_lines(_source_tree.parse(text)))
             if lines:
                 hits[rel] = sorted(lines)
     return hits
@@ -567,7 +569,7 @@ def _network_subprocess_sites() -> dict[tuple[str, str, str], int]:
     """Every network-capable subprocess spawn in particles/, with its call count."""
     sites: dict[tuple[str, str, str], int] = {}
     for path in _PARTICLES_ROOT.rglob("*.py"):
-        for func_name, binary in _spawn_sites_in(ast.parse(path.read_text())):
+        for func_name, binary in _spawn_sites_in(_source_tree.parse(path.read_text())):
             if binary not in _NETWORK_BINARIES and binary != _DYNAMIC:
                 continue
             key = (path.relative_to(_PARTICLES_ROOT).as_posix(), func_name, binary)
@@ -579,7 +581,7 @@ def _git_spawning_files() -> set[str]:
     """Files that spawn git: a literal ``git`` argv head, or a dynamic spawn beside a ``"git"``."""
     files: set[str] = set()
     for path in _PARTICLES_ROOT.rglob("*.py"):
-        tree = ast.parse(path.read_text())
+        tree = _source_tree.parse(path.read_text())
         heads = {binary for _func, binary in _spawn_sites_in(tree)}
         names_git = any(
             isinstance(node, ast.Constant) and node.value == "git" for node in ast.walk(tree)
@@ -691,20 +693,125 @@ class TestSubprocessEgressInventory:
 # ---------------------------------------------------------------------------
 
 
+#: The client modules the ratchet watches. ``httpx2`` is the fork the Anthropic
+#: SDK runs on; its clients are no subclass of httpx's.
+_CLIENT_MODULES = frozenset({"httpx", "httpx2", "anthropic"})
+_CLIENT_NAMES = frozenset(
+    {
+        "httpx.AsyncClient",
+        "httpx.Client",
+        "httpx2.AsyncClient",
+        "httpx2.Client",
+        "anthropic.Anthropic",
+        "anthropic.AsyncAnthropic",
+    }
+)
+#: Calls that open an HTTP connection with no client of ours at all: httpx's
+#: module-level helpers (each builds a client of its own), the stdlib's
+#: ``urllib`` / ``http.client``, ``requests``, ``urllib3`` and ``aiohttp``
+#: (security review 2026-10-25, Q48).
+_HTTPX_HELPERS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+_OUTBOUND_NAMES = frozenset(
+    {f"{module}.{verb}" for module in ("httpx", "httpx2") for verb in _HTTPX_HELPERS}
+    | {f"{module}.{verb}" for module in ("httpx", "httpx2") for verb in ("request", "stream")}
+    | {
+        "urllib.request.urlopen",
+        "urllib.request.build_opener",
+        "urllib.request.urlretrieve",
+        "http.client.HTTPConnection",
+        "http.client.HTTPSConnection",
+        "urllib3.PoolManager",
+        "urllib3.ProxyManager",
+        "urllib3.HTTPConnectionPool",
+        "urllib3.HTTPSConnectionPool",
+        "urllib3.request",
+        "aiohttp.ClientSession",
+        "aiohttp.request",
+        "requests.Session",
+        "requests.session",
+    }
+    | {f"requests.{verb}" for verb in (*_HTTPX_HELPERS, "request")}
+)
+#: The modules whose attributes, reached through ``getattr``, could name one
+#: of the calls above without spelling it.
+_OUTBOUND_MODULES = frozenset(
+    {"httpx", "httpx2", "urllib.request", "http.client", "urllib3", "aiohttp", "requests"}
+)
+_WATCHED_NAMES = _CLIENT_NAMES | _OUTBOUND_NAMES
+
+#: Files permitted an outbound call from ``_OUTBOUND_NAMES``, each audited:
+#:   observability/setup.py — the ``requests.Session`` handed to the OTLP
+#:       exporters (Q47), which ignores environment proxies; the endpoint it
+#:       serves is checked against ``network.egress`` and the plaintext rule
+#:       in ``_otlp_kwargs`` before any exporter is built.
+_ALLOWLISTED_OUTBOUND = {("observability/setup.py", "requests.Session")}
+
+
+def _bindings(tree: ast.Module) -> dict[str, str]:
+    """Each imported name, mapped to the dotted name it stands for."""
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bound[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    bound[top] = top
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def _dotted(node: ast.expr) -> list[str] | None:
+    """``a.b.c`` as ``["a", "b", "c"]``, or ``None`` for any other expression."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return parts[::-1]
+
+
 def _client_constructions() -> list[tuple[str, int, str, ast.Call]]:
-    """Every ``httpx.AsyncClient(`` / ``httpx.Client(`` / ``anthropic.Anthropic(`` call."""
+    """Every outbound HTTP client or call the package makes, however spelled.
+
+    An httpx / httpx2 or Anthropic client construction, an httpx module-level
+    helper, or a ``urllib`` / ``http.client`` / ``requests`` / ``urllib3`` /
+    ``aiohttp`` call (Q48). A module alias (``import httpx as hx``), a dotted
+    import (``import urllib.request``) and a from-import (``from httpx import
+    AsyncClient``, aliased or not) resolve to the canonical dotted name (D44),
+    so the spelling cannot hide a call. ``getattr`` on one of those modules is
+    reported as ``<module>.<getattr>``.
+    """
     found: list[tuple[str, int, str, ast.Call]] = []
     for path in _PARTICLES_ROOT.rglob("*.py"):
         rel = path.relative_to(_PARTICLES_ROOT).as_posix()
-        for node in ast.walk(ast.parse(path.read_text())):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        tree = _source_tree.parse(path.read_text())
+        bound = _bindings(tree)
+
+        def resolve(expr: ast.expr, bound: dict[str, str] = bound) -> str | None:
+            parts = _dotted(expr)
+            if parts is None or parts[0] not in bound:
+                return None
+            return ".".join([bound[parts[0]], *parts[1:]])
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            receiver = node.func.value
-            if not isinstance(receiver, ast.Name):
-                continue
-            name = f"{receiver.id}.{node.func.attr}"
-            if name in {"httpx.AsyncClient", "httpx.Client", "anthropic.Anthropic"}:
+            name = resolve(node.func)
+            if name in _WATCHED_NAMES:
                 found.append((rel, node.lineno, name, node))
+            elif (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and node.args
+                and resolve(node.args[0]) in _OUTBOUND_MODULES
+            ):
+                found.append((rel, node.lineno, f"{resolve(node.args[0])}.<getattr>", node))
     return found
 
 
@@ -725,6 +832,74 @@ class TestClientConstructionRatchet:
             "httpx client constructed outside particles/http.py; use "
             f"particles_client() or egress_client() instead: {offenders}"
         )
+
+    def test_the_ratchet_sees_every_spelling_of_a_client(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D44: a from-import, a module alias and httpx2 are all seen."""
+        (tmp_path / "mod.py").write_text(
+            "from httpx import AsyncClient\n"
+            "from httpx import Client as C\n"
+            "import httpx as hx\n"
+            "import httpx2\n"
+            "def f():\n"
+            "    AsyncClient()\n"
+            "    C()\n"
+            "    hx.Client()\n"
+            "    httpx2.Client()\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PARTICLES_ROOT", tmp_path)
+        names = sorted(name for _rel, _line, name, _node in _client_constructions())
+        assert names == ["httpx.AsyncClient", "httpx.Client", "httpx.Client", "httpx2.Client"]
+
+    def test_no_outbound_call_skips_the_chokepoint(self) -> None:
+        """Q48: no package code opens a connection through another HTTP stack.
+
+        httpx's module-level helpers build an unchecked client of their own, and
+        the stdlib, ``requests``, ``urllib3`` and ``aiohttp`` need no httpx at
+        all, so each would reach the network with neither the SSRF transport nor
+        the no-egress check.
+        """
+        offenders = [
+            f"{rel}:{line} {name}"
+            for rel, line, name, _ in _client_constructions()
+            if name not in _CLIENT_NAMES and (rel, name) not in _ALLOWLISTED_OUTBOUND
+        ]
+        assert offenders == [], (
+            "outbound HTTP call outside particles/http.py; use particles_client() "
+            f"or egress_client() instead: {offenders}"
+        )
+
+    def test_the_ratchet_sees_every_outbound_http_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Q48: httpx helpers, urllib, http.client, requests and getattr are all seen."""
+        (tmp_path / "mod.py").write_text(
+            "import httpx\n"
+            "import urllib.request\n"
+            "import requests\n"
+            "from http import client as hc\n"
+            "from urllib.request import urlopen as uo\n"
+            "def f(url):\n"
+            "    httpx.get(url)\n"
+            "    urllib.request.urlopen(url)\n"
+            "    requests.get(url)\n"
+            "    hc.HTTPSConnection(url)\n"
+            "    uo(url)\n"
+            "    getattr(httpx, 'post')(url)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PARTICLES_ROOT", tmp_path)
+        seen = {(line, name) for _rel, line, name, _node in _client_constructions()}
+        assert seen == {
+            (7, "httpx.get"),
+            (8, "urllib.request.urlopen"),
+            (9, "requests.get"),
+            (10, "http.client.HTTPSConnection"),
+            (11, "urllib.request.urlopen"),
+            (12, "httpx.<getattr>"),
+        }
 
     def test_anthropic_client_carries_the_egress_hook(self) -> None:
         """The SDK runs on httpx2, so the check rides its own client's request hook."""

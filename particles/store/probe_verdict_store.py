@@ -48,8 +48,10 @@ The functions flush and never commit: the caller owns the transaction.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -343,6 +345,60 @@ async def lookup_answer(
     return row
 
 
+@dataclass(frozen=True)
+class DeferredAnswer:
+    """A ledger answer asked before the store's writer lock, written under it."""
+
+    kind: ProbeKind
+    prompt_hash: str
+    key: VerdictKey
+    verdict: bool
+    answer: str
+    model: str
+    temperature: str | None
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+_deferred_answers: ContextVar[list[DeferredAnswer] | None] = ContextVar(
+    "particles_deferred_probe_answers", default=None
+)
+
+
+@contextmanager
+def deferring_answers(into: list[DeferredAnswer]) -> Iterator[list[DeferredAnswer]]:
+    """Collect :func:`record_answer`'s rows in ``into`` instead of writing them.
+
+    A gather that runs before the store's writer lock (a subject prefetch whose
+    live authority asks the Wikidata judge) must open no SQLite write
+    transaction, or it holds SQLite's write lock while the advisory lock is
+    free (security review 2026-10-31-1, AD6). Inside this block the answers are
+    kept; :func:`record_deferred` writes them in the apply, under the lock.
+    """
+    token = _deferred_answers.set(into)
+    try:
+        yield into
+    finally:
+        _deferred_answers.reset(token)
+
+
+async def record_deferred(session: AsyncSession, answers: list[DeferredAnswer]) -> None:
+    """Write the answers a :func:`deferring_answers` block kept, then empty the list."""
+    pending = list(answers)
+    answers.clear()
+    for item in pending:
+        await record_answer(
+            session,
+            item.kind,
+            item.prompt_hash,
+            item.key,
+            verdict=item.verdict,
+            answer=item.answer,
+            model=item.model,
+            now=item.recorded_at,
+            temperature=item.temperature,
+        )
+
+
 async def record_answer(
     session: AsyncSession,
     kind: ProbeKind,
@@ -358,10 +414,26 @@ async def record_answer(
     """Append ``answer`` unless it is already the newest one recorded; True when written.
 
     ``temperature`` is what the answering call sent. Flushes;
-    the caller commits.
+    the caller commits. Inside :func:`deferring_answers` the row is kept for
+    the apply and the session is not written.
     """
     if await lookup_answer(session, kind, prompt_hash, key, model=model) == answer:
         return False
+    deferred = _deferred_answers.get()
+    if deferred is not None:
+        deferred.append(
+            DeferredAnswer(
+                kind=kind,
+                prompt_hash=prompt_hash,
+                key=key,
+                verdict=verdict,
+                answer=answer,
+                model=model,
+                temperature=temperature,
+                recorded_at=now or datetime.now(UTC),
+            )
+        )
+        return True
     session.add(
         ProbeVerdictRow(
             probe_kind=kind.value,

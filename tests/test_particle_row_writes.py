@@ -18,6 +18,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests import _source_tree
+
 PACKAGE = Path(__file__).resolve().parent.parent / "particles"
 STORE = PACKAGE / "store" / "particle_store.py"
 
@@ -31,7 +33,7 @@ FROM_MODEL_ALLOWED = {
 
 def _modules() -> list[tuple[str, ast.Module]]:
     return [
-        (str(path.relative_to(PACKAGE)), ast.parse(path.read_text(encoding="utf-8")))
+        (str(path.relative_to(PACKAGE)), _source_tree.parse(path.read_text(encoding="utf-8")))
         for path in sorted(PACKAGE.rglob("*.py"))
     ]
 

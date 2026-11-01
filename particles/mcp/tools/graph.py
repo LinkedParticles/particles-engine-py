@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 
+from particles.mcp.limits import admit
 from particles.mcp.observer import observer_for, scope_disclosure
 
 
@@ -59,7 +60,8 @@ async def graph_view(
             ``inconsistency_id`` is the usual source).
         manifest: With ``section``, projection scope — an
             manifest section's deterministic selection rendered as
-            a graph. The manifest path resolves on the engine host.
+            a graph. The manifest is a relative name under the engine's
+            ``graph.manifest_root``; with that unset the scope is refused.
         section: The manifest section's ``region`` id, or its exact
             (case-insensitive) title.
         hops: Neighbourhood radius for subject scope (clamped to
@@ -105,6 +107,10 @@ async def graph_view(
                 f"Invalid as_of value {as_of!r}: expected an ISO-8601 date or "
                 "datetime (e.g. 2000-01-01 or 2006-08-24T12:00:00+00:00)."
             ) from None
+
+    # Each render embeds and ranks, and the engine's /graph route is rate-limited
+    # for the same reason (security review D30).
+    admit("graph_view", store=store)
 
     from particles.api.client import get_backend
 

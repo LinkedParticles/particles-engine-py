@@ -34,7 +34,7 @@ ARG SOURCE=tree
 # same bytes; Dependabot's docker entry moves the digests as a reviewable PR.
 # uv comes from its own release image by digest rather than from a `pip
 # install` that checks no hash, and is the version the publish workflows pin.
-FROM ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
 # ---------------------------------------------------------------------------
 # Stage 1a — builder-tree: resolve the locked closure into a self-contained

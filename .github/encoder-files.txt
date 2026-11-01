@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 The Particles authors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# The SHA-256 of every file in the pinned encoder commit (the one in
+# encoder-revision.txt) of sentence-transformers/all-MiniLM-L6-v2, in
+# `sha256sum` form. publish-image.yml copies each pushed image's Hugging Face
+# cache out without running the image, and image_sbom.py check-model refuses
+# the image unless every file under the pinned snapshot is listed here with
+# these bytes, so a bake that stored other weights under the pin's name is
+# never tagged (security review R46).
+#
+# Regenerate only with a new pin: list the commit's files from the hub API
+# (/api/models/<repo>/tree/<commit>?recursive=true), take each LFS file's
+# sha256 oid, and hash each other file fetched at that commit after checking
+# its git blob id against the listing. Authored in the private upstream under
+# publish/overlays/; a test there keeps the pin and this list together.
+98ccb431c012ebfe976280fbd45aea4cec7409935868ccecf3954370f96732a1  .gitattributes
+4be450dde3b0273bb9787637cfbd28fe04a7ba6ab9d36ac48e92b11e350ffc23  1_Pooling/config.json
+dcd602d2fd35c203a247304a06fec6654a12f7941b739f9221a064fe8dc3b7f0  README.md
+953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41  config.json
+061ca9d39661d6c6d6de5ba27f79a1cd5770ea247f8d46412a68a498dc5ac9f3  config_sentence_transformers.json
+32edcb108fc2516b920734a862ae0692bcae1c5d45d5f8d972cb0d53434a4c54  data_config.json
+53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db  model.safetensors
+84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf  modules.json
+6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452  onnx/model.onnx
+1391c6fc20b5530250bc15cbe1f47578ffeca55ab0551d335cc668b6299a88ec  onnx/model_O1.onnx
+1de3905029190b398c7d300b530e320cf4b5e7d3dfb9af1429ebd73fd9a16faf  onnx/model_O2.onnx
+a44f671e364dddbac31f203f07b91be6b0a35e51936e5ebfab65b6d9538b83ff  onnx/model_O3.onnx
+1667d7f3ba669048b13a96ee3a44456d5e42c8f44588ae8b603430e16160c485  onnx/model_O4.onnx
+4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474  onnx/model_qint8_arm64.onnx
+4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474  onnx/model_qint8_avx512.onnx
+4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474  onnx/model_qint8_avx512_vnni.onnx
+b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  onnx/model_quint8_avx2.onnx
+8b86cab4722e2aefab310cf96d4d5a9eb3b187f7d9670a082afc55c7fa0d392a  openvino/openvino_model.bin
+f87dd1482b2a745f8c699b81ddd9cbcad666a193be4693abcea44b7ac8c67c1e  openvino/openvino_model.xml
+c92ea4af3c6bc7b4a0f3b3d61b147c850f4dbdd7c9e7beee0c0c70dc12da289b  openvino/openvino_model_qint8_quantized.bin
+a19425e3f56f7736f752923f0a0b5a8d61c7878017f02e1fc9086615391105dd  openvino/openvino_model_qint8_quantized.xml
+c3a85f238711653950f6a79ece63eb0ea93d76f6a6284be04019c53733baf256  pytorch_model.bin
+2d98d96d278348988f2744e6445b8bc16d921c3f6e17c667362f3cb353007aea  rust_model.ot
+fc1993fde0a95c24ec6c022539d41cf6e2f7c9721e5415d6fb6897472a9cd4b7  sentence_bert_config.json
+303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3  special_tokens_map.json
+24c06a7429b843d46e40c6b167122053921bf94dce2e5550ea5c07fabc597646  tf_model.h5
+be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  tokenizer.json
+acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b  tokenizer_config.json
+f9b98b9d203d728cbf93ccdbae84131ab926541b56196f11d1385fed0b4d1a07  train_script.py
+07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3  vocab.txt

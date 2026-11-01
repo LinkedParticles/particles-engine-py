@@ -23,11 +23,14 @@ source bindings are the "curation cage".
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+from particles.core import bounded_yaml
+from particles.corpus.local_read import read_local_file
 
 #: A well-formed particle id *body* — the pin with any ``p-`` / ``p:`` display
 #: prefix already stripped. The store id is UUID-shaped (hex + hyphens); the
@@ -167,7 +170,11 @@ class MechanicalBlock(BaseModel):
     """A hand-authored Markdown fragment spliced verbatim.
 
     Content that lives in no ADR — install / quickstart / badges. ``block`` is a
-    path resolved relative to the manifest file (or absolute).
+    path resolved relative to the manifest file. It stays inside the manifest's
+    tree: an absolute path, a ``..`` component, or a path that resolves outside
+    the repository holding the manifest is refused unless the operator passes
+    ``--allow-outside-paths`` (security review 2026-10-24-2, P3; see
+    :mod:`particles.operations.projection.paths`).
     """
 
     block: str = Field(min_length=1)
@@ -179,8 +186,9 @@ Section = DerivedSection | MechanicalBlock
 class DocManifest(BaseModel):
     """An ordered projection of the store into one Markdown document.
 
-    ``output`` is the default render target (overridable on the CLI). README is
-    the first instance; the mechanism is general.
+    ``output`` is the default render target (overridable on the CLI), resolved
+    against the working directory and held to the same containment as a block
+    path. README is the first instance; the mechanism is general.
     """
 
     name: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
@@ -255,14 +263,48 @@ class DocManifest(BaseModel):
         }
 
 
-def load_manifest(path: Path) -> DocManifest:
+def load_manifest(
+    path: Path,
+    *,
+    follow_symlinks: bool = True,
+    max_bytes: int | None = None,
+    allowed: Callable[[Path], bool] | None = None,
+) -> DocManifest:
     """Parse and validate a projection manifest from a YAML file.
+
+    The file is read through one descriptor (``read_local_file``), so a device,
+    a pipe or a directory is refused rather than read. ``follow_symlinks``,
+    ``max_bytes`` and ``allowed`` pass through to it: a caller reading a name
+    it did not choose itself (``GET /graph``) confines the read to a manifest
+    root and caps its size (security review 2026-10-24-2, P1).
 
     Raises ``ValueError`` when the file is not a YAML mapping; Pydantic
     ``ValidationError`` when a section is malformed (e.g. a derived section with
-    no binding).
+    no binding); ``OSError`` (``LocalReadRefused`` among them) when the file is
+    missing or the read is refused. The YAML is read through the bounded loader,
+    so a few anchor and alias lines cannot stand for a large value and a refusal
+    raises ``yaml.YAMLError`` (security review 2026-10-27-1, G21, G64).
     """
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    read = read_local_file(
+        path, follow_symlinks=follow_symlinks, max_bytes=max_bytes, allowed=allowed
+    )
+    raw = bounded_yaml.load(read.content.decode("utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"manifest {path} must be a YAML mapping, got {type(raw).__name__}")
     return DocManifest.model_validate(raw)
+
+
+def manifest_error_text(exc: Exception) -> str:
+    """A manifest refusal as text that never echoes the file's values.
+
+    A Pydantic ``ValidationError`` renders each problem's location and type
+    only: its own text repeats the input, which an aliased manifest can make
+    exponentially long (security review 2026-10-27-1, G21). Any other error
+    renders as itself.
+    """
+    if isinstance(exc, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(part) for part in err['loc']) or '(top level)'}: {err['type']}"
+            for err in exc.errors(include_input=False, include_url=False)
+        )
+    return str(exc)

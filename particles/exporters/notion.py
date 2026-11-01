@@ -234,7 +234,10 @@ def _particle_block(
     """
     text = f"{particle.content}  (confidence {effective_confidence:.2f} · {particle.status})"
     runs: list[dict[str, Any]] = [{"type": "text", "text": {"content": text[:2000]}}]
-    if source_uri:
+    # A corpus entry's ``uri_r`` is stored text, so only a web URL becomes a
+    # link; a ``file://`` path or another scheme is left out (security review
+    # 2026-10-27-1, R3).
+    if source_uri and source_uri.lower().startswith(("http://", "https://")):
         runs.append({"type": "text", "text": {"content": " "}})
         runs.append(
             {

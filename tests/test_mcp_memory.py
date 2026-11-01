@@ -908,3 +908,45 @@ def test_the_default_caps_are_set() -> None:
     cfg = get_config().migration
     assert cfg.max_candidates == 10_000
     assert cfg.max_bytes == 32 * 1024 * 1024
+
+
+def test_a_memory_export_records_a_bounded_number_of_notes() -> None:
+    """An export of many bad lines yields a bounded set of notes, the rest as one count
+    (security review 2026-10-26-1, W25)."""
+    from particles.extraction.mcp_memory import _MAX_LINE_NOTES, parse_memory_jsonl
+
+    graph = parse_memory_jsonl(b"x\n" * 50_000)
+    assert len(graph.notes) == _MAX_LINE_NOTES + 1
+    assert graph.notes[-1].startswith(f"{50_000 - _MAX_LINE_NOTES} more line(s)")
+
+
+_GOOD_LINE = b'{"type":"entity","name":"A","entityType":"t","observations":["x"]}\n'
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b'{"type":"entity","name":"B","observations":5}\n',
+        b"[" * 200_000 + b"]" * 200_000 + b"\n",
+    ],
+    ids=["non-list-observations", "deep-nesting"],
+)
+def test_a_malformed_memory_export_line_is_skipped_and_the_rest_parsed(bad: bytes) -> None:
+    """A malformed export line is skipped with a note and every good line is still parsed (G19)."""
+    graph = parse_memory_jsonl(_GOOD_LINE + bad)
+    assert [e.name for e in graph.entities] == ["A"]
+    assert any("Line 2" in n for n in graph.notes)
+
+
+def test_a_string_observations_field_is_not_split_into_characters() -> None:
+    graph = parse_memory_jsonl(b'{"type":"entity","name":"C","observations":"abc"}\n')
+    assert all(e.observations != ["a", "b", "c"] for e in graph.entities)
+    assert graph.notes
+
+
+def test_a_non_text_entity_type_is_reported() -> None:
+    graph = parse_memory_jsonl(
+        b'{"type":"entity","name":"D","entityType":7,"observations":["x"]}\n'
+    )
+    assert [e.entity_type for e in graph.entities] == [""]
+    assert graph.notes

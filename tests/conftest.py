@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import pwd
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,8 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests import _source_tree
 
 # Re-exported, not redefined: pytest picks the `pytest_configure` hook and the
 # autouse fixtures up off this module's namespace. Keep the list exhaustive —
@@ -41,6 +45,18 @@ from tests._client_fixtures import (  # noqa: F401
     reset_client_state,
     restore_logger_levels,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def release_parsed_sources() -> Generator[None, None, None]:
+    """Free the static guards' shared parse trees when each test module ends.
+
+    ``tests/_source_tree.py`` shares one parse of each package module among a
+    module's guard tests; the trees of the whole package hold about 220 MB, too
+    much to keep on every xdist worker for the rest of the session.
+    """
+    yield
+    _source_tree.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +88,21 @@ def clear_subject_cache(reset_client_state: None) -> None:  # noqa: F811
     from particles.api.cli._output import _CURRENT, OutputSettings
 
     _CURRENT.set(OutputSettings())
+
+
+@pytest.fixture(autouse=True)
+def disarm_egress_backstop() -> Generator[None, None, None]:
+    """Leave the process-wide no-egress backstop disarmed after every test.
+
+    Every engine request runs the serving checks, which arm the backstop for
+    the test's ``network.egress`` (security review 2026-10-25, Q10 and Q46), and
+    a test that configures ``none`` would otherwise leave it refusing lookups
+    and connects in the tests after it on the same worker.
+    """
+    yield
+    from particles import egress
+
+    egress.disarm_backstop()
 
 
 @pytest.fixture(autouse=True)
@@ -255,23 +286,260 @@ def _claude_projects_audit_hook(event: str, args: tuple[object, ...]) -> None:
 sys.addaudithook(_claude_projects_audit_hook)
 
 
+#: The options the installed ``claude mcp add`` declares (2.1.301, read
+#: statically): these take one value, these are variadic (commander takes every
+#: following word up to one that starts with ``-`` and is longer than one
+#: character), and these are flags. Any other option is unknown and refused.
+_CLAUDE_ADD_ONE_VALUE = frozenset(
+    {"-s", "--scope", "-t", "--transport", "--client-id", "--callback-port"}
+)
+_CLAUDE_ADD_VARIADIC = frozenset({"-e", "--env", "-H", "--header"})
+_CLAUDE_ADD_FLAGS = frozenset({"--client-secret", "--xaa", "-h", "--help"})
+#: ``claude mcp remove`` declares only ``-s/--scope`` and ``-h``.
+_CLAUDE_REMOVE_ONE_VALUE = frozenset({"-s", "--scope"})
+_CLAUDE_REMOVE_FLAGS = frozenset({"-h", "--help"})
+#: The server names the CLI accepts.
+_CLAUDE_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+#: The values ``-s/--scope`` and ``-t/--transport`` take; the CLI refuses any other.
+_CLAUDE_SCOPES = frozenset({"local", "user", "project"})
+_CLAUDE_TRANSPORTS = frozenset({"stdio", "sse", "http"})
+_CLAUDE_CHOICES = {
+    "-s": _CLAUDE_SCOPES,
+    "--scope": _CLAUDE_SCOPES,
+    "-t": _CLAUDE_TRANSPORTS,
+    "--transport": _CLAUDE_TRANSPORTS,
+}
+
+
+def _claude_mcp_words(
+    rest: list[str],
+    *,
+    one_value: frozenset[str],
+    variadic: frozenset[str] = frozenset(),
+    flags: frozenset[str],
+    options: dict[str, str] | None = None,
+) -> tuple[list[str], list[str]] | None:
+    """``(positional, env)`` as commander reads ``rest``, or ``None`` where it refuses it.
+
+    Each one-value option's value lands in ``options`` under its long name
+    (``--scope``, ``--transport``), and a value outside the choices the CLI
+    declares for it is refused.
+    """
+    positional: list[str] = []
+    env: list[str] = []
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        if word == "--":
+            positional += rest[i + 1 :]
+            break
+        if word in one_value:
+            if i + 1 >= len(rest):
+                return None
+            value = rest[i + 1]
+            if word in _CLAUDE_CHOICES and value not in _CLAUDE_CHOICES[word]:
+                return None
+            if options is not None:
+                options[{"-s": "--scope", "-t": "--transport"}.get(word, word)] = value
+            i += 2
+            continue
+        if word in variadic:
+            i += 1
+            taken = 0
+            while i < len(rest) and not (len(rest[i]) > 1 and rest[i].startswith("-")):
+                if word in ("-e", "--env"):
+                    env.append(rest[i])
+                i += 1
+                taken += 1
+            if taken == 0:
+                return None
+            continue
+        if word in flags:
+            i += 1
+            continue
+        if len(word) > 1 and word.startswith("-"):
+            return None  # an option the CLI does not declare
+        positional.append(word)
+        i += 1
+    return positional, env
+
+
+def _claude_add_scoped(rest: list[str]) -> tuple[str, str] | None:
+    """``(scope, name)`` ``claude mcp add <rest>`` registers, or ``None`` where the CLI refuses it.
+
+    Each env entry needs a key before its ``=``, the name must match the CLI's
+    ``[A-Za-z0-9_-]+``, and a command must follow it. The scope defaults to
+    ``local``, as the CLI's does.
+    """
+    options: dict[str, str] = {}
+    read = _claude_mcp_words(
+        rest,
+        one_value=_CLAUDE_ADD_ONE_VALUE,
+        variadic=_CLAUDE_ADD_VARIADIC,
+        flags=_CLAUDE_ADD_FLAGS,
+        options=options,
+    )
+    if read is None:
+        return None
+    positional, env = read
+    if len(positional) < 2 or not _CLAUDE_SERVER_NAME.fullmatch(positional[0]):
+        return None
+    if not all(entry.partition("=")[0] and "=" in entry for entry in env):
+        return None
+    return options.get("--scope", "local"), positional[0]
+
+
+def _claude_add_name(rest: list[str]) -> str | None:
+    """The server name ``claude mcp add <rest>`` registers, or ``None`` where the CLI refuses it."""
+    scoped = _claude_add_scoped(rest)
+    return None if scoped is None else scoped[1]
+
+
+def _claude_remove_scoped(rest: list[str]) -> tuple[str | None, str] | None:
+    """``(scope, name)`` ``claude mcp remove <rest>`` names, or ``None`` where the CLI refuses it.
+
+    The scope is ``None`` when the call names none.
+    """
+    options: dict[str, str] = {}
+    read = _claude_mcp_words(
+        rest, one_value=_CLAUDE_REMOVE_ONE_VALUE, flags=_CLAUDE_REMOVE_FLAGS, options=options
+    )
+    if read is None or len(read[0]) != 1 or read[1]:
+        return None
+    return options.get("--scope"), read[0][0]
+
+
+def _registered_servers() -> set[tuple[str, str]]:
+    """The ``(scope, name)`` MCP servers in the test's ``~/.claude.json``; never the real account's.
+
+    The ``user`` scope is its top-level ``mcpServers``, the ``local`` scope
+    the ``mcpServers`` of its ``projects`` entry for the working directory.
+    """
+    home = Path.home()
+    if os.path.realpath(home) == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir):
+        return set()
+    try:
+        user = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(user, dict):
+        return set()
+    found: set[tuple[str, str]] = set()
+    servers = user.get("mcpServers")
+    if isinstance(servers, dict):
+        found |= {("user", name) for name in servers}
+    projects = user.get("projects")
+    project = projects.get(os.getcwd()) if isinstance(projects, dict) else None
+    local = project.get("mcpServers") if isinstance(project, dict) else None
+    if isinstance(local, dict):
+        found |= {("local", name) for name in local}
+    return found
+
+
+def _write_back_registration(key: tuple[str, str], add_rest: list[str] | None) -> None:
+    """Write an accepted ``claude mcp add`` (or, with ``None``, a remove) to ``~/.claude.json``.
+
+    The ``project`` scope (``.mcp.json`` in the working directory) is kept in
+    the recorder's registry only, and nothing is written under the real
+    account's home.
+    """
+    scope, name = key
+    home = Path.home()
+    if scope not in ("user", "local") or os.path.realpath(home) == os.path.realpath(
+        pwd.getpwuid(os.getuid()).pw_dir
+    ):
+        return
+    path = home / ".claude.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    holder = (
+        data if scope == "user" else data.setdefault("projects", {}).setdefault(os.getcwd(), {})
+    )
+    servers = holder.setdefault("mcpServers", {})
+    if add_rest is None:
+        servers.pop(name, None)
+    else:
+        read = _claude_mcp_words(
+            add_rest,
+            one_value=_CLAUDE_ADD_ONE_VALUE,
+            variadic=_CLAUDE_ADD_VARIADIC,
+            flags=_CLAUDE_ADD_FLAGS,
+        )
+        assert read is not None  # _claude_add_scoped accepted these words
+        positional, env = read
+        servers[name] = {
+            "type": "stdio",
+            "command": positional[1],
+            "args": positional[2:],
+            "env": dict(entry.split("=", 1) for entry in env),
+        }
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def no_real_claude_cli(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """No test runs the real ``claude`` CLI.
 
     ``init claude-code`` registers the MCP server through ``claude mcp``,
     which edits the account's real ``~/.claude.json``. Every call goes to
-    this recorder instead, which reports success; a test that needs the
-    CLI missing patches ``particles.api.cli.init._claude_mcp`` itself.
+    this recorder instead. It answers as the installed CLI would: it refuses
+    an option the CLI does not declare, a server name outside
+    ``[A-Za-z0-9_-]+``, an ``mcp add`` whose variadic ``-e`` swallows the
+    server name (security review 2026-10-27-1, E13), a second add of a name
+    already registered in that scope, and a remove of a name that is not
+    (security review 2026-10-28-1, O68). Servers are keyed by scope and name:
+    a ``-s`` value outside ``local``, ``user`` and ``project`` or a ``-t``
+    value outside ``stdio``, ``sse`` and ``http`` is refused, a remove under a
+    scope the add did not use is refused, and a remove naming no scope is
+    refused when the name is in more than one (security review 2026-10-28-2,
+    AA59). The registry starts from the test's own ``~/.claude.json``, and
+    each add and remove it accepts is written back there as the CLI writes it
+    (``user`` in the top-level ``mcpServers``, ``local`` under the working
+    directory's ``projects`` entry), so the installer's own reader sees it
+    (security review 2026-10-30-1, AB65); never under the real account's home.
+    A test that needs the CLI missing patches
+    ``particles.api.cli.init._claude_mcp`` itself; the real runner stays
+    reachable as the recorder's ``__wrapped__``.
     """
     import particles.api.cli.init as init_mod
 
     calls: list[list[str]] = []
+    registry: set[tuple[str, str]] | None = None
+    real = init_mod._claude_mcp
 
     def _record(argv: list[str]) -> bool:
+        nonlocal registry
         calls.append(list(argv))
-        return True
+        if registry is None:
+            registry = _registered_servers()
+        verb, rest = argv[:2], argv[2:]
+        if verb == ["mcp", "add"]:
+            added = _claude_add_scoped(rest)
+            if added is None or added in registry:
+                return False
+            registry.add(added)
+            _write_back_registration(added, rest)
+            return True
+        if verb == ["mcp", "remove"]:
+            removal = _claude_remove_scoped(rest)
+            if removal is None:
+                return False
+            scope, name = removal
+            held = [key for key in registry if key[1] == name and scope in (None, key[0])]
+            if len(held) != 1:
+                return False
+            registry.discard(held[0])
+            _write_back_registration(held[0], None)
+            return True
+        return False
 
+    _record.__wrapped__ = real  # type: ignore[attr-defined]
     monkeypatch.setattr(init_mod, "_claude_mcp", _record)
     return calls
 

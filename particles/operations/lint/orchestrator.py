@@ -96,6 +96,7 @@ async def run_lint(
     *,
     contradiction_probe: ContradictionProbeControl | None = None,
     granularity_probe: bool = True,
+    actor: str = "lint",
 ) -> LintReport:
     """Run all lint checks and return a LintReport.
 
@@ -112,13 +113,16 @@ async def run_lint(
             check within the semantic pass. ``collect_cards`` does:
             ``GRANULARITY_VIOLATION`` has no card kind, so for the curation
             queue and the audit those LLM calls would be pure discard.
+        actor: the verb a fix's ``CLAIMS_RETIRED`` events name (``reindex``
+            passes its own); every claim a fix retires is named in the event
+            log (security review 2026-10-28-1, O36).
     """
     findings: list[LintFinding] = []
 
     # --- Structural checks ---
-    findings += await _check_staleness(session, fix)
-    findings += await _check_retraction_propagation(session, fix)
-    findings += await _check_corpus_link_integrity(session, fix)
+    findings += await _check_staleness(session, fix, actor=actor)
+    findings += await _check_retraction_propagation(session, fix, actor=actor)
+    findings += await _check_corpus_link_integrity(session, fix, actor=actor)
     findings += await _check_confidence_decay(session)
     findings += await _check_recency_staleness(session)
     findings += await _check_orphans(session)

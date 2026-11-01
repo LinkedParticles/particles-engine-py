@@ -350,6 +350,19 @@ class TestSplitFileByDate:
             assert entry.uri_r.endswith(f"#entry-{ordinal}")
 
     @pytest.mark.asyncio
+    async def test_a_future_section_date_is_held_to_the_deposit(
+        self, db_session: object, tmp_path: Path
+    ) -> None:
+        """Security review 2026-10-24-2, P5: a section heading is a self-declared date."""
+        f = tmp_path / "journal.md"
+        f.write_text("2026-03-15\nFirst day.\n\n2099-01-01\nA day from the future.\n")
+        rows = await split_file_by_date(db_session, f)  # type: ignore[arg-type]
+        snaps = [await get_snapshot(db_session, sid) for _, sid in rows]  # type: ignore[arg-type]
+        dates = [_as_utc(s.content_published_at) for s in snaps if s and s.content_published_at]
+        assert dates[0] == datetime(2026, 3, 15, tzinfo=UTC)
+        assert dates[1] <= datetime.now(UTC)
+
+    @pytest.mark.asyncio
     async def test_preamble_emitted_with_mtime_fallback(
         self, db_session: object, tmp_path: Path
     ) -> None:

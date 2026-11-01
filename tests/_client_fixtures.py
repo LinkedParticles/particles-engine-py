@@ -26,8 +26,11 @@ every fixture at once. Put Engine-touching fixtures in ``conftest.py``.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 import httpx
+import httpx2
 import pytest
 from hypothesis import HealthCheck, settings
 
@@ -72,9 +76,21 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ.setdefault("PARTICLES_BLOB_DIR", blob_dir)
     # An empty file that exists, not a missing one: a missing PARTICLES_CONFIG
     # file is reported once per process, which would put a
-    # warning into whichever test first loads config.
-    empty_config = Path(f"/tmp/particles_test_config{('_' + worker) if worker else ''}.yaml")
-    empty_config.write_text("", encoding="utf-8")
+    # warning into whichever test first loads config. It sits in a directory
+    # only this user may write, not in /tmp itself: the local refresh refuses
+    # a config file in a directory others may create names in.
+    # A fresh directory under a name nobody could choose first: a fixed name
+    # in a shared temp directory may already be another account's link, which
+    # a write would follow (security review 2026-10-30-1, AB11).
+    config_dir = Path(tempfile.mkdtemp(prefix=f"particles_test_config_{os.getuid()}_"))
+    atexit.register(shutil.rmtree, config_dir, ignore_errors=True)
+    empty_config = config_dir / f"config{('_' + worker) if worker else ''}.yaml"
+    fd = os.open(
+        empty_config,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC,
+        0o600,
+    )
+    os.close(fd)
     os.environ["PARTICLES_CONFIG"] = str(empty_config)
     # Benchmark-run persistence is on by default; keep test runs out of the
     # developer's real ~/.particles/benchmark/runs (worker-suffixed like the
@@ -82,6 +98,13 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ.setdefault(
         "BENCHMARK_RUNS_DIR",
         f"/tmp/particles_test_benchmark_runs{('_' + worker) if worker else ''}",
+    )
+    # The engine's per-client key file defaults under the real
+    # ~/.particles; point it at a worker-suffixed path that no test creates, so
+    # the suite never reads the developer's keys and starts keyless. A test that
+    # mints keys sets ``api.keys_file`` to a path under its own ``tmp_path``.
+    os.environ["PARTICLES_API_KEYS_FILE"] = (
+        f"/tmp/particles_test_engine_keys{('_' + worker) if worker else ''}.json"
     )
     # Hypothesis's too_slow health check times input generation, and the first
     # integer draw in a process also pays Hypothesis's one-off harvest of
@@ -228,13 +251,29 @@ _PROVIDER_KEY_VARS = ("ANTHROPIC_API_KEY", "PARTICLES_LOCAL_LLM_API_KEY")
 _PROVIDER_KEY_PREFIX = "PARTICLES_LLM_API_KEY_"
 
 
-def _is_anthropic_request(request: httpx.Request) -> bool:
+_REFUSAL_BODY = {
+    "type": "error",
+    "error": {"type": "invalid_request_error", "message": "live LLM call refused in a unit test"},
+}
+
+
+def _is_anthropic_request(request: httpx.Request | httpx2.Request) -> bool:
     """True for a request the Anthropic SDK sent, whatever base URL it used.
 
     The SDK stamps ``anthropic-version`` on every request, so this also catches
     a developer shell with ``ANTHROPIC_BASE_URL`` pointed at a gateway.
     """
     return "anthropic-version" in request.headers or request.url.host.endswith("anthropic.com")
+
+
+def _is_live(client: Any, request: Any, mock_type: type) -> bool:
+    """False when ``client`` would hand ``request`` to an in-process mock transport.
+
+    A test that swaps the SDK client's transport for a ``MockTransport`` sends
+    nothing over the network, so the guard lets it through; every other
+    transport is live.
+    """
+    return not isinstance(client._transport_for_url(request.url), mock_type)
 
 
 @pytest.fixture(autouse=True)
@@ -254,7 +293,9 @@ def no_live_llm(
     Two layers. The provider keys are removed from the environment, so an
     unmocked call site takes the same no-key path it takes in CI. A test that
     sets a fake key on purpose, to reach a key-gated branch, still builds a real
-    SDK client, so the Anthropic SDK's HTTP traffic is also intercepted: the
+    SDK client, so the Anthropic SDK's HTTP traffic is also intercepted, on
+    ``httpx`` and on the ``httpx2`` the SDK sends with (unless the client's
+    transport is an in-process ``MockTransport``, which reaches nothing): the
     request gets an immediate 400 (not retried, so no backoff delay) and the
     test fails at teardown naming the request. Tests marked ``integration`` are
     exempt; they exist to make live calls.
@@ -271,17 +312,7 @@ def no_live_llm(
 
     def _refuse(req: httpx.Request) -> httpx.Response:
         blocked.append(f"{req.method} {req.url}")
-        return httpx.Response(
-            400,
-            json={
-                "type": "error",
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "live LLM call refused in a unit test",
-                },
-            },
-            request=req,
-        )
+        return httpx.Response(400, json=_REFUSAL_BODY, request=req)
 
     real_send = httpx.Client.send
     real_async_send = httpx.AsyncClient.send
@@ -291,19 +322,46 @@ def no_live_llm(
     def send(
         self: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any
     ) -> httpx.Response:
-        if _is_anthropic_request(request):
+        if _is_anthropic_request(request) and _is_live(self, request, httpx.MockTransport):
             return _refuse(request)
         return real_send(self, request, *args, **kwargs)
 
     async def async_send(
         self: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any
     ) -> httpx.Response:
-        if _is_anthropic_request(request):
+        if _is_anthropic_request(request) and _is_live(self, request, httpx.MockTransport):
             return _refuse(request)
         return await real_async_send(self, request, *args, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "send", send)
     monkeypatch.setattr(httpx.AsyncClient, "send", async_send)
+
+    # The Anthropic SDK sends on ``httpx2``, whose clients are no subclass of
+    # httpx's, so the patch above never sees its traffic (P44). Same refusal,
+    # built from httpx2's own types.
+    real_send2 = httpx2.Client.send
+    real_async_send2 = httpx2.AsyncClient.send
+
+    def _refuse2(req: httpx2.Request) -> httpx2.Response:
+        blocked.append(f"{req.method} {req.url}")
+        return httpx2.Response(400, json=_REFUSAL_BODY, request=req)
+
+    def send2(
+        self: httpx2.Client, request: httpx2.Request, *args: Any, **kwargs: Any
+    ) -> httpx2.Response:
+        if _is_anthropic_request(request) and _is_live(self, request, httpx2.MockTransport):
+            return _refuse2(request)
+        return real_send2(self, request, *args, **kwargs)
+
+    async def async_send2(
+        self: httpx2.AsyncClient, request: httpx2.Request, *args: Any, **kwargs: Any
+    ) -> httpx2.Response:
+        if _is_anthropic_request(request) and _is_live(self, request, httpx2.MockTransport):
+            return _refuse2(request)
+        return await real_async_send2(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(httpx2.Client, "send", send2)
+    monkeypatch.setattr(httpx2.AsyncClient, "send", async_send2)
     yield
     if blocked:
         raise AssertionError(

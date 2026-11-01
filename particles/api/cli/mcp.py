@@ -14,13 +14,12 @@ changes.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 
 import typer
 
-from particles.api.cli import app, prepare_stdio_server_store
+from particles.api.cli import app, prepare_stdio_server_store, run
 from particles.db import DEFAULT_STORE
 
 mcp_app = typer.Typer(
@@ -53,6 +52,8 @@ def mcp_serve_cmd(
     `config.yaml` is shared by every MCP client on the machine, and a client
     started from your home directory should not be bound to it.
     """
+    from particles.egress import UncoveredEventLoop
+
     # One import edge into `particles.mcp`, the one the acyclic contract pins.
     from particles.mcp import bind_project
     from particles.mcp import main as serve_main
@@ -74,10 +75,14 @@ def mcp_serve_cmd(
             )
         else:
             bind_project(key)
-    # Named stores are reached per tool call and fail there with the same one-line
-    # message; the default store is the one a fresh install's DATABASE_URL names.
-    prepare_stdio_server_store(DEFAULT_STORE)
-    serve_main()
+    # Named stores are reached per tool call, so every configured one is held to
+    # the store rule here, before serving (security review P15).
+    prepare_stdio_server_store(DEFAULT_STORE, every_store=True)
+    try:
+        serve_main()
+    except UncoveredEventLoop as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
 
 @mcp_app.command("tools")
@@ -112,7 +117,7 @@ def mcp_tools_cmd(
             for t in tools
         ]
 
-    surface = asyncio.run(_dump())
+    surface = run(_dump())
 
     if output_format == "text":
         for entry in surface:
@@ -168,7 +173,7 @@ def mcp_resources_cmd(
             ],
         }
 
-    surface = asyncio.run(_dump())
+    surface = run(_dump())
 
     if output_format == "text":
         for kind in ("templates", "resources"):

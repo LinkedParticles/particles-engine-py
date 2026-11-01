@@ -60,6 +60,28 @@ class TestTrustPolicyEvaluate:
         policy = _policy(domain_scores={"*": 0.3})
         assert policy.evaluate("e1", "PDF", "file:///tmp/doc.pdf") is None
 
+    def test_harness_uri_gets_no_domain_baseline(self) -> None:
+        # The wildcard is the unknown-web-domain default; it halved transcript
+        # beliefs while a memory file (file://) stayed neutral. The netloc of a
+        # session URI is "session", which no host row may name either.
+        policy = _policy(domain_scores={"*": 0.5, "session": 0.2})
+        assert policy.evaluate("e1", "CONVERSATION", "claude-code://session/abc123") is None
+
+    @pytest.mark.parametrize("uri", ["inbox://note/1", "urn:isbn:0451450523", "ftp://x.example/f"])
+    def test_other_schemes_keep_the_domain_baseline(self, uri: str) -> None:
+        # The exemption is a list of harness schemes, not "anything but http":
+        # a depositor cannot lift a source to neutral by picking a new scheme.
+        policy = _policy(domain_scores={"*": 0.5})
+        assert policy.evaluate("e1", "CONVERSATION", uri) == pytest.approx(0.5)
+
+    def test_harness_uri_still_takes_an_explicit_pattern(self) -> None:
+        policy = _policy(
+            domain_scores={"*": 0.5},
+            url_patterns=((re.compile(r"^claude-code://session/"), -0.3),),
+        )
+        rank = policy.evaluate("e1", "CONVERSATION", "claude-code://session/abc123")
+        assert rank == pytest.approx(0.7)
+
     def test_missing_uri_is_none(self) -> None:
         policy = _policy(domain_scores={"*": 0.3})
         assert policy.evaluate("e1", "WEB_PAGE", None) is None
@@ -150,6 +172,37 @@ class TestTrustPolicyEvaluate:
             }
         )
         assert policy.evaluate("e1", "REDDIT_POST", None, None) == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://x.example/p",
+        "http://session/p",
+        "claude-code://session/abc123",
+        "inbox://note/1",
+        "urn:isbn:0451450523",
+    ],
+)
+async def test_query_path_and_ladder_agree_on_domain_rows(db_session: object, uri: str) -> None:
+    """The §6.6 ladder and the query policy apply a domain row to the same URIs (S1)."""
+    from particles.store.trust_store import resolve_trust_score, upsert_trust_rule
+
+    session = db_session  # type: ignore[assignment]
+    await upsert_trust_rule(session, "domain", "*", 0.3, None)  # type: ignore[arg-type]
+    await upsert_trust_rule(session, "domain", "session", 0.2, None)  # type: ignore[arg-type]
+    policy = await load_trust_policy(session)  # type: ignore[arg-type]
+
+    ladder = await resolve_trust_score(session, uri)  # type: ignore[arg-type]
+    query = policy.evaluate("e1", "CONVERSATION", uri)
+    # A scored URI gets the same row on both paths; an exempt one gets each
+    # path's no-information value (0.50 on the ladder, neutral None at query).
+    assert ladder in (0.2, 0.3, 0.5)
+    if ladder == pytest.approx(0.5):
+        assert query is None
+    else:
+        assert query == pytest.approx(ladder)
 
 
 @pytest.mark.asyncio

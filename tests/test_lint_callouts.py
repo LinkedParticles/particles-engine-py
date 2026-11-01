@@ -16,7 +16,13 @@ on sight to migrate notes written by 0.61.x.
 
 from __future__ import annotations
 
-from particles.core.schema import LintFinding
+import re
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from particles.core.schema import ExternalRef, LintFinding, Subject
 from particles.exporters.article_synthesis import (
     _parse_frontmatter,
     apply_lint_callouts,
@@ -214,3 +220,45 @@ class TestStripLintCallouts:
 
     def test_leaves_callout_free_text_unchanged(self) -> None:
         assert strip_lint_callouts(_ARTICLE) == _ARTICLE
+
+
+class TestCalloutDetailIsInert:
+    """No line of a lint callout opens a fenced code block, whatever lines a
+    finding's detail carries (security review 2026-10-27-1, G4)."""
+
+    _FENCE = re.compile(r"(?m)^>[ \t>]*(`{3,}|~{3,})")
+
+    def test_detail_lines_open_no_fenced_code_block(self) -> None:
+        finding = SimpleNamespace(
+            finding_type="CONTRADICTION",
+            detail="Semantic contradiction with particle p-1: why\n```dataviewjs\nx\n```",
+            recommended_action="~~~js\nrun\n~~~",
+        )
+        out = apply_lint_callouts("# Storage\n\nBody.\n", [finding])
+        callout = out[out.index("> [!danger]") :]
+        assert not self._FENCE.search(callout), callout
+
+    @pytest.mark.asyncio
+    async def test_a_stored_subject_description_opens_no_fenced_code_block(
+        self,
+        db_session: Any,
+    ) -> None:
+        from particles.operations.lint.wikidata_links import _check_wikidata_link_confidence
+        from particles.store.subject_store import insert_subject
+
+        subject = Subject(
+            canonical_name="Storage",
+            description="An entity\n```fencedlang\nbody\n```",
+            external_ids=[ExternalRef(namespace="wikidata", id="Q1", confidence=0.01)],
+            asserted_by="test",
+        )
+        await insert_subject(db_session, subject)
+        findings = [
+            f
+            for f in await _check_wikidata_link_confidence(db_session)
+            if f.subject_id == subject.id
+        ]
+        assert findings
+        out = apply_lint_callouts("# Storage\n\nBody.\n", findings)
+        callout = out[out.index("> [!warning]") :]
+        assert not self._FENCE.search(callout), callout

@@ -90,8 +90,8 @@ Five resolution actions:
 | Action | Effect |
 |---|---|
 | `PREFER_A` | The existing claim wins. The challenger is demoted (quarantined claims flip their reason to `CONFLICT_RESOLVED` in place); a reviewer-derived `SourceTrustStatement` for the preferred source is written, keyed on the corpus entry of the preferred claim's SOURCE provenance (a claim with no source provenance writes none). |
-| `PREFER_B` | The challenger wins. The existing claim is demoted to `PROVENANCE_STALE`; a quarantined challenger is promoted to a **new ACTIVE particle** (fresh ID, provenance preserved); the trust statement is written. |
-| `BOTH_VALID` | The contradiction is apparent, not real. Both claims stay queryable with `uncertainty_nature = ALEATORY`; a quarantined challenger is recovered as a new ACTIVE particle. |
+| `PREFER_B` | The challenger wins. The existing claim is demoted to `PROVENANCE_STALE`; a quarantined challenger is promoted to a **new ACTIVE particle** (fresh ID, provenance preserved), unless the store, searched again under the writer lock, now holds a claim that conflicts with it, which keeps it held behind a new INCONSISTENCY record; the trust statement is written. |
+| `BOTH_VALID` | The contradiction is apparent, not real. Both claims stay queryable with `uncertainty_nature = ALEATORY`; a quarantined challenger is recovered as a new ACTIVE particle, with the same search under the writer lock as `PREFER_B`. |
 | `DEFER` | Record a reviewer note and re-queue; the only action that leaves the conflict open. |
 | `DISCARD` | Neither claim is worth keeping, for example two transient session-state claims from one conversation. Both claims are retracted (`RETRACTED` / `CONFLICT_RESOLVED`, a quarantined challenger included) and no trust statement is written. The retirement is not a verdict on the value, so a later restatement is not held for review; to keep a value out for good, use `particles particle retract` instead. |
 
@@ -102,7 +102,8 @@ superseded by judgment, and the pipeline held the new copy for you instead of
 re-minting it. Their headline reads *"a candidate re-asserts a claim retired by
 judgment"* and Particle A is the retired original. Read the actions as:
 `PREFER_A`: the retirement stands; `PREFER_B`: lift it (a fresh ACTIVE
-particle is minted from the held copy; the original stays retired);
+particle is minted from the held copy, with the search under the writer lock
+above; the original stays retired);
 `DISCARD`: let this copy go without ruling again (the original keeps its
 retirement, so the value is still held if restated).
 

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_echo
 from particles.core.schema import RelationType
 from particles.db import session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
@@ -121,10 +122,10 @@ def links_suggest_cmd(
 ) -> None:
     """Propose (and optionally resolve) co-evidential candidate links."""
     if subject is None and not all_subjects:
-        typer.echo("Specify --subject <id|name> or --all.", err=True)
+        terminal_echo("Specify --subject <id|name> or --all.", err=True)
         raise typer.Exit(1)
     if subject is not None and all_subjects:
-        typer.echo("--subject and --all are mutually exclusive.", err=True)
+        terminal_echo("--subject and --all are mutually exclusive.", err=True)
         raise typer.Exit(1)
     run(_links_suggest(subject, threshold, llm_judge, apply, yes, output_format))
 
@@ -188,14 +189,16 @@ def links_dedup_cmd(
     similarity stratum is admitted in links_suggest.reread.admitted.
     """
     if not reread and (judge or sheet is not None or labels is not None):
-        typer.echo("--judge, --sheet and --labels need --reread.", err=True)
+        terminal_echo("--judge, --sheet and --labels need --reread.", err=True)
         raise typer.Exit(1)
     if reread:
         if subject is not None:
-            typer.echo("--reread works on the whole store; --subject is not supported.", err=True)
+            terminal_echo(
+                "--reread works on the whole store; --subject is not supported.", err=True
+            )
             raise typer.Exit(1)
         if judge and apply:
-            typer.echo("--judge and --apply are separate steps; run one at a time.", err=True)
+            terminal_echo("--judge and --apply are separate steps; run one at a time.", err=True)
             raise typer.Exit(1)
         if labels is not None:
             _score_labels(labels)
@@ -267,7 +270,7 @@ def _parse_relation_type(rt: str) -> RelationType:
         return RelationType(norm)
     except ValueError:
         valid = ", ".join(t.value for t in RelationType)
-        typer.echo(f"Unknown relation type {rt!r}. Valid: {valid}.", err=True)
+        terminal_echo(f"Unknown relation type {rt!r}. Valid: {valid}.", err=True)
         raise typer.Exit(1) from None
 
 
@@ -280,12 +283,12 @@ async def _resolve_particle_id(session: AsyncSession, id_prefix: str) -> str:
 
     id_prefix = normalise_particle_id(id_prefix)
     if len(id_prefix) < 8:
-        typer.echo(f"Particle ID prefix {id_prefix!r} must be at least 8 characters.", err=True)
+        terminal_echo(f"Particle ID prefix {id_prefix!r} must be at least 8 characters.", err=True)
         raise typer.Exit(1)
     if len(id_prefix) >= 36:
         row = await session.get(ParticleRow, id_prefix)
         if row is None:
-            typer.echo(f"Particle {id_prefix!r} not found.", err=True)
+            terminal_echo(f"Particle {id_prefix!r} not found.", err=True)
             raise typer.Exit(1)
         return str(row.id)
     result = await session.execute(
@@ -295,12 +298,12 @@ async def _resolve_particle_id(session: AsyncSession, id_prefix: str) -> str:
     )
     rows = result.scalars().all()
     if not rows:
-        typer.echo(f"No particle matches prefix {id_prefix!r}.", err=True)
+        terminal_echo(f"No particle matches prefix {id_prefix!r}.", err=True)
         raise typer.Exit(1)
     if len(rows) > 1:
-        typer.echo(f"Ambiguous prefix {id_prefix!r} matches {len(rows)} particles:", err=True)
+        terminal_echo(f"Ambiguous prefix {id_prefix!r} matches {len(rows)} particles:", err=True)
         for r in rows[:10]:
-            typer.echo(f"  {r}", err=True)
+            terminal_echo(f"  {r}", err=True)
         raise typer.Exit(1)
     return str(rows[0])
 
@@ -326,14 +329,14 @@ async def _links_add(
             a_id = await _resolve_particle_id(session, particle_a_prefix)
             b_id = await _resolve_particle_id(session, particle_b_prefix)
     if a_id == b_id:
-        typer.echo("Cannot link a particle to itself.", err=True)
+        terminal_echo("Cannot link a particle to itself.", err=True)
         raise typer.Exit(1)
     try:
         rel = await backend.links_add(a_id, b_id, relation_type=rt.value, confidence=confidence)
     except Exception as exc:
-        typer.echo(f"Failed to create relation: {exc}", err=True)
+        terminal_echo(f"Failed to create relation: {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(
+    terminal_echo(
         f"Linked {rel.particle_a[:8]}… ↔ {rel.particle_b[:8]}… "
         f"({rel.relation_type}, created_by={rel.created_by}, confidence={rel.confidence:.2f})"
     )
@@ -358,12 +361,12 @@ async def _links_remove(
             b_id = await _resolve_particle_id(session, particle_b_prefix)
     removed = await backend.links_remove(a_id, b_id, relation_type=rt.value)
     if not removed:
-        typer.echo(
+        terminal_echo(
             f"No {rt.value} relation found between {a_id[:8]}… and {b_id[:8]}….",
             err=True,
         )
         raise typer.Exit(1)
-    typer.echo(f"Removed {rt.value} relation: {a_id[:8]}… ↔ {b_id[:8]}…")
+    terminal_echo(f"Removed {rt.value} relation: {a_id[:8]}… ↔ {b_id[:8]}…")
 
 
 async def _links_list(particle_id_prefix: str, kind_str: str | None = None) -> None:
@@ -381,17 +384,17 @@ async def _links_list(particle_id_prefix: str, kind_str: str | None = None) -> N
         pid = await _resolve_particle_id(session, particle_id_prefix)
         rels = await get_relations_for_particle(session, pid, relation_type=kind)
 
-        typer.echo(f"Particle {pid}")
-        typer.echo("")
+        terminal_echo(f"Particle {pid}")
+        terminal_echo("")
 
         kind_label = f" of kind {kind.value}" if kind is not None else ""
         if not rels:
-            typer.echo(f"No direct relations{kind_label}.")
+            terminal_echo(f"No direct relations{kind_label}.")
         else:
-            typer.echo(f"Direct relations{kind_label} ({len(rels)}):")
+            terminal_echo(f"Direct relations{kind_label} ({len(rels)}):")
             for r in rels:
                 other = r.particle_b if r.particle_a == pid else r.particle_a
-                typer.echo(
+                terminal_echo(
                     f"  ↔ {other[:8]}…  type={r.relation_type}  "
                     f"created_by={r.created_by}  confidence={r.confidence:.2f}"
                 )
@@ -400,15 +403,15 @@ async def _links_list(particle_id_prefix: str, kind_str: str | None = None) -> N
         # neighbours) — skipped when filtering to a non-co-evidential kind.
         if kind is not None and kind is not RelationType.CO_EVIDENTIAL:
             return
-        typer.echo("")
+        terminal_echo("")
         group = await get_co_evidential_group(session, pid)
         if len(group) > 1:
-            typer.echo(f"Co-evidential group ({len(group)} members, transitive closure):")
+            terminal_echo(f"Co-evidential group ({len(group)} members, transitive closure):")
             for member in sorted(group):
                 marker = " ← this particle" if member == pid else ""
-                typer.echo(f"  {member[:8]}…{marker}")
+                terminal_echo(f"  {member[:8]}…{marker}")
         else:
-            typer.echo("Co-evidential group: singleton (only this particle).")
+            terminal_echo("Co-evidential group: singleton (only this particle).")
 
 
 async def _resolve_subject_id(session: AsyncSession, subject_arg: str) -> str:
@@ -418,10 +421,10 @@ async def _resolve_subject_id(session: AsyncSession, subject_arg: str) -> str:
     try:
         subject = await lookup_subject(session, subject_arg)
     except ValueError as exc:
-        typer.echo(str(exc), err=True)
+        terminal_echo(str(exc), err=True)
         raise typer.Exit(1) from None
     if subject is None:
-        typer.echo(f"No subject matches {subject_arg!r} by ID, ID prefix, or name.", err=True)
+        terminal_echo(f"No subject matches {subject_arg!r} by ID, ID prefix, or name.", err=True)
         raise typer.Exit(1)
     return subject.id
 
@@ -459,18 +462,18 @@ async def _links_suggest(
             subject_id=subject_id, threshold=threshold, mode=mode, confirmed=yes
         )
     except ApplyConfirmationRequired as exc:
-        typer.echo(str(exc), err=True)
+        terminal_echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     except EngineHttpError as exc:
         # The engine returns 409 when --apply would exceed the confirm threshold
         # (its own ApplyConfirmationRequired surfaced over HTTP); surface cleanly.
-        typer.echo(str(exc), err=True)
+        terminal_echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
     if output_format == "json":
         typer.echo(report.model_dump_json(indent=2))
         return
-    typer.echo(_render_suggest_markdown(report))
+    terminal_echo(_render_suggest_markdown(report))
 
 
 async def _links_dedup(
@@ -501,13 +504,13 @@ async def _links_dedup(
                 session, subject_id=subject_id, dry_run=not apply
             )
         except AutoMergeDisabled as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(1) from exc
 
     if output_format == "json":
         typer.echo(report.model_dump_json(indent=2))
         return
-    typer.echo(_render_dedup_markdown(report, limit))
+    terminal_echo(_render_dedup_markdown(report, limit))
 
 
 def _score_labels(path: Path) -> None:
@@ -516,15 +519,15 @@ def _score_labels(path: Path) -> None:
     from particles.operations.reread_merge import score_labels
 
     if not path.is_file():
-        typer.echo(f"No such sheet: {path}", err=True)
+        terminal_echo(f"No such sheet: {path}", err=True)
         raise typer.Exit(1)
     with path.open(newline="", encoding="utf-8") as fh:
         scores = score_labels(csv.DictReader(fh))
-    typer.echo(f"links dedup --reread --labels  {path}")
+    terminal_echo(f"links dedup --reread --labels  {path}")
     for score in scores:
         verdict = "passes" if score.passes else "does not pass"
         rule = f"{score.rule_correct}/{score.rule_labelled}" if score.rule_labelled else "no labels"
-        typer.echo(
+        terminal_echo(
             f"  {score.stratum:<4} {score.correct}/{score.labelled} SAME verdicts correct, "
             f"Wilson lower bound {score.lower_bound:.3f}: {verdict} "
             f"(needs at least 100 labels and 0.950). Write rule: {rule}."
@@ -554,7 +557,7 @@ async def _links_dedup_reread(
 
     def _confirm(report: RereadReport) -> bool:
         # On stderr under --output-format json, so stdout stays one JSON document.
-        typer.echo(_render_reread_markdown(report, limit), err=output_format == "json")
+        terminal_echo(_render_reread_markdown(report, limit), err=output_format == "json")
         if yes:
             return True
         return confirm("Ask these questions now?", default=False)
@@ -571,16 +574,16 @@ async def _links_dedup_reread(
                     report = await judge_reread(
                         session,
                         confirm=_confirm,
-                        progress=lambda m: typer.echo(f"  {m}", err=True),
+                        progress=lambda m: terminal_echo(f"  {m}", err=True),
                     )
                 else:
                     report = await census_reread(session)
             except (AutoMergeDisabled, RereadNotAdmitted) as exc:
-                typer.echo(str(exc), err=True)
+                terminal_echo(str(exc), err=True)
                 raise typer.Exit(1) from exc
             if sheet is not None:
                 rows = write_sheet(report, await sheet_texts(session, report), sheet)
-                typer.echo(f"Wrote {rows} SAME verdict(s) to {sheet}.", err=True)
+                terminal_echo(f"Wrote {rows} SAME verdict(s) to {sheet}.", err=True)
         return report
 
     if judge:
@@ -596,14 +599,14 @@ async def _links_dedup_reread(
                 report = await _run()
         finally:
             if meter.llm_usage is not None:
-                typer.echo(render_usage_line(meter.llm_usage), err=True)
+                terminal_echo(render_usage_line(meter.llm_usage), err=True)
     else:
         report = await _run()
 
     if output_format == "json":
         typer.echo(report.model_dump_json(indent=2))
         return
-    typer.echo(_render_reread_markdown(report, limit))
+    terminal_echo(_render_reread_markdown(report, limit))
 
 
 async def _links_unmerge(
@@ -643,24 +646,24 @@ async def _links_unmerge(
         try:
             plan = await unmerge_exact_duplicates(session, **selector, dry_run=True)  # type: ignore[arg-type]
         except UnmergeSelectorError as exc:
-            typer.echo(f"Error: {exc}", err=True)
+            terminal_echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from exc
 
     if dry_run or not plan.restored_particles:
         if output_format == "json":
             typer.echo(plan.model_dump_json(indent=2))
             return
-        typer.echo(_render_unmerge_markdown(plan, limit))
+        terminal_echo(_render_unmerge_markdown(plan, limit))
         if not plan.restored_particles:
-            typer.echo("\nNothing to restore.")
+            terminal_echo("\nNothing to restore.")
         elif dry_run:
-            typer.echo("\n--dry-run: nothing written.")
+            terminal_echo("\n--dry-run: nothing written.")
         return
 
     if not yes:
         # Narration on stderr so `--output-format json` still
         # emits a clean artifact on stdout when the operator confirms.
-        typer.echo(_render_unmerge_markdown(plan, limit), err=True)
+        terminal_echo(_render_unmerge_markdown(plan, limit), err=True)
         confirm(
             f"\nRestore {plan.restored_particles} superseded copy/copies "
             f"across {len(plan.groups)} group(s)?",
@@ -673,7 +676,7 @@ async def _links_unmerge(
     if output_format == "json":
         typer.echo(report.model_dump_json(indent=2))
         return
-    typer.echo(_render_unmerge_markdown(report, limit))
+    terminal_echo(_render_unmerge_markdown(report, limit))
 
 
 def _render_unmerge_markdown(report: UnmergeReport, limit: int) -> str:

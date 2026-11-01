@@ -270,7 +270,12 @@ async def consolidation_tick() -> str:
             log.warning("daemon consolidation tick: %s", reason)
         else:
             log.info("daemon consolidation tick: %s", reason)
-        return f"skipped: {reason}"
+        # The outcome is served on the unauthenticated /health, and a lock
+        # holder's reason names its pid, host and start time; /health says which
+        # kind of skip it was, and the engine log keeps the rest (security
+        # review 2026-10-24-2, N8).
+        kind = "not due" if reason.startswith("not due") else "another run holds the cycle lock"
+        return f"skipped: {kind} (details in the engine log)"
     failed = report.failed_passes()
     if failed:
         log.warning("daemon consolidation tick: pass(es) failed: %s", ", ".join(failed))
@@ -329,17 +334,29 @@ def _make_inbox_tick(path: Path) -> Work:
 
     async def _tick() -> str:
         from particles.db import session_scope
-        from particles.operations.inbox import process_inbox
+        from particles.operations.inbox import INBOX_DEPOSITOR, inbox_has_pending, process_inbox
 
         current = _mtime_or_none(path)
         if current is None or current == state["last_mtime"]:
             return "unchanged"
         store = get_config().daemon.store
-        async with session_scope(store) as session:
-            summary = await process_inbox(session, path, deposited_by="inbox")
+        try:
+            async with session_scope(store) as session:
+                summary = await process_inbox(session, path, deposited_by=INBOX_DEPOSITOR)
+        except BaseException:
+            # A pass that raised (a rewrite the directory refuses, say) still
+            # closes the gate on the mtime it read, so the unchanged file is not
+            # fetched again on every tick; a new share changes the mtime and
+            # reopens it (security review 2026-10-30-1, AB2).
+            state["last_mtime"] = current
+            raise
         # Re-stat after the in-place rewrite so its own mtime bump does not
-        # trigger an immediate second pass (the `inbox watch` behaviour).
-        state["last_mtime"] = _mtime_or_none(path)
+        # trigger an immediate second pass (the `inbox watch` behaviour),
+        # unless a URL shared while the pass ran is still pending.
+        # The re-read runs off the event loop, as the pass's reads do (security
+        # review 2026-10-30-1, Z70).
+        pending = await asyncio.to_thread(inbox_has_pending, path)
+        state["last_mtime"] = None if pending else _mtime_or_none(path)
         processed, failed = len(summary["processed"]), len(summary["failed"])
         refused = len(summary["refused"])
         log.info(
@@ -353,6 +370,11 @@ def _make_inbox_tick(path: Path) -> Work:
     return _tick
 
 
+#: Ticks on which the web-clipper watcher retries a skipped capture before it
+#: waits for the captures tree to change.
+_CAPTURE_RETRIES = 3
+
+
 def _make_web_clipper_tick(captures_dir: Path) -> Work:
     """Web-clipper watcher — periodically re-runs the idempotent one-shot scan.
 
@@ -361,21 +383,47 @@ def _make_web_clipper_tick(captures_dir: Path) -> Work:
     there to skip the walk-and-hash cost, not for correctness.
     """
     state: dict[str, float | None] = {"last_mtime": None}
+    # Consecutive ticks each skipped capture has failed. A skipped capture is
+    # retried on the next ticks even when the tree is unchanged, so a
+    # transient store error does not leave it unstored until another capture
+    # arrives, and a capture that keeps failing waits for the tree to change
+    # after _CAPTURE_RETRIES (security review 2026-10-28-1, O20).
+    retries: dict[Path, int] = {}
 
     async def _tick() -> str:
-        from particles.db import session_scope
+        from particles.db import session_scope, write_transaction
         from particles.operations.deposit import deposit_web_clipper
 
         current = _tree_mtime(captures_dir)
         if current is None:
             return "captures directory absent"
-        if current == state["last_mtime"]:
+        retry_due = any(n < _CAPTURE_RETRIES for n in retries.values())
+        if current == state["last_mtime"] and not retry_due:
             return "unchanged"
         store = get_config().daemon.store
-        async with session_scope(store) as session:
-            results = await deposit_web_clipper(session, captures_dir)
-        state["last_mtime"] = _tree_mtime(captures_dir)
-        log.info("daemon web-clipper: scanned %s, %d capture(s)", captures_dir, len(results))
+        # The scan's deposits are committed under the writer lock before the
+        # mtime gate advances, so a capture the tick reports is in the store,
+        # and a failed commit leaves the gate where it was for the next tick
+        # (security review 2026-10-26-1, W11, W24). A capture the scan cannot
+        # read is skipped, not fatal to the batch (2026-10-27-1, G9).
+        skipped: list[Path] = []
+        async with session_scope(store) as session, write_transaction(session, store):
+            results = await deposit_web_clipper(session, captures_dir, skipped=skipped)
+        # The gate takes the mtime read before the scan: a capture written
+        # while the scan ran is newer than it, so the next tick scans again
+        # (security review 2026-10-27-1, G8). The scan writes nothing there.
+        state["last_mtime"] = current
+        failed = {path: retries.get(path, 0) + 1 for path in skipped}
+        retries.clear()
+        retries.update(failed)
+        log.info(
+            "daemon web-clipper: scanned %s, %d capture(s), %d skipped",
+            captures_dir,
+            len(results),
+            len(skipped),
+        )
+        if skipped:
+            return f"deposited {len(results)}, skipped {len(skipped)}"
         return f"deposited {len(results)}"
 
     return _tick

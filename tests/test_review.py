@@ -704,3 +704,83 @@ async def test_prior_reviews_follow_the_replacement_chain(db_session: object) ->
         (old.id, "DEFER", "check the GoatCounter docs first")
     ]
     assert await prior_reviews(session, old) == []  # type: ignore[arg-type]
+
+
+#: Vectors for the held-claim search: B and C nearly the same direction, A apart.
+_NEAR_B = [1.0, 0.0, 0.0, 0.0]
+_NEAR_C = [0.99, 0.141, 0.0, 0.0]
+_APART = [0.0, 0.0, 1.0, 0.0]
+
+
+async def _held_with_a_claim_committed_meanwhile(session: object) -> tuple[Particle, ...]:
+    """A record (A, quarantined B), then a claim C near B committed while B was held."""
+    pa = _make_active("The widget ships in blue.")
+    pb = _make_quarantined("The widget ships only in red.")
+    inc = _make_inconsistency(pa.id, pb.id)
+    await insert_particle(session, pa, _APART)  # type: ignore[arg-type]
+    await insert_particle(session, pb, _NEAR_B)  # type: ignore[arg-type]
+    await insert_particle(session, inc)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+    pc = _make_active("The widget ships only in green.")
+    await insert_particle(session, pc, _NEAR_C)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+    return pa, pb, pc, inc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [ResolutionAction.PREFER_B, ResolutionAction.BOTH_VALID])
+async def test_a_resolution_never_mints_a_held_claim_beside_a_claim_committed_while_it_was_held(
+    db_session: object, action: ResolutionAction
+) -> None:
+    """A resolution settles the record the claim was held behind, and no other
+    (security review 2026-10-31-3, AF1): a claim §6.6 now pairs with the held one
+    keeps it quarantined behind a new record naming both."""
+    from particles.core.conflict_review import conflict_pair_ids
+    from particles.operations.review import resolve
+    from particles.store.event_store import OperatorEventType, list_events
+    from particles.store.particle_store import get_active_particles
+
+    session = db_session
+    _pa, pb, pc, inc = await _held_with_a_claim_committed_meanwhile(session)
+
+    await resolve(session, inc.id, action, "reviewer-1")  # type: ignore[arg-type]
+
+    still = await get_particle(session, pb.id)  # type: ignore[arg-type]
+    assert still is not None
+    assert (still.status, still.status_reason) == (
+        Status.PROVENANCE_STALE,
+        StatusReason.CONFLICT_PENDING,
+    )
+    active = await get_active_particles(session)  # type: ignore[arg-type]
+    assert not any(p.content == pb.content for p in active)
+    closed = await get_particle(session, inc.id)  # type: ignore[arg-type]
+    assert closed is not None and closed.status is Status.RETRACTED
+    [event] = await list_events(session, event_type=OperatorEventType.REVIEW_RESOLVED)  # type: ignore[arg-type]
+    assert event.payload is not None and event.payload["promoted_particle_ids"] == []
+    [record_id] = event.payload["held_behind_record_ids"]
+    record = await get_particle(session, record_id)  # type: ignore[arg-type]
+    assert record is not None and record.status is Status.INCONSISTENCY
+    assert conflict_pair_ids(record) == (pc.id, pb.id)
+
+
+@pytest.mark.asyncio
+async def test_prefer_b_mints_the_held_claim_when_nothing_else_pairs_it(
+    db_session: object,
+) -> None:
+    """Control for the test above: with no claim near B, PREFER_B mints it."""
+    from particles.operations.review import resolve
+    from particles.store.particle_store import get_active_particles
+
+    session = db_session
+    pa = _make_active("The widget ships in blue.")
+    pb = _make_quarantined("The widget ships only in red.")
+    inc = _make_inconsistency(pa.id, pb.id)
+    await insert_particle(session, pa, _APART)  # type: ignore[arg-type]
+    await insert_particle(session, pb, _NEAR_B)  # type: ignore[arg-type]
+    await insert_particle(session, inc)  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[attr-defined]
+
+    await resolve(session, inc.id, ResolutionAction.PREFER_B, "reviewer-1")  # type: ignore[arg-type]
+
+    active = await get_active_particles(session)  # type: ignore[arg-type]
+    assert [p.supersedes for p in active if p.content == pb.content] == [pb.id]

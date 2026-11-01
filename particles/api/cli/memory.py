@@ -62,9 +62,10 @@ from particles.api.cli._progress import (
     progress_line,
     set_heartbeat_status,
 )
+from particles.api.cli._terminal import terminal_echo
 from particles.core.progress import ProgressEvent
 from particles.core.schema import ObserverScopeNote
-from particles.db import DEFAULT_STORE, session_scope
+from particles.db import DEFAULT_STORE, session_scope, write_transaction
 from particles.operations.utility_feedback import CLI_ACTOR
 from particles.operations.utility_sweep import (
     DEFAULT_DISTINCT_RATIO,
@@ -224,11 +225,13 @@ async def _useful(particle_id: str, *, reason: str | None, store: str) -> None:
             )
         )[0]
         try:
-            result = await mark_belief_useful(session, resolved, actor=CLI_ACTOR, reason=reason)
+            # The credit and its event commit under the store's writer lock
+            # (security review 2026-10-30-1, Z69).
+            async with write_transaction(session, store):
+                result = await mark_belief_useful(session, resolved, actor=CLI_ACTOR, reason=reason)
         except BeliefNotCreditable as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(2) from exc
-        await session.commit()
 
     if result.counted:
         typer.echo(
@@ -383,10 +386,12 @@ async def _mark_agent_writes(extra: list[str], *, dry_run: bool, store: str) -> 
         f"Agent writes in '{store}': {verb} {len(report.marked)} keyless "
         f"entr{'y' if len(report.marked) == 1 else 'ies'} `scope:unattributed`."
     )
-    typer.echo(f"  Agent identities: {', '.join(identities)}")
+    # Depositor names are stored text: printed through the terminal escape
+    # (security review 2026-10-28-2, AA31).
+    terminal_echo(f"  Agent identities: {', '.join(identities)}")
     for who, count in sorted(report.conversation_by_depositor.items()):
         matched = "matched" if who in identities else "not matched"
-        typer.echo(f"  {count:5d}  keyless conversation entries by {who} ({matched})")
+        terminal_echo(f"  {count:5d}  keyless conversation entries by {who} ({matched})")
     if report.unmatched:
         typer.echo("  A depositor you recognise as an agent can be added with `--identity NAME`.")
     if dry_run:
@@ -595,6 +600,18 @@ def redate_cmd(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report what would change; write nothing."
     ),
+    transcripts: Path | None = typer.Option(
+        None,
+        "--transcripts",
+        metavar="DIR",
+        help=(
+            "Read the transcripts from DIR instead of Claude Code's projects folder: "
+            "the folder given to `audit --transcripts`, or a copy of the projects folder."
+        ),
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+    ),
     store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
     verbose: bool = VERBOSE_OPTION,
     debug: bool = DEBUG_OPTION,
@@ -614,18 +631,21 @@ def redate_cmd(
     nothing. Local store only.
     """
     configure_output(verbose, debug, quiet, progress)
-    run(_redate(dry_run=dry_run, store=store))
+    run(_redate(dry_run=dry_run, store=store, transcripts=transcripts))
 
 
-async def _redate(*, dry_run: bool, store: str) -> None:
+async def _redate(*, dry_run: bool, store: str, transcripts: Path | None = None) -> None:
     from particles.api.cli._claude_code import session_started_at
     from particles.operations.validity import REDATE_ACTOR, redate_sessions
 
-    root = _claude_projects_root()
+    root = transcripts if transcripts is not None else _claude_projects_root()
+    flat = transcripts is not None
     async with session_scope(store, write=not dry_run) as session:
         report = await redate_sessions(
             session,
-            started_at_for=lambda _entry_id, uri_r, _tags: session_started_at(uri_r, root),
+            started_at_for=lambda _entry_id, uri_r, _tags: session_started_at(
+                uri_r, root, flat=flat
+            ),
             dry_run=dry_run,
             actor=REDATE_ACTOR,
         )
@@ -648,8 +668,206 @@ async def _redate(*, dry_run: bool, store: str) -> None:
         )
         for entry_id in report.unresolved[:10]:
             typer.echo(f"  {entry_id}")
+        if transcripts is None:
+            typer.echo(
+                "If their transcripts were copied elsewhere, name that folder with "
+                "--transcripts DIR."
+            )
     if dry_run:
         typer.echo("\nDry run: nothing was written.")
+
+
+@memory_app.command("absences")
+def absences_cmd(
+    memory_dir: list[Path] = typer.Option(  # noqa: B008 — Typer reads the default
+        [],
+        "--memory-dir",
+        help=(
+            "A Claude Code memory directory to check. Repeatable. Default: every "
+            "memory directory the store serves."
+        ),
+    ),
+    record: bool = typer.Option(
+        False,
+        "--record",
+        help=(
+            "Record the absences and process them now, with no model call. Without it, "
+            "the verb reports and writes nothing."
+        ),
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print the report as JSON."),
+    store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
+) -> None:
+    """Report the memory files that no longer exist, and with `--record` retire their claims.
+
+    A memory file deleted from a Claude Code memory directory keeps its claims
+    until an absence is recorded for it. The session-end hook records one for
+    each small deletion. It holds back the first deletion ever seen in a
+    directory, and a deletion of more than a quarter of its files (and at least
+    five), and reports them in the next session's digest.
+
+    Without `--record` this reports, per directory, the files no longer found,
+    the beliefs their absences would retire, and how many of those are lines of
+    `MEMORY.md`. It writes nothing and makes no model call. With `--record` it
+    records every absence, then processes them at once. A belief another
+    current memory file still states is kept. When another memory file of the
+    project is still waiting to be read, the absences are left for the next
+    extraction pass, which reads that file first. Local store only. Exit code 0
+    when done, 1 when a directory could not be read in full (nothing is
+    recorded there), 2 when the verb could not start.
+    """
+    configure_output(verbose, debug, quiet, progress)
+    code = run(_absences(list(memory_dir), record=record, as_json=as_json, store=store))
+    if code:
+        raise typer.Exit(code)
+
+
+async def _absences(dirs: list[Path], *, record: bool, as_json: bool, store: str) -> int:
+    from particles.api.cli._claude_code import (
+        discover_memory_dirs,
+        is_claude_code_memory_dir,
+        projection_refusal,
+        walk_memory_dir,
+    )
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.memory_absence import (
+        NAMED_MISSING,
+        MemoryWalk,
+        preview_memory_absences,
+        process_recorded_absences,
+        record_memory_absences,
+    )
+
+    ensure_local("memory absences")
+    if dirs:
+        for d in dirs:
+            reason = (
+                None
+                if is_claude_code_memory_dir(d)
+                else "not a memory directory Claude Code reads (~/.claude/projects/<key>/memory)"
+            ) or projection_refusal(store, d)
+            if reason is not None:
+                typer.echo(f"Error: {d}: {reason}", err=True)
+                return 2
+    else:
+        dirs = list(discover_memory_dirs(store).bound)
+        if not dirs:
+            typer.echo(f"Error: store {store!r} serves no Claude Code memory directory.", err=True)
+            return 2
+
+    results: list[dict[str, Any]] = []
+    incomplete = False
+    async with session_scope(store) as session:
+        for d in dirs:
+            walk = walk_memory_dir(d)
+            facts = MemoryWalk(
+                directory=d.resolve(),
+                project_key=d.parent.name,
+                listed=walk.listed_uris(),
+                errors=walk.errors,
+            )
+            preview = await preview_memory_absences(session, facts)
+            found = preview.report
+            incomplete = incomplete or found.skipped == "walk_incomplete"
+            index = _read_index(d)
+            entry: dict[str, Any] = {
+                "directory": str(d),
+                "project": facts.project_key,
+                "listed": found.listed,
+                "previously_harvested": found.previously_harvested,
+                "missing": [str(note.path) for note in found.missing],
+                "skipped": found.skipped,
+                "hook_refusal": found.refusal,
+                "would_retire": len(preview.would_retire),
+                "would_retire_in_memory_md": sum(
+                    1 for pid in preview.would_retire if f"`p-{pid[:8]}`" in index
+                ),
+                "waiting_on": preview.holder.snapshot_id if preview.holder else None,
+                "walk_errors": list(found.walk_errors),
+            }
+            if record and found.skipped is None and found.missing:
+                written = await record_memory_absences(session, facts, confirmed=True)
+                retired, holder = await process_recorded_absences(session, written)
+                entry["recorded"] = len(written.absences)
+                entry["retired"] = len(retired)
+                entry["left_pending_behind"] = holder.snapshot_id if holder else None
+            results.append(entry)
+
+    if as_json:
+        typer.echo(json.dumps({"store": store, "record": record, "directories": results}, indent=2))
+    else:
+        for entry in results:
+            _echo_absences(entry, named=NAMED_MISSING)
+        if not record and any(e["missing"] and not e["skipped"] for e in results):
+            typer.echo(
+                "\nDry run: nothing was written. `particles memory absences --record` "
+                "records these absences."
+            )
+    return 1 if incomplete else 0
+
+
+def _read_index(memory_dir: Path) -> str:
+    """The directory's ``MEMORY.md`` text, or ``""`` (never a symlink's target)."""
+    index = memory_dir / "MEMORY.md"
+    if index.is_symlink() or not index.is_file():
+        return ""
+    try:
+        return index.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _echo_absences(entry: dict[str, Any], *, named: int) -> None:
+    missing: list[str] = entry["missing"]
+    typer.echo(f"\n{entry['directory']}")
+    share = f" ({len(missing) / entry['previously_harvested']:.0%})" if missing else ""
+    typer.echo(
+        f"  {entry['listed']} memory file(s) listed, {entry['previously_harvested']} "
+        f"previously harvested, {len(missing)} no longer found{share}"
+    )
+    if entry["skipped"] == "walk_incomplete":
+        typer.echo("  the directory could not be read in full, so nothing is recorded here:")
+        for error in entry["walk_errors"][:5]:
+            typer.echo(f"    {error}")
+        return
+    if entry["skipped"] == "empty_listing":
+        typer.echo("  the directory lists no memory file, so nothing is recorded here")
+        return
+    if not missing:
+        return
+    for path in missing[:named]:
+        typer.echo(f"    {Path(path).name}")
+    if len(missing) > named:
+        typer.echo(f"    … and {len(missing) - named} more")
+    typer.echo(
+        f"  their absences retire {entry['would_retire']} belief(s), "
+        f"{entry['would_retire_in_memory_md']} of them line(s) of MEMORY.md"
+    )
+    if entry["hook_refusal"] == "first":
+        typer.echo("  the hook holds these back: no deletion was ever recorded in this directory")
+    elif entry["hook_refusal"] == "mass":
+        typer.echo("  the hook holds these back: too large a share of the directory at once")
+    if "recorded" in entry:
+        if entry["left_pending_behind"]:
+            typer.echo(
+                f"  recorded {entry['recorded']} absence(s); they wait for snapshot "
+                f"{entry['left_pending_behind'][:8]}, an unextracted memory file of this "
+                "project, and are processed at the next extraction pass"
+            )
+        else:
+            typer.echo(
+                f"  recorded {entry['recorded']} absence(s) and retired {entry['retired']} "
+                "belief(s)"
+            )
+    elif entry["waiting_on"]:
+        typer.echo(
+            f"  --record would leave them pending behind snapshot {entry['waiting_on'][:8]}, "
+            "an unextracted memory file of this project"
+        )
 
 
 @memory_app.command("sweep-rank-lift")
@@ -1436,31 +1654,20 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
     projection-runner factory, so a resident daemon renders
     ``MEMORY.md`` exactly as the launchd recipe does.
     """
-    from particles.api.cli._claude_code import (
-        projection_enabled,
-        projection_refusal,
-        stray_memory_dirs,
-    )
+    from particles.api.cli._claude_code import discover_memory_dirs, projection_enabled
 
     if not projection_enabled():
         return None, "agent_memory.projection.enabled is false"
-    root = Path.home() / ".claude" / "projects"
     # A linked worktree's memory directory is this SDK's own stray output, never
     # Claude Code's: harvesting it re-ingests the projection and rendering into
     # it reaches no session. `particles hook doctor` lists them.
-    strays = set(stray_memory_dirs(root))
-    memory_dirs = (
-        sorted(p for p in root.glob("*/memory") if p.is_dir() and p not in strays)
-        if root.is_dir()
-        else []
-    )
-    if not memory_dirs:
+    found = discover_memory_dirs(store)
+    root, strays, unbound = found.root, found.strays, list(found.refused)
+    memory_dirs = list(found.bound)
+    if not memory_dirs and not unbound:
         return None, f"no memory directories under {root}"
-    refusals = {d: projection_refusal(store, d) for d in memory_dirs}
-    unbound = [d for d, reason in refusals.items() if reason is not None]
-    memory_dirs = [d for d, reason in refusals.items() if reason is None]
     if not memory_dirs:
-        first = refusals[unbound[0]]
+        first = found.refused[unbound[0]]
         return None, (
             f"store {store!r} serves none of the {len(unbound)} memory directories "
             f"under {root} ({first})"
@@ -1481,13 +1688,21 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
             "unbound_dirs_skipped": len(unbound),
             "harvested": 0,
             "rendered": 0,
+            "absences_recorded": 0,
+            "absences_unrecorded": 0,
         }
         for memory_dir in memory_dirs:
             project = memory_dir.parent.name
+            # The same walk, so the same guards, as the SessionEnd hook.
+            absence_log: dict[str, Any] = {}
             harvested, _unchanged, memory_md_text = await _harvest_memory_files(
-                store, memory_dir, project
+                store, memory_dir, project, absence_log=absence_log
             )
             telemetry["harvested"] += len(harvested)
+            recorded = int(absence_log.get("recorded", 0))
+            telemetry["absences_recorded"] += recorded
+            if not recorded:
+                telemetry["absences_unrecorded"] += int(absence_log.get("missing", 0))
             outcome = await run_projection_cycle(store, memory_dir, memory_md_text)
             if outcome.get("outcome") in ("rendered", "created"):
                 telemetry["rendered"] += 1
@@ -1519,10 +1734,25 @@ def memory_serve_cmd(
             tools stay visible either way and refuse with an actionable
             message when it is not.
     """
+    from particles.config import get_config
+    from particles.egress import UncoveredEventLoop
     from particles.mcp.memory_compat import main as serve_main
 
-    prepare_stdio_server_store(store or DEFAULT_STORE)
-    serve_main(store)
+    # The facade opens the local store even when a remote engine is
+    # configured, so the store rule applies regardless (security review R11).
+    prepare_stdio_server_store(store or DEFAULT_STORE, local_store=True)
+    if store is None:
+        # With no --store the write path names the sole allowlisted store, so
+        # that store meets the same rule before serving starts (security
+        # review 2026-10-30-1, AB31).
+        allowed = get_config().mcp.write.enabled_stores
+        if len(allowed) == 1 and allowed[0] != DEFAULT_STORE:
+            prepare_stdio_server_store(allowed[0], local_store=True)
+    try:
+        serve_main(store)
+    except UncoveredEventLoop as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
 
 
 @memory_app.command("tools")

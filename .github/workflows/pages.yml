@@ -62,11 +62,12 @@ jobs:
         with:
           # Packages from an index run in this job; leave it no token on disk.
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install the docs toolchain
-        run: python -m pip install -r docs-requirements.txt
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r docs-requirements.txt
       # The API reference documents both layers, but this tree holds only the
       # Engine half — the Client half ships as the `linkedparticles-core`
       # distribution. griffe resolves a package to ONE location and will not
@@ -96,6 +97,11 @@ jobs:
       # release's core from the core repository at a logged commit instead.
       # Only when the core repository does not declare this version either
       # does the build fall back to the newest core on the index, and say so.
+      # Every path installs wheels only or fetches plain files, and the
+      # toolchain above is hash-locked and wheels-only too, since pip does
+      # not hash-check an sdist's build requirements, so no build backend or
+      # unhashed package runs in the job whose output is deployed (security
+      # review P37, Q56).
       # The Publish workflow re-triggers this one when it succeeds, which
       # rebuilds against the exact match from the index.
       - name: Materialise the Client layer for the API reference
@@ -103,11 +109,25 @@ jobs:
           set -euo pipefail
           v="$(sed -nE 's/^version = "(.+)"$/\1/p' pyproject.toml | head -1)"
           [ -n "$v" ] || { echo "could not read version from pyproject.toml" >&2; exit 1; }
-          if pip install --no-deps --only-binary=:all: --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
+          if pip install --only-binary=:all: --no-deps --target "$RUNNER_TEMP/core-dist" "linkedparticles-core==$v"; then
             echo "API reference: exact match, linkedparticles-core==$v"
           else
             python3 .github/core_requirement.py "$v" --out "$RUNNER_TEMP/core-req.txt"
-            pip install --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
+            req="$(cat "$RUNNER_TEMP/core-req.txt")"
+            # The reference reads source and imports nothing, so a commit of
+            # the core repository is fetched as files and never built: a
+            # build would run a backend resolved from the index.
+            git_re='^linkedparticles-core @ git\+(https://github\.com/LinkedParticles/particles-core-py)@([0-9a-f]{40})$'
+            if [[ "$req" =~ $git_re ]]; then
+              src="$RUNNER_TEMP/core-src"
+              git init -q "$src"
+              git -C "$src" fetch -q --depth 1 "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+              git -C "$src" checkout -q --detach FETCH_HEAD
+              mkdir -p "$RUNNER_TEMP/core-dist"
+              cp -R "$src/particles" "$RUNNER_TEMP/core-dist/"
+            else
+              pip install --only-binary=:all: --no-deps --target "$RUNNER_TEMP/core-dist" -r "$RUNNER_TEMP/core-req.txt"
+            fi
           fi
           cp -R "$RUNNER_TEMP/core-dist/particles/." particles/
           # Fail here, loudly, rather than 40 lines later inside mkdocs.

@@ -126,8 +126,20 @@ async def _fetch_coin(coin_id: str) -> bytes:
 
     api_key = get_numista_api_key()
     api_url = f"{NUMISTA_API_BASE}/types/{coin_id}"
+    # No redirect is followed: httpx strips only ``Authorization`` on a
+    # cross-origin hop, so the custom key header would travel to whatever host a
+    # 3xx names, over http included (security review 2026-10-25, Q17; the
+    # Anthropic client's rule, P9). The API does not redirect a type lookup.
     async with particles_client() as client:
-        resp = await get_capped(client, api_url, headers={"Numista-API-Key": api_key})
+        resp = await get_capped(
+            client, api_url, headers={"Numista-API-Key": api_key}, follow_redirects=False
+        )
+    if 300 <= resp.status_code < 400:
+        raise ValueError(
+            f"Numista API answered coin type {coin_id} with a redirect (HTTP "
+            f"{resp.status_code}); it is not followed, so the API key stays with "
+            "the API host."
+        )
     if resp.status_code == 429:
         raise ValueError("Numista API quota exhausted (HTTP 429). Monthly limit reached.")
     if resp.status_code == 404:

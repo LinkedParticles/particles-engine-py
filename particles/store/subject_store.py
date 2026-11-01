@@ -986,7 +986,7 @@ async def merge_subjects_many(
 
     p_result = await session.execute(
         select(ParticleRow).where(
-            or_(*(ParticleRow.subject_ids_json.contains(s) for s in source_set))
+            or_(*(ParticleRow.subject_ids_json.contains(s, autoescape=True) for s in source_set))
         )
     )
     for p_row in p_result.scalars():
@@ -1166,7 +1166,9 @@ async def delete_subject(
     from particles.store.particle_store import ParticleRow
 
     p_result = await session.execute(
-        select(ParticleRow).where(ParticleRow.subject_ids_json.contains(subject_id))
+        select(ParticleRow).where(
+            ParticleRow.subject_ids_json.contains(subject_id, autoescape=True)
+        )
     )
     for p_row in p_result.scalars():
         ids: list[str] = json.loads(p_row.subject_ids_json)

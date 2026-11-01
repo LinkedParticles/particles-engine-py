@@ -553,9 +553,16 @@ def render_html(data: GraphData, *, generated_at: datetime) -> str:
         for mark, meaning in _LEGEND
     )
 
-    payload = json.dumps(
-        data.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")
-    ).replace("</", "<\\/")
+    # Every ``<``, ``>`` and ``&`` becomes its JSON escape, which ``JSON.parse``
+    # reads back unchanged. Escaping only ``</`` left ``<!--<script>``, which
+    # puts the HTML parser in its double-escaped state, so the block's own
+    # closing tag stopped ending it (security review D33; 2026-10-24-2, P51).
+    payload = (
+        json.dumps(data.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
 
     values = {
         "CY_VERSION": CYTOSCAPE_VERSION,

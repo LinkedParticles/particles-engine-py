@@ -38,7 +38,9 @@ from typing import Any
 
 import yaml
 
+from particles.core import bounded_yaml
 from particles.core.schema import Particle, Subject
+from particles.render.escape import synthesized_prose
 from particles.render.markdown import subject_slug
 
 log = logging.getLogger(__name__)
@@ -58,7 +60,16 @@ log = logging.getLogger(__name__)
 # 13 (security review N31): the instructions ride the system turn and the
 #    subject name, the particle listing and the judge's reasons ride the user
 #    turn behind a nonce fence.
-_PROMPT_VERSION = "13"
+# 14 (security review 2026-10-25-1, Q8 and Q37): the model's body is
+#    neutralized whole before the engine's References section is appended,
+#    with a References heading of its own demoted and its code fences escaped.
+_PROMPT_VERSION = "14"
+
+
+#: What the engine writes before the References section it builds from its own
+#: citation data. Both renderers append that section last, so a reader finds it
+#: as the *last* occurrence; an earlier one is text inside the article.
+REFERENCES_HEADING = "\n## References"
 
 
 def compute_input_hash(
@@ -146,7 +157,7 @@ def _parse_frontmatter(text: str) -> dict[str, Any] | None:
     if not m:
         return None
     try:
-        data = yaml.safe_load(m.group(1))
+        data = bounded_yaml.load(m.group(1))
     except yaml.YAMLError:
         return None
     return data if isinstance(data, dict) else None
@@ -169,8 +180,9 @@ def split_rendered_article(rendered: str) -> tuple[dict[str, Any], str, str, str
     * ``h1_line`` — the ``# Subject Title`` line, **including** the
       leading ``#`` and trailing newline. Empty string if no H1 was
       present (defensive — both renderers always emit one).
-    * ``prose`` — everything between the H1 and the ``## References``
-      heading, with leading/trailing whitespace stripped
+    * ``prose`` — everything between the H1 and the engine's
+      ``## References`` heading (the last one), with leading/trailing
+      whitespace stripped
     * ``references`` — the ``## References`` heading and everything
       after it, with leading/trailing whitespace stripped. Empty string
       if the article has no References section.
@@ -183,7 +195,7 @@ def split_rendered_article(rendered: str) -> tuple[dict[str, Any], str, str, str
     m = _FRONTMATTER_RE.match(rendered)
     if m:
         try:
-            parsed = yaml.safe_load(m.group(1))
+            parsed = bounded_yaml.load(m.group(1))
             if isinstance(parsed, dict):
                 fm = parsed
         except yaml.YAMLError:
@@ -196,8 +208,8 @@ def split_rendered_article(rendered: str) -> tuple[dict[str, Any], str, str, str
     h1_line = h1_match.group(0) if h1_match else ""
     after_h1 = body[h1_match.end() :] if h1_match else body
 
-    # Split on the References heading.
-    refs_idx = after_h1.find("\n## References")
+    # Split on the engine's References heading, which is the last one.
+    refs_idx = after_h1.rfind(REFERENCES_HEADING)
     if refs_idx == -1:
         prose = after_h1.strip()
         references = ""
@@ -207,6 +219,70 @@ def split_rendered_article(rendered: str) -> tuple[dict[str, Any], str, str, str
         references = after_h1[refs_idx + 1 :].strip()
 
     return fm, h1_line, prose, references
+
+
+# A heading the model wrote whose text is "References", at any level and inside
+# a quote or list item. Only the engine's References section may read as one
+# (security review 2026-10-25-1, Q8; 2026-10-25-2, R45). The ``#`` run becomes
+# entities, which no longer opens a heading and which this pattern does not
+# match again.
+_CONTAINER_PREFIX = r"(?:[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t])))*[ \t]*"
+_MODEL_REFERENCES_HEADING = re.compile(
+    rf"^({_CONTAINER_PREFIX})(#+)(?=[ \t]*references\b)", re.I | re.M
+)
+# The setext form: a line ending in "References" underlined by ``=`` or ``-``.
+# The underline run becomes entities, so the line above stays a paragraph.
+_MODEL_REFERENCES_SETEXT = re.compile(
+    r"^([^\n]*\breferences[ \t]*\n(?:[ \t]*>)*[ \t]*)(=+|-+)(?=[ \t]*$)", re.I | re.M
+)
+_SETEXT_ENTITY = {"=": "&#61;", "-": "&#45;"}
+# A footnote definition the model wrote for a cited id, at any indent and inside
+# a quote or list item: the colon becomes an entity, so the line is text and the
+# engine's definition in References is the only one (security review
+# 2026-10-26-1, W42), in any letter case, since GFM folds footnote labels
+# (security review 2026-10-27-1, G31).
+_MODEL_FOOTNOTE_DEF = re.compile(rf"^({_CONTAINER_PREFIX}\[\^p-[0-9a-fA-F]{{8}}\]):", re.M | re.I)
+
+
+def demote_model_structure(text: str) -> str:
+    """Model prose with each References heading and footnote definition demoted to text.
+
+    Shared by the fresh body (``render.neutralize_model_body``) and the cached
+    one (:func:`neutralize_article_prose`), so a body cached before a demotion
+    was added gets it when it is served. Idempotent.
+    """
+    text = _MODEL_REFERENCES_HEADING.sub(lambda m: m.group(1) + "&#35;" * len(m.group(2)), text)
+    text = _MODEL_REFERENCES_SETEXT.sub(
+        lambda m: m.group(1) + _SETEXT_ENTITY[m.group(2)[0]] * len(m.group(2)), text
+    )
+    return _MODEL_FOOTNOTE_DEF.sub(r"\1&#58;", text)
+
+
+def neutralize_article_prose(rendered: str) -> str:
+    """``rendered`` with its model-written prose made inert (security review 2026-10-24-2, P31).
+
+    The backstop for a cached article. A fresh one never needs it, since
+    :func:`~particles.render.article_synthesis.render.render_synthesised_article`
+    neutralizes the model's body before it appends anything of its own
+    (security review 2026-10-25-1, Q8). Here the prose is the span between the
+    H1 and the engine's References heading, found as the *last* one, so a
+    References heading the model wrote ends nothing: what follows it is escaped
+    with the rest. The frontmatter, the H1 and the engine's References section
+    pass through unchanged. The prose also gets :func:`demote_model_structure`,
+    so a body cached before a demotion landed (a setext or quoted References
+    heading, the R45 residual; security review 2026-10-26-1, W45) is served
+    with it. Both are idempotent, so a cached body neutralized when it was
+    stored is returned unchanged.
+    """
+    m = _FRONTMATTER_RE.match(rendered)
+    start = m.end() if m else 0
+    h1_match = re.compile(r"^# .*\n", flags=re.MULTILINE).search(rendered, start)
+    if h1_match:
+        start = h1_match.end()
+    refs_idx = rendered.rfind(REFERENCES_HEADING, start)
+    end = len(rendered) if refs_idx == -1 else refs_idx
+    prose = synthesized_prose(demote_model_structure(rendered[start:end]))
+    return rendered[:start] + prose + rendered[end:]
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +326,7 @@ def _strip_input_hash_from_frontmatter(
     if not m:
         return None
     try:
-        fm = yaml.safe_load(m.group(1))
+        fm = bounded_yaml.load(m.group(1))
     except yaml.YAMLError:
         return None
     if not isinstance(fm, dict) or hash_field not in fm:

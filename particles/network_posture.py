@@ -25,7 +25,7 @@ from particles.egress import (
     entry_labels,
     host_port,
 )
-from particles.embeddings import EMBEDDING_MODEL_ID
+from particles.embeddings import EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REVISION
 from particles.llm.registry import LLMPurpose, purpose_endpoint
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,10 @@ def encoder_cached() -> bool:
         if "/" in EMBEDDING_MODEL_ID
         else f"sentence-transformers/{EMBEDDING_MODEL_ID}"
     )
-    found = try_to_load_from_cache(repo, "config.json")
+    # The pinned revision only, the one the offline load accepts (security
+    # review Q58). A download by commit writes no `main` ref, so the
+    # published image holds that snapshot and nothing else.
+    found = try_to_load_from_cache(repo, "config.json", revision=EMBEDDING_MODEL_REVISION)
     return isinstance(found, str)
 
 

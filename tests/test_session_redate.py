@@ -51,6 +51,7 @@ async def _session_entry(session: Any, sid: str) -> tuple[str, str]:
         source_type="CONVERSATION",
         mutability=Mutability.APPEND_ONLY,
         tags=["claude-code", f"session:{sid}"],
+        deposited_by="claude-code-hook",
     )
     return entry_id, snapshot_id
 
@@ -260,9 +261,105 @@ class TestRedateCli:
 
         assert asyncio.run(_event_count()) == 1
 
+    def test_transcripts_option_reads_a_copied_folder(
+        self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The folder an operator gave `audit --transcripts`: flat, outside the
+        # projects folder, which holds nothing.
+        from particles.api.cli import memory as memory_cli
+
+        ids = asyncio.run(_seed_only())
+        empty = tmp_path / "projects"
+        empty.mkdir()
+        monkeypatch.setattr(memory_cli, "_claude_projects_root", lambda: empty)
+        copied = tmp_path / "copied"
+        copied.mkdir()
+        (copied / "s1.jsonl").write_text(
+            json.dumps({"type": "user", "timestamp": START.isoformat().replace("+00:00", "Z")})
+            + "\n"
+        )
+
+        result = runner.invoke(app, ["memory", "redate", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "2 session(s) have no transcript" in result.output
+        assert "--transcripts DIR" in result.output
+
+        result = runner.invoke(app, ["memory", "redate", "--transcripts", str(copied)])
+        assert result.exit_code == 0, result.output
+        assert "did set the date on 1 snapshot(s) and move 1 of 2" in result.output
+        assert "--transcripts DIR" not in result.output
+        assert _read(ids["wrong"])[0] == datetime(2026, 10, 9, tzinfo=UTC)
+
+    def test_transcripts_option_rejects_a_missing_folder(
+        self, cli_db: Path, tmp_path: Path
+    ) -> None:
+        result = runner.invoke(app, ["memory", "redate", "--transcripts", str(tmp_path / "nope")])
+        assert result.exit_code == 2
+
 
 async def _seed_only() -> dict[str, str]:
     from particles.db import session_scope
 
     async with session_scope() as session:
         return await _seed(session)
+
+
+class TestRedateBounds:
+    """Security review 2026-10-25-2, R30, adopted from the review's proof."""
+
+    @pytest.mark.asyncio
+    async def test_never_dates_a_snapshot_after_its_capture(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        from datetime import timedelta
+
+        from particles.api.cli._claude_code import session_started_at
+        from particles.corpus.store import get_entry
+        from particles.operations.validity import redate_sessions
+
+        entry_id, snapshot_id = await _session_entry(db_session, "abc123")
+        await db_session.commit()
+        projects = tmp_path / "projects"
+        (projects / "proj").mkdir(parents=True)
+        future = (datetime.now(UTC) + timedelta(days=3650)).isoformat()
+        (projects / "proj" / "abc123.jsonl").write_text(
+            json.dumps({"type": "user", "timestamp": future}) + "\n", encoding="utf-8"
+        )
+        await redate_sessions(
+            db_session, started_at_for=lambda _e, uri, _t: session_started_at(uri, projects)
+        )
+        await db_session.commit()
+        entry = await get_entry(db_session, entry_id)
+        assert entry is not None
+        snap = next(s for s in entry.snapshots if s.snapshot_id == snapshot_id)
+        published = snap.content_published_at
+        assert published is not None
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=UTC)
+        captured = snap.captured_at
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=UTC)
+        assert published <= captured, (published, captured)
+
+    @pytest.mark.asyncio
+    async def test_repairs_only_the_harvesters_own_session_deposits(self, db_session: Any) -> None:
+        """A caller's tag and URI alone do not make an entry a harvested session."""
+        from particles.corpus.deposit import deposit_text_versioned
+        from particles.corpus.store import get_entry
+        from particles.operations.validity import redate_sessions
+
+        entry_id, _snap, _ = await deposit_text_versioned(
+            db_session,
+            text="Session transcript text.",
+            uri_r="claude-code://session/abc123",
+            source_type="CONVERSATION",
+            mutability=Mutability.APPEND_ONLY,
+            tags=["claude-code"],
+            deposited_by="api-user",
+        )
+        await db_session.commit()
+        report = await redate_sessions(db_session, started_at_for=lambda *_a: START)
+        assert report.examined == 0 and report.snapshots_dated == 0
+        entry = await get_entry(db_session, entry_id)
+        assert entry is not None
+        assert all(s.content_published_at is None for s in entry.snapshots)

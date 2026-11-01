@@ -588,6 +588,63 @@ class TestTrustedProxiesValidator:
         with pytest.raises(ValidationError):
             ApiConfig(trusted_proxies=["10.0.0.0/8", "0.0.0.0/0"])
 
+    @pytest.mark.parametrize(
+        "entry",
+        ["127.0.0.0/7", "126.0.0.0/6", "::ffff:127.0.0.1", "::ffff:0:0/96", "::/96"],
+    )
+    def test_range_containing_loopback_rejected(self, entry: str) -> None:
+        """Security review 2026-10-25, Q42: a range that merely contains loopback
+        (or its IPv4-mapped form) lets a loopback caller name its own address."""
+        from particles.config import ApiConfig
+
+        with pytest.raises(ValidationError):
+            ApiConfig(trusted_proxies=[entry])
+
+    @pytest.mark.parametrize("entry", ["0.0.0.0/1", "10.0.0.0/7", "2001::/16", "fc00::/31"])
+    def test_very_broad_range_rejected(self, entry: str) -> None:
+        """Security review 2026-10-25, Q42: nothing broader than /8 or /32."""
+        from particles.config import ApiConfig
+
+        with pytest.raises(ValidationError):
+            ApiConfig(trusted_proxies=[entry])
+
+    @pytest.mark.parametrize("entry", ["10.0.0.0/8", "fd00::/32", "::ffff:10.0.0.5"])
+    def test_narrowest_admitted_ranges_pass(self, entry: str) -> None:
+        from particles.config import ApiConfig
+
+        assert ApiConfig(trusted_proxies=[entry]).trusted_proxies == [entry]
+
+
+class TestGraphManifestRoot:
+    """Security review 2026-10-25, Q43: a broad graph.manifest_root is refused."""
+
+    @pytest.mark.parametrize("broad", ["/", "~", "~/..", "HOME_PARENT", "HOME"])
+    def test_broad_root_rejected(
+        self, broad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import GraphConfig
+
+        home = tmp_path / "home" / "me"
+        home.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        broad = {"HOME_PARENT": str(home.parent), "HOME": str(home)}.get(broad, broad)
+        with pytest.raises(ValidationError):
+            GraphConfig(manifest_root=broad)
+
+    def test_real_home_and_filesystem_root_rejected(self) -> None:
+        from particles.config import GraphConfig
+
+        for broad in ("/", str(Path.home())):
+            with pytest.raises(ValidationError):
+                GraphConfig(manifest_root=broad)
+
+    def test_a_manifest_directory_passes(self, tmp_path: Path) -> None:
+        from particles.config import GraphConfig
+
+        root = tmp_path / "manifests"
+        assert GraphConfig(manifest_root=str(root)).manifest_root == str(root)
+        assert GraphConfig().manifest_root is None
+
 
 class TestConsolidationConfig:
     """the cycle's cadence/cost knobs, and the §5 structured-output knob."""
@@ -1011,3 +1068,24 @@ def test_retired_agent_extraction_keys_are_dropped_with_a_warning(
     assert raw["extraction"] == {}
     assert "claude_code.agent_extraction" in caplog.text
     ParticlesConfig.model_validate(raw)
+
+
+def test_a_relative_config_path_anchors_to_the_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U15: a relative path a config names is read beside that config, not the cwd."""
+    from particles.config import resolve_config_relative_path
+
+    home = tmp_path / "conf"
+    home.mkdir()
+    (home / "config.yaml").write_text("curation:\n  projection_manifests: [m.yaml]\n")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "m.yaml").write_text("planted\n")
+    monkeypatch.setenv("PARTICLES_CONFIG", str(home / "config.yaml"))
+    monkeypatch.chdir(clone)
+    reset_config()
+    (raw,) = get_config().curation.projection_manifests
+    assert resolve_config_relative_path(raw) == home.resolve() / "m.yaml"
+    assert resolve_config_relative_path(str(clone / "m.yaml")) == clone / "m.yaml"
+    assert resolve_config_relative_path("~/m.yaml") == Path.home() / "m.yaml"

@@ -16,6 +16,7 @@ import typer
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm, progress_line, set_heartbeat_status
 from particles.api.cli._remote import refuse_remote_sync
+from particles.api.cli._terminal import terminal_echo
 from particles.api.client import get_backend
 from particles.llm.usage import LLMUsage, render_usage_line
 from particles.operations.reindex_scope import (
@@ -133,7 +134,7 @@ def reindex_cmd(
     """
     eids = [e.strip() for e in entry_ids.split(",")] if entry_ids else None
     if only_changed_components and not ONLY_CHANGED_COMPONENTS_ENABLED:
-        typer.echo(f"Error: {ONLY_CHANGED_COMPONENTS_REFUSAL}", err=True)
+        terminal_echo(f"Error: {ONLY_CHANGED_COMPONENTS_REFUSAL}", err=True)
         raise typer.Exit(_EXIT_NOT_STARTED)
     if estimate:
         _refuse_estimate_misuse(extractor_version, dry_run, only_changed_components)
@@ -182,7 +183,7 @@ def _echo_usage(summary: dict[str, object]) -> None:
     """
     raw = summary.get("llm_usage")
     if isinstance(raw, dict):
-        typer.echo(render_usage_line(LLMUsage.model_validate(raw)), err=True)
+        terminal_echo(render_usage_line(LLMUsage.model_validate(raw)), err=True)
 
 
 async def _reindex(
@@ -238,7 +239,7 @@ def _refuse_estimate_misuse(
     elif only_changed_components:
         problem = "--estimate samples the full version scope; drop --only-changed-components."
     if problem is not None:
-        typer.echo(f"Error: {problem}", err=True)
+        terminal_echo(f"Error: {problem}", err=True)
         raise typer.Exit(_EXIT_NOT_STARTED)
 
 
@@ -284,16 +285,16 @@ async def _estimate(
             seed=seed,
         )
     for line in plan.format_lines():
-        typer.echo(line, err=as_json)
+        terminal_echo(line, err=as_json)
     if not plan.sample:
-        typer.echo(
+        terminal_echo(
             "Nothing to sample: no snapshot in scope has stored claims to compare.",
             err=as_json,
         )
         return
     if not yes:
         if not sys.stdin.isatty():
-            typer.echo(
+            terminal_echo(
                 "Error: --estimate spends on its sample and asks first; pass --yes "
                 "in a non-interactive run. Nothing was spent.",
                 err=True,
@@ -302,7 +303,7 @@ async def _estimate(
         if not confirm(
             f"Re-extract and judge {len(plan.sample)} sampled snapshot(s)?", err=as_json
         ):
-            typer.echo("Aborted: nothing was spent.", err=as_json)
+            terminal_echo("Aborted: nothing was spent.", err=as_json)
             raise typer.Exit(_EXIT_NOT_STARTED)
 
     # the sample is metered and recorded like any reindex spend.
@@ -312,12 +313,12 @@ async def _estimate(
             report = await run_reindex_estimate(session, plan)
         meter.snapshots = len(plan.sample)
     if as_json:
-        typer.echo(report.model_dump_json(indent=2))
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
     else:
         for line in report.format_lines():
-            typer.echo(line)
+            terminal_echo(line)
     if meter.llm_usage is not None:
-        typer.echo(render_usage_line(meter.llm_usage), err=True)
+        terminal_echo(render_usage_line(meter.llm_usage), err=True)
 
 
 def _echo_human_summary(summary: dict[str, object], dry_run: bool) -> None:
@@ -328,20 +329,20 @@ def _echo_human_summary(summary: dict[str, object], dry_run: bool) -> None:
 
     plan = ReindexPlan.model_validate(summary["plan"])
     if dry_run:
-        typer.echo(plan.format_line())
+        terminal_echo(plan.format_line())
         for line in plan.format_missing_blob_lines():
-            typer.echo(line)
+            terminal_echo(line)
         for line in plan.format_absent_lines():
-            typer.echo(line)
-        typer.echo("Dry run — nothing extracted.")
+            terminal_echo(line)
+        terminal_echo("Dry run — nothing extracted.")
         return
 
-    typer.echo(
+    terminal_echo(
         f"Reindex complete: {summary['succeeded']} succeeded, "
         f"{summary['failed']} failed (scope: {summary['scope']} snapshot(s))."
     )
     if plan.skipped_newer_schema:
-        typer.echo(
+        terminal_echo(
             f"Skipped {plan.skipped_newer_schema} snapshot(s) holding particles a newer "
             "SDK wrote; reindex them with that SDK."
         )
@@ -350,8 +351,8 @@ def _echo_human_summary(summary: dict[str, object], dry_run: bool) -> None:
         shown = ", ".join(f"{e[:8]}…" for e in failed_entries[:5])
         remainder = len(failed_entries) - 5
         suffix = f" … and {remainder} more" if remainder > 0 else ""
-        typer.echo(f"Failed entries: {shown}{suffix} (see --format json)")
+        terminal_echo(f"Failed entries: {shown}{suffix} (see --format json)")
     lint_summary = cast(dict[str, int], summary.get("lint_summary") or {})
     if lint_summary:
         rendered = ", ".join(f"{k}={v}" for k, v in sorted(lint_summary.items()))
-        typer.echo(f"Post-reindex lint: {rendered}")
+        terminal_echo(f"Post-reindex lint: {rendered}")

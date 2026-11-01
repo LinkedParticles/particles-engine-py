@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -53,3 +54,22 @@ def test_the_admission_bar() -> None:
 @pytest.mark.parametrize(("correct", "total"), [(0, 10), (10, 10), (7, 20)])
 def test_the_bound_sits_below_the_point_estimate(correct: int, total: int) -> None:
     assert _load().wilson_lower(correct, total) <= correct / total
+
+
+def test_the_store_path_cannot_add_a_uri_parameter(tmp_path: Path) -> None:
+    """U9: a ``?`` or ``#`` in the store's path stays in the file name, read-only."""
+    sheet = _load()
+    db = tmp_path / "odd?mode=rwc&x#y" / "store.db"
+    db.parent.mkdir()
+    sqlite3.connect(db).close()
+    uri = sheet.read_only_uri(db)
+    assert uri.startswith("file:///") and uri.endswith("?mode=ro") and uri.count("?") == 1
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        assert conn.execute("PRAGMA database_list").fetchone()[2] == str(db.resolve())
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE t (x)")
+    finally:
+        conn.close()
+    # A relative path is anchored before it is encoded.
+    assert sheet.read_only_uri(Path("store.db")).startswith("file:///")

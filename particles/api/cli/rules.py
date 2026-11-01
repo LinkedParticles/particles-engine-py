@@ -15,6 +15,7 @@ live store was *no*, and that should not require a database client to discover.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -89,7 +90,43 @@ def rules_sync_cmd(
 ) -> None:
     """Deposit the rule-source set as MUTABLE + LAZY corpus entries."""
     configure_output(verbose, debug, quiet, progress)
-    run(_sync([str(p) for p in paths] if paths else None, store, dry_run, restamp_only))
+    # A path named here is the operator's own choice, so a relative one is taken
+    # against this directory now; the configured roots never are (O59).
+    named = [str(p.expanduser().absolute()) for p in paths] if paths else None
+    run(_sync(named, store, dry_run, restamp_only))
+
+
+@rules_app.command("forget")
+def rules_forget_cmd(
+    roots: list[str] = typer.Argument(
+        ...,
+        help=(
+            "Recorded refresh roots to remove, as `particles rules` lists them. "
+            "A path that names no recorded root is reported and changes nothing."
+        ),
+    ),
+    store: str = _STORE_OPTION,
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print what each removal would change without removing anything.",
+    ),
+    verbose: bool = VERBOSE_OPTION,
+    debug: bool = DEBUG_OPTION,
+    quiet: bool = QUIET_OPTION,
+    progress: bool | None = PROGRESS_OPTION,
+) -> None:
+    """Remove recorded refresh roots, so the refresh no longer reads rule files under them.
+
+    Only the recorded rows are removed: no belief is retracted, no corpus entry
+    is touched, and a later `particles rules sync` from the same place records
+    the root again. Before removing a root the verb counts the sources it admits
+    (under it, and under the main checkout of a recorded worktree) that stop
+    being refreshed and the ones another route still admits, naming that route.
+    Each removal is written to the operator event log.
+    """
+    configure_output(verbose, debug, quiet, progress)
+    run(_forget(roots, store, dry_run))
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +134,33 @@ def rules_sync_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _print_resolution_notes(resolution: RuleSourceResolution) -> None:
-    """Disclose discovery, truncation, and unresolvable roots — never silently."""
+def _print_resolution_notes(resolution: RuleSourceResolution, *, named: bool = False) -> None:
+    """Disclose discovery, truncation, and unresolvable roots — never silently.
+
+    ``named`` is set when the roots were passed on the command line. A file
+    named there is deposited but recorded as no root, since a recorded root
+    admits rule files beneath a directory only, so the refresh
+    keeps it current only through the config.
+    """
+    if named:
+        for root in resolution.roots:
+            if root.is_file():
+                narrate(
+                    f"Warning: {root} is a file, so it is registered but not recorded as a "
+                    "refresh root. The refresh keeps it current only if it is a rule file "
+                    "under another recorded root, or its path is in rule_sources.paths or "
+                    "under local_refresh.allowed_roots."
+                )
     if resolution.discovered:
         roots = ", ".join(str(r) for r in resolution.roots) or "(none found)"
         narrate(f"rule_sources.paths is empty — discovered roots: {roots}")
     for missing in resolution.missing:
         narrate(f"Warning: registered path does not exist: {missing}")
+    for broad in resolution.broad:
+        narrate(
+            f"Warning: skipped {broad}: the filesystem root, the home directory and their "
+            "ancestors are too broad to track. Name the project directory instead."
+        )
     for escaped in resolution.escaped:
         narrate(
             f"Warning: skipped {escaped}: it links outside its root or to a file that is "
@@ -201,12 +258,23 @@ async def _report_refresh_roots(store: str) -> None:
     typer.echo()
     typer.echo("Recorded refresh roots:" if roots else "No refresh root recorded yet.")
     for root in roots:
-        typer.echo(f"  {root}{'' if root.exists() else '  (missing)'}")
-    if refused:
-        typer.echo(
-            f"{refused} LAZY local source(s) outside every allowed root are not refreshed; "
-            "run `particles rules sync` from the project that holds them."
-        )
+        typer.echo(_root_line(root))
+    for line in refused.lines():
+        typer.echo(line)
+
+
+def _root_line(root: Path) -> str:
+    """One recorded root as ``particles rules`` lists it, marked when it admits nothing."""
+    from particles.corpus.rule_roots import owned_by_refresher, owner_name
+
+    forget = f"`particles rules forget {shlex.quote(str(root))}`"
+    if root.is_dir() and not owned_by_refresher(root):
+        return f"  {root}  (owned by {owner_name(root)}: admits nothing; {forget})"
+    if root.is_dir():
+        return f"  {root}"
+    if root.exists():
+        return f"  {root}  (a file: admits nothing)"
+    return f"  {root}  (missing; {forget})"
 
 
 def _enabled_or_report() -> bool:
@@ -315,7 +383,7 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
             restamped = await _restamp(session, report.resolution.files)
             await session.commit()
 
-    _print_resolution_notes(report.resolution)
+    _print_resolution_notes(report.resolution, named=bool(paths))
     if not report.resolution.files:
         typer.echo(
             "No rule sources resolved — nothing to sync. Register paths in "
@@ -362,3 +430,36 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
         )
     else:
         typer.echo("All tracked and enrolled in the refresh loop.")
+
+
+async def _forget(roots: list[str], store: str, dry_run: bool) -> None:
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.rule_roots import forget_rule_source_roots
+
+    ensure_local("rules forget")
+    async with session_scope(store, write=not dry_run) as session:
+        report = await forget_rule_source_roots(session, roots, dry_run=dry_run)
+        if not dry_run:
+            await session.commit()
+
+    for raw in report.unmatched:
+        typer.echo(f"Not a recorded refresh root: {raw}. `particles rules` lists them.")
+    verb = "would forget" if dry_run else "forgot"
+    for plan in report.plans:
+        typer.echo(f"{verb} {plan.path} (recorded by {plan.recorded_by})")
+        typer.echo(f"  {plan.becomes_refused} LAZY source(s) it admitted stop being refreshed.")
+        for route, count in plan.still_admitted.items():
+            typer.echo(
+                f"  {count} source(s) it admitted are still refreshed through {route}; "
+                "remove that route to stop them."
+            )
+        if plan.already_refused:
+            typer.echo(f"  {plan.already_refused} source(s) under it were already refused.")
+    if any(plan.becomes_refused for plan in report.plans):
+        typer.echo(
+            "Refused sources stay in the corpus and keep their beliefs. To withdraw "
+            "one, run `particles corpus retract <entry>`; to read it again, run "
+            "`particles rules sync` from its directory."
+        )
+    if not report.plans:
+        raise typer.Exit(1)

@@ -107,6 +107,25 @@ class SourceTrustRow(Base):
     asserted_by: Mapped[str] = mapped_column(String, nullable=False)
 
 
+#: The URI schemes a harness's own deposits use (``claude-code://session/<id>``).
+#: Such a URI names no web host (its netloc is a path segment), so no domain
+#: row, the ``*`` "unknown domain" default among them, scores it. An explicit
+#: list, not "anything but http": a source under any other scheme is still
+#: scored as an unknown domain (security review of PR 1203, S1).
+HARNESS_URI_SCHEMES = frozenset({"claude-code"})
+
+
+def domain_rows_apply(uri_r: str) -> bool:
+    """Whether the domain rows score this URI.
+
+    The one scheme decision both trust paths take: the §6.6 ladder's
+    :func:`resolve_trust_score` and the query-time ``TrustPolicy``, so the two
+    cannot disagree on which sources a domain row covers. A URI it exempts
+    still takes every matching URL-pattern rule.
+    """
+    return urlparse(uri_r).scheme not in HARNESS_URI_SCHEMES
+
+
 def _extract_domain(uri_r: str) -> str:
     return urlparse(uri_r).netloc or uri_r
 
@@ -148,8 +167,10 @@ async def resolve_trust_score(session: AsyncSession, uri_r: str | None) -> float
     """Return the effective trust score [0.0, 1.0] for a corpus entry URI."""
     if uri_r is None or uri_r.startswith("file://"):
         return 0.50
-    domain = _extract_domain(uri_r)
-    base = await _lookup_domain_score(session, domain)
+    if domain_rows_apply(uri_r):
+        base = await _lookup_domain_score(session, _extract_domain(uri_r))
+    else:
+        base = 0.50
     mod = await _lookup_url_modifier(session, uri_r)
     return max(0.0, min(1.0, base + mod))
 

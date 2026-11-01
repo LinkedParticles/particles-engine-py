@@ -95,11 +95,14 @@ particle; the source UUID rides along as `sourceParticleId` (origin metadata
 only). The validation confirmed the imported particle's ID differs from the
 source: there is no primary-key clash, but see idempotency below.
 
-**No exact-duplicate dedup → import is not idempotent.** Import identity is
-embedding-similarity + §6.6, **not** claim identity. Re-running the same import
-does not no-op: an identical claim re-embeds to the same vector, matches its
-own twin, is judged *corroborating* (not contradicting), and is **inserted
-again as a near-duplicate**. Run an interchange import **once**.
+**Exact duplicates are skipped; near-duplicates are not.** Exact-duplicate
+suppression (
+on by default) skips an imported claim the store already holds ACTIVE with the
+same text and subjects, and adds no particle for it. Any other similar claim
+runs the §6.6 ladder below and may be inserted beside its twin as a
+near-duplicate, so import is not a general merge. An import stopped midway
+keeps the units it had committed; running it again skips those an exact
+duplicate already holds.
 
 **Importing into a non-empty store invokes the LLM.** When an imported claim is
 highly similar to an existing Mini claim, reconciliation runs an LLM
@@ -110,6 +113,11 @@ collision). Outcomes per imported particle:
 - *Similar, not contradictory* → **corroborates**; inserted alongside (a
   near-duplicate you may later link or merge).
 - *Similar and contradictory* → resolved by **reconciliation mode** (below).
+- *A similar claim another writer committed while the import ran, when it is
+  the nearest claim the import's search under the writer lock finds* → the
+  imported particle is **held for review** (quarantined behind an
+  INCONSISTENCY record), in either reconciliation mode, since no probe read
+  that pair.
 
 **Reconciliation mode matters**.
 The effective
@@ -296,7 +304,8 @@ flagging only.
   pending items (trust, events, relation edges) and
   lenses (deferred). No new PDR needed.
 - **Import is not idempotent and has no `--dry-run`.** Re-running an import
-  duplicates particles (no claim-identity dedup before §6.6), and the only way
+  can add near-duplicate particles (only an exact duplicate is skipped before
+  §6.6), and the only way
   to preview is to import into a throwaway DB copy. This is **not** cleanly
   covered by an existing row and is the strongest candidate for a **new PDR**
   if a safe, repeatable "merge only what's missing" import workflow is wanted;

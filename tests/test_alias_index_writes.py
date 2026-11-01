@@ -25,6 +25,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests import _source_tree
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "particles"
 COLUMN = "aliases_json"
 
@@ -109,7 +111,7 @@ class _WriteFinder(ast.NodeVisitor):
 
 def _writes_in(source: str) -> list[tuple[str, int]]:
     finder = _WriteFinder()
-    finder.visit(ast.parse(source))
+    finder.visit(_source_tree.parse(source))
     return finder.writes
 
 

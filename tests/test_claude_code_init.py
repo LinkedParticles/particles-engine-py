@@ -13,6 +13,7 @@ preservation (parse-preserve-append, never clobber).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -515,7 +516,7 @@ class TestInitClaudeCode:
         commands = [h["command"] for g in settings["hooks"]["SessionStart"] for h in g["hooks"]]
         config_abs = str(init_env["config"].resolve())
         assert commands == [
-            f"env PARTICLES_CONFIG={config_abs} "
+            f"env PARTICLES_CONFIG={config_abs} PARTICLES_ENGINE_BASE_URL='' "
             "/custom/bin/particles hook session-start --store memory"
         ]
 
@@ -783,6 +784,15 @@ class TestProjectInstallNarrowsItsSideEffects:
         assert {p.name for p in _resolved_rule_sources()} == {"AGENTS.md", "CLAUDE.md"}
 
 
+def _installed_particles(directory: Path) -> str:
+    """An executable named ``particles`` this account owns, as an install leaves one."""
+    directory.mkdir(parents=True, exist_ok=True)
+    executable = directory / "particles"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    return str(executable)
+
+
 def _write_user_config(home: Path, servers: dict[str, Any]) -> None:
     (home / ".claude.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
 
@@ -804,15 +814,20 @@ class TestMcpRegistration:
         assert f"PARTICLES_CONFIG={init_env['config'].resolve()}" in add
 
     def test_an_existing_registration_keeps_its_executable_and_gains_the_config_pin(
-        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        no_real_claude_cli: list[list[str]],
+        tmp_path: Path,
     ) -> None:
         """an unpinned registration read its starting directory (finding D8)."""
+        pinned = _installed_particles(tmp_path / "pinned")
         _write_user_config(
             init_env["home"],
             {
                 "particles": {
                     "type": "stdio",
-                    "command": "/opt/pinned/.venv/bin/particles",
+                    "command": pinned,
                     "args": ["mcp", "serve"],
                     "env": {"DATABASE_URL": "sqlite+aiosqlite:////data/p.db"},
                 }
@@ -829,13 +844,15 @@ class TestMcpRegistration:
             "add",
             "--scope",
             "user",
+            "particles",
             "-e",
             "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
             "-e",
             f"PARTICLES_CONFIG={init_env['config'].resolve()}",
-            "particles",
+            "-e",
+            "PARTICLES_ENGINE_BASE_URL=",
             "--",
-            "/opt/pinned/.venv/bin/particles",
+            pinned,
             "mcp",
             "serve",
             "--project-observer",
@@ -854,11 +871,11 @@ class TestMcpRegistration:
             "add",
             "--scope",
             "user",
+            "particles",
             "-e",
             "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
-            "particles",
             "--",
-            "/opt/pinned/.venv/bin/particles",
+            pinned,
             "mcp",
             "serve",
         ]
@@ -915,7 +932,10 @@ class TestMcpRegistration:
                 "particles": {
                     "command": "/opt/p/bin/particles",
                     "args": ["mcp", "serve", "--project-observer", "cwd"],
-                    "env": {"PARTICLES_CONFIG": str(init_env["config"].resolve())},
+                    "env": {
+                        "PARTICLES_CONFIG": str(init_env["config"].resolve()),
+                        "PARTICLES_ENGINE_BASE_URL": "",
+                    },
                 }
             },
         )
@@ -1208,3 +1228,308 @@ class TestStateDirIsPrivate:
         state.chmod(0o755)
         assert runner.invoke(app, ["init", "claude-code", "--no-audit"]).exit_code == 0
         assert state.stat().st_mode & 0o777 == 0o700
+
+    def test_the_projection_manifest_is_owner_only(
+        self, init_env: dict[str, Path], tmp_path: Path
+    ) -> None:
+        from particles.api.cli._claude_code import memory_manifest_path
+        from particles.api.cli.init import _provision_projection
+        from particles.config import reset_config
+
+        state = tmp_path / "state"
+        init_env["config"].write_text(
+            f"claude_code:\n  state_dir: {state}\n"
+            f"agent_memory:\n  projection:\n    manifest: {state}/memory.yaml\n",
+            encoding="utf-8",
+        )
+        reset_config()
+        _provision_projection(tmp_path / "nowhere")
+        assert memory_manifest_path().stat().st_mode & 0o777 == 0o600
+
+
+class TestProjectRemoveStaysAtProjectScope:
+    """Security review 2026-10-24-2, P23 / P24 / N25: a project remove touches only the project."""
+
+    @pytest.fixture
+    def project(
+        self, init_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Path:
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        return project
+
+    def _user_install(self, runner: CliRunner, init_env: dict[str, Path]) -> None:
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit"])
+        assert result.exit_code == 0, result.output
+        assert init_env["settings"].is_file()
+
+    def _link_project_settings(self, project: Path, init_env: dict[str, Path]) -> None:
+        (project / ".claude").mkdir()
+        (project / ".claude" / "settings.local.json").symlink_to(init_env["settings"])
+
+    def test_project_remove_leaves_user_mcp_registration(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        project: Path,
+        no_real_claude_cli: list[list[str]],
+    ) -> None:
+        """A project-scope ``--remove`` never touches the user-scope MCP registration."""
+        self._user_install(runner, init_env)
+        no_real_claude_cli.clear()
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 0, result.output
+        assert no_real_claude_cli == [], f"project remove ran: {no_real_claude_cli}"
+
+    def test_remove_replays_only_an_mcp_add(
+        self, runner: CliRunner, init_env: dict[str, Path], no_real_claude_cli: list[list[str]]
+    ) -> None:
+        """Only an ``mcp add --scope user`` of the recorded name is ever replayed."""
+        from particles.api.cli._claude_code import make_private_dir, state_dir, write_private_text
+
+        make_private_dir(state_dir())
+        write_private_text(
+            state_dir() / "mcp-registration.json",
+            json.dumps(
+                {"name": "particles", "created": False, "previous": ["config", "set", "x", "y"]}
+            ),
+        )
+        no_real_claude_cli.clear()
+        result = runner.invoke(app, ["init", "claude-code", "--remove"])
+        assert result.exit_code == 0, result.output
+        assert no_real_claude_cli == [["mcp", "remove", "--scope", "user", "particles"]]
+
+    def test_a_recorded_particles_add_is_replayed(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        no_real_claude_cli: list[list[str]],
+        tmp_path: Path,
+    ) -> None:
+        from particles.api.cli._claude_code import make_private_dir, state_dir, write_private_text
+
+        previous = [
+            "mcp", "add", "--scope", "user", "-e", "PARTICLES_CONFIG=/c.yaml", "particles",
+            "--", _installed_particles(tmp_path / "venv" / "bin"), "mcp", "serve",
+        ]  # fmt: skip
+        make_private_dir(state_dir())
+        write_private_text(
+            state_dir() / "mcp-registration.json",
+            json.dumps({"name": "particles", "created": False, "previous": previous}),
+        )
+        # The registration the install made is there for the remove to take.
+        _write_user_config(
+            init_env["home"],
+            {
+                "particles": {
+                    "command": previous[8],
+                    "args": ["mcp", "serve", "--project-observer", "cwd"],
+                }
+            },
+        )
+        no_real_claude_cli.clear()
+        assert runner.invoke(app, ["init", "claude-code", "--remove"]).exit_code == 0
+        # A record an earlier release wrote, with the pairs before the name, is
+        # replayed in the order the CLI accepts (security review 2026-10-27-1, E13).
+        name_first = [*previous[:4], "particles", *previous[4:6], *previous[7:]]
+        assert no_real_claude_cli == [["mcp", "remove", "--scope", "user", "particles"], name_first]
+
+    @pytest.mark.parametrize(
+        "previous",
+        [
+            ["mcp", "add", "--scope", "user", "other", "--", "particles", "mcp", "serve"],
+            ["mcp", "add", "--scope", "project", "particles", "--", "particles", "mcp", "serve"],
+            ["mcp", "add", "--scope", "user", "particles", "--", "/bin/sh", "-c", "id"],
+            ["mcp", "add", "--scope", "user", "-e", "particles", "--", "particles", "mcp", "serve"],
+        ],
+        ids=["other-name", "other-scope", "other-program", "malformed-env"],
+    )
+    def test_is_recorded_mcp_add_rejects(self, previous: list[str]) -> None:
+        from particles.api.cli.init import _is_recorded_mcp_add
+
+        assert not _is_recorded_mcp_add(previous, "particles")
+
+    def test_project_remove_does_not_write_through_a_symlinked_settings_file(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        """A project-scope remove leaves the user-scope settings file byte-for-byte unchanged."""
+        self._user_install(runner, init_env)
+        before = init_env["settings"].read_bytes()
+        self._link_project_settings(project, init_env)
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 1
+        assert "symlink" in result.output
+        assert init_env["settings"].read_bytes() == before
+
+    def test_project_install_does_not_write_through_a_symlinked_dot_claude(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path, tmp_path: Path
+    ) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (project / ".claude").symlink_to(elsewhere)
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--no-audit"])
+        assert result.exit_code == 1
+        assert list(elsewhere.iterdir()) == []
+
+    def test_project_remove_through_symlink_keeps_the_user_store(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        """A project-scope remove never deletes the user-scope store or reverts its config."""
+        self._user_install(runner, init_env)
+        store = init_env["home"] / ".particles" / "memory.db"
+        assert store.exists()
+        config_before = init_env["config"].read_text(encoding="utf-8")
+        self._link_project_settings(project, init_env)
+        runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert store.exists()
+        assert init_env["config"].read_text(encoding="utf-8") == config_before
+
+    def test_a_shipped_settings_file_naming_the_user_store_keeps_it(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        """A real settings.local.json naming the user's empty store does not revert it."""
+        self._user_install(runner, init_env)
+        store = init_env["home"] / ".particles" / "memory.db"
+        config_before = init_env["config"].read_text(encoding="utf-8")
+        (project / ".claude").mkdir()
+        (project / ".claude" / "settings.local.json").write_text(
+            init_env["settings"].read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 0, result.output
+        assert "no project-scope install recorded creating it" in result.output
+        assert store.exists()
+        assert init_env["config"].read_text(encoding="utf-8") == config_before
+
+    def test_a_project_install_reverts_the_store_it_created(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        """The round trip still works: a project install's own store auto-create is undone."""
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--no-audit"])
+        assert result.exit_code == 0, result.output
+        assert "memory" in init_env["config"].read_text(encoding="utf-8")
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 0, result.output
+        assert "Reverted the 'memory' store auto-create" in result.output
+
+
+class TestLinkedProjectFilesAndReplay:
+    """Security review 2026-10-25-1: Q27 (a hard-linked project file) and Q53 (the replay)."""
+
+    @pytest.fixture
+    def project(
+        self, init_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Path:
+        project = tmp_path / "project"
+        (project / ".claude").mkdir(parents=True)
+        monkeypatch.chdir(project)
+        return project
+
+    def _user_settings(self, init_env: dict[str, Path]) -> Path:
+        user_settings = init_env["settings"]
+        user_settings.parent.mkdir(parents=True, exist_ok=True)
+        user_settings.write_text('{"owner": true}\n', encoding="utf-8")
+        return user_settings
+
+    def test_a_project_install_does_not_write_through_a_hard_linked_settings_file(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        """The audit's proof: a hard link to the user settings file is refused, not rewritten."""
+        user_settings = self._user_settings(init_env)
+        before = user_settings.read_bytes()
+        os.link(user_settings, project / ".claude" / "settings.local.json")
+        result = runner.invoke(
+            app, ["init", "claude-code", "--project", "--no-audit", "--no-skills"]
+        )
+        assert result.exit_code == 1
+        assert "another name" in result.output
+        assert user_settings.read_bytes() == before
+
+    def test_a_project_remove_does_not_write_through_a_hard_linked_settings_file(
+        self, runner: CliRunner, init_env: dict[str, Path], project: Path
+    ) -> None:
+        user_settings = self._user_settings(init_env)
+        before = user_settings.read_bytes()
+        os.link(user_settings, project / ".claude" / "settings.local.json")
+        result = runner.invoke(app, ["init", "claude-code", "--project", "--remove"])
+        assert result.exit_code == 1
+        assert user_settings.read_bytes() == before
+
+    def test_the_project_settings_write_replaces_rather_than_writes_into(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even past the check, the write replaces the name and leaves a shared inode alone."""
+        from particles.api.cli.init import _write_settings
+
+        shared = tmp_path / "shared.json"
+        shared.write_text("{}\n", encoding="utf-8")
+        target = tmp_path / ".claude" / "settings.local.json"
+        target.parent.mkdir()
+        os.link(shared, target)
+        _write_settings(target, '{"new": true}\n')
+        assert shared.read_text(encoding="utf-8") == "{}\n"
+        assert target.read_text(encoding="utf-8") == '{"new": true}\n'
+        assert target.stat().st_nlink == 1
+        assert [p.name for p in target.parent.iterdir()] == ["settings.local.json"]
+
+    def test_a_hard_linked_project_skill_file_is_replaced_not_written_into(
+        self, tmp_path: Path
+    ) -> None:
+        from particles.api.cli.skills import OWNED_SUBDIR, install_skills, skill_files
+
+        victim = tmp_path / "victim.json"
+        victim.write_text("owner\n", encoding="utf-8")
+        target = tmp_path / "skills"
+        owned = target / OWNED_SUBDIR
+        owned.mkdir(parents=True)
+        os.link(victim, owned / skill_files()[0].name)
+        install_skills(target, root=tmp_path)
+        assert victim.read_text(encoding="utf-8") == "owner\n"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            # The command element is a shell that merely mentions the words.
+            ["mcp", "add", "--scope", "user", "particles", "--", "sh", "-c",
+             "true; /opt/bin/particles mcp serve"],
+            # Environment overrides that reroute which program or store the server runs.
+            ["mcp", "add", "--scope", "user", "-e", "PATH=/tmp/elsewhere", "particles", "--",
+             "/opt/bin/particles", "mcp", "serve"],
+            ["mcp", "add", "--scope", "user", "-e", "DATABASE_URL=sqlite+aiosqlite:///./p.db",
+             "particles", "--", "/opt/bin/particles", "mcp", "serve"],
+            ["mcp", "add", "--scope", "user", "-e", "PARTICLES_CONFIG=rel.yaml", "particles",
+             "--", "/opt/bin/particles", "mcp", "serve"],
+            # A bare name resolved on PATH, a launcher, and an extra argument.
+            ["mcp", "add", "--scope", "user", "particles", "--", "particles", "mcp", "serve"],
+            ["mcp", "add", "--scope", "user", "particles", "--", "/usr/bin/env", "particles",
+             "mcp", "serve"],
+            ["mcp", "add", "--scope", "user", "particles", "--", "/opt/bin/particles", "mcp",
+             "serve", "--project-observer", "cwd", "; id"],
+        ],
+        ids=["shell", "path-env", "relative-store", "relative-config", "bare-name", "launcher",
+             "extra-arg"],
+    )  # fmt: skip
+    def test_the_replay_accepts_only_a_direct_particles_server(self, argv: list[str]) -> None:
+        """The audit's proof, widened: only a direct particles server, pinned absolute."""
+        from particles.api.cli.init import _is_recorded_mcp_add
+
+        assert not _is_recorded_mcp_add(argv, "particles")
+
+    @pytest.mark.parametrize(
+        "tail",
+        [[], ["--project-observer", "cwd"], ["--project-observer=cwd"]],
+    )
+    def test_the_replay_accepts_what_the_installer_records(
+        self, tail: list[str], tmp_path: Path
+    ) -> None:
+        from particles.api.cli.init import _is_recorded_mcp_add
+
+        argv = [
+            "mcp", "add", "--scope", "user",
+            "-e", "DATABASE_URL=sqlite+aiosqlite:////data/p.db",
+            "-e", "PARTICLES_CONFIG=/c.yaml",
+            "-e", "PARTICLES_ENGINE_BASE_URL=",
+            "particles", "--", _installed_particles(tmp_path), "mcp", "serve", *tail,
+        ]  # fmt: skip
+        assert _is_recorded_mcp_add(argv, "particles")

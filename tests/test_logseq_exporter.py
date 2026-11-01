@@ -491,12 +491,15 @@ class TestSynthesisSpliceFormat:
         from particles.store.synthesis_cache_store import store_cached_article
 
         input_hash = compute_input_hash(ps, subj)
+        # A cached body as the engine writes one: a synthesis that cites an
+        # input particle. A hit rebuilds the title and References around it.
         cached_body = (
             "---\n"
             f"input_hash: {input_hash}\n"
+            "synthesis: llm\n"
             "---\n"
             "# Shared\n\n"
-            "Synthesised prose body.\n\n"
+            f"Synthesised prose body.[^p-{ps[0].id[:8]}]\n\n"
             "## References\n\n"
             "- One reference line.\n"
         )
@@ -607,7 +610,8 @@ class TestSkipLowCoverage:
                 subj.id,
                 input_hash,
                 _PROMPT_VERSION,
-                "---\ninput_hash: " + input_hash + "\n---\n# Subj\n\nProse.\n",
+                "---\ninput_hash: " + input_hash + "\nsynthesis: llm\n---\n# Subj\n\n"
+                f"Prose.[^p-{ps[0].id[:8]}]\n",
             )
             await session.commit()
 
@@ -754,15 +758,16 @@ class TestNarrativePageExport:
                 subj.id,
                 subject_hash,
                 _PROMPT_VERSION,
-                f"---\ninput_hash: {subject_hash}\n---\n# Shared\n\nSubject prose.\n",
+                f"---\ninput_hash: {subject_hash}\nsynthesis: llm\n---\n# Shared\n\n"
+                f"Subject prose.[^p-{ps[0].id[:8]}]\n",
             )
             await store_cached_article(
                 session,
                 narrative.id,
                 narrative_hash,
                 _PROMPT_VERSION,
-                f"---\ninput_hash: {narrative_hash}\n---\n# A hard day.\n\n"
-                "Narrative prose.\n\n## References\n\n- One reference line.\n",
+                f"---\ninput_hash: {narrative_hash}\nsynthesis: llm\n---\n# A hard day.\n\n"
+                f"Narrative prose.[^p-{ps[0].id[:8]}]\n\n## References\n\n- One reference line.\n",
             )
             await session.commit()
 
@@ -825,3 +830,34 @@ class TestNarrativePageExport:
             set_client(None)
         assert summary.narrative_notes is None
         assert not (tmp_path / "pages" / "Narratives___A_hard_day.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# D36 residual: a narrative label is one inert heading (security review 2026-10-24-2, P32)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_d36_a_narrative_label_stays_one_inert_logseq_heading() -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from particles.core.schema import ParticleType
+    from particles.exporters.logseq import narrative as logseq_narrative
+    from tests.test_wiki_exporter import _make_particle
+
+    label = "Morning\n- {{embed [[Secrets]]}}\n  tags:: injected"
+    story = _make_particle(label).model_copy(update={"particle_type": ParticleType.NARRATIVE})
+    body = "---\ntitle: x\n---\n# x\n\nProse.\n"
+    with patch.object(logseq_narrative, "render_article", AsyncMock(return_value=(body, False))):
+        page, _state = await logseq_narrative.render_narrative_page(
+            narrative=story,
+            constituents=[_make_particle("a")],
+            entry_uri_map={},
+            eff_conf={},
+            article_hash="h",
+            session=None,  # type: ignore[arg-type]
+        )
+    first_block = page.split("\n", 1)[0]
+    assert "{{embed" not in page.replace("\\{\\{", "")
+    assert "tags:: injected" not in page
+    assert first_block.startswith("- # Morning")

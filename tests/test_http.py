@@ -18,6 +18,7 @@ from particles.http import (
     TransientHttpError,
     get_capped,
     get_with_retry,
+    particles_client,
 )
 
 
@@ -251,3 +252,108 @@ class TestGetWithRetry:
         assert args[0] == "GET"
         assert kwargs["headers"] == {"Accept": "application/json"}
         assert kwargs["timeout"] == 5
+
+
+class TestCallerHeadersStayWithTheOrigin:
+    """R39 (SECURITY_REVIEW_20261025-2): a caller's credential header stays with its origin.
+
+    It is never resent to the origin a redirect names.
+
+    The SSRF transport runs for real (egress check, resolve, blocklist, pin)
+    with a stub resolver; only the socket-level send of
+    ``httpx.AsyncHTTPTransport`` is replaced, so nothing leaves the process.
+    """
+
+    _SECRET = "svc-token-0123456789abcdef"
+
+    @pytest.fixture
+    def hops(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        import ipaddress
+
+        import httpx
+
+        from particles import url_safety
+
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            url_safety, "_resolve_all", lambda host: [ipaddress.ip_address("1.1.1.1")]
+        )
+        redirects = {
+            "https://api.origin.test/start": "https://collector.elsewhere.test/landing",
+            "https://api.origin.test/same": "https://api.origin.test/landing",
+            "http://api.origin.test/upgrade": "https://api.origin.test/landing",
+        }
+
+        async def fake_send(self: Any, request: httpx.Request) -> httpx.Response:
+            # The transport pins the resolved address into the URL; the name
+            # the request was for travels as its Host header.
+            url = f"{request.url.scheme}://{request.headers['host']}{request.url.raw_path.decode()}"
+            seen.append({"url": url, "headers": {k.lower(): v for k, v in request.headers.items()}})
+            target = redirects.get(url)
+            if target is not None:
+                return httpx.Response(302, headers={"Location": target}, request=request)
+            return httpx.Response(200, content=b"{}", request=request)
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", fake_send)
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_a_custom_credential_header_is_not_sent_to_another_origin(
+        self, hops: list[dict[str, Any]]
+    ) -> None:
+        headers = {"X-Service-Token": self._SECRET, "Accept": "application/json"}
+        async with particles_client(extra_headers=headers) as client:
+            resp = await get_capped(client, "https://api.origin.test/start")
+        assert resp.status_code == 200
+        assert [h["url"] for h in hops] == [
+            "https://api.origin.test/start",
+            "https://collector.elsewhere.test/landing",
+        ]
+        assert hops[0]["headers"]["x-service-token"] == self._SECRET
+        assert "x-service-token" not in hops[1]["headers"]
+        # A header that carries no credential still rides the hop.
+        assert hops[1]["headers"]["accept"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_a_credential_header_passed_on_the_request_is_not_sent_to_another_origin(
+        self, hops: list[dict[str, Any]]
+    ) -> None:
+        """SECURITY_REVIEW_20261026-1 (W59): a header given per request is bound
+        to the chain's origin as a construction header is."""
+        async with particles_client() as client:
+            resp = await client.get(
+                "https://api.origin.test/start",
+                headers={"X-Service-Token": self._SECRET, "Accept": "application/json"},
+            )
+        assert resp.status_code == 200
+        assert [h["url"] for h in hops] == [
+            "https://api.origin.test/start",
+            "https://collector.elsewhere.test/landing",
+        ]
+        assert hops[0]["headers"]["x-service-token"] == self._SECRET
+        assert self._SECRET not in repr(hops[1]["headers"])
+        assert hops[1]["headers"]["accept"] == "application/json"
+        assert hops[1]["headers"]["host"] == "collector.elsewhere.test"
+
+    @pytest.mark.parametrize(
+        "start", ["https://api.origin.test/same", "http://api.origin.test/upgrade"]
+    )
+    @pytest.mark.asyncio
+    async def test_a_same_origin_or_upgrade_hop_keeps_it(
+        self, hops: list[dict[str, Any]], start: str
+    ) -> None:
+        async with particles_client(extra_headers={"X-Service-Token": self._SECRET}) as client:
+            resp = await get_capped(client, start)
+        assert resp.status_code == 200
+        assert [h["url"] for h in hops] == [start, "https://api.origin.test/landing"]
+        assert all(h["headers"]["x-service-token"] == self._SECRET for h in hops)
+
+    @pytest.mark.asyncio
+    async def test_each_request_on_one_client_starts_its_own_chain(
+        self, hops: list[dict[str, Any]]
+    ) -> None:
+        """A second top-level request to another origin is not a redirect hop."""
+        async with particles_client(extra_headers={"X-Service-Token": self._SECRET}) as client:
+            await get_capped(client, "https://api.origin.test/landing")
+            await get_capped(client, "https://collector.elsewhere.test/landing")
+        assert [h["headers"].get("x-service-token") for h in hops] == [self._SECRET] * 2

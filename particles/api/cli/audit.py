@@ -20,6 +20,7 @@ report live in ``particles.operations.audit``.
 
 from __future__ import annotations
 
+import logging
 import math
 import sys
 import time
@@ -40,9 +41,11 @@ from particles.api.cli._claude_code import (
     filter_memory_file_for_deposit,
     is_claude_code_memory_dir,
     projection_enabled,
+    read_memory_files,
     redact_secrets,
     stray_memory_dirs,
     transcript_project_key,
+    transcript_started_at,
 )
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._output import current_output
@@ -54,9 +57,12 @@ from particles.api.cli._progress import (
 )
 from particles.config import get_config
 from particles.core.observer_scope import project_tag
+from particles.corpus.local_read import read_local_file, within
 from particles.db import session_scope
 from particles.llm.usage import render_usage_line
 from particles.secrets import get_anthropic_api_key_optional
+
+log = logging.getLogger(__name__)
 
 _FORMATS = ("markdown", "json")
 _SCOPES = ("harvested", "store")
@@ -378,7 +384,7 @@ def _project_tag(memory_dir: Path) -> list[str]:
 
 
 def _plan_memory_file(
-    md: Path, tags: list[str], memory_dir: Path | None = None
+    md: Path, tags: list[str], memory_dir: Path | None = None, raw: str | None = None
 ) -> _PlannedDeposit | None:
     """Filter + shape one memory-file deposit.
 
@@ -389,13 +395,17 @@ def _plan_memory_file(
     ``memory_dir`` is the memory directory ``md`` was found under, so its
     projected region is compared with that project's own render; a
     file audited by bare path has none.
+
+    ``raw`` is the text a directory walk already read (:func:`read_memory_files`);
+    a file audited by bare path is the operator's choice and is read by name.
     """
     # The precedence ladder deposit_file uses; imported from its home
     # module (the audit harvests via deposit_text_versioned, which takes the
     # resolved date rather than re-deriving it).
     from particles.corpus.deposit import _resolve_content_published_at
 
-    raw = md.read_text(encoding="utf-8", errors="replace")
+    if raw is None:
+        raw = md.read_text(encoding="utf-8", errors="replace")
     text = filter_memory_file_for_deposit(raw, memory_dir=memory_dir, source_dir=md.parent)
     if not text.strip():
         return None
@@ -409,10 +419,28 @@ def _plan_memory_file(
     )
 
 
-def _plan_transcript(jsonl: Path) -> _PlannedDeposit | None:
-    """Distill + redact one session transcript (same URI identity)."""
+def _plan_transcript(jsonl: Path, *, walked_dir: Path | None = None) -> _PlannedDeposit | None:
+    """Distill + redact one session transcript (same URI identity).
+
+    The bytes come through :func:`~particles.corpus.local_read.read_local_file`,
+    capped at ``local_files.max_bytes``. A transcript found by walking
+    ``walked_dir`` is read without following a link and contained to that
+    directory, so a link planted there deposits nothing from outside it
+    (security review 2026-10-25-2, R17); one the operator named is read as named.
+    """
     session_id = jsonl.stem
-    text = distill_transcript(jsonl.read_text(encoding="utf-8", errors="replace"), session_id)
+    try:
+        read = read_local_file(
+            jsonl,
+            follow_symlinks=walked_dir is None,
+            max_bytes=get_config().local_files.max_bytes,
+            allowed=within(walked_dir) if walked_dir is not None else None,
+        )
+    except OSError as exc:
+        log.warning("audit: transcript %s not read (%s)", jsonl, exc)
+        return None
+    raw = read.content.decode("utf-8", errors="replace")
+    text = distill_transcript(raw, session_id)
     if not text.strip():
         return None
     return _PlannedDeposit(
@@ -428,7 +456,10 @@ def _plan_transcript(jsonl: Path) -> _PlannedDeposit | None:
             "audit",
             project_tag(transcript_project_key(jsonl)),
         ],
-        content_published_at=None,
+        # The session's own start, as the SessionEnd hook records it:
+        # left unset, a claim about the session's acts is dated to the day the
+        # audit extracts it.
+        content_published_at=transcript_started_at(raw),
     )
 
 
@@ -445,19 +476,18 @@ def build_harvest_plan(
     """
     plan = _HarvestPlan()
 
-    memory_files: list[tuple[Path, list[str], Path | None]] = []
+    memory_files: list[tuple[Path, list[str], Path | None, str | None]] = []
     for path in paths:
         if path.is_dir():
             tags = ["claude-code", "memory-file", *_project_tag(path)]
-            memory_files.extend((md, tags, path) for md in sorted(path.rglob("*.md")))
+            read = [(md, raw) for md, raw, _st in read_memory_files(path)]
+            memory_files.extend((md, tags, path, raw) for md, raw in read)
+            # The index comes from the same walk as every other memory file:
+            # skipped when a symlink, read contained and capped, absent when
+            # refused (security review 2026-10-26-1, W22).
             memory_md = path / "MEMORY.md"
             plan.memory_dirs.append(
-                (
-                    path,
-                    memory_md.read_text(encoding="utf-8", errors="replace")
-                    if memory_md.is_file()
-                    else None,
-                )
+                (path, next((raw for md, raw in read if md == memory_md), None))
             )
         elif path.suffix == ".jsonl":
             planned = _plan_transcript(path)
@@ -465,22 +495,29 @@ def build_harvest_plan(
                 plan.deposits.append(planned)
                 plan.transcripts += 1
         else:
-            memory_files.append((path, ["claude-code", "memory-file"], None))
+            memory_files.append((path, ["claude-code", "memory-file"], None, None))
 
     if max_entries is not None:
         memory_files = memory_files[:max_entries]
-    for md, tags, memory_dir in memory_files:
-        planned = _plan_memory_file(md, tags, memory_dir)
+    for md, tags, memory_dir, raw in memory_files:
+        planned = _plan_memory_file(md, tags, memory_dir, raw)
         if planned is not None:
             plan.deposits.append(planned)
             plan.memory_files += 1
 
     if transcripts_dir is not None:
         cap = max_entries if max_entries is not None else get_config().audit.transcript_max_entries
-        candidates = [p for p in transcripts_dir.glob("*.jsonl") if p.is_file()]
+        candidates: list[Path] = []
+        for found in transcripts_dir.glob("*.jsonl"):
+            # A walk never follows a symlinked file (security review
+            # 2026-10-25-2, R17), as the memory-file walk does not.
+            if found.is_symlink():
+                log.warning("audit: transcript %s is a symlink; skipped", found)
+            elif found.is_file():
+                candidates.append(found)
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         for jsonl in candidates[:cap]:
-            planned = _plan_transcript(jsonl)
+            planned = _plan_transcript(jsonl, walked_dir=transcripts_dir)
             if planned is not None:
                 plan.deposits.append(planned)
                 plan.transcripts += 1

@@ -18,6 +18,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from particles.core.schema import (
     Confidence,
     Particle,
@@ -237,3 +239,18 @@ def test_direction_and_framing_absent_from_strict_retry() -> None:
     assert "The spine." not in strict
     plain_strict = _prompt(subject=subject, particles=ps, eff=eff, strict=True)
     assert strict == plain_strict
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["k: " + "[" * 3000 + "]" * 3000, "k: " + "1" * 5000],
+    ids=["deep", "long-int"],
+)
+def test_a_vault_article_header_that_cannot_be_built_reads_as_none(header: str) -> None:
+    """A cached article's frontmatter that cannot be built is no frontmatter, never an error."""
+    from particles.render.article_synthesis import cache
+
+    text = f"---\n{header}\n---\n# Title\n\nBody.\n"
+    assert cache._parse_frontmatter(text) is None
+    assert cache.split_rendered_article(text)[0] == {}
+    assert cache._strip_input_hash_from_frontmatter(text, "input_hash") is None

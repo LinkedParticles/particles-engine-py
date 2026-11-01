@@ -27,6 +27,7 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -495,3 +496,40 @@ def test_clipper_walk_lists_no_symlinked_capture(tmp_path: Path) -> None:
     secret.write_text("SECRET\n")
     (root / "planted.md").symlink_to(secret)
     assert _iter_clipper_markdown(root) == [root / "real.md"]
+
+
+# --- Frontmatter bounds (security review 2026-10-26-1, W7) -------------------
+
+
+def test_capture_frontmatter_with_an_alias_fan_out_is_not_parsed() -> None:
+    """A short capture header cannot expand into a large value: it reads as no frontmatter."""
+    from particles.corpus.deposit import _split_frontmatter
+
+    lines = ["---", "a0: &a0 [x]"]
+    for i in range(1, 8):
+        lines.append(f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 9) + "]")
+    lines += ["source: *a7", "---", "body"]
+    text = "\n".join(lines) + "\n"
+    assert len(text) < 1024
+    assert _split_frontmatter(text) == ({}, text)
+
+
+@pytest.mark.asyncio
+async def test_capture_source_is_read_only_as_a_string(
+    db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source key holding a list is no URL: the capture onboards as a plain local file."""
+    from particles.corpus.deposit import deposit_web_clipper
+    from particles.corpus.store import get_entry
+
+    monkeypatch.setenv("PARTICLES_BLOB_DIR", str(tmp_path / "blobs"))
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / "note.md").write_text(
+        "---\nsource: [https://example.org/a, https://example.org/b]\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    [(entry_id, _snapshot_id)] = await deposit_web_clipper(db_session, captures)
+    entry = await get_entry(db_session, entry_id)
+    assert entry is not None
+    assert entry.uri_r is None or entry.uri_r.startswith("file://")

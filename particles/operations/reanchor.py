@@ -32,7 +32,8 @@ Per trigger R, oldest retirement first after the cursor:
    retires the original in its favour; one that contradicts a standing claim,
    or whose check could not run, writes nothing and is shown to the owner.
 5. **The writes**: the restatement ACTIVE, the original ``SUPERSEDED`` /
-   ``SUPERSEDED_BY_REANCHOR``; or a ``DEPENDENT_CLAIM_EXAMINED`` event.
+   ``SUPERSEDED_BY_REANCHOR``, with a ``DEPENDENT_CLAIM_EXAMINED`` event
+   naming both; or that event alone.
 
 The caller owns the transaction: nothing here commits.
 """
@@ -79,6 +80,7 @@ from particles.corpus.store import get_entry, get_snapshot
 from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.ingest.observer_gate import ObserverGate
+from particles.ingest.pipeline import ConflictWatermark, read_conflict_watermark
 from particles.ingest.update_supersession import (
     is_extractor_asserted,
     is_reconcilable,
@@ -211,7 +213,7 @@ class ReanchorReport(BaseModel):
     conflict_probes: int = 0
     holds: int = 0
     dependency_rejected: int = 0
-    #: ``{"original", "restatement", "retired"}`` per claim restated.
+    #: ``{"original", "restatement", "retired", "event"}`` per claim restated.
     restated: list[dict[str, str]] = Field(default_factory=list)
     #: ``{"original", "existing", "retired", "event"}`` per claim matched.
     matched_existing: list[dict[str, str]] = Field(default_factory=list)
@@ -689,10 +691,21 @@ class _Pool:
     names the place and the speaker, and a claim about either may contradict it.
     """
 
-    def __init__(self, pairs: Iterable[tuple[Particle, Embedding | None]]) -> None:
+    def __init__(
+        self,
+        pairs: Iterable[tuple[Particle, Embedding | None]],
+        watermark: ConflictWatermark = None,
+    ) -> None:
         self.by_subject: dict[str, list[tuple[Particle, Embedding]]] = {}
         #: Claims retired earlier in this run: never offered again.
         self.retired: set[str] = set()
+        #: The store's change marker, read before ``pairs`` were loaded.
+        self.watermark = watermark
+        #: Every claim loaded, and every restatement this run wrote: a claim
+        #: the search under the lock finds outside it was committed meanwhile.
+        self.known: set[str] = set()
+        pairs = list(pairs)
+        self.known.update(particle.id for particle, _ in pairs)
         for particle, emb in pairs:
             if emb is None or not is_reconcilable(particle):
                 continue
@@ -822,6 +835,47 @@ async def _conflicting(
     return False, None
 
 
+async def _unchecked_under_lock(
+    session: AsyncSession,
+    restatement: str,
+    embedding: Embedding,
+    original: Particle,
+    retired: Particle,
+    index: _Pool,
+    *,
+    exempt: str | None,
+) -> list[str]:
+    """Claims committed since the pool loaded that the contradiction check would ask.
+
+    Runs with the writer lock held. Reads the claims changed since the pool's
+    watermark (``search_store_under_lock``), or the whole ACTIVE set when the
+    change journal cannot say what changed, and applies
+    :func:`_conflicting`'s selection to those the pool did not hold. Each one
+    is a claim no check paired with the restatement (security review
+    2026-10-31-3, AF1).
+    """
+    # Deferred import: tests/test_writer_lock_guard.py wraps the search at its
+    # source module (tests/AGENTS.md § Mocking strategy).
+    from particles.ingest import pipeline
+
+    found = await pipeline.search_store_under_lock(session, index.watermark, ())
+    pairs = found[0] if found is not None else await load_active_candidates(session)
+    fresh = _Pool((p, e) for p, e in pairs if p.id not in index.known)
+    update_cfg = get_config().reconciliation.update_supersession
+    generic = is_generic_claim(restatement)
+    return [
+        p.id
+        for p in fresh.nearest(
+            list(dict.fromkeys([*original.subject_ids, *retired.subject_ids])),
+            embedding,
+            floor=update_cfg.subject_floor,
+            limit=update_cfg.max_candidates,
+            skip={original.id, retired.id} | ({exempt} if exempt is not None else set()),
+        )
+        if is_generic_claim(p.content) == generic
+    ]
+
+
 async def _exempt_winner(session: AsyncSession, retired: Particle, date: str | None) -> str | None:
     """The claim that retired R, when the restatement dated ``date`` precedes it.
 
@@ -940,6 +994,7 @@ async def _settle(
 
     [embedding] = await _encode([restatement])
     duplicate = await _duplicate_of(session, restatement, embedding, original, retired, report)
+    exempt = await _exempt_winner(session, retired, date) if duplicate is None else None
     conflict, conflict_id = (
         (False, None)
         if duplicate is not None
@@ -951,7 +1006,7 @@ async def _settle(
             retired,
             index,
             report,
-            exempt=await _exempt_winner(session, retired, date),
+            exempt=exempt,
         )
     )
     outcome = decide_write(duplicate_of=duplicate, conflict=conflict)
@@ -1016,17 +1071,84 @@ async def _settle(
         now=now,
     )
     async with write_transaction(session):
-        await insert_particle(session, written, embedding=[float(x) for x in embedding])
-        # The restatement carries the original's modality value, so it carries
-        # the stamp that says who set it: an operator verdict stays pinned.
-        await copy_modality_stamp(session, original.id, written.id)
-        await update_particle_status(
-            session, original.id, Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_REANCHOR
+        # The check ran on the pool as loaded: a claim committed since, which
+        # it would have asked, keeps the original for the owner instead of
+        # writing the restatement beside it unchecked (security review
+        # 2026-10-31-3, AF1).
+        unchecked = await _unchecked_under_lock(
+            session, restatement, embedding, original, retired, index, exempt=exempt
         )
+        if unchecked:
+            why = (
+                f"{len(unchecked)} claim(s) committed during the pass were not checked "
+                "against the restatement"
+            )
+            event_id = await _record(
+                session,
+                actor=actor,
+                outcome=Outcome.UNRESTATED,
+                original=original,
+                retired=retired,
+                other_id=unchecked[0],
+                reason=verdict.reason,
+                why=why,
+                restatement=restatement,
+            )
+        else:
+            event_id = await _write_restatement(
+                session, written, embedding, original, retired, verdict, actor, restatement
+            )
+    if unchecked:
+        report.unrestated.append(
+            {"original": original.id, "retired": retired.id, "event": event_id, "why": why}
+        )
+        return
     index.retired.add(original.id)
+    index.known.add(written.id)
     report.restated.append(
-        {"original": original.id, "restatement": written.id, "retired": retired.id}
+        {
+            "original": original.id,
+            "restatement": written.id,
+            "retired": retired.id,
+            "event": event_id,
+        }
     )
+
+
+async def _write_restatement(
+    session: AsyncSession,
+    written: Particle,
+    embedding: Embedding,
+    original: Particle,
+    retired: Particle,
+    verdict: ProbeVerdict,
+    actor: str,
+    restatement: str,
+) -> str:
+    """Insert the restatement and retire the original; the event id. Under the lock."""
+    await insert_particle(session, written, embedding=[float(x) for x in embedding])
+    # The restatement carries the original's modality value, so it carries
+    # the stamp that says who set it: an operator verdict stays pinned.
+    await copy_modality_stamp(session, original.id, written.id)
+    await update_particle_status(
+        session, original.id, Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_REANCHOR
+    )
+    # The retirement is named in the event log in the same unit as the
+    # status change, as the other two outcomes are: the run's own event
+    # lists it only when the whole pass returns (security review
+    # 2026-10-25-1, Q36).
+    event_id = await _record(
+        session,
+        actor=actor,
+        outcome=Outcome.RESTATED,
+        original=original,
+        retired=retired,
+        other_id=written.id,
+        reason=verdict.reason,
+        why="the restatement supersedes it",
+        restatement=restatement,
+    )
+    return event_id
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +1257,10 @@ async def run_reanchor(
                 )
         by_id = {c.id: c for c in chosen}
         if index is None:
-            index = _Pool(await load_active_candidates(session))
+            # The marker first, so every claim committed after the load is
+            # named after it (security review 2026-10-31-3, AF1).
+            watermark = await read_conflict_watermark(session)
+            index = _Pool(await load_active_candidates(session), watermark)
         for verdict in verdicts:
             if verdict.verdict is DependencyVerdict.HOLDS:
                 report.holds += 1

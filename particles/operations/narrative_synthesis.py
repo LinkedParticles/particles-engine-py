@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config
 from particles.core.schema import Particle, ParticleType, Subject
 from particles.core.scoring.confidence import compute_effective_confidence
+from particles.db import write_transaction
 from particles.operations.narrative import get_narrative_sequence
 from particles.render.article_synthesis import compute_input_hash, render_article
 
@@ -69,6 +70,7 @@ async def synthesize_narrative(
     narrative_id: str,
     *,
     without_synthesis: bool = False,
+    persist_cache: bool = True,
 ) -> NarrativeArticle | None:
     """Render a NARRATIVE's constituents as one cited prose narrative.
 
@@ -77,6 +79,13 @@ async def synthesize_narrative(
     empty ``constituents`` list and empty ``body`` so the caller can message it.
     ``without_synthesis=True`` forces the deterministic, key-free structured
     listing (no LLM, no cache).
+
+    A synthesised body is written to the article cache and committed under the
+    writer lock once the model calls are done, never across them, so
+    the next identical request is a cache hit rather than another round of
+    model calls, whatever session the caller passed (security review
+    2026-10-26-1, W47). ``persist_cache=False`` discards the write with the
+    caller's session instead, for a caller that may not write.
     """
     # Deferred import (cycle-free but keeps the store dep out of module import
     # for the test-mock seam, tests/AGENTS.md § Mocking strategy).
@@ -120,6 +129,10 @@ async def synthesize_narrative(
         sequence_mode=True,
         without_synthesis=without_synthesis,
     )
+    if persist_cache and (session.new or session.dirty):
+        # Only the cache row is pending: render_article's last act on success.
+        async with write_transaction(session):
+            pass
     return NarrativeArticle(
         narrative=narrative,
         constituents=constituents,

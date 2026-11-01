@@ -39,6 +39,13 @@ left ACTIVE (§3). The pass never retires an ACTIVE claim. The trust cascade is
 unchanged: whichever of the two reaches a record first closes it, and the
 release re-reads each record before it writes. Each record's writes commit
 under the writer lock; the LLM calls run outside it.
+
+The checks run on the ACTIVE set as the pass loaded it, so a release searches
+the store again under the lock (``search_store_under_lock``), bounded by the
+store's change marker read before that load: when the selection now chooses a
+claim no check asked about (one another writer committed during the pass), the
+record stays open, counted incomplete, and the next run asks again (security
+review 2026-10-31-3, AF1).
 """
 
 from __future__ import annotations
@@ -77,7 +84,12 @@ from particles.db import write_transaction
 from particles.embeddings import get_embedding_model
 from particles.ingest.duplicate_suppression import build_duplicate_index
 from particles.ingest.observer_gate import ObserverGate
-from particles.ingest.pipeline import _find_conflict, load_active_conflict_candidates
+from particles.ingest.pipeline import (
+    ConflictWatermark,
+    _find_conflict,
+    load_active_conflict_candidates,
+    read_conflict_watermark,
+)
 from particles.ingest.second_reading import (
     claim_context,
     read_pair,
@@ -163,6 +175,20 @@ class ReleaseReport(BaseModel):
             "closed_meanwhile": self.closed_meanwhile,
             "divergences": self.divergences,
         }
+
+
+@dataclass(frozen=True)
+class _Selection:
+    """What a record's checks were asked about, carried to its release."""
+
+    embedding: Embedding
+    exclude: frozenset[str]
+    speaker: SpeakerKey | None
+    watermark: ConflictWatermark
+    #: Every claim the pass loaded or minted before the checks: the selection's universe.
+    known: frozenset[str]
+    #: The claims the checks asked about.
+    checked: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -430,6 +456,34 @@ async def _still_open(session: AsyncSession, item: _Held) -> tuple[Particle, Par
     return record, held
 
 
+async def _unchecked_since_load(
+    session: AsyncSession, held: Particle, selection: _Selection
+) -> list[str]:
+    """The claims the selection chooses now that no check asked about; under the lock.
+
+    Reads the checked claims and every claim changed since the pass loaded its
+    candidates (``search_store_under_lock``), or the whole ACTIVE set when the
+    change journal cannot say what changed, and runs :func:`select_pairs` over
+    them. A claim it chooses that the checks did not ask about and the pass
+    did not load was committed during the pass (security review
+    2026-10-31-3, AF1).
+    """
+    # Deferred import: tests/test_writer_lock_guard.py wraps the search at its
+    # source module (tests/AGENTS.md § Mocking strategy).
+    from particles.ingest import pipeline
+
+    found = await pipeline.search_store_under_lock(session, selection.watermark, selection.checked)
+    candidates = found[0] if found is not None else await load_active_conflict_candidates(session)
+    chosen = select_pairs(
+        held,
+        selection.embedding,
+        candidates,
+        exclude=set(selection.exclude),
+        speaker=selection.speaker,
+    )
+    return [p.id for p in chosen if p.id not in selection.checked | selection.known]
+
+
 async def _release(
     session: AsyncSession,
     item: _Held,
@@ -437,14 +491,27 @@ async def _release(
     gate: ObserverGate,
     report: ReleaseReport,
     winner: str | None,
+    selection: _Selection,
 ) -> str | None:
-    """Close the record and return the held claim to the store; the landed id, or ``None``."""
+    """Close the record and return the held claim to the store; the landed id, or ``None``.
+
+    Leaves the record open, counted incomplete, when the selection under the
+    lock chooses a claim no check asked about.
+    """
     async with write_transaction(session):
         reread = await _still_open(session, item)
         if reread is None:
             report.closed_meanwhile += 1
             return None
         record, held = reread
+        unchecked = await _unchecked_since_load(session, held, selection)
+        if unchecked:
+            report.incomplete += 1
+            report.warnings.append(
+                f"{len(unchecked)} claim(s) committed during the pass were not checked "
+                f"against {item.held.id[:8]}; asked again next run"
+            )
+            return None
         await update_particle_status(session, record.id, *CLOSED_RECORD)
         key, landed = await restore_held_claim(session, held)
         standing: list[Particle] = []
@@ -560,6 +627,9 @@ async def run_release(session: AsyncSession, *, dry_run: bool = False) -> Releas
         report.skipped_reason = "no embedding model (pair selection needs one)"
         return report
 
+    # The marker is read before the candidates, so every claim committed after
+    # the load is named after it (security review 2026-10-31-3, AF1).
+    watermark = await read_conflict_watermark(session)
     candidates: list[tuple[Particle, Embedding | None]] = list(
         await load_active_conflict_candidates(session)
     )
@@ -578,6 +648,14 @@ async def run_release(session: AsyncSession, *, dry_run: bool = False) -> Releas
             report.examined += 1
             continue
         winner = await retired_by(session, item.partner)
+        selection = _Selection(
+            embedding=embedding,
+            exclude=frozenset(exclude),
+            speaker=speaker,
+            watermark=watermark,
+            known=frozenset(p.id for p, _ in candidates),
+            checked=frozenset(p.id for p in pairs),
+        )
         checks = await _check(session, item, pairs, gate, report)
         if checks is None:
             report.waiting += len(chosen) - index
@@ -587,7 +665,7 @@ async def run_release(session: AsyncSession, *, dry_run: bool = False) -> Releas
         decision = decide_release(checks)
         match decision.action:
             case ReleaseAction.RELEASE:
-                landed = await _release(session, item, decision, gate, report, winner)
+                landed = await _release(session, item, decision, gate, report, winner, selection)
                 minted = await get_particle(session, landed) if landed and twin is None else None
                 if minted is not None:
                     # A later record this run is checked against the claim just minted.

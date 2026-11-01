@@ -34,7 +34,7 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | `corpus retract` | `SOURCE_RETRACTED` |
 | `corpus delete` | `CORPUS_ENTRY_DELETED` (entry id and counts only, never the deleted content) |
 | `particle retract` | `PARTICLE_RETRACTED` (actor `cli:particle-retract`) |
-| `memory useful` | `BELIEF_MARKED_USEFUL` (actor `cli:memory-useful` / `http:/memory/useful`) |
+| `memory useful` | `BELIEF_MARKED_USEFUL` (actor `cli:memory-useful` / `http:/memory/useful`; a press with an agent key carries `operator_credit: false`, names its `http_principal` and credits nothing) |
 | *(system-emitted)* §6.6 trust resolution drops a candidate | `CONFLICT_CANDIDATE_DROPPED` |
 
 Read-only and pipeline commands (`query`, `lint`, `extract`, `reindex`,

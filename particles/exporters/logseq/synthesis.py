@@ -36,6 +36,7 @@ from particles.render.article_synthesis import (
     render_article,
     split_rendered_article,
 )
+from particles.render.escape import logseq_prose
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -173,7 +174,9 @@ def _format_synthesis_block(
         # lines indent one level past the bullet (depth 1 + one
         # space). Use four spaces (two for depth-1 indent + two for
         # continuation) on each prose-body line after the first.
-        prose_lines = prose.splitlines()
+        # Every prose line becomes block text, so none may read as a
+        # ``key:: value`` block property (security review 2026-10-28-2, AA33).
+        prose_lines = logseq_prose(prose).splitlines()
         if prose_lines:
             lines.append(f"{indent}- {prose_lines[0]}")
             for cont in prose_lines[1:]:
@@ -185,7 +188,7 @@ def _format_synthesis_block(
             line = ref_line.strip()
             if not line or line.startswith("## References") or line.startswith("##References"):
                 continue
-            lines.append(f"{_INDENT * (depth + 1)}- {line}")
+            lines.append(f"{_INDENT * (depth + 1)}- {logseq_prose(line)}")
 
     return "\n".join(lines) + "\n"
 

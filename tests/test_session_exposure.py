@@ -33,6 +33,7 @@ from particles.store.session_exposure_store import (
     session_exposures_for,
 )
 from tests._claude_projects import bind_hooks_to_store
+from tests._engine_client import TEST_ENGINE_KEY
 from tests.test_memory_projection import (
     _MANIFEST_YAML,
     _last_log,
@@ -49,6 +50,15 @@ from tests.test_memory_projection import (
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+def _write_render_snapshot(memory_dir: Path, body: str) -> None:
+    """Record ``body`` as the region last rendered into ``memory_dir``, as a render does."""
+    from particles.api.cli._claude_code import MEMORY_REGION, project_state_dir
+
+    snapshots = project_state_dir(memory_dir)
+    snapshots.mkdir(parents=True, exist_ok=True)
+    (snapshots / f"{MEMORY_REGION}.snapshot.md").write_text(body, encoding="utf-8")
 
 
 @pytest.fixture
@@ -163,6 +173,33 @@ class TestFull:
         assert set(recorded) == set(shown)  # none of the cut lines
         assert recorded == sorted(shown, key=lambda pid: context.index(content[pid]))
         assert _ids(row, "projection") == []  # no projected region was loaded
+
+    @pytest.mark.parametrize("configured", [None, 24_000, 0])
+    def test_digest_fits_the_harness_cap_and_records_what_it_delivered(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        configured: int | None,
+    ) -> None:
+        # Claude Code shows the model a 2 KB preview of context over 10,000
+        # characters; a digest past the cap would credit lines never read.
+        ids = _seed(*((f"Belief number {i:03d} " + "z" * 140, 0.5 + i / 1000) for i in range(150)))
+        content = {pid: f"Belief number {i:03d} " for i, pid in enumerate(ids)}
+        if configured is not None:
+            get_config().claude_code.digest_max_bytes = configured
+        transcript, _ = _project_dir(tmp_path, f"-cap{configured}")
+
+        context = _context(_start(runner, transcript))
+
+        assert len(context) < 10_000
+        assert "digest truncated" in context
+        (row,) = _rows()
+        recorded = _ids(row, "digest")
+        delivered = [pid for pid in ids if content[pid] in context]
+        assert 0 < len(delivered) < len(ids)
+        assert set(recorded) == set(delivered)
 
     def test_full_after_a_loaded_region_records_its_trailer_first(
         self,
@@ -364,14 +401,19 @@ class TestFailOpen:
 @pytest.fixture
 def engine(cli_db: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[list[str], None, None]:
     """Route ``HttpBackend`` through the in-process engine; yield the recorded paths."""
-    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
-    monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "https://engine.test")
+    # A keyless engine serves reads only: key the engine and send it.
+    monkeypatch.setenv("PARTICLES_API_KEY", TEST_ENGINE_KEY)
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", TEST_ENGINE_KEY)
     from particles.config import reset_config
 
     reset_config()
-    # The in-process engine runs under the dev-key skip, which serves only
-    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    # Served only for loopback names and api.allowed_hosts (security review
+    # 2026-10-24, N1).
     get_config().api.allowed_hosts = ["engine.test"]
+    # The exposure route writes only to a write-enabled store (security review
+    # 2026-10-26-1, W6).
+    get_config().mcp.write.enabled_stores = ["default"]
     from particles.api.app import app as fastapi_app
 
     recorded: list[str] = []
@@ -405,11 +447,14 @@ class TestRemote:
         # render shows this session's observer, so the check
         # pushes the full digest, and the row still records what was loaded.
         memory_dir.mkdir(parents=True)
+        body = f"- DCO is enforced. `p-{a[:8]}`\n<!-- sources: p-{a[:8]} -->"
         (memory_dir / "MEMORY.md").write_text(
             "<!-- BEGIN PROJECTED: memory-index (manifest: m) -->\n"
-            f"- DCO is enforced. `p-{a[:8]}`\n<!-- sources: p-{a[:8]} -->\n"
+            f"{body}\n"
             "<!-- END PROJECTED: memory-index -->\n"
         )
+        # The region is the one last rendered there, so the check trusts it (W34).
+        _write_render_snapshot(memory_dir, body)
 
         _start(runner, transcript)
 

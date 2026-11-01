@@ -459,7 +459,9 @@ class TestProjectionScope:
     ) -> None:
         s, hit, _other = await self._seed_tagged(db_session)
         path = self._write_manifest(tmp_path)
-        data = await build_graph_data(db_session, manifest=str(path), section="tagged-claims")
+        data = await build_graph_data(
+            db_session, manifest=str(path), section="tagged-claims", read_any_manifest=True
+        )
         assert data.scope_type == "projection"
         assert data.scope_ref == f"{path}#tagged-claims"
         assert data.particles[hit.id].retrieval_hit
@@ -472,21 +474,140 @@ class TestProjectionScope:
             db_session,
             manifest=str(path),
             section="tagged claims",  # ci title
+            read_any_manifest=True,
         )
         assert data.scope_ref == f"{path}#tagged-claims"  # resolved to the region
 
     async def test_unknown_manifest_raises(self, db_session: Any, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="unknown manifest"):
-            await build_graph_data(db_session, manifest=str(tmp_path / "missing.yaml"), section="x")
+            await build_graph_data(
+                db_session,
+                manifest=str(tmp_path / "missing.yaml"),
+                section="x",
+                read_any_manifest=True,
+            )
 
     async def test_unknown_section_lists_available(self, db_session: Any, tmp_path: Path) -> None:
         path = self._write_manifest(tmp_path)
         with pytest.raises(ValueError, match="unknown section.*tagged-claims"):
-            await build_graph_data(db_session, manifest=str(path), section="nope")
+            await build_graph_data(
+                db_session, manifest=str(path), section="nope", read_any_manifest=True
+            )
 
     async def test_manifest_without_section_raises(self, db_session: Any) -> None:
         with pytest.raises(ValueError, match="both selectors"):
             await build_graph_data(db_session, manifest="m.yaml")
+
+    async def test_local_directory_reads_as_unknown_manifest(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        # In-process callers keep the detail, but a directory is a refused read,
+        # not an IsADirectoryError escaping the operation.
+        with pytest.raises(ValueError, match="unknown manifest"):
+            await build_graph_data(
+                db_session, manifest=str(tmp_path), section="x", read_any_manifest=True
+            )
+
+
+@pytest.mark.asyncio
+class TestProjectionManifestRoot:
+    """Security review 2026-10-24-2, P1: a contained manifest read for GET /graph."""
+
+    _SENTINEL = "SENTINEL-0123abcd"
+
+    def _root(self, tmp_path: Path) -> Path:
+        root = tmp_path / "manifests"
+        root.mkdir()
+        (root / "m.yaml").write_text(
+            "name: graph-test\n"
+            "sections:\n"
+            "  - title: Tagged claims\n"
+            "    region: tagged-claims\n"
+            "    tags: [graph-test]\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def _outside(self, tmp_path: Path) -> Path:
+        target = tmp_path / "hosts.yml"
+        target.write_text(f"oauth_token: {self._SENTINEL}\n", encoding="utf-8")
+        return target
+
+    async def test_relative_name_resolves_under_the_root(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        root = self._root(tmp_path)
+        data = await build_graph_data(
+            db_session, manifest="m.yaml", section="tagged-claims", manifest_root=root
+        )
+        assert data.scope_type == "projection"
+        # The address is the caller's own name, never the resolved host path.
+        assert data.scope_ref == "m.yaml#tagged-claims"
+
+    @pytest.mark.parametrize("kind", ["absolute", "dotdot", "tilde", "empty"])
+    async def test_a_name_outside_the_root_is_refused(
+        self, db_session: Any, tmp_path: Path, kind: str
+    ) -> None:
+        root = self._root(tmp_path)
+        outside = self._outside(tmp_path)
+        name = {
+            "absolute": str(outside),
+            "dotdot": "../hosts.yml",
+            "tilde": "~/hosts.yml",
+            "empty": "",
+        }[kind]
+        with pytest.raises(ValueError) as exc:
+            await build_graph_data(db_session, manifest=name, section="x", manifest_root=root)
+        assert str(exc.value) == f"unknown manifest: {name!r}"
+
+    async def test_symlinks_out_of_the_root_are_refused(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        root = self._root(tmp_path)
+        outside = self._outside(tmp_path)
+        (root / "link.yaml").symlink_to(outside)
+        (root / "sub").symlink_to(tmp_path)
+        for name in ("link.yaml", "sub/hosts.yml"):
+            with pytest.raises(ValueError) as exc:
+                await build_graph_data(db_session, manifest=name, section="x", manifest_root=root)
+            assert str(exc.value) == f"unknown manifest: {name!r}"
+
+    async def test_missing_directory_and_oversized_read_alike(
+        self, db_session: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+
+        root = self._root(tmp_path)
+        (root / "dir").mkdir()
+        monkeypatch.setattr(get_config().graph, "manifest_max_bytes", 16)
+        for name in ("absent.yaml", "dir", "m.yaml"):
+            with pytest.raises(ValueError) as exc:
+                await build_graph_data(db_session, manifest=name, section="x", manifest_root=root)
+            assert str(exc.value) == f"unknown manifest: {name!r}"
+
+    async def test_no_root_and_no_opt_in_reads_nothing(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        """Security review 2026-10-25, Q11: an in-process caller that sets neither
+        ``manifest_root`` nor ``read_any_manifest`` opens no file."""
+        outside = self._outside(tmp_path)
+        with pytest.raises(ValueError) as exc:
+            await build_graph_data(db_session, manifest=str(outside), section="x")
+        assert str(exc.value) == f"unknown manifest: {str(outside)!r}"
+
+    async def test_an_invalid_manifest_echoes_none_of_its_values(
+        self, db_session: Any, tmp_path: Path
+    ) -> None:
+        root = self._root(tmp_path)
+        (root / "creds.yaml").write_text(f"oauth_token: {self._SENTINEL}\n", encoding="utf-8")
+        (root / "list.yaml").write_text(f"- {self._SENTINEL}\n", encoding="utf-8")
+        (root / "broken.yaml").write_text(f"a: [{self._SENTINEL}\n", encoding="utf-8")
+        for name in ("creds.yaml", "list.yaml", "broken.yaml"):
+            with pytest.raises(ValueError) as exc:
+                await build_graph_data(db_session, manifest=name, section="x", manifest_root=root)
+            # One answer for a missing and an invalid file, so it says nothing
+            # about which names exist (security review 2026-10-25, Q43).
+            assert str(exc.value) == f"unknown manifest: {name!r}"
 
 
 @pytest.mark.asyncio
@@ -796,3 +917,30 @@ class TestCliUsageErrors:
         assert result.exit_code == 2
         assert "scope is mandatory" in result.output
         assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# D33 residual: the payload escapes every '<' (security review 2026-10-24-2, P51)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_d33_the_graph_payload_cannot_open_a_script_escape(db_session: Any) -> None:
+    """A stored label cannot make the JSON block swallow the glue script.
+
+    An HTML comment opener followed by a script start tag inside a script
+    element sends the parser into its double-escaped state, where the block's
+    own closing tag no longer ends it. ``render_html`` escapes only the
+    closing-tag sequence.
+    """
+    from particles.exporters.graph.render import render_html
+    from particles.operations.graph_view import build_graph_data
+
+    a, _b, _c, _ = await _seed_neighbourhood(db_session)
+    data = await build_graph_data(db_session, subject_id=a.id)
+    anchor = next(n for n in data.nodes if n.subject_id == a.id)
+    anchor.label = "Alpha <!--<script>"
+    page = render_html(data, generated_at=datetime(2026, 7, 23, tzinfo=UTC))
+    block = page.split('<script type="application/json" id="graph-data">', 1)[1]
+    block = block.split("</script>", 1)[0]
+    assert "<!--" not in block and "<script" not in block.lower()

@@ -56,7 +56,9 @@ class MastodonImporter:
         """
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # RecursionError: a body nested past the decoder's depth
+            # (security review 2026-10-30, AB17).
             return None
         if not isinstance(data, dict):
             return None

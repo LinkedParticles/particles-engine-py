@@ -1,6 +1,64 @@
 {
   "components": {
     "schemas": {
+      "AgentDepositRequest": {
+        "description": "Deposit conversational material as the agent (MCP ``deposit_text``). The\ndepositor, author, source type and scope tags are set server-side.",
+        "properties": {
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "AgentDepositRequest",
+        "type": "object"
+      },
+      "AgentDepositResponse": {
+        "description": "Identifiers for the agent's corpus entry and its snapshot.",
+        "properties": {
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "snapshot_id"
+        ],
+        "title": "AgentDepositResponse",
+        "type": "object"
+      },
       "AgentLinkRequest": {
         "description": "An agent's link or unlink between two of its beliefs (MCP ``link_add`` /\n``link_remove``). Only ``CO_EVIDENTIAL`` is agent-writable.",
         "properties": {
@@ -360,9 +418,15 @@
             "title": "Content Date"
           },
           "deposited_by": {
-            "default": "api-user",
-            "title": "Deposited By",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposited By"
           },
           "file": {
             "contentMediaType": "application/octet-stream",
@@ -1087,7 +1151,7 @@
         "type": "object"
       },
       "CurationAffirmRequest": {
-        "description": "Affirm a belief still holds: records ``BELIEF_AFFIRMED``,\nsuppressing the belief's card. Does NOT touch confidence; first-class\ncorroboration is vouch.",
+        "description": "Affirm a belief still holds: records ``BELIEF_AFFIRMED``,\nsuppressing the belief's card. Does NOT touch confidence; agreeing with a\nbelief is an endorsement stance, which never feeds\nconfidence either.",
         "properties": {
           "card_key": {
             "anyOf": [
@@ -1801,11 +1865,19 @@
         "type": "object"
       },
       "DepositResponse": {
-        "description": "Identifiers for the corpus entry + initial snapshot created by a deposit.\n\n``unchanged``: the entry's latest snapshot already\ncarried the deposited content hash, so nothing was written and the existing\nIDs are echoed. Every deposit route sets it, except a URL deposit handled by\na domain importer, which is deduplicated the same way but always reports\n``false``.",
+        "description": "Identifiers for the corpus entry + initial snapshot created by a deposit.\n\n``unchanged``: the entry's latest snapshot already\ncarried the deposited content hash, so nothing was written and the existing\nIDs are echoed. Every deposit route sets it, except a URL deposit handled by\na domain importer, which is deduplicated the same way but always reports\n``false``.\n\n``follow_refused`` (a URL deposit only): each primary URL a link post\nnames that the deposit did not follow, because another principal's entry\nholds it and an agent key writes only its own entries. The\nprimary deposit stands; empty when every follow was made or none was due.",
         "properties": {
           "entry_id": {
             "title": "Entry Id",
             "type": "string"
+          },
+          "follow_refused": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Follow Refused",
+            "type": "array"
           },
           "snapshot_id": {
             "title": "Snapshot Id",
@@ -1916,9 +1988,15 @@
             "title": "Content Published At"
           },
           "deposited_by": {
-            "default": "api-user",
-            "title": "Deposited By",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposited By"
           },
           "fetch_policy": {
             "anyOf": [
@@ -1981,9 +2059,15 @@
         "description": "Deposit-from-URL request. The importer registry routes the URL to\na domain-specific extractor when applicable (Reddit, GitHub, Numista, \u2026);\notherwise the generic fetcher takes it.",
         "properties": {
           "deposited_by": {
-            "default": "api-user",
-            "title": "Deposited By",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposited By"
           },
           "follow_comment_links": {
             "anyOf": [
@@ -2199,7 +2283,7 @@
         "type": "object"
       },
       "DocManifest": {
-        "description": "An ordered projection of the store into one Markdown document.\n\n``output`` is the default render target (overridable on the CLI). README is\nthe first instance; the mechanism is general.",
+        "description": "An ordered projection of the store into one Markdown document.\n\n``output`` is the default render target (overridable on the CLI), resolved\nagainst the working directory and held to the same containment as a block\npath. README is the first instance; the mechanism is general.",
         "properties": {
           "framing": {
             "anyOf": [
@@ -2364,9 +2448,15 @@
         "description": "Identify the corpus entry + snapshot to run extraction against.",
         "properties": {
           "agent_id": {
-            "default": "api-user",
-            "title": "Agent Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
           },
           "entry_id": {
             "title": "Entry Id",
@@ -3148,7 +3238,7 @@
         "type": "object"
       },
       "MechanicalBlock": {
-        "description": "A hand-authored Markdown fragment spliced verbatim.\n\nContent that lives in no ADR \u2014 install / quickstart / badges. ``block`` is a\npath resolved relative to the manifest file (or absolute).",
+        "description": "A hand-authored Markdown fragment spliced verbatim.\n\nContent that lives in no ADR \u2014 install / quickstart / badges. ``block`` is a\npath resolved relative to the manifest file. It stays inside the manifest's\ntree: an absolute path, a ``..`` component, or a path that resolves outside\nthe repository holding the manifest is refused unless the operator passes\n``--allow-outside-paths`` (security review 2026-10-24-2, P3; see\n:mod:`particles.operations.projection.paths`).",
         "properties": {
           "block": {
             "minLength": 1,
@@ -3245,7 +3335,7 @@
         "type": "object"
       },
       "MemoryUsefulRequest": {
-        "description": "Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits\nthe belief on the explicit utility channel. Does NOT touch confidence and does\nNOT claim the belief is true; it lifts the belief in the projection / digest\nranking only. For \"still true\", use ``/curation/affirm``.",
+        "description": "Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and, for a\npress made with an operator key, credits the belief on the explicit utility\nchannel. Does NOT touch confidence and does NOT claim the belief is true; it\nlifts the belief in the projection / digest ranking only. For \"still true\",\nuse ``/curation/affirm``.",
         "properties": {
           "particle_id": {
             "title": "Particle Id",
@@ -3270,15 +3360,22 @@
         "type": "object"
       },
       "MemoryUsefulResponse": {
-        "description": "Outcome of an explicit usefulness gesture.\n\n``counted`` is False when this principal already credited this belief today,\nthe rate bound. The event is recorded either way.",
+        "description": "Outcome of an explicit usefulness gesture.\n\n``counted`` is False when this interface already credited this belief today,\nthe rate bound, and on every press made without an operator\nkey, which earns no credit and has no ``credit_key`` (amended\n2026-10-27). The event is recorded either way.",
         "properties": {
           "counted": {
             "title": "Counted",
             "type": "boolean"
           },
           "credit_key": {
-            "title": "Credit Key",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credit Key"
           },
           "event_id": {
             "title": "Event Id",
@@ -3570,6 +3667,8 @@
           "SOURCE_RETRACTED",
           "CORPUS_ENTRY_DELETED",
           "CORPUS_ENTRY_RECLASSIFIED",
+          "CORPUS_ENTRY_URI_RELEASED",
+          "RULE_SOURCE_ROOT_FORGOTTEN",
           "CONFLICT_CANDIDATE_DROPPED",
           "SUBJECTS_SPLIT",
           "SUBJECTS_MERGED",
@@ -3596,9 +3695,13 @@
           "INCONSISTENCY_CLOSED",
           "DEPENDENT_CLAIM_EXAMINED",
           "UPDATE_SUPERSESSION",
+          "TRUST_SUPERSESSION",
+          "DOCUMENT_SUPERSESSION",
           "HELD_CLAIM_EXAMINED",
           "ABSTRACTION_CANDIDATE",
           "ABSTRACTION_RESOLVED",
+          "ABSTRACTION_RETIRED",
+          "CLAIMS_RETIRED",
           "DUPLICATES_MERGED",
           "DUPLICATES_UNMERGED",
           "BELIEF_MARKED_USEFUL",
@@ -7383,6 +7486,92 @@
         "title": "WarcRecordType",
         "type": "string"
       },
+      "WhoAmIResponse": {
+        "description": "The presented key, as the engine resolved it.",
+        "properties": {
+          "anonymous": {
+            "title": "Anonymous",
+            "type": "boolean"
+          },
+          "archive_roots": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Roots"
+          },
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "memory_roots": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Roots"
+          },
+          "principal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "required": [
+          "anonymous"
+        ],
+        "title": "WhoAmIResponse",
+        "type": "object"
+      },
       "WindowCoverage": {
         "description": "What a window read could and could not judge.\n\nDisclosure only. ``undated`` are candidates with no ``valid_from``;\n``unkinded`` carry a date but no kind and so match the ``BEGAN`` reading\nonly; ``retired_admitted`` is how many retired claims the window let in;\n``restated`` how many of those yielded to a successor in the set.",
         "properties": {
@@ -7526,6 +7715,30 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/auth/whoami": {
+      "get": {
+        "description": "Say which principal, role and project the presented key stands for.\n\nA client checks its key with it before any write, and the remote-aware\ndoctor uses it as its authenticated probe. On a keyed engine the bearer is\nrequired (401 otherwise); a keyless engine answers ``anonymous`` to a\nloopback caller. ``key_id`` is ``env`` for ``PARTICLES_API_KEY``, which is\nthe operator's key. A harvester key also returns the client directories it\nrecords, which its own memory and archive files must lie under.",
+        "operationId": "whoami_auth_whoami_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Whoami"
+      }
+    },
     "/corpus": {
       "get": {
         "description": "List corpus entries, most-recently-deposited first (HTTP mirror of the MCP\n``list_corpus_entries`` tool). Optional ``source_type`` filter.\n``limit`` defaults to 50 and is capped at ``storage.max_page_size`` (F5).",
@@ -7664,7 +7877,7 @@
     },
     "/corpus/deposit/file": {
       "post": {
-        "description": "Deposit a file upload into the corpus. The file is hashed +\nstored under the blob directory; metadata + initial snapshot are\ncreated from the upload's content-type.\n\n``deposited_by`` / ``source_type`` / ``tags`` / ``content_date`` are\noptional multipart form fields so the thin client's local-file ``deposit``\n(which uploads the bytes over HTTP) keeps its flags; ``content_date``\nis the archival authorship date.",
+        "description": "Deposit a file upload into the corpus. The file is hashed +\nstored under the blob directory; metadata + initial snapshot are\ncreated from the upload's content-type.\n\n``deposited_by`` / ``source_type`` / ``tags`` / ``content_date`` are\noptional multipart form fields so the thin client's local-file ``deposit``\n(which uploads the bytes over HTTP) keeps its flags; ``content_date``\nis the archival authorship date, held to the deposit time. An\nagent key's upload is recorded as its principal, takes the type the engine\ninfers from the bytes (a body type must equal it, and an inferred policy\ntype, a taxonomy, trust lens or vocabulary document, is refused), names no\nharvester's tag unless its principal is a harvester, and touches only the\nagent's own entries. An operator key names what it likes.\nRate-limited per principal like the agents' deposit (``api.rate_limit_per_minute``).\n\nAn upload larger than ``local_files.max_bytes`` is refused with 413. An\nupload whose bytes match a file the engine enrolled from its own disk gets\nan entry of its own rather than appending to that entry or changing its\n``source_type``.",
         "operationId": "corpus_deposit_file_corpus_deposit_file_post",
         "requestBody": {
           "content": {
@@ -7708,7 +7921,7 @@
     },
     "/corpus/deposit/text": {
       "post": {
-        "description": "Deposit raw text into the corpus (no fetch).\n\n``store`` selects the target store (404 on an unknown handle).\n``fetch_policy`` ``LAZY`` is refused with 400 unless ``uri_r`` is an http(s)\nURL, because the engine would later re-read a ``file://`` path from its own\ndisk. A ``uri_r`` already held by a non-http(s) ``LAZY`` entry (a file the\nengine refreshes from its own disk) is refused with 409, as is a deposit\nwhose ``source_type`` differs from the entry it would join.",
+        "description": "Deposit raw text into the corpus (no fetch).\n\n``store`` selects the target store (404 on an unknown handle).\n``fetch_policy`` ``LAZY`` is refused with 400 unless ``uri_r`` is an http(s)\nURL, because the engine would later re-read a ``file://`` path from its own\ndisk. A ``uri_r`` already held by a non-http(s) ``LAZY`` entry (a file the\nengine refreshes from its own disk) is refused with 409, as is a deposit\nwhose ``source_type`` differs from the entry it would join.\n\nAn agent key's deposit is recorded as its principal, depositor and author\nalike, and a body naming anyone else is refused (403). It names no\n``uri_r`` (a harvester principal may name a session transcript's\n``claude-code://session/<id>``, or the ``file://`` URI of a memory file\nunder a ``projects/<slug>/memory/`` directory or of a project's\n``MEMORY.archive.md``), no source type but ``CONVERSATION``\n(``LOCAL_MARKDOWN`` for a harvester's memory file), and no harvester's tag\n(``claude-code``, ``memory-file``, ``memory-archive``) unless its\nprincipal is a harvester. No agent key names ``rule-file``, which only the\nlocal rule-file intake writes. An agent key's deposit that names no project\nis marked ``scope:unattributed``. It may not write another principal's\nentry, unchanged bytes included (409 on a ``uri_r`` such an entry holds). An operator\nkey names what it likes. A ``content_published_at`` after the\ndeposit is stored as the deposit time. Rate-limited per principal like the\nagents' deposit (``api.rate_limit_per_minute``).",
         "operationId": "corpus_deposit_text_corpus_deposit_text_post",
         "parameters": [
           {
@@ -7785,7 +7998,7 @@
     },
     "/corpus/deposit/url": {
       "post": {
-        "description": "Deposit a URL into the corpus. Returns the entry + snapshot IDs.",
+        "description": "Deposit a URL into the corpus. Returns the entry + snapshot IDs.\n\nAn agent key's deposit is recorded as its principal, names no source type\n(the engine records the one it fetches) and no harvester's tag, and may\nnot write another principal's entry: a URL another principal's entry holds\nanswers 409. An operator key names what it likes. The store's\nwriter lock is taken around each write, never across the fetch. Rate-limited\nper principal like the agents' deposit (``api.rate_limit_per_minute``).",
         "operationId": "corpus_deposit_url_corpus_deposit_url_post",
         "requestBody": {
           "content": {
@@ -8463,7 +8676,7 @@
     },
     "/events": {
       "get": {
-        "description": "List operator events newest-first, optionally filtered.\n\nAt most one of ``particle`` / ``subject`` / ``entry`` may be set (the\nrecord the event touched); ``type`` filters by event type.",
+        "description": "List operator events newest-first, optionally filtered.\n\nAt most one of ``particle`` / ``subject`` / ``entry`` may be set (the\nrecord the event touched); ``type`` filters by event type; ``principal``\nand ``key`` keep the events an HTTP caller with that principal, or that\none key, wrote. A reader or agent key is served no other key's id, and may\nfilter by its own key only (403 otherwise).",
         "operationId": "list_events_endpoint_events_get",
         "parameters": [
           {
@@ -8528,6 +8741,38 @@
                 }
               ],
               "title": "Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "principal",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Principal"
+            }
+          },
+          {
+            "in": "query",
+            "name": "key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
             }
           },
           {
@@ -8707,7 +8952,7 @@
     },
     "/graph": {
       "get": {
-        "description": "One scoped epistemic subgraph: the same ``GraphData`` the\nstatic ``export graph`` artifact embeds, computed fresh per request.\n\nScope is mandatory (the anti-hairball invariant: a whole-store render does\nnot exist): ``scope=subject`` needs ``subject_id``, ``scope=query`` needs\n``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's\nevidence: the INCONSISTENCY anchor, its disputants, their\nsubjects), ``scope=projection`` needs ``manifest`` + ``section`` (a\nmanifest section's deterministic selection; the manifest path is\nresolved on the engine host, which the bearer gate makes operator-equivalent\naccess); anything else is 422. ``subject_id`` accepts a subject id or an\nexact (case-insensitive) canonical name / alias; ``inconsistency_id``\naccepts a full id or unique prefix; ``scope_ref`` in the response is always\nthe resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the\n``graph.*`` caps; ``as_of`` renders the graph as believed at T;\n``history`` adds supersession-chain ghosts; ``store`` selects the target\nstore (404 on an unknown handle). ``observer_project`` reads the\nsubject, query and projection scopes through a project observer;\nthe inconsistency scope addresses its evidence by id and is never filtered.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` and rate-limited\n(same posture as ``/query``): the query scope drives a paid embedding per\nrequest. All epistemics are computed server-side; clients only render.",
+        "description": "One scoped epistemic subgraph: the same ``GraphData`` the\nstatic ``export graph`` artifact embeds, computed fresh per request.\n\nScope is mandatory (the anti-hairball invariant: a whole-store render does\nnot exist): ``scope=subject`` needs ``subject_id``, ``scope=query`` needs\n``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's\nevidence: the INCONSISTENCY anchor, its disputants, their\nsubjects), ``scope=projection`` needs ``manifest`` + ``section`` (a\nmanifest section's deterministic selection); anything else is\n422. ``manifest`` is a relative name under ``graph.manifest_root``; with no\nroot configured the projection scope is refused (404), and a name that is\nabsolute, climbs out with ``..``, or names a missing, non-regular,\noversized or invalid file gets one fixed 404 with no exception text, so the\nroute reads nothing on the engine host outside that directory and does not\nsay which files exist (security review 2026-10-24-2, P1; 2026-10-25, Q43).\n``subject_id`` accepts a subject id or an exact (case-insensitive) canonical\nname / alias; ``inconsistency_id``\naccepts a full id or unique prefix; ``scope_ref`` in the response is always\nthe resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the\n``graph.*`` caps; ``as_of`` renders the graph as believed at T;\n``history`` adds supersession-chain ghosts; ``store`` selects the target\nstore (404 on an unknown handle). ``observer_project`` reads the\nsubject, query and projection scopes through a project observer;\nthe inconsistency scope addresses its evidence by id and is never filtered.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` and rate-limited\n(same posture as ``/query``): the query scope drives a paid embedding per\nrequest. All epistemics are computed server-side; clients only render.",
         "operationId": "get_graph_graph_get",
         "parameters": [
           {
@@ -8920,7 +9165,7 @@
     },
     "/health": {
       "get": {
-        "description": "Liveness check. Returns ``status=\"ok\"``, the SDK version, and the build date.\n\nIn daemon mode the response also carries the background tasks'\nstate, and ``status`` becomes ``\"degraded\"`` once any of them has crashed.\nThe process is still serving requests, so this stays a 200 (the API must\nnot take itself down because a scheduled tick died), but the disclosure is\nmachine-readable for an operator alert or a readiness gate.\n\n``built_at`` is present only when the artifact stamped itself (the\ncontainer image does; a source checkout does not), so the route stays\nunauthenticated with nothing new behind it: the version was already\ndisclosed here, and a build timestamp says no more about the deployment\nthan the version it accompanies.",
+        "description": "Liveness check. Returns ``status=\"ok\"``, the SDK version, and the build date.\n\nIn daemon mode the response also carries the background tasks'\nstate, and ``status`` becomes ``\"degraded\"`` once any of them has crashed.\nThe process is still serving requests, so this stays a 200 (the API must\nnot take itself down because a scheduled tick died), but the disclosure is\nmachine-readable for an operator alert or a readiness gate.\n\n``built_at`` is present only when the artifact stamped itself (the\ncontainer image does; a source checkout does not), so the route stays\nunauthenticated with nothing new behind it: the version was already\ndisclosed here, and a build timestamp says no more about the deployment\nthan the version it accompanies.\n\nWith ``api.require_auth_for_reads`` on, the daemon's per-task detail (runs,\nfailures, each task's last outcome) is served only to a request whose key\nauthenticates; a caller without one still gets ``status``, so a readiness\ngate keeps working (security review 2026-10-28-2, AA50).",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -8934,6 +9179,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Health"
       }
     },
@@ -9222,7 +9472,7 @@
     },
     "/memory/useful": {
       "post": {
-        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. 403 when belief\nwrites are disabled (``mcp.write.enabled_stores`` default-deny).",
+        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. Only a press made\nwith an operator key earns the utility credit, at most one per belief per\nday. An agent key's press is recorded with its principal and earns none,\nso it neither adds to the credit nor uses up the operator's.\n403 when belief writes are disabled (``mcp.write.enabled_stores``\ndefault-deny).",
         "operationId": "memory_useful_endpoint_memory_useful_post",
         "requestBody": {
           "content": {
@@ -9532,6 +9782,73 @@
           }
         ],
         "summary": "Particle Contested Badges"
+      }
+    },
+    "/particles/deposit": {
+      "post": {
+        "description": "Deposit text as the agent (HTTP mirror of MCP ``deposit_text``). The entry\nis a CONVERSATION deposit attributed to the agent identity and deduplicated\nonly onto the agent's own entries in the same scope, so identical bytes\nanother principal or project deposited are never reused or rescoped. 400 on\na guard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``; 429 past ``api.rate_limit_per_minute``, since each\ndeposit queues a snapshot for model extraction.",
+        "operationId": "agent_deposit_endpoint_particles_deposit_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDepositRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDepositResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Agent Deposit Endpoint"
       }
     },
     "/particles/link": {
@@ -10131,7 +10448,7 @@
     },
     "/particles/{particle_id}/narrative/synthesis": {
       "get": {
-        "description": "Render a NARRATIVE as one cited prose article.\n\nTraverses the SEQUENCE_IN chain and runs the article-synthesis engine\n(LLM call; structured-listing fallback on failure), rate-limited like\n``/query``. 404 if the particle does not exist or is not a NARRATIVE.",
+        "description": "Render a NARRATIVE as one cited prose article.\n\nTraverses the SEQUENCE_IN chain and runs the article-synthesis engine\n(LLM call; structured-listing fallback on failure), rate-limited like\n``/query``. 404 if the particle does not exist or is not a NARRATIVE.\n\nA synthesised body is cached, so a repeat request makes no model call. Only\na key that can write persists the cache row: a reader key writes nothing\n(security review 2026-10-27-1, G7), and a keyless engine\nserves reads only.",
         "operationId": "get_narrative_synthesis_particles__particle_id__narrative_synthesis_get",
         "parameters": [
           {
@@ -10430,7 +10747,7 @@
     },
     "/particles/{particle_id}/supersede": {
       "post": {
-        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. ``reason`` is required and recorded on the\naudit event. 400 on a guard / granularity violation or an empty reason; 403\nwhen curation writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer.",
+        "description": "Operator-supersede any belief, incl. an extracted one.\n\nThe \"edit\" gesture finally working on the extracted beliefs that fill a\ncuration queue. Skips only the ownership check; the HUMAN_REVIEW guard and\nACTIVE-status check still apply. ``reason`` is required and recorded on the\naudit event. 400 on a guard / granularity violation or an empty reason; 403\nwhen curation writes are disabled.\nRefused (503) under the dev-key skip, even from loopback: it needs a real\nbearer. Rate-limited like the agent ``/particles/supersede``: the\nreplacement runs the same reconciliation ladder and its model calls\n(security review 2026-10-24-2, N10).",
         "operationId": "operator_supersede_endpoint_particles__particle_id__supersede_post",
         "parameters": [
           {
@@ -10548,7 +10865,7 @@
         "summary": "Remove Particle Tags Endpoint"
       },
       "post": {
-        "description": "Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.\n\nThe operator form: it tags any belief, so it needs a real bearer (503 under\nthe dev-key skip) and 403 when belief writes are disabled. An agent\ntags its own beliefs through `POST /particles/tag`.",
+        "description": "Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.\n\nThe operator form: it tags any belief, so it needs a real bearer (503 under\nthe dev-key skip) and 403 when belief writes are disabled. An agent\ntags its own beliefs through `POST /particles/tag`. The memory-server\nmigration's tag is refused (400): only the migration stamps it.",
         "operationId": "add_particle_tags_endpoint_particles__particle_id__tags_post",
         "parameters": [
           {
@@ -10862,7 +11179,7 @@
     },
     "/session-exposures": {
       "post": {
-        "description": "Append the beliefs one session was shown at session start.\n\nThe SessionStart hook calls this after it has cut what it injects to its\nbyte budget. Short ``p-`` ids are resolved to full ids here. Rows are only\nappended, and no route reads them back. ``store`` selects the store the\ndigest was read from (404 on an unknown handle).",
+        "description": "Append the beliefs one session was shown at session start.\n\nThe SessionStart hook calls this after it has cut what it injects to its\nbyte budget. Short ``p-`` ids are resolved to full ids here. Rows are only\nappended, and no route reads them back. ``store`` selects the store the\ndigest was read from (404 on an unknown handle).\n\nThe row records the key's principal and the engine's own receipt time, not\na time the body names. A project-bound key records its own project, and a\nbody naming another is refused (403). The store must be in\n``mcp.write.enabled_stores`` (403), a request names at most\n``storage.max_page_size`` beliefs (422), and the route is rate-limited per\nprincipal (``api.rate_limit_per_minute``).",
         "operationId": "record_session_exposure_endpoint_session_exposures_post",
         "parameters": [
           {
@@ -10898,15 +11215,25 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Another project than the key's, or writes disabled on the store"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "More beliefs than one request may name"
           }
         },
         "security": [
@@ -10999,7 +11326,7 @@
         "summary": "List Subjects"
       },
       "post": {
-        "description": "Create a Subject by hand. The normal path is automatic\nresolution at extraction time; this endpoint exists for operator\nbootstrapping and corrections.",
+        "description": "Create a Subject by hand. The normal path is automatic\nresolution at extraction time; this endpoint exists for operator\nbootstrapping and corrections.\n\n``aliases`` and ``external_ids`` need operator authority (503 under the\ndev-key skip), as ``/subjects/{id}/aliases`` does: the local alias index is\nthe resolver's first step, so either steers every later extraction that\nnames those strings onto this Subject (security review 2026-10-24-2, P7).\nEvery Subject needs a real key, since a keyless engine serves reads only:\na canonical name alone can capture another Subject's alias\n(security review 2026-10-25, Q3).",
         "operationId": "create_subject_subjects_post",
         "requestBody": {
           "content": {

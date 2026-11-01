@@ -19,6 +19,7 @@ import json as _json
 import typer
 
 from particles.api.cli import app
+from particles.api.cli._terminal import terminal_echo, terminal_field
 
 conformance_app = typer.Typer(
     help="Conformance Profile checks, the behavioural ground truth.",
@@ -56,9 +57,9 @@ def conformance_check_cmd(
         typer.echo(_json.dumps(payload, indent=2))
     else:
         for r in reports:
-            typer.echo(f"{r.level}: {r.status}  ({len(r.checks)} checks)")
+            terminal_echo(f"{r.level}: {r.status}  ({len(r.checks)} checks)")
             for c in r.failures:
-                typer.echo(f"  ✗ {c.name}: {c.detail}")
+                terminal_echo(f"  ✗ {c.name}: {terminal_field(c.detail)}")
 
     if any(r.status == "FAIL" for r in reports):
         raise typer.Exit(code=1)
@@ -71,16 +72,16 @@ def conformance_show_cmd() -> None:
 
     profile = load_profile()
     ref = profile.embedding_profile.reference
-    typer.echo(f"profile_version: {profile.profile_version}")
-    typer.echo(f"float_tolerance: {profile.float_tolerance:g}")
-    typer.echo(f"reference embedding_profile: {ref.model} / {ref.dim} / {ref.normalization}")
-    typer.echo(f"similarity_vectors: {profile.similarity_vectors_ref}")
-    typer.echo("constants:")
+    terminal_echo(f"profile_version: {profile.profile_version}")
+    terminal_echo(f"float_tolerance: {profile.float_tolerance:g}")
+    terminal_echo(f"reference embedding_profile: {ref.model} / {ref.dim} / {ref.normalization}")
+    terminal_echo(f"similarity_vectors: {profile.similarity_vectors_ref}")
+    terminal_echo("constants:")
     for c in profile.all_constants():
-        typer.echo(f"  {c.name} = {c.value}  [{c.level}] {c.spec}")
-    typer.echo("recency_decay (unlisted source_type -> 1.0):")
+        terminal_echo(f"  {c.name} = {c.value}  [{c.level}] {c.spec}")
+    terminal_echo("recency_decay (unlisted source_type -> 1.0):")
     for st, d in profile.recency_decay.sources.items():
-        typer.echo(f"  {st}: half_life={d.half_life_days}d floor={d.floor}")
-    typer.echo("formulas:")
+        terminal_echo(f"  {st}: half_life={d.half_life_days}d floor={d.floor}")
+    terminal_echo("formulas:")
     for name, expr in profile.formulas.items():
-        typer.echo(f"  {name}: {expr}")
+        terminal_echo(f"  {name}: {expr}")

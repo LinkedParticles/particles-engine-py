@@ -26,14 +26,14 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import ValidKind
+from particles.core.schema import Snapshot, ValidKind
 from particles.core.status import Status
 from particles.core.validity import (
     REGENERABLE_BASES,
@@ -45,7 +45,8 @@ from particles.core.validity import (
     anchor_from_prose,
     prose_rule_digest,
 )
-from particles.corpus.store import list_entry_tag_rows, set_snapshots_published_at
+from particles.corpus.harvest_marks import is_owner_harvest
+from particles.corpus.store import get_entry, list_entry_tag_rows, set_snapshots_published_at
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
     ValidityRecordRow,
@@ -363,6 +364,18 @@ def session_anchor(started_at: datetime) -> datetime:
     return datetime.combine(started_at.astimezone(UTC).date(), time.min, tzinfo=UTC)
 
 
+def _no_later_than_capture(started: datetime, snapshots: Sequence[Snapshot]) -> datetime:
+    """``started``, or the entry's first capture when that is earlier (R30)."""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    for snap in snapshots:
+        captured = snap.captured_at
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=UTC)
+        started = min(started, captured)
+    return started
+
+
 async def redate_sessions(
     session: AsyncSession,
     *,
@@ -384,11 +397,21 @@ async def redate_sessions(
     session the resolver cannot date (its transcript is gone) is listed, not
     guessed. Records one ``SESSION_DATES_REPAIRED`` event. Does not commit;
     the caller owns the transaction.
+
+    Only the harvester's own session deposits are repaired: a deposit route
+    accepts its caller's tags and URI, so the entry's depositor must be one of
+    the owner's harvesters (:func:`~particles.corpus.harvest_marks.is_owner_harvest`).
+    The date written is never later than the entry's first capture, the bound
+    a deposit's own ``content_published_at`` already keeps (security review
+    2026-10-25-2, R30).
     """
     report = RedateReport(dry_run=dry_run)
     session_basis = ValidFromBasis.SESSION.value
     for entry_id, uri_r, tags in await list_entry_tag_rows(session):
         if "claude-code" not in tags or not (uri_r or "").startswith("claude-code://session/"):
+            continue
+        entry = await get_entry(session, entry_id)
+        if entry is None or not is_owner_harvest(entry):
             continue
         report.examined += 1
         started = started_at_for(entry_id, uri_r, tags)
@@ -396,7 +419,7 @@ async def redate_sessions(
             report.unresolved.append(entry_id)
             continue
         report.resolved += 1
-        anchor = session_anchor(started)
+        anchor = session_anchor(_no_later_than_capture(started, entry.snapshots))
         if not dry_run:
             report.snapshots_dated += await set_snapshots_published_at(session, entry_id, anchor)
         for particle in await get_particles_for_entry(session, entry_id):

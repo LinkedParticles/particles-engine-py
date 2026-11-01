@@ -52,6 +52,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.stance import stance_holder
+from particles.corpus.harvest_marks import is_owner_harvest
 from particles.corpus.rule_sources import is_rule_source
 from particles.embeddings import cosine_similarity
 from particles.extraction.components import component_digest
@@ -349,12 +350,6 @@ def _authority(uri: str | None) -> str | None:
     return urlparse(uri).netloc or None
 
 
-#: Tags that only the owner's own harvesters stamp (the Claude Code hooks and
-#: the memory audit). Two local entries are one lineage only when both carry
-#: one of these, or a recorded author (security review N6).
-OWNER_HARVEST_TAGS = frozenset({"memory-file", "claude-code"})
-
-
 def _local_lineage_shared(
     new_entry: CorpusEntry, new_snap: Any, existing_entry: CorpusEntry
 ) -> bool:
@@ -364,14 +359,17 @@ def _local_lineage_shared(
     enough. A local entry (no authority) carries no principal of its own: it
     counts as the same lineage only when the snapshots record an author (the
     caller has checked the two match), the entries record contributors (likewise
-    matched), or both carry the same owner-harvest tag.
+    matched), or both are memory-file harvests by the owner's own harvesters
+    (:func:`~particles.corpus.harvest_marks.is_owner_harvest`). That last test
+    reads the recorded depositor, which no other intake may claim, and never a
+    tag alone: a deposit route accepts tags from its caller (security review
+    N6; 2026-10-24-2, P5).
     """
     if _authority(new_entry.uri_r) is not None:
         return True
     if new_snap.author_id or _contributors_key(new_entry):
         return True
-    shared = set(new_entry.tags or []) & set(existing_entry.tags or [])
-    return bool(shared & OWNER_HARVEST_TAGS)
+    return is_owner_harvest(new_entry) and is_owner_harvest(existing_entry)
 
 
 def _contributors_key(entry: CorpusEntry) -> tuple[tuple[str, str], ...]:
@@ -471,11 +469,13 @@ def update_order(
       (security review D13). A rule file updates only its own earlier
       snapshots; a later claim from any other entry is held for review;
     * the sides are two different local entries (no URL authority, such as two
-      ``file://`` Markdown files) that share neither an owner-harvest tag
-      (:data:`OWNER_HARVEST_TAGS`) nor a recorded author. A local path names no
-      principal, so a cloned vault or repository's notes would otherwise be one
-      lineage with the owner's memory files, and a self-dated third-party file
-      could retire the owner's claim (security review N6);
+      ``file://`` Markdown files) that are not both owner memory-file harvests
+      (a harvester's depositor id and a memory-file tag) and record no author.
+      A local path names no principal, so a cloned vault or repository's notes
+      would otherwise be one lineage with the owner's memory files, and a
+      self-dated third-party file could retire the owner's claim (security
+      review N6). A tag alone never counts, since deposit routes take tags
+      from their caller;
     * either side's source content date is unknown, or the dates are equal.
       ``new_date`` / ``existing_date`` override the snapshot's own date, which
       is how a caller supplies the **latest** observation of a re-stated claim

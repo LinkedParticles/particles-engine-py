@@ -37,8 +37,19 @@ def traced(name: str) -> Callable[[Callable[_P, Awaitable[_R]]], Callable[_P, Aw
     def deco(fn: Callable[_P, Awaitable[_R]]) -> Callable[_P, Awaitable[_R]]:
         @functools.wraps(fn)
         async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-            with _tracer.start_as_current_span(span_name):
-                return await fn(*args, **kwargs)
+            # No exception event and no status description: both carry the
+            # exception's message, and a failed fetch's message is the URL with
+            # its query string. The span records the exception's type alone
+            # (security review 2026-10-26-1, R7).
+            with _tracer.start_as_current_span(
+                span_name, record_exception=False, set_status_on_exception=False
+            ) as span:
+                try:
+                    return await fn(*args, **kwargs)
+                except Exception as exc:
+                    span.set_attribute("error.type", type(exc).__name__)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR))
+                    raise
 
         return wrapper
 

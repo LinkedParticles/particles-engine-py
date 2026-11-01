@@ -249,6 +249,7 @@ def _entry(
     author: str | None = None,
     contributors: list[ContributorRef] | None = None,
     tags: list[str] | None = None,
+    deposited_by: str = "test",
 ) -> tuple[CorpusEntry, str]:
     snap = Snapshot(content_hash="0" * 64, content_published_at=published, author_id=author)
     entry = CorpusEntry(
@@ -256,7 +257,7 @@ def _entry(
         source_type=source_type,
         snapshots=[snap],
         contributors=contributors,
-        deposited_by="test",
+        deposited_by=deposited_by,
         tags=tags or [],
     )
     return entry, snap.snapshot_id
@@ -326,12 +327,16 @@ class TestRuleFileLineage:
     """Security review D13: a rule file is one lineage only with its own snapshots."""
 
     @staticmethod
-    def _md(path: str, tags: list[str], day: int = 0) -> tuple[CorpusEntry, str]:
+    def _md(
+        path: str, tags: list[str], day: int = 0, deposited_by: str = "claude-code-hook"
+    ) -> tuple[CorpusEntry, str]:
+        # The SessionEnd harvest's depositor id, which the lineage guard reads.
         return _entry(
             uri=f"file://{path}",
             source_type="LOCAL_MARKDOWN",
             published=T0 + timedelta(days=day),
             tags=tags,
+            deposited_by=deposited_by,
         )
 
     def test_a_cloned_repositorys_rule_file_never_retires_the_owners_claim(self) -> None:
@@ -356,6 +361,21 @@ class TestRuleFileLineage:
         old, os_ = self._md("/m/session-04.md", ["claude-code", "memory-file"])
         new, ns = self._md("/m/session-07.md", ["claude-code", "memory-file"], day=1)
         assert update_order(_p(), new, ns, _p(), old, os_) == 1
+
+    def test_the_audit_and_the_hook_are_one_harvest_lineage(self) -> None:
+        old, os_ = self._md("/m/a.md", ["claude-code", "memory-file"], deposited_by="audit")
+        new, ns = self._md("/m/b.md", ["claude-code", "memory-file"], day=1)
+        assert update_order(_p(), new, ns, _p(), old, os_) == 1
+
+    def test_harvest_tags_without_a_harvester_depositor_are_no_lineage(self) -> None:
+        """Security review 2026-10-24-2, P5: a tag any intake accepts names no principal."""
+        owner, os_ = self._md("/Users/o/.claude/projects/x/memory/MEMORY.md", ["memory-file"])
+        for depositor in ("api-user", "operator", "web-clipper"):
+            forged, fs = self._md(
+                "/tmp/planted/notes.md", ["claude-code", "memory-file"], 1, depositor
+            )
+            assert update_order(_p(), forged, fs, _p(), owner, os_) is None
+            assert update_order(_p(), owner, os_, _p(), forged, fs) is None
 
 
 class TestLocalMarkdownLineage:
@@ -1465,6 +1485,7 @@ class TestMemoryFileSpeaker:
             content_published_at=dated,
             # What `particles audit` and the SessionEnd harvest stamp.
             tags=["claude-code", "memory-file"],
+            deposited_by="claude-code-hook",
         )
         await session.commit()
         with patch("particles.ingest.subject_resolver.get_authorities", return_value=[wikidata]):

@@ -29,7 +29,7 @@ stores whatever canonical string it is handed.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, Index, String, select
@@ -123,6 +123,7 @@ async def reconcile_url_to_entry(
     *,
     canonical_url: str,
     target_entry_id: str,
+    source_depositors: Collection[str] | None = None,
 ) -> list[str]:
     """Bind every undeposited mention of ``canonical_url`` to a deposited entry.
 
@@ -132,19 +133,28 @@ async def reconcile_url_to_entry(
     that were bound — the deposit path turns each into a ``COMMENT_LINK`` follow
     edge. Idempotent: a second call finds no ``NULL`` rows and
     returns ``[]``.
+
+    ``source_depositors``, when given, binds only the mentions recorded from
+    entries one of those depositors deposited; every other mention stays
+    undeposited. A deposit confined to its own entries passes its owners, so
+    it never rebinds another principal's mentions (security review
+    2026-10-26-1, N2).
     """
-    rows = list(
-        (
-            await session.execute(
-                select(UrlMentionRow).where(
-                    UrlMentionRow.canonical_url == canonical_url,
-                    UrlMentionRow.target_entry_id.is_(None),
+    from particles.corpus.store import CorpusEntryRow
+
+    conditions = [
+        UrlMentionRow.canonical_url == canonical_url,
+        UrlMentionRow.target_entry_id.is_(None),
+    ]
+    if source_depositors is not None:
+        conditions.append(
+            UrlMentionRow.source_entry_id.in_(
+                select(CorpusEntryRow.entry_id).where(
+                    CorpusEntryRow.deposited_by.in_(list(source_depositors))
                 )
             )
         )
-        .scalars()
-        .all()
-    )
+    rows = list((await session.execute(select(UrlMentionRow).where(*conditions))).scalars().all())
     vias: list[str] = []
     for row in rows:
         row.target_entry_id = target_entry_id

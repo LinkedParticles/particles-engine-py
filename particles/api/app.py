@@ -6,34 +6,61 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+import unicodedata
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote, urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, BeforeValidator, Field
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from particles import __version__
+from particles.api import _keys
 from particles.api._middleware import BodySizeLimitMiddleware, HostBoundMiddleware
-from particles.api._rate_limit import RateLimitDep, enforce_rate_limit
+from particles.api._rate_limit import ModelCallMeterMiddleware, RateLimitDep, enforce_rate_limit
 from particles.api.auth import (
-    AuthDep,
-    OperatorAuthDep,
-    ReadAuthDep,
+    AGENT_GATE,
+    AUTH_GATE,
+    OPERATOR_GATE,
+    READ_GATE,
+    Capability,
+    Principal,
+    current_principal,
     enforce_fail_closed_on_startup,
+    enforce_key_material_on_startup,
+    request_holds_a_key,
     require_operator_credential,
+    startup_open_reads_warning,
     warn_if_dev_auth_in_use,
 )
 from particles.api.daemon import DaemonStatus, daemon_status, start_daemon, stop_daemon
 from particles.api.web_app import WEB_APP_MOUNT, build_web_ui_static_app
 from particles.config import get_config
+from particles.core.observer_scope import (
+    PROJECT_TAG_PREFIX,
+    UNATTRIBUTED_MARKER,
+    EntryScope,
+    canonical_project_key,
+    classify_entry,
+    hides_a_character,
+    lookalike_reason,
+    names_a_project,
+    project_keys,
+    project_tag,
+)
 from particles.core.schema import (
     ContestedBadge,
     CorpusEntry,
@@ -58,6 +85,13 @@ from particles.core.schema import (
     VocabularyReport,
 )
 from particles.core.status import Status
+from particles.corpus.deposit import (
+    ForeignEntryRefused,
+    own_entries_only_for,
+    resolve_upload_source_type,
+)
+from particles.corpus.harvest_marks import reserved_marks
+from particles.corpus.rule_sources import RULE_SOURCE_TAG
 from particles.db import (
     DEFAULT_STORE,
     WriteLockTimeout,
@@ -65,15 +99,21 @@ from particles.db import (
     get_session,
     get_write_session,
     session_scope,
+    write_transaction,
 )
-from particles.egress import EgressRefused, ensure_backstop
+from particles.egress import EgressRefused, ensure_backstop, require_covered_loop
+from particles.extraction.mcp_memory import SOURCE_TYPE as MIGRATION_SOURCE_TYPE
 from particles.http import SourceFetchError
 from particles.operations._llm import llm_circuit_open
 from particles.operations.agent_write import (
     AgentWriteResult,
     assert_belief,
     assign_subject_belief,
+    check_belief_body,
+    check_operator_supersede,
+    deposit_conversation_text,
     link_beliefs,
+    require_project_binding,
     retract_belief,
     supersede_belief,
     tag_belief,
@@ -95,6 +135,7 @@ from particles.operations.deposit import (
     deposit_text,
     deposit_text_versioned,
     deposit_url,
+    writes_committed_under_lock,
 )
 from particles.operations.deposit_suggest import DepositSuggestReport
 from particles.operations.digest import DigestLine
@@ -115,11 +156,70 @@ from particles.operations.subject_relink import (
     build_report,
     plan_gated_relink,
 )
-from particles.store.event_store import OperatorEvent
+from particles.store.event_store import HTTP_KEY_ID_FIELD, OperatorEvent
 from particles.store.session_exposure_store import SessionExposure
 from particles.url_safety import is_network_uri
 
 log = logging.getLogger(__name__)
+
+
+#: The config the serving checks last passed under. ``None`` until they first
+#: pass; a reload (a new config object) runs them again.
+_serving_checks_passed_for: object | None = None
+
+
+def ensure_serving_checks() -> None:
+    """Run the checks that must hold before the engine serves, once per config.
+
+    The lifespan runs them at startup, where a failure aborts it. A server run
+    with its lifespan off (``uvicorn --lifespan off``) never enters the
+    lifespan, so :class:`ServingChecksMiddleware` runs them on the first
+    request too, and answers 503 for as long as they fail (security review
+    2026-10-25, Q10 and Q46). Raises what the failing check raises.
+    """
+    global _serving_checks_passed_for
+    config = get_config()
+    if _serving_checks_passed_for is config:
+        return
+    # Fail closed before anything else: if bearer auth is disabled and the
+    # bind host is not loopback, refuse to start rather than serve
+    # unauthenticated traffic beyond loopback. Raising here aborts startup.
+    enforce_fail_closed_on_startup()
+    # Refuse key material the engine cannot use as intended.
+    enforce_key_material_on_startup()
+    warn_if_dev_auth_in_use()
+    reads_warning = startup_open_reads_warning()
+    if reads_warning is not None:
+        log.warning("%s", reads_warning)
+    # Arm the no-egress backstop before anything can connect.
+    ensure_backstop()
+    # The backstop cannot see uvloop's sockets; a raw `uvicorn` launch picks
+    # uvloop when it is installed, so a refusing posture refuses to start on it.
+    require_covered_loop()
+    _serving_checks_passed_for = config
+
+
+class ServingChecksMiddleware:
+    """Serve nothing until :func:`ensure_serving_checks` has passed."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            try:
+                ensure_serving_checks()
+            except Exception as exc:  # noqa: BLE001 - every failing check refuses alike
+                log.error("engine refused a request: a serving check failed: %s", exc)
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1011})
+                    return
+                await JSONResponse(
+                    {"detail": "the engine is not serving: a startup check failed (see its log)"},
+                    status_code=503,
+                )(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 @asynccontextmanager
@@ -130,11 +230,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runs before ``yield``; the shutdown half cancels the daemon tasks
     (a no-op unless daemon mode is on).
     """
-    # Fail closed before anything else: if bearer auth is disabled and the
-    # bind host is not loopback, refuse to start rather than serve
-    # unauthenticated traffic beyond loopback. Raising here aborts startup.
-    enforce_fail_closed_on_startup()
-    warn_if_dev_auth_in_use()
+    ensure_serving_checks()
     # Bootstrap observability. No-op unless enabled + the `otel` extra
     # is installed. This covers a raw `uvicorn particles.api.app:app` launch
     # (providers + httpx / SQLAlchemy / log correlation); the FastAPI server span
@@ -142,8 +238,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # app starts (middleware cannot be added once serving has begun).
     from particles.observability import setup_observability
 
-    # Arm the no-egress backstop before anything can connect.
-    ensure_backstop()
     setup_observability()
     await create_tables()
     # Resident daemon mode — opt-in, off by default. Started after
@@ -171,10 +265,16 @@ app = FastAPI(
 # The limit is read per-request from config, so this single registration
 # honours reloads and the PARTICLES_MAX_REQUEST_BODY_BYTES override.
 app.add_middleware(BodySizeLimitMiddleware)
+# A request without the bearer has each model call charged to its rate-limit
+# bucket and writes no probe verdict (security review 2026-10-25-2, R2 and R5).
+app.add_middleware(ModelCallMeterMiddleware)
 # Outermost (added last): refuse a disallowed Host, or a non-loopback client under
 # the dev-key skip, on every path before the body is read (security review
 # 2026-10-24, N1). The route gates repeat it; this covers /health and /app.
 app.add_middleware(HostBoundMiddleware)
+# Outermost of all: nothing is served before the startup checks have passed,
+# including under `uvicorn --lifespan off` (security review 2026-10-25, Q10).
+app.add_middleware(ServingChecksMiddleware)
 
 
 @app.middleware("http")
@@ -293,10 +393,23 @@ async def _store_write_session(store: StoreDep) -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def _belief_write_session(store: StoreDep) -> AsyncIterator[AsyncSession]:
+    """A write session on a store that takes belief writes, checked before the lock.
+
+    A refused write on a store outside ``mcp.write.enabled_stores`` answers 403
+    without taking the store's writer lock (security review 2026-10-27-1, G36).
+    """
+    _require_belief_writes_enabled(store)
+    async with session_scope(store, write=True) as session:
+        yield session
+
+
 #: ``SessionDep`` / ``WriteSessionDep`` bound to the store the ``store`` query
 #: parameter names, for the writes the thin client routes by handle.
 StoreSessionDep = Annotated[AsyncSession, Depends(_store_session)]
 StoreWriteSessionDep = Annotated[AsyncSession, Depends(_store_write_session)]
+#: ``StoreWriteSessionDep`` for a belief write: the write-enable 403 comes first.
+BeliefWriteSessionDep = Annotated[AsyncSession, Depends(_belief_write_session)]
 
 
 def _bounded_limit(limit: int | None, *, default: int | None = None) -> int:
@@ -416,13 +529,37 @@ _ERR502: dict[int | str, dict[str, Any]] = {
 }
 
 
+def _blank_is_omitted(value: object) -> object:
+    """Read a string with no visible character (empty, whitespace, zero-width) as omitted.
+
+    A key that names a project is stored in NFC, and one that hides an
+    invisible character among visible ones is refused (422): it would render
+    exactly as another project (security review 2026-10-28-1, O46).
+    """
+    if not isinstance(value, str):
+        return value
+    if not names_a_project(value):
+        return None
+    reason = lookalike_reason(value)
+    if reason is not None:
+        raise ValueError(f"project_key {reason}")
+    return canonical_project_key(value)
+
+
+#: The project an agent surface writes as. An empty key names no
+#: project, so it is read as omitted and meets the rescoped-store binding
+#: check like one (security review 2026-10-25-1, Q54); so does a key of only
+#: invisible characters (security review 2026-10-26-1, E9).
+ProjectKey = Annotated[str | None, BeforeValidator(_blank_is_omitted)]
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
+async def health(holds_key: Annotated[bool, Depends(request_holds_a_key)]) -> HealthResponse:
     """Liveness check. Returns ``status="ok"``, the SDK version, and the build date.
 
     In daemon mode the response also carries the background tasks'
@@ -436,11 +573,22 @@ async def health() -> HealthResponse:
     unauthenticated with nothing new behind it: the version was already
     disclosed here, and a build timestamp says no more about the deployment
     than the version it accompanies.
+
+    With ``api.require_auth_for_reads`` on, the daemon's per-task detail (runs,
+    failures, each task's last outcome) is served only to a request whose key
+    authenticates; a caller without one still gets ``status``, so a readiness
+    gate keeps working (security review 2026-10-28-2, AA50).
     """
     built_at = get_config().build.date
     daemon = daemon_status()
     if not daemon.enabled:
         return HealthResponse(status="ok", version=__version__, built_at=built_at)
+    if get_config().api.require_auth_for_reads and not holds_key:
+        return HealthResponse(
+            status="ok" if daemon.healthy else "degraded",
+            version=__version__,
+            built_at=built_at,
+        )
     return HealthResponse(
         status="ok" if daemon.healthy else "degraded",
         version=__version__,
@@ -449,16 +597,15 @@ async def health() -> HealthResponse:
     )
 
 
-@app.get("/quality", response_model=QualityReport)
-async def quality_dashboard(session: SessionDep, _auth: ReadAuthDep) -> QualityReport:
+@app.get("/quality", dependencies=[READ_GATE], response_model=QualityReport)
+async def quality_dashboard(session: SessionDep) -> QualityReport:
     """Extraction quality dashboard: calibration distribution, corpus status, subject coverage."""
     return await get_quality_report(session)
 
 
-@app.get("/vocabulary", response_model=VocabularyReport)
+@app.get("/vocabulary", dependencies=[READ_GATE], response_model=VocabularyReport)
 async def vocabulary_report_route(
     session: SessionDep,
-    _auth: ReadAuthDep,
     observer_project: Annotated[str | None, Query(min_length=1)] = None,
     include_document_meta: bool = False,
     include_non_asserted: bool = False,
@@ -536,11 +683,10 @@ class CurationQueueResponse(BaseModel):
     kind_as_of: dict[str, datetime] = Field(default_factory=dict)
 
 
-@app.get("/curation", response_model=CurationQueueResponse)
+@app.get("/curation", dependencies=[AUTH_GATE], response_model=CurationQueueResponse)
 async def get_curation_queue(
     request: Request,
     session: SessionDep,
-    _auth: AuthDep,
     limit: int | None = Query(None, ge=1),
     kind: str | None = None,
     semantic: bool | None = None,
@@ -607,9 +753,14 @@ async def get_curation_queue(
     )
 
 
-@app.get("/curation/cards/{key:path}", response_model=CurationCard, responses=_ERR404)
+@app.get(
+    "/curation/cards/{key:path}",
+    dependencies=[AUTH_GATE],
+    response_model=CurationCard,
+    responses=_ERR404,
+)
 async def get_curation_card_endpoint(
-    key: str, request: Request, session: SessionDep, _auth: AuthDep
+    key: str, request: Request, session: SessionDep
 ) -> CurationCard:
     """Return one open curation card by its key, with every belief it names briefed.
 
@@ -636,10 +787,9 @@ class CurationRebuildResponse(BaseModel):
     semantic: bool
 
 
-@app.post("/curation/rebuild", response_model=CurationRebuildResponse)
+@app.post("/curation/rebuild", dependencies=[OPERATOR_GATE], response_model=CurationRebuildResponse)
 async def rebuild_curation_endpoint(
     session: SessionDep,
-    _auth: AuthDep,
     _rl: RateLimitDep,
     semantic: bool | None = None,
 ) -> CurationRebuildResponse:
@@ -670,15 +820,16 @@ async def rebuild_curation_endpoint(
 # filter (`_suppressed_keys`) consumes them. Gated exactly like the belief-write
 # endpoints (`mcp.write.enabled_stores` → 403; the bearer) — they are
 # operator-judgment writes against the canonical store, so the same write gate
-# applies and they never ride the dev-key loopback skip: `OperatorAuthDep`
-# refuses them (503) while PARTICLES_API_KEY is the dev-key sentinel.
+# applies: `OPERATOR_GATE` refuses them (503) while PARTICLES_API_KEY is the
+# dev-key sentinel, as every write route is refused on a keyless engine.
 # ---------------------------------------------------------------------------
 
 
 class CurationAffirmRequest(BaseModel):
     """Affirm a belief still holds: records ``BELIEF_AFFIRMED``,
-    suppressing the belief's card. Does NOT touch confidence; first-class
-    corroboration is vouch."""
+    suppressing the belief's card. Does NOT touch confidence; agreeing with a
+    belief is an endorsement stance, which never feeds
+    confidence either."""
 
     particle_id: str
     card_key: str | None = None
@@ -705,10 +856,13 @@ class CurationEventResponse(BaseModel):
     benchmark_fixture: str | None = None
 
 
-@app.post("/curation/affirm", response_model=CurationEventResponse, responses=_ERR400)
-async def curation_affirm_endpoint(
-    req: CurationAffirmRequest, session: SessionDep, _auth: OperatorAuthDep
-) -> CurationEventResponse:
+@app.post(
+    "/curation/affirm",
+    dependencies=[OPERATOR_GATE],
+    response_model=CurationEventResponse,
+    responses=_ERR400,
+)
+async def curation_affirm_endpoint(req: CurationAffirmRequest) -> CurationEventResponse:
     """Affirm a belief still holds (``BELIEF_AFFIRMED`` operator event).
 
     Suppresses the belief's curation card without mutating the belief. 403 when
@@ -718,15 +872,20 @@ async def curation_affirm_endpoint(
 
     _require_belief_writes_enabled()
     card_key = req.card_key or f"contested:{req.particle_id}"
-    event = await record_event(
-        session,
-        actor="http:/curation/affirm",
-        event_type=OperatorEventType.BELIEF_AFFIRMED,
-        refs=[(EventRefKind.PARTICLE, req.particle_id)],
-        payload={"card_key": card_key, "particle_id": req.particle_id},
-    )
-    fixture = await _record_demotion_ruling(session, card_key, "affirm", "http:/curation/affirm")
-    await session.commit()
+    # The event commits under the store's writer lock, after the 403 (security
+    # review 2026-10-28-2, Z47).
+    async with session_scope(write=True) as session:
+        event = await record_event(
+            session,
+            actor="http:/curation/affirm",
+            event_type=OperatorEventType.BELIEF_AFFIRMED,
+            refs=[(EventRefKind.PARTICLE, req.particle_id)],
+            payload={"card_key": card_key, "particle_id": req.particle_id},
+        )
+        fixture = await _record_demotion_ruling(
+            session, card_key, "affirm", "http:/curation/affirm"
+        )
+        await session.commit()
     return CurationEventResponse(
         event_id=event.event_id, card_key=card_key, benchmark_fixture=fixture
     )
@@ -748,10 +907,11 @@ async def _record_demotion_ruling(
 
 
 class MemoryUsefulRequest(BaseModel):
-    """Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and credits
-    the belief on the explicit utility channel. Does NOT touch confidence and does
-    NOT claim the belief is true; it lifts the belief in the projection / digest
-    ranking only. For "still true", use ``/curation/affirm``."""
+    """Mark a belief useful: records ``BELIEF_MARKED_USEFUL`` and, for a
+    press made with an operator key, credits the belief on the explicit utility
+    channel. Does NOT touch confidence and does NOT claim the belief is true; it
+    lifts the belief in the projection / digest ranking only. For "still true",
+    use ``/curation/affirm``."""
 
     particle_id: str
     reason: str | None = None
@@ -760,39 +920,54 @@ class MemoryUsefulRequest(BaseModel):
 class MemoryUsefulResponse(BaseModel):
     """Outcome of an explicit usefulness gesture.
 
-    ``counted`` is False when this principal already credited this belief today,
-    the rate bound. The event is recorded either way."""
+    ``counted`` is False when this interface already credited this belief today,
+    the rate bound, and on every press made without an operator
+    key, which earns no credit and has no ``credit_key`` (amended
+    2026-10-27). The event is recorded either way."""
 
     event_id: str
     particle_id: str
-    credit_key: str
+    credit_key: str | None
     counted: bool
 
 
-@app.post("/memory/useful", response_model=MemoryUsefulResponse, responses=_ERR400)
-async def memory_useful_endpoint(
-    req: MemoryUsefulRequest, session: SessionDep, _auth: AuthDep
-) -> MemoryUsefulResponse:
+@app.post(
+    "/memory/useful",
+    dependencies=[AGENT_GATE],
+    response_model=MemoryUsefulResponse,
+    responses=_ERR400,
+)
+async def memory_useful_endpoint(req: MemoryUsefulRequest) -> MemoryUsefulResponse:
     """Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).
 
     The explicit second utility channel, for the belief class the transcript
     miner cannot observe: prohibitions and design stances, complied
-    with by *not* acting. Promotion-only and projection-only. 403 when belief
-    writes are disabled (``mcp.write.enabled_stores`` default-deny)."""
+    with by *not* acting. Promotion-only and projection-only. Only a press made
+    with an operator key earns the utility credit, at most one per belief per
+    day. An agent key's press is recorded with its principal and earns none,
+    so it neither adds to the credit nor uses up the operator's.
+    403 when belief writes are disabled (``mcp.write.enabled_stores``
+    default-deny)."""
     from particles.operations.utility_feedback import (
         HTTP_ACTOR,
         BeliefNotCreditable,
         mark_belief_useful,
     )
 
-    _require_belief_writes_enabled()
-    try:
-        result = await mark_belief_useful(
-            session, req.particle_id, actor=HTTP_ACTOR, reason=req.reason
-        )
-    except BeliefNotCreditable as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    store = _require_belief_writes_enabled()
+    principal = current_principal()
+    operator = principal is not None and principal.can(Capability.OPERATOR_WRITE)
+    # The press writes an event, so it commits under the writer lock like
+    # every other agent write; the 403 above comes first (security review
+    # 2026-10-28-1, O47, E18).
+    async with session_scope(store, write=True) as session:
+        try:
+            result = await mark_belief_useful(
+                session, req.particle_id, actor=HTTP_ACTOR, reason=req.reason, operator=operator
+            )
+        except BeliefNotCreditable as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return MemoryUsefulResponse(
         event_id=result.event_id,
         particle_id=result.particle_id,
@@ -801,10 +976,13 @@ async def memory_useful_endpoint(
     )
 
 
-@app.post("/curation/snooze", response_model=CurationEventResponse, responses=_ERR400)
-async def curation_snooze_endpoint(
-    req: CurationSnoozeRequest, session: SessionDep, _auth: OperatorAuthDep
-) -> CurationEventResponse:
+@app.post(
+    "/curation/snooze",
+    dependencies=[OPERATOR_GATE],
+    response_model=CurationEventResponse,
+    responses=_ERR400,
+)
+async def curation_snooze_endpoint(req: CurationSnoozeRequest) -> CurationEventResponse:
     """Snooze / dismiss a curation card (``CURATION_CARD_SNOOZED`` event).
 
     ``snooze_days=None`` permanently dismisses; a positive value hides the card
@@ -815,34 +993,37 @@ async def curation_snooze_endpoint(
 
     _require_belief_writes_enabled()
     snooze_days = req.snooze_days
-    if snooze_days is None and req.card_key.startswith(f"{CardKind.SUBJECTLESS_SOURCE.value}:"):
-        # dismissing a source card rules on the beliefs it names.
-        card = CurationCard.from_key(req.card_key)
-        card.particle_ids = list(req.particle_ids)
-        try:
-            dismissal = await dismiss_source_card(session, card, actor="http:/curation/snooze")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Every write commits under the store's writer lock, after the 403 (security
+    # review 2026-10-28-2, Z47).
+    async with session_scope(write=True) as session:
+        if snooze_days is None and req.card_key.startswith(f"{CardKind.SUBJECTLESS_SOURCE.value}:"):
+            # dismissing a source card rules on the beliefs it names.
+            card = CurationCard.from_key(req.card_key)
+            card.particle_ids = list(req.particle_ids)
+            try:
+                dismissal = await dismiss_source_card(session, card, actor="http:/curation/snooze")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await session.commit()
+            return CurationEventResponse(event_id=dismissal.event_id, card_key=req.card_key)
+        until = None if snooze_days is None else datetime.now(UTC) + timedelta(days=snooze_days)
+        event = await record_event(
+            session,
+            actor="http:/curation/snooze",
+            event_type=OperatorEventType.CURATION_CARD_SNOOZED,
+            refs=[(EventRefKind.PARTICLE, pid) for pid in req.particle_ids],
+            payload={
+                "card_key": req.card_key,
+                "snoozed_until": None if until is None else until.isoformat(),
+                "snooze_days": snooze_days,
+            },
+        )
+        fixture = (
+            await _record_demotion_ruling(session, req.card_key, "dismiss", "http:/curation/snooze")
+            if snooze_days is None
+            else None
+        )
         await session.commit()
-        return CurationEventResponse(event_id=dismissal.event_id, card_key=req.card_key)
-    until = None if snooze_days is None else datetime.now(UTC) + timedelta(days=snooze_days)
-    event = await record_event(
-        session,
-        actor="http:/curation/snooze",
-        event_type=OperatorEventType.CURATION_CARD_SNOOZED,
-        refs=[(EventRefKind.PARTICLE, pid) for pid in req.particle_ids],
-        payload={
-            "card_key": req.card_key,
-            "snoozed_until": None if until is None else until.isoformat(),
-            "snooze_days": snooze_days,
-        },
-    )
-    fixture = (
-        await _record_demotion_ruling(session, req.card_key, "dismiss", "http:/curation/snooze")
-        if snooze_days is None
-        else None
-    )
-    await session.commit()
     return CurationEventResponse(
         event_id=event.event_id,
         card_key=req.card_key,
@@ -864,7 +1045,8 @@ class DepositUrlRequest(BaseModel):
     url: str
     source_type: str | None = None
     mutability: Mutability | None = None
-    deposited_by: str = "api-user"
+    # Absent: an agent key's principal, or ``api-user`` for an operator key.
+    deposited_by: str | None = None
     tags: list[str] = []
     # deposit-time link-follow opt-in; None ⇒ the extractor's default
     # (Reddit / HN / Mastodon default True, everything else False). Exposed over
@@ -889,7 +1071,8 @@ class DepositTextRequest(BaseModel):
 
     text: str
     source_type: str = SourceType.CONVERSATION
-    deposited_by: str = "api-user"
+    # Absent: an agent key's principal, or ``api-user`` for an operator key.
+    deposited_by: str | None = None
     tags: list[str] = []
     author_id: str | None = None
     uri_r: str | None = None
@@ -910,36 +1093,369 @@ class DepositResponse(BaseModel):
     carried the deposited content hash, so nothing was written and the existing
     IDs are echoed. Every deposit route sets it, except a URL deposit handled by
     a domain importer, which is deduplicated the same way but always reports
-    ``false``."""
+    ``false``.
+
+    ``follow_refused`` (a URL deposit only): each primary URL a link post
+    names that the deposit did not follow, because another principal's entry
+    holds it and an agent key writes only its own entries. The
+    primary deposit stands; empty when every follow was made or none was due."""
 
     entry_id: str
     snapshot_id: str
     unchanged: bool = False
+    follow_refused: list[str] = []
+
+
+def _actor_label() -> str:
+    """The acting key's principal, for the audit labels an operator route records.
+
+    ``POST /subjects``, ``POST /trust/statements`` and ``POST /extract`` recorded a
+    fixed ``api-user`` before (§3 rule 6). Nothing reads these labels as
+    evidence, unlike a depositor, so they name who acted.
+    """
+    principal = current_principal()
+    return principal.id if principal is not None else _ANONYMOUS_DEPOSITOR
+
+
+@dataclass(frozen=True)
+class _DepositProvenance:
+    """Who a deposit is recorded as, decided from the key, not the body.
+
+    ``confined`` is true for an agent key: its deposit is wrapped in
+    :func:`own_entries_only_for` and may name no URI, no source type of its own
+    and no reserved mark it does not hold.
+    """
+
+    principal: Principal
+    deposited_by: str
+    author_id: str | None
+    confined: bool
+    #: The deposit's tags, with a project-bound key's project stamped on (§4).
+    tags: list[str]
+
+
+#: The anonymous depositor label an operator key's deposit records when the
+#: body names none, exactly as before.
+_ANONYMOUS_DEPOSITOR = "api-user"
+
+#: The ``file://`` paths a harvester principal's text deposit may name: a
+#: memory file under a Claude Code ``projects/<slug>/memory/`` directory, and
+#: one project's fold-and-archive file, ``projects/<slug>/MEMORY.archive.md``
+#: under the hook's state directory (rule 4; security review
+#: 2026-10-26-1, W41). The shape is checked here, and the directories the key
+#: records at mint by :func:`_harvest_root_refusal`.
+_HARVEST_FILE_PATH_RE = re.compile(
+    r"(?:/[^/]+)*/projects/[^/]+/(?:memory/(?:[^/]+/)*[^/]+\.md|MEMORY\.archive\.md)"
+)
+
+#: The one ``claude-code://`` shape the harvest sends: a session transcript.
+_HARVEST_SESSION_URI_RE = re.compile(r"claude-code://session/[0-9A-Za-z][0-9A-Za-z_-]*")
+
+#: The source types a file can declare in its own bytes that set policy.
+_POLICY_SOURCE_TYPES = frozenset(
+    {
+        SourceType.TAXONOMY_DEFINITION,
+        SourceType.TRUST_LENS_DEFINITION,
+        SourceType.VOCABULARY_DOCUMENT,
+    }
+)
+
+
+def _provenance_refusal(principal: Principal, what: str) -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail=(
+            f"This key ({principal.role.value}, principal {principal.id}) deposits as "
+            f"{principal.id}, so {what}; that needs an operator key."
+        ),
+    )
+
+
+def _canonical_project_tags(tags: list[str] | None) -> list[str]:
+    """``tags`` with each ``project:`` tag that names a project in its canonical spelling."""
+    return [
+        project_tag(canonical_project_key(tag[len(PROJECT_TAG_PREFIX) :]))
+        if tag.startswith(PROJECT_TAG_PREFIX) and names_a_project(tag[len(PROJECT_TAG_PREFIX) :])
+        else tag
+        for tag in tags or []
+    ]
+
+
+def _deposit_provenance(
+    deposited_by: str | None, author_id: str | None = None, tags: list[str] | None = None
+) -> _DepositProvenance:
+    """Stamp a deposit with the key's principal, or keep an operator's named attribution.
+
+    An operator key may name any depositor and author (attribution authority);
+    when it names no depositor the deposit records ``api-user``, as before,
+    because a depositor is evidence trust and the refresh tier read. An agent
+    key's deposit is recorded as its principal: a body that names anyone else
+    is refused with 403 and nothing is stored, so a client that thinks it
+    deposits as someone else is told so. The reserved harvest tags need
+    ``HARVEST_MARKS``: an operator, or an agent whose principal is a harvester
+    (rules 1 and 5; security review 2026-10-24-2, P5).
+    """
+    principal = current_principal()
+    if principal is None:  # the agent gate admits no anonymous write
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if principal.can(Capability.ATTRIBUTE_OTHERS):
+        # An operator names what tags it likes, but a project tag is stored in
+        # its canonical spelling, as an agent's is, so one project is never two
+        # by normalisation form (security review 2026-10-28-2, AA25).
+        return _DepositProvenance(
+            principal=principal,
+            deposited_by=deposited_by or _ANONYMOUS_DEPOSITOR,
+            author_id=author_id,
+            confined=False,
+            tags=_canonical_project_tags(tags),
+        )
+    for field, value in (("deposited_by", deposited_by), ("author_id", author_id)):
+        if value is not None and value != principal.id:
+            raise _provenance_refusal(principal, f"{field} may not name {value!r}")
+    marks = reserved_marks(tags, None)
+    if marks and not principal.can(Capability.HARVEST_MARKS):
+        raise _provenance_refusal(
+            principal,
+            f"it may not name {', '.join(marks)}, which only the owner's harvesters write",
+        )
+    if RULE_SOURCE_TAG in marks:
+        # The rule-file intake (`rules sync`, `init claude-code`) runs on the
+        # engine's host only; the remote harvest never sends the mark
+        # (security review 2026-10-26-1, W41).
+        raise _provenance_refusal(
+            principal,
+            f"it may not name {RULE_SOURCE_TAG}, which only the local rule-file intake writes",
+        )
+    for tag in tags or []:
+        # A project tag that renders as another project's (security review
+        # 2026-10-28-1, O46). The key is judged alone, as the mint judges it,
+        # so a key in one non-Latin script is not read as mixing it with the
+        # Latin prefix (security review 2026-10-28-2, AA26, AA48).
+        reason = (
+            lookalike_reason(tag[len(PROJECT_TAG_PREFIX) :])
+            if tag.startswith(PROJECT_TAG_PREFIX)
+            else None
+        )
+        if reason is not None:
+            raise _provenance_refusal(principal, f"the tag {tag!r} {reason}")
+    stamped = _canonical_project_tags(tags)
+    if principal.project is not None:
+        foreign = project_keys(stamped) - {principal.project}
+        if foreign:
+            raise _provenance_refusal(
+                principal,
+                f"its writes are bound to project {principal.project!r} and may not name "
+                f"{', '.join(sorted(project_tag(k) for k in foreign))}",
+            )
+        if principal.project not in project_keys(stamped):
+            stamped.append(project_tag(principal.project))
+    elif classify_entry(stamped, get_config().observer_scope.harness_tags) is EntryScope.GLOBAL:
+        # An agent's material is never global by omission: a deposit that
+        # names no project and carries no harness tag is marked unattributed,
+        # as the agent routes mark it (security review
+        # 2026-10-26-1, W4, W36).
+        stamped.append(UNATTRIBUTED_MARKER)
+    return _DepositProvenance(
+        principal=principal,
+        deposited_by=principal.id,
+        author_id=principal.id,
+        confined=True,
+        tags=stamped,
+    )
+
+
+def _is_harvest_uri(uri_r: str) -> bool:
+    """Whether ``uri_r`` has the shape of a URI the SessionEnd harvest deposits.
+
+    A session transcript (``claude-code://session/<id>``), or a ``file://``
+    memory file or archive file (:data:`_HARVEST_FILE_PATH_RE`). A ``file://``
+    URI with a host, a query, a fragment, a ``.`` / ``..`` segment or a control
+    character is refused, and the whole path must match, so the shape cannot be
+    met by a path that leaves it.
+    """
+    if any(unicodedata.category(ch)[0] == "C" for ch in uri_r):
+        # Judged on the raw string, the one the deposit stores: ``urlsplit``
+        # drops a raw tab, CR or LF before the path check below could see it
+        # (security review 2026-10-28-1, O44).
+        return False
+    if uri_r.startswith("claude-code://"):
+        return _HARVEST_SESSION_URI_RE.fullmatch(uri_r) is not None
+    if not uri_r.startswith("file://"):
+        return False
+    if any(unicodedata.category(ch)[0] == "C" for ch in uri_r):
+        # ``urlsplit`` strips a raw tab, CR or LF before the path is judged,
+        # while the raw ``uri_r`` is what is stored (security review
+        # 2026-10-28-1, G41).
+        return False
+    parts = urlsplit(uri_r)
+    if parts.netloc or parts.query or parts.fragment:
+        return False
+    path = unquote(parts.path)
+    if any(segment in {".", ".."} for segment in path.split("/")):
+        return False
+    if any(unicodedata.category(ch)[0] == "C" for ch in path):
+        # ``$`` matched before a trailing newline, so an encoded one passed the
+        # shape (security review 2026-10-27-1, G41).
+        return False
+    return _HARVEST_FILE_PATH_RE.fullmatch(path) is not None
+
+
+def _harvest_root_refusal(principal: Principal, path: str) -> str | None:
+    """Why a harvester's ``file://`` path lies under none of its key's roots, or None.
+
+    ``path`` has passed :func:`_is_harvest_uri`. A memory file must sit at
+    ``<memory root>/<slug>/memory/…/<name>.md`` and an archive file at
+    ``<archive root>/<slug>/MEMORY.archive.md``, the leading segments equal to a
+    recorded root's segment for segment: never a string prefix, case-sensitive,
+    and with no link resolved, since the harvest sends resolved paths and the
+    mint records resolved roots. A key that records no root names no file.
+    """
+    if principal.memory_roots is None and principal.archive_roots is None:
+        return (
+            "records no harvest roots, so it names no memory or archive file; mint the hooks "
+            "a key with --memory-root and --archive-root naming the client's directories"
+        )
+    segments = path.split("/")[1:]
+
+    def rest_under(roots: tuple[str, ...] | None) -> list[list[str]]:
+        found: list[list[str]] = []
+        for root in roots or ():
+            head = root.split("/")[1:]
+            if segments[: len(head)] == head:
+                found.append(segments[len(head) :])
+        return found
+
+    for rest in rest_under(principal.memory_roots):
+        if len(rest) >= 3 and rest[1] == "memory" and rest[-1].endswith(".md"):
+            return None
+    for rest in rest_under(principal.archive_roots):
+        if len(rest) == 2 and rest[1] == "MEMORY.archive.md":
+            return None
+    named = [
+        f"{label} {', '.join(roots)}"
+        for label, roots in (
+            ("memory roots", principal.memory_roots),
+            ("archive roots", principal.archive_roots),
+        )
+        if roots
+    ]
+    return f"may not name {path!r}, which lies under none of its {'; '.join(named)}"
+
+
+def _confine_text_deposit(prov: _DepositProvenance, uri_r: str | None, source_type: str) -> None:
+    """An agent's text deposit names no URI and no source type of its own (rule 4).
+
+    A URI is evidence: an ``http(s)`` one takes that domain's trust and joins its
+    update lineage without a fetch (Q2, Q9), and a ``file://`` one is what the
+    local refresh keys on and what a document collection is keyed on (Q7).
+    Only a harvester principal names one, and only the shapes the harvest
+    sends (:func:`_is_harvest_uri`). The engine records the type:
+    ``CONVERSATION``, or ``LOCAL_MARKDOWN`` for a harvester's ``file://``
+    memory file.
+    """
+    if not prov.confined:
+        return
+    harvester = prov.principal.can(Capability.HARVEST_MARKS)
+    if uri_r is not None and not (harvester and _is_harvest_uri(uri_r)):
+        raise _provenance_refusal(prov.principal, f"it may not name the URI {uri_r!r}")
+    if uri_r is not None and uri_r.startswith("file://"):
+        path = unquote(urlsplit(uri_r).path)
+        refusal = _harvest_root_refusal(prov.principal, path)
+        if refusal is None and uri_r != Path(path).as_uri():
+            # The one spelling the harvest sends, so the path the roots judged is
+            # the URI every lookup keys on and the slug every consumer reads
+            # (security review 2026-10-30-1, AB52).
+            refusal = f"may name a file only as {Path(path).as_uri()!r}, the harvest's spelling"
+        if refusal is not None:
+            principal = prov.principal
+            raise HTTPException(
+                status_code=403,
+                detail=f"This key ({principal.role.value}, principal {principal.id}) {refusal}.",
+            )
+    allowed = {SourceType.CONVERSATION}
+    if harvester and uri_r is not None and uri_r.startswith("file://"):
+        allowed.add(SourceType.LOCAL_MARKDOWN)
+    if source_type not in allowed:
+        raise _provenance_refusal(prov.principal, f"it may not type a deposit {source_type!r}")
+
+
+@contextlib.contextmanager
+def _confined(prov: _DepositProvenance) -> Iterator[None]:
+    """Run an agent key's deposit under :func:`own_entries_only_for`; 409 on another's entry."""
+    if not prov.confined:
+        yield
+        return
+    try:
+        with own_entries_only_for(prov.deposited_by):
+            yield
+    except ForeignEntryRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _refuse_migration_source_type(source_type: str | None) -> None:
+    """Refuse an HTTP deposit typed as a memory-server export (400).
+
+    The memory-server façade reads a belief extracted from such an entry as its
+    own memory, so the type is a mark only the local migration verb
+    (``particles import mcp-memory``, which refuses remote mode) may write.
+    Over HTTP, with a key or without one, the type is refused (security review
+    2026-10-25-2, R26; the bearer half of Q6).
+    """
+    if source_type == MIGRATION_SOURCE_TYPE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refusing a deposit typed {MIGRATION_SOURCE_TYPE}: only the local "
+                "`particles import mcp-memory` verb deposits a memory-server export, "
+                "because the memory-server facade reads what it yields as its own memory. "
+                "Run that verb on the engine's host, or deposit the file under another type."
+            ),
+        )
 
 
 @app.post(
     "/corpus/deposit/url",
+    dependencies=[AGENT_GATE],
     response_model=DepositResponse,
     responses={**_ERR400, **_ERR502},
 )
 async def corpus_deposit_url(
-    req: DepositUrlRequest, session: WriteSessionDep, _auth: AuthDep
+    req: DepositUrlRequest, _rl: RateLimitDep, session: SessionDep
 ) -> DepositResponse:
-    """Deposit a URL into the corpus. Returns the entry + snapshot IDs."""
-    unchanged: list[bool] = []
-    try:
-        entry_id, snapshot_id = await deposit_url(
-            session,
-            req.url,
-            deposited_by=req.deposited_by,
-            source_type=req.source_type,
-            mutability=req.mutability,
-            tags=req.tags,
-            follow_post_links=req.follow_post_links,
-            follow_comment_links=req.follow_comment_links,
-            out_unchanged=unchanged,
+    """Deposit a URL into the corpus. Returns the entry + snapshot IDs.
+
+    An agent key's deposit is recorded as its principal, names no source type
+    (the engine records the one it fetches) and no harvester's tag, and may
+    not write another principal's entry: a URL another principal's entry holds
+    answers 409. An operator key names what it likes. The store's
+    writer lock is taken around each write, never across the fetch. Rate-limited
+    per principal like the agents' deposit (``api.rate_limit_per_minute``)."""
+    prov = _deposit_provenance(req.deposited_by, tags=req.tags)
+    _refuse_migration_source_type(req.source_type)
+    if prov.confined and req.source_type is not None:
+        raise _provenance_refusal(
+            prov.principal, "it may not type a deposit; the engine records the type it fetches"
         )
-        await session.commit()
+    unchanged: list[bool] = []
+    follow_refused: list[str] = []
+    try:
+        with _confined(prov), writes_committed_under_lock():
+            entry_id, snapshot_id = await deposit_url(
+                session,
+                req.url,
+                deposited_by=prov.deposited_by,
+                source_type=req.source_type,
+                mutability=req.mutability,
+                tags=prov.tags,
+                follow_post_links=req.follow_post_links,
+                follow_comment_links=req.follow_comment_links,
+                out_unchanged=unchanged,
+                out_follow_refused=follow_refused,
+            )
+        # Each write unit committed itself; this commits, under the lock, any
+        # write a unit did not cover.
+        async with write_transaction(session):
+            pass
     except SourceFetchError as exc:
         # Expected upstream condition — the origin refused/failed the fetch (e.g.
         # a Reddit thread the Arctic Shift archive has not captured, the
@@ -949,16 +1465,24 @@ async def corpus_deposit_url(
         # (the client request was well-formed; the upstream is the problem).
         log.warning("deposit_url: upstream fetch failed for %r: %s", req.url, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except EgressRefused:
-        raise  # a policy, mapped to 403 by the app-level handler
+    except (EgressRefused, HTTPException):
+        # A policy refusal, mapped to 403 by the app-level handler,
+        # or this route's own answer (the 409 for another principal's entry).
+        raise
     except Exception as exc:
         log.warning("deposit_url failed for %r: %s", req.url, exc, exc_info=True)
         raise HTTPException(status_code=400, detail="Could not deposit the provided URL") from exc
-    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(unchanged))
+    return DepositResponse(
+        entry_id=entry_id,
+        snapshot_id=snapshot_id,
+        unchanged=any(unchanged),
+        follow_refused=follow_refused,
+    )
 
 
 @app.post(
     "/corpus/deposit/text",
+    dependencies=[AGENT_GATE],
     response_model=DepositResponse,
     responses={
         **_ERR400,
@@ -969,7 +1493,7 @@ async def corpus_deposit_url(
     },
 )
 async def corpus_deposit_text(
-    req: DepositTextRequest, session: StoreWriteSessionDep, _auth: AuthDep
+    req: DepositTextRequest, _rl: RateLimitDep, store: StoreDep
 ) -> DepositResponse:
     """Deposit raw text into the corpus (no fetch).
 
@@ -978,37 +1502,77 @@ async def corpus_deposit_text(
     URL, because the engine would later re-read a ``file://`` path from its own
     disk. A ``uri_r`` already held by a non-http(s) ``LAZY`` entry (a file the
     engine refreshes from its own disk) is refused with 409, as is a deposit
-    whose ``source_type`` differs from the entry it would join."""
-    if req.uri_r is not None:
-        # Versioned path: stable per-source entry identity,
-        # caller-chosen mutability, unchanged re-deposit skipped.
-        try:
-            mutability = Mutability(req.mutability) if req.mutability else Mutability.STABLE
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"Unknown mutability {req.mutability!r}"
-            ) from exc
-        try:
-            fetch_policy = FetchPolicy(req.fetch_policy) if req.fetch_policy else None
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"Unknown fetch_policy {req.fetch_policy!r}"
-            ) from exc
-        if fetch_policy is FetchPolicy.LAZY and not is_network_uri(req.uri_r):
-            # A LAZY entry is re-read later by the engine itself. Over HTTP the
-            # caller is not on the engine host, so a file:// URI-R names the
-            # engine's files, not the caller's (security review 2026-10-23, D2).
-            # A local deposit (CLI, hook, rules sync) never comes through here.
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "fetch_policy LAZY needs an http(s) uri_r over HTTP: the engine "
-                    "cannot re-read a file on the caller's host. Deposit with "
-                    "fetch_policy NEVER, or run the deposit against a local store."
-                ),
-            )
-        from particles.corpus.store import get_entry_by_uri
+    whose ``source_type`` differs from the entry it would join.
 
+    An agent key's deposit is recorded as its principal, depositor and author
+    alike, and a body naming anyone else is refused (403). It names no
+    ``uri_r`` (a harvester principal may name a session transcript's
+    ``claude-code://session/<id>``, or the ``file://`` URI of a memory file
+    under a ``projects/<slug>/memory/`` directory or of a project's
+    ``MEMORY.archive.md``), no source type but ``CONVERSATION``
+    (``LOCAL_MARKDOWN`` for a harvester's memory file), and no harvester's tag
+    (``claude-code``, ``memory-file``, ``memory-archive``) unless its
+    principal is a harvester. No agent key names ``rule-file``, which only the
+    local rule-file intake writes. An agent key's deposit that names no project
+    is marked ``scope:unattributed``. It may not write another principal's
+    entry, unchanged bytes included (409 on a ``uri_r`` such an entry holds). An operator
+    key names what it likes. A ``content_published_at`` after the
+    deposit is stored as the deposit time. Rate-limited per principal like the
+    agents' deposit (``api.rate_limit_per_minute``)."""
+    # Every refusal that reads no row comes before the store's writer lock, so
+    # a refused or malformed request holds up no other writer (security review
+    # 2026-10-28-2, AA6, AA43).
+    prov = _deposit_provenance(req.deposited_by, req.author_id, req.tags)
+    _refuse_migration_source_type(req.source_type)
+    _confine_text_deposit(prov, req.uri_r, req.source_type)
+    if req.uri_r is None:
+        text_unchanged: list[bool] = []
+        async with session_scope(store, write=True) as session:
+            with _confined(prov):
+                entry_id, snapshot_id = await deposit_text(
+                    session,
+                    req.text,
+                    prov.deposited_by,
+                    req.source_type,
+                    prov.tags,
+                    author_id=prov.author_id,
+                    out_unchanged=text_unchanged,
+                )
+            await session.commit()
+        return DepositResponse(
+            entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(text_unchanged)
+        )
+
+    # Versioned path: stable per-source entry identity,
+    # caller-chosen mutability, unchanged re-deposit skipped.
+    try:
+        mutability = Mutability(req.mutability) if req.mutability else Mutability.STABLE
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown mutability {req.mutability!r}"
+        ) from exc
+    try:
+        fetch_policy = FetchPolicy(req.fetch_policy) if req.fetch_policy else None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown fetch_policy {req.fetch_policy!r}"
+        ) from exc
+    if fetch_policy is FetchPolicy.LAZY and not is_network_uri(req.uri_r):
+        # A LAZY entry is re-read later by the engine itself. Over HTTP the
+        # caller is not on the engine host, so a file:// URI-R names the
+        # engine's files, not the caller's (security review 2026-10-23, D2).
+        # A local deposit (CLI, hook, rules sync) never comes through here.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "fetch_policy LAZY needs an http(s) uri_r over HTTP: the engine "
+                "cannot re-read a file on the caller's host. Deposit with "
+                "fetch_policy NEVER, or run the deposit against a local store."
+            ),
+        )
+    from particles.corpus.store import get_entry_by_uri
+
+    async with session_scope(store, write=True) as session:
         existing = await get_entry_by_uri(session, req.uri_r)
         if (
             existing is not None
@@ -1034,42 +1598,31 @@ async def corpus_deposit_text(
                     f"HTTP cannot change it to {req.source_type}."
                 ),
             )
-        entry_id, snapshot_id, unchanged = await deposit_text_versioned(
-            session,
-            text=req.text,
-            uri_r=req.uri_r,
-            source_type=req.source_type,
-            mutability=mutability,
-            tags=req.tags,
-            deposited_by=req.deposited_by,
-            content_published_at=req.content_published_at,
-            fetch_policy=fetch_policy,
-        )
+        with _confined(prov):
+            entry_id, snapshot_id, unchanged = await deposit_text_versioned(
+                session,
+                text=req.text,
+                uri_r=req.uri_r,
+                source_type=req.source_type,
+                mutability=mutability,
+                tags=prov.tags,
+                deposited_by=prov.deposited_by,
+                content_published_at=req.content_published_at,
+                fetch_policy=fetch_policy,
+            )
         await session.commit()
-        return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=unchanged)
-
-    text_unchanged: list[bool] = []
-    entry_id, snapshot_id = await deposit_text(
-        session,
-        req.text,
-        req.deposited_by,
-        req.source_type,
-        req.tags,
-        author_id=req.author_id,
-        out_unchanged=text_unchanged,
-    )
-    await session.commit()
-    return DepositResponse(
-        entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(text_unchanged)
-    )
+    return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=unchanged)
 
 
-@app.post("/corpus/deposit/file", response_model=DepositResponse)
+#: The block size the file-upload route copies in.
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+@app.post("/corpus/deposit/file", dependencies=[AGENT_GATE], response_model=DepositResponse)
 async def corpus_deposit_file(
     file: UploadFile,
-    session: WriteSessionDep,
-    _auth: AuthDep,
-    deposited_by: Annotated[str, Form()] = "api-user",
+    _rl: RateLimitDep,
+    deposited_by: Annotated[str | None, Form()] = None,
     source_type: Annotated[str | None, Form()] = None,
     tags: Annotated[list[str] | None, Form()] = None,
     content_date: Annotated[datetime | None, Form()] = None,
@@ -1081,9 +1634,24 @@ async def corpus_deposit_file(
     ``deposited_by`` / ``source_type`` / ``tags`` / ``content_date`` are
     optional multipart form fields so the thin client's local-file ``deposit``
     (which uploads the bytes over HTTP) keeps its flags; ``content_date``
-    is the archival authorship date."""
+    is the archival authorship date, held to the deposit time. An
+    agent key's upload is recorded as its principal, takes the type the engine
+    infers from the bytes (a body type must equal it, and an inferred policy
+    type, a taxonomy, trust lens or vocabulary document, is refused), names no
+    harvester's tag unless its principal is a harvester, and touches only the
+    agent's own entries. An operator key names what it likes.
+    Rate-limited per principal like the agents' deposit (``api.rate_limit_per_minute``).
+
+    An upload larger than ``local_files.max_bytes`` is refused with 413. An
+    upload whose bytes match a file the engine enrolled from its own disk gets
+    an entry of its own rather than appending to that entry or changing its
+    ``source_type``."""
     import tempfile
 
+    prov = _deposit_provenance(deposited_by, tags=tags)
+    _refuse_migration_source_type(source_type)
+
+    max_bytes = get_config().local_files.max_bytes
     # Create + write the temp file *inside* the try so a crash mid-read/write is
     # still covered by the finally unlink — a ``delete=False`` temp that leaked
     # before the try would accrete under repeated failed uploads (F20).
@@ -1094,17 +1662,50 @@ async def corpus_deposit_file(
             delete=False, suffix=Path(file.filename or "upload").suffix
         ) as tmp:
             tmp_path = Path(tmp.name)
-            tmp.write(await file.read())
-        entry_id, snapshot_id = await deposit_file(
-            session,
-            tmp_path,
-            deposited_by=deposited_by,
-            source_type=source_type,
-            tags=tags or [],
-            content_date=content_date,
-            out_unchanged=file_unchanged,
-        )
-        await session.commit()
+            # Copied in blocks and capped, never read whole into memory
+            # (security review 2026-10-24, the critic's S4 item).
+            written = 0
+            while block := await file.read(_UPLOAD_CHUNK):
+                written += len(block)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"upload is over the {max_bytes}-byte local_files.max_bytes cap",
+                    )
+                tmp.write(block)
+        if prov.confined:
+            # The engine records the type the bytes resolve to; a body type
+            # must agree, and a file declaring policy is the operator's. The
+            # sniff reads and parses, so it runs off the event loop (AC2).
+            inferred = await asyncio.to_thread(resolve_upload_source_type, tmp_path)
+            if source_type is not None and source_type != inferred:
+                raise _provenance_refusal(
+                    prov.principal, f"it may not type an upload {source_type!r}"
+                )
+            if inferred in _POLICY_SOURCE_TYPES or inferred == MIGRATION_SOURCE_TYPE:
+                raise _provenance_refusal(prov.principal, f"it may not deposit a {inferred} file")
+            source_type = inferred
+        elif source_type is None:
+            # Any caller's untyped upload is sniffed the same way: off the event
+            # loop and before the writer lock (security review 2026-10-31-1, AD23).
+            source_type = await asyncio.to_thread(resolve_upload_source_type, tmp_path)
+        # The caller chose ``deposited_by``, so a content-hash match may not
+        # join or retype an entry the engine enrolled itself (security review P19).
+        # The writer lock is taken only now, after the upload is copied and every
+        # refusal made (security review 2026-10-28-2, AA6).
+        async with session_scope(write=True) as session:
+            with _confined(prov):
+                entry_id, snapshot_id = await deposit_file(
+                    session,
+                    tmp_path,
+                    deposited_by=prov.deposited_by,
+                    source_type=source_type,
+                    tags=prov.tags,
+                    content_date=content_date,
+                    out_unchanged=file_unchanged,
+                    untrusted_caller=True,
+                )
+            await session.commit()
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
@@ -1113,10 +1714,9 @@ async def corpus_deposit_file(
     )
 
 
-@app.get("/corpus", response_model=list[CorpusEntry])
+@app.get("/corpus", dependencies=[READ_GATE], response_model=list[CorpusEntry])
 async def list_corpus(
     session: SessionDep,
-    _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
     source_type: str | None = None,
 ) -> list[CorpusEntry]:
@@ -1132,10 +1732,11 @@ async def list_corpus(
 
 @app.get(
     "/corpus/{entry_id}",
+    dependencies=[READ_GATE],
     response_model=CorpusEntry,
     responses=_ERR404,
 )
-async def corpus_get(entry_id: str, session: SessionDep, _auth: ReadAuthDep) -> CorpusEntry:
+async def corpus_get(entry_id: str, session: SessionDep) -> CorpusEntry:
     """Fetch a corpus entry by ID. 404 if not present."""
     from particles.corpus.store import get_entry as _get_entry
 
@@ -1147,9 +1748,10 @@ async def corpus_get(entry_id: str, session: SessionDep, _auth: ReadAuthDep) -> 
 
 @app.get(
     "/corpus/blob/{selector}",
+    dependencies=[READ_GATE],
     responses={**_ERR404, **_ERR400},
 )
-async def corpus_blob(selector: str, session: SessionDep, _auth: ReadAuthDep) -> Response:
+async def corpus_blob(selector: str, session: SessionDep) -> Response:
     """Return the raw stored bytes of a snapshot's blob (backs `corpus cat`).
 
     ``selector`` is a full ID or unambiguous prefix of a snapshot or a corpus
@@ -1177,6 +1779,10 @@ async def corpus_blob(selector: str, session: SessionDep, _auth: ReadAuthDep) ->
         headers={
             "X-Snapshot-Id": snap.snapshot_id,
             "X-Content-Hash": snap.content_hash,
+            # The bytes are a depositor's, served on the origin that holds the
+            # web UI's bearer: a browser must never sniff them into a script or
+            # a page (security review 2026-10-24-2, N7).
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -1205,11 +1811,12 @@ class CorpusRetractResponse(BaseModel):
 
 @app.post(
     "/corpus/{entry_id}/retract",
+    dependencies=[AUTH_GATE],
     response_model=CorpusRetractResponse,
     responses=_ERR404,
 )
 async def corpus_retract_endpoint(
-    entry_id: str, req: CorpusRetractRequest, session: WriteSessionDep, _auth: AuthDep
+    entry_id: str, req: CorpusRetractRequest, session: SessionDep
 ) -> CorpusRetractResponse:
     """Retract every live particle from a source, preserving the corpus +
     snapshots (HTTP mirror of `corpus retract`). Live particles
@@ -1235,8 +1842,10 @@ async def corpus_retract_endpoint(
             skipped=plan.skipped,
         )
 
-    result = await retract_entry(session, entry_id, reason=req.reason)
-    await session.commit()
+    # The writer lock is taken only here, after the credential check, so a
+    # refused retract never holds it (security review 2026-10-25, Q12).
+    async with write_transaction(session):
+        result = await retract_entry(session, entry_id, reason=req.reason)
     return CorpusRetractResponse(
         entry_id=entry_id,
         dry_run=False,
@@ -1255,17 +1864,17 @@ class ExtractRequest(BaseModel):
 
     entry_id: str
     snapshot_id: str
-    agent_id: str = "api-user"
+    # Absent: the acting key's principal (rule 6).
+    agent_id: str | None = None
 
 
 @app.post(
     "/extract",
+    dependencies=[OPERATOR_GATE],
     response_model=list[Particle],
     responses={**_ERR404, **_ERR500},
 )
-async def extract(
-    req: ExtractRequest, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
-) -> list[Particle]:
+async def extract(req: ExtractRequest, session: SessionDep, _rl: RateLimitDep) -> list[Particle]:
     """Run the extractor pipeline against a corpus snapshot. Returns
     the ACTIVE particles produced by the run (excludes any that
     immediately transitioned to SUPERSEDED / INCONSISTENCY).
@@ -1277,7 +1886,7 @@ async def extract(
         async with meter:
             meter.snapshots = 1
             particles = await extract_snapshot(
-                session, req.entry_id, req.snapshot_id, agent_id=req.agent_id
+                session, req.entry_id, req.snapshot_id, agent_id=req.agent_id or _actor_label()
             )
             await session.commit()
     except ValueError as exc:
@@ -1312,12 +1921,11 @@ class NarrativeResponse(BaseModel):
 
 @app.get(
     "/particles/{particle_id}/narrative",
+    dependencies=[READ_GATE],
     response_model=NarrativeResponse,
     responses=_ERR404,
 )
-async def get_narrative(
-    particle_id: str, session: SessionDep, _auth: ReadAuthDep
-) -> NarrativeResponse:
+async def get_narrative(particle_id: str, session: SessionDep) -> NarrativeResponse:
     """Return a NARRATIVE particle and its constituents in SEQUENCE_IN order.
 
     404 if the particle does not exist or is not a NARRATIVE."""
@@ -1335,12 +1943,11 @@ async def get_narrative(
 
 @app.get(
     "/particles/{particle_id}/narratives",
+    dependencies=[READ_GATE],
     response_model=list[Particle],
     responses=_ERR404,
 )
-async def get_containing_narratives(
-    particle_id: str, session: SessionDep, _auth: ReadAuthDep
-) -> list[Particle]:
+async def get_containing_narratives(particle_id: str, session: SessionDep) -> list[Particle]:
     """Return the NARRATIVE particles this particle is ``PART_OF``.
 
     404 if the particle does not exist; an empty list if it belongs to none."""
@@ -1354,12 +1961,11 @@ async def get_containing_narratives(
 
 @app.get(
     "/particles/{particle_id}/source",
+    dependencies=[READ_GATE],
     response_model=SourcePassage,
     responses=_ERR404,
 )
-async def get_particle_source(
-    particle_id: str, session: SessionDep, _auth: ReadAuthDep
-) -> SourcePassage:
+async def get_particle_source(particle_id: str, session: SessionDep) -> SourcePassage:
     """Return the source passage behind a particle, with how it was found.
 
     ``match`` is ``EXACT`` (the hash-verified chunk the extractor saw),
@@ -1391,21 +1997,29 @@ class NarrativeArticleResponse(BaseModel):
 
 @app.get(
     "/particles/{particle_id}/narrative/synthesis",
+    dependencies=[AUTH_GATE],
     response_model=NarrativeArticleResponse,
     responses=_ERR404,
 )
 async def get_narrative_synthesis(
-    particle_id: str, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
+    particle_id: str, session: SessionDep, _rl: RateLimitDep
 ) -> NarrativeArticleResponse:
     """Render a NARRATIVE as one cited prose article.
 
     Traverses the SEQUENCE_IN chain and runs the article-synthesis engine
     (LLM call; structured-listing fallback on failure), rate-limited like
-    ``/query``. 404 if the particle does not exist or is not a NARRATIVE."""
+    ``/query``. 404 if the particle does not exist or is not a NARRATIVE.
+
+    A synthesised body is cached, so a repeat request makes no model call. Only
+    a key that can write persists the cache row: a reader key writes nothing
+    (security review 2026-10-27-1, G7), and a keyless engine
+    serves reads only."""
     from particles.operations.narrative_synthesis import synthesize_narrative
     from particles.store.particle_store import get_particle
 
-    article = await synthesize_narrative(session, particle_id)
+    principal = current_principal()
+    persist = principal is not None and principal.can(Capability.AGENT_WRITE)
+    article = await synthesize_narrative(session, particle_id, persist_cache=persist)
     if article is None:
         if await get_particle(session, particle_id) is None:
             raise HTTPException(status_code=404, detail="Particle not found")
@@ -1423,10 +2037,8 @@ async def get_narrative_synthesis(
 # ---------------------------------------------------------------------------
 
 
-@app.post("/query", response_model=QueryResponse)
-async def run_query(
-    req: QueryRequest, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
-) -> QueryResponse:
+@app.post("/query", dependencies=[AUTH_GATE], response_model=QueryResponse)
+async def run_query(req: QueryRequest, session: SessionDep, _rl: RateLimitDep) -> QueryResponse:
     """Tag-aware semantic query. Embeds the question, runs cosine
     similarity over ACTIVE particles, generates a natural-language
     answer with citations.
@@ -1461,9 +2073,8 @@ _GRAPH_SELECTORS: dict[str, tuple[str, ...]] = {
 }
 
 
-@app.get("/graph", response_model=GraphData)
+@app.get("/graph", dependencies=[AUTH_GATE], response_model=GraphData)
 async def get_graph(
-    _auth: AuthDep,
     _rl: RateLimitDep,
     scope: GraphScope,
     subject_id: str | None = None,
@@ -1486,10 +2097,15 @@ async def get_graph(
     ``q``, ``scope=inconsistency`` needs ``inconsistency_id`` (a contradiction's
     evidence: the INCONSISTENCY anchor, its disputants, their
     subjects), ``scope=projection`` needs ``manifest`` + ``section`` (a
-    manifest section's deterministic selection; the manifest path is
-    resolved on the engine host, which the bearer gate makes operator-equivalent
-    access); anything else is 422. ``subject_id`` accepts a subject id or an
-    exact (case-insensitive) canonical name / alias; ``inconsistency_id``
+    manifest section's deterministic selection); anything else is
+    422. ``manifest`` is a relative name under ``graph.manifest_root``; with no
+    root configured the projection scope is refused (404), and a name that is
+    absolute, climbs out with ``..``, or names a missing, non-regular,
+    oversized or invalid file gets one fixed 404 with no exception text, so the
+    route reads nothing on the engine host outside that directory and does not
+    say which files exist (security review 2026-10-24-2, P1; 2026-10-25, Q43).
+    ``subject_id`` accepts a subject id or an exact (case-insensitive) canonical
+    name / alias; ``inconsistency_id``
     accepts a full id or unique prefix; ``scope_ref`` in the response is always
     the resolved anchor address. ``hops`` / ``max_nodes`` are clamped to the
     ``graph.*`` caps; ``as_of`` renders the graph as believed at T;
@@ -1521,6 +2137,19 @@ async def get_graph(
         if value is not None and name not in required:
             raise HTTPException(status_code=422, detail=f"scope={scope} does not take {name}")
 
+    manifest_root: Path | None = None
+    if scope == "projection":
+        root = get_config().graph.manifest_root
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "unknown manifest: the projection scope is served over HTTP only "
+                    "from graph.manifest_root, which is not set"
+                ),
+            )
+        manifest_root = Path(root)
+
     try:
         async with session_scope(store) as session:
             return await build_graph_data(
@@ -1535,6 +2164,7 @@ async def get_graph(
                 as_of=as_of,
                 max_nodes=max_nodes,
                 observer_project=observer_project,
+                manifest_root=manifest_root,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
@@ -1565,10 +2195,8 @@ class LintRequest(BaseModel):
     low_coverage_threshold: int = 3
 
 
-@app.post("/lint", response_model=LintReport)
-async def run_lint_endpoint(
-    req: LintRequest, request: Request, session: SessionDep, _auth: AuthDep
-) -> LintReport:
+@app.post("/lint", dependencies=[AUTH_GATE], response_model=LintReport)
+async def run_lint_endpoint(req: LintRequest, request: Request, session: SessionDep) -> LintReport:
     """Run the lint pipeline. Returns the structured findings report.
 
     ``fix`` defaults to ``False``; pass ``fix: true`` to
@@ -1591,8 +2219,8 @@ async def run_lint_endpoint(
     )
 
 
-@app.get("/lint/report", response_model=LintReport)
-async def get_lint_report(session: SessionDep, _auth: ReadAuthDep) -> LintReport:
+@app.get("/lint/report", dependencies=[READ_GATE], response_model=LintReport)
+async def get_lint_report(session: SessionDep) -> LintReport:
     """Return the structural-only lint report: no LLM call, no mutations."""
     return await run_lint(session, fix=False, semantic=False)
 
@@ -1616,9 +2244,9 @@ class LinksSuggestRequest(BaseModel):
     confirmed: bool = False
 
 
-@app.post("/links/suggest", response_model=SuggestReport)
+@app.post("/links/suggest", dependencies=[AUTH_GATE], response_model=SuggestReport)
 async def run_links_suggest(
-    req: LinksSuggestRequest, request: Request, session: SessionDep, _auth: AuthDep
+    req: LinksSuggestRequest, request: Request, session: SessionDep
 ) -> SuggestReport:
     """Propose (and optionally resolve) co-evidential candidate links.
 
@@ -1688,9 +2316,9 @@ class CorpusLinksDismissResponse(BaseModel):
     suppressed_until: datetime
 
 
-@app.post("/corpus/links/suggest", response_model=DepositSuggestReport)
+@app.post("/corpus/links/suggest", dependencies=[READ_GATE], response_model=DepositSuggestReport)
 async def run_corpus_links_suggest(
-    req: CorpusLinksSuggestRequest, session: SessionDep, _auth: ReadAuthDep
+    req: CorpusLinksSuggestRequest, session: SessionDep
 ) -> DepositSuggestReport:
     """Rank undeposited but frequently-cited URLs as deposit suggestions.
 
@@ -1702,10 +2330,10 @@ async def run_corpus_links_suggest(
     return await suggest_deposits(session, limit=limit, min_sources=req.min_sources)
 
 
-@app.post("/corpus/links/dismiss", response_model=CorpusLinksDismissResponse)
-async def run_corpus_links_dismiss(
-    req: CorpusLinksDismissRequest, session: SessionDep, _auth: AuthDep
-) -> CorpusLinksDismissResponse:
+@app.post(
+    "/corpus/links/dismiss", dependencies=[OPERATOR_GATE], response_model=CorpusLinksDismissResponse
+)
+async def run_corpus_links_dismiss(req: CorpusLinksDismissRequest) -> CorpusLinksDismissResponse:
     """Dismiss / snooze a deposit suggestion (audited via the event log).
 
     Returns ``400`` when ``url`` is not a usable http(s) URL."""
@@ -1715,13 +2343,16 @@ async def run_corpus_links_dismiss(
     canon = canonicalize_url(req.url)
     if canon is None:
         raise HTTPException(status_code=400, detail=f"Not a usable http(s) URL: {req.url!r}")
-    until = await dismiss_suggestion(
-        session,
-        canonical_url=canon,
-        actor="http:/corpus/links/dismiss",
-        snooze_days=req.snooze_days,
-    )
-    await session.commit()
+    # Commits under the store's writer lock, after the 400 (security review
+    # 2026-10-30-1, AB68).
+    async with session_scope(write=True) as session:
+        until = await dismiss_suggestion(
+            session,
+            canonical_url=canon,
+            actor="http:/corpus/links/dismiss",
+            snooze_days=req.snooze_days,
+        )
+        await session.commit()
     return CorpusLinksDismissResponse(canonical_url=canon, suppressed_until=until)
 
 
@@ -1730,8 +2361,8 @@ async def run_corpus_links_dismiss(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/review", response_model=list[Particle])
-async def list_review_queue(session: SessionDep, _auth: AuthDep) -> list[Particle]:
+@app.get("/review", dependencies=[AUTH_GATE], response_model=list[Particle])
+async def list_review_queue(session: SessionDep) -> list[Particle]:
     """Return all INCONSISTENCY particles awaiting operator resolution."""
     return await list_inconsistencies(session)
 
@@ -1748,15 +2379,14 @@ class ReviewRequest(BaseModel):
 
 @app.post(
     "/review/{particle_id}",
+    dependencies=[OPERATOR_GATE],
     response_model=ReviewParticle,
     responses={
         **_ERR404,
         409: {"model": ErrorResponse, "description": "Action refused on this record"},
     },
 )
-async def review_particle(
-    particle_id: str, req: ReviewRequest, session: SessionDep, _auth: OperatorAuthDep
-) -> ReviewParticle:
+async def review_particle(particle_id: str, req: ReviewRequest) -> ReviewParticle:
     """Resolve an INCONSISTENCY particle (§9.6).
 
     Every action except DEFER closes the record. PREFER_A and PREFER_B demote
@@ -1768,14 +2398,17 @@ async def review_particle(
     Refused (503) under the dev-key skip, even from loopback: it needs a real
     bearer."""
     try:
-        return await resolve(
-            session,
-            particle_id,
-            req.action,
-            req.reviewer_id,
-            req.domain,
-            req.note,
-        )
+        # The resolution commits under the store's writer lock (security review
+        # 2026-10-30-1, AB4).
+        async with session_scope(write=True) as session:
+            return await resolve(
+                session,
+                particle_id,
+                req.action,
+                req.reviewer_id,
+                req.domain,
+                req.note,
+            )
     except ResolutionRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1820,9 +2453,9 @@ class ReindexRequest(BaseModel):
     dry_run: bool = False
 
 
-@app.post("/reindex", response_model=ReindexResponse)
+@app.post("/reindex", dependencies=[AUTH_GATE], response_model=ReindexResponse)
 async def run_reindex(
-    req: ReindexRequest, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
+    req: ReindexRequest, session: SessionDep, _rl: RateLimitDep
 ) -> ReindexResponse:
     """Re-extract stale / failed snapshots. Honours chunk-hash
     carry-forward so unchanged source chunks skip
@@ -1849,6 +2482,7 @@ async def run_reindex(
     if req.dry_run:
         result = await _run()
     else:
+        require_operator_credential()
         meter = MeteredExtractRun(actor="http:/reindex", route="reindex")
         async with meter:
             result = await _run()
@@ -1864,9 +2498,9 @@ class ReconcileRequest(BaseModel):
     dry_run: bool = False
 
 
-@app.post("/reconcile", response_model=ReconcileResponse)
+@app.post("/reconcile", dependencies=[AUTH_GATE], response_model=ReconcileResponse)
 async def run_reconcile(
-    req: ReconcileRequest, session: SessionDep, _auth: AuthDep, _rl: RateLimitDep
+    req: ReconcileRequest, session: SessionDep, _rl: RateLimitDep
 ) -> ReconcileResponse:
     """Run the cross-entry document-supersession sweep: demote
     superseded claims the intra-entry extract path never reconciles. v1 is
@@ -1894,10 +2528,9 @@ class CreateSubjectRequest(BaseModel):
     external_ids: list[ExternalRef] = []
 
 
-@app.get("/subjects", response_model=list[Subject])
+@app.get("/subjects", dependencies=[READ_GATE], response_model=list[Subject])
 async def list_subjects(
     session: SessionDep,
-    _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     order: Literal["name", "degree"] = Query("name"),
@@ -1912,10 +2545,9 @@ async def list_subjects(
     return await list_all_subjects(session, limit=_bounded_limit(limit), offset=offset, order=order)
 
 
-@app.get("/subjects/search", response_model=list[Subject])
+@app.get("/subjects/search", dependencies=[READ_GATE], response_model=list[Subject])
 async def search_subjects_endpoint(
     session: SessionDep,
-    _auth: ReadAuthDep,
     q: str = Query(..., min_length=1, max_length=200),
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
@@ -1931,10 +2563,11 @@ async def search_subjects_endpoint(
 
 @app.get(
     "/subjects/{subject_id}",
+    dependencies=[READ_GATE],
     response_model=Subject,
     responses=_ERR404,
 )
-async def get_subject_endpoint(subject_id: str, session: SessionDep, _auth: ReadAuthDep) -> Subject:
+async def get_subject_endpoint(subject_id: str, session: SessionDep) -> Subject:
     """Fetch a Subject by ID. 404 if not present."""
     from particles.store.subject_store import get_subject
 
@@ -1944,11 +2577,12 @@ async def get_subject_endpoint(subject_id: str, session: SessionDep, _auth: Read
     return s
 
 
-@app.get("/subjects/{subject_id}/particles", response_model=list[Particle])
+@app.get(
+    "/subjects/{subject_id}/particles", dependencies=[READ_GATE], response_model=list[Particle]
+)
 async def get_particles_for_subject(
     subject_id: str,
     session: SessionDep,
-    _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ) -> list[Particle]:
@@ -1982,9 +2616,13 @@ class SubjectParticleIdsResponse(BaseModel):
     particle_count: int
 
 
-@app.get("/subjects/{subject_id}/particle-ids", response_model=SubjectParticleIdsResponse)
+@app.get(
+    "/subjects/{subject_id}/particle-ids",
+    dependencies=[READ_GATE],
+    response_model=SubjectParticleIdsResponse,
+)
 async def get_subject_particle_ids(
-    subject_id: str, session: SessionDep, _auth: ReadAuthDep, limit: int | None = Query(None, ge=1)
+    subject_id: str, session: SessionDep, limit: int | None = Query(None, ge=1)
 ) -> SubjectParticleIdsResponse:
     """Return up to ``limit`` particle IDs linked to a subject, plus the true total.
 
@@ -2001,12 +2639,23 @@ async def get_subject_particle_ids(
     return SubjectParticleIdsResponse(particle_ids=particle_ids, particle_count=particle_count)
 
 
-@app.post("/subjects", response_model=Subject)
-async def create_subject(req: CreateSubjectRequest, session: SessionDep, _auth: AuthDep) -> Subject:
+@app.post("/subjects", dependencies=[OPERATOR_GATE], response_model=Subject)
+async def create_subject(req: CreateSubjectRequest) -> Subject:
     """Create a Subject by hand. The normal path is automatic
     resolution at extraction time; this endpoint exists for operator
-    bootstrapping and corrections."""
+    bootstrapping and corrections.
+
+    ``aliases`` and ``external_ids`` need operator authority (503 under the
+    dev-key skip), as ``/subjects/{id}/aliases`` does: the local alias index is
+    the resolver's first step, so either steers every later extraction that
+    names those strings onto this Subject (security review 2026-10-24-2, P7).
+    Every Subject needs a real key, since a keyless engine serves reads only:
+    a canonical name alone can capture another Subject's alias
+    (security review 2026-10-25, Q3)."""
     from datetime import datetime
+
+    if req.aliases or req.external_ids:
+        require_operator_credential()
 
     from particles.store.subject_store import insert_subject
 
@@ -2016,10 +2665,13 @@ async def create_subject(req: CreateSubjectRequest, session: SessionDep, _auth: 
         aliases=req.aliases,
         external_ids=req.external_ids,
         created_at=datetime.now(UTC),
-        asserted_by="api-user",
+        asserted_by=_actor_label(),
     )
-    await insert_subject(session, subject)
-    await session.commit()
+    # Commits under the store's writer lock, after the credential refusal
+    # (security review 2026-10-30-1, AB68).
+    async with session_scope(write=True) as session:
+        await insert_subject(session, subject)
+        await session.commit()
     return subject
 
 
@@ -2047,35 +2699,42 @@ class SplitSubjectResponse(BaseModel):
 
 @app.post(
     "/subjects/{subject_id}/split",
+    dependencies=[OPERATOR_GATE],
     response_model=SplitSubjectResponse,
     responses=_ERR404,
 )
-async def split_subject_endpoint(
-    subject_id: str, req: SplitSubjectRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> SplitSubjectResponse:
+async def split_subject_endpoint(subject_id: str, req: SplitSubjectRequest) -> SplitSubjectResponse:
     """Re-bind misjoined particles off a source Subject onto a new Subject the
     resolver canonicalises (HTTP mirror of `subjects split`). 404 if
     the source Subject is absent; 400 on an empty particle list or a bad target
     identity. Refused (503) under the dev-key skip, even from loopback: it
     needs a real bearer."""
-    from particles.ingest.subject_resolver import split_subject_resolving
+    from particles.ingest.subject_resolver import gather_split_target, split_subject_resolving
     from particles.store.subject_store import get_subject
 
     if not req.particle_ids:
         raise HTTPException(status_code=400, detail="particle_ids must be non-empty")
-    if await get_subject(session, subject_id) is None:
-        raise HTTPException(status_code=404, detail="Subject not found")
-    try:
-        new_subject, relinked, not_bound = await split_subject_resolving(
-            session,
-            source_id=subject_id,
-            particle_ids=req.particle_ids,
-            new_name=req.new_name,
-            new_external_id=req.new_external_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    # The writer lock is taken after the body's refusals (security review
+    # 2026-10-30-1, AB54), and after the target's live lookups and label fetch
+    # (security review 2026-10-31-1).
+    async with session_scope() as session:
+        if await get_subject(session, subject_id) is None:
+            raise HTTPException(status_code=404, detail="Subject not found")
+        try:
+            gathered = await gather_split_target(
+                session, new_name=req.new_name, new_external_id=req.new_external_id
+            )
+            async with write_transaction(session):
+                new_subject, relinked, not_bound = await split_subject_resolving(
+                    session,
+                    source_id=subject_id,
+                    particle_ids=req.particle_ids,
+                    new_name=req.new_name,
+                    new_external_id=req.new_external_id,
+                    gathered=gathered,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return SplitSubjectResponse(
         new_subject=new_subject,
         relinked_particle_ids=relinked,
@@ -2088,20 +2747,63 @@ async def split_subject_endpoint(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/events", response_model=list[OperatorEvent])
+class WhoAmIResponse(BaseModel):
+    """The presented key, as the engine resolved it."""
+
+    anonymous: bool
+    principal: str | None = None
+    role: str | None = None
+    key_id: str | None = None
+    project: str | None = None
+    #: A harvester key's recorded client directories, so the
+    #: client's doctor can compare them with its own; absent otherwise.
+    memory_roots: list[str] | None = None
+    archive_roots: list[str] | None = None
+
+
+@app.get("/auth/whoami", dependencies=[AUTH_GATE], response_model=WhoAmIResponse)
+async def whoami() -> WhoAmIResponse:
+    """Say which principal, role and project the presented key stands for.
+
+    A client checks its key with it before any write, and the remote-aware
+    doctor uses it as its authenticated probe. On a keyed engine the bearer is
+    required (401 otherwise); a keyless engine answers ``anonymous`` to a
+    loopback caller. ``key_id`` is ``env`` for ``PARTICLES_API_KEY``, which is
+    the operator's key. A harvester key also returns the client directories it
+    records, which its own memory and archive files must lie under.
+    """
+    principal = current_principal()
+    if principal is None:
+        return WhoAmIResponse(anonymous=True)
+    return WhoAmIResponse(
+        anonymous=False,
+        principal=principal.id,
+        role=principal.role.value,
+        key_id=principal.key_id,
+        project=principal.project,
+        memory_roots=list(principal.memory_roots) if principal.memory_roots else None,
+        archive_roots=list(principal.archive_roots) if principal.archive_roots else None,
+    )
+
+
+@app.get("/events", dependencies=[AUTH_GATE], response_model=list[OperatorEvent])
 async def list_events_endpoint(
     session: SessionDep,
-    _auth: AuthDep,
     particle: str | None = None,
     subject: str | None = None,
     entry: str | None = None,
     type: str | None = None,
+    principal: str | None = None,
+    key: str | None = None,
     limit: int | None = Query(None, ge=1),
 ) -> list[OperatorEvent]:
     """List operator events newest-first, optionally filtered.
 
     At most one of ``particle`` / ``subject`` / ``entry`` may be set (the
-    record the event touched); ``type`` filters by event type.
+    record the event touched); ``type`` filters by event type; ``principal``
+    and ``key`` keep the events an HTTP caller with that principal, or that
+    one key, wrote. A reader or agent key is served no other key's id, and may
+    filter by its own key only (403 otherwise).
     """
     from particles.store.event_store import (
         OperatorEventType,
@@ -2122,17 +2824,33 @@ async def list_events_endpoint(
             etype = OperatorEventType(type)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Unknown event type {type!r}") from exc
-    return await list_events(
+    caller = current_principal()
+    if (
+        key is not None
+        and caller is not None
+        and _hides_other_key_ids(caller)
+        and key != caller.key_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="This key may filter the event log by its own key id only.",
+        )
+    events = await list_events(
         session,
         ref_kind=ref_kind,
         ref_id=ref_id,
         event_type=etype,
+        http_principal=principal,
+        http_key_id=key,
         limit=_bounded_limit(limit, default=50),
     )
+    return [_event_for_caller(event, caller) for event in events]
 
 
-@app.get("/events/{event_id}", response_model=OperatorEvent, responses=_ERR404)
-async def get_event_endpoint(event_id: str, session: SessionDep, _auth: AuthDep) -> OperatorEvent:
+@app.get(
+    "/events/{event_id}", dependencies=[AUTH_GATE], response_model=OperatorEvent, responses=_ERR404
+)
+async def get_event_endpoint(event_id: str, session: SessionDep) -> OperatorEvent:
     """Fetch one operator event by id. 404 if not present.
 
     Bearer-gated like ``GET /events`` (the operator audit trail; F2)."""
@@ -2141,25 +2859,48 @@ async def get_event_endpoint(event_id: str, session: SessionDep, _auth: AuthDep)
     event = await get_event(session, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
-    return event
+    return _event_for_caller(event, current_principal())
+
+
+def _hides_other_key_ids(caller: Principal) -> bool:
+    """Whether ``caller`` is served no other key's id from the event log.
+
+    Every key but an operator key: the ids are the engine's key inventory,
+    and with them a reader could list one other client's acts (security
+    review 2026-10-27-1, G47).
+    """
+    return not caller.can(Capability.OPERATOR_WRITE)
+
+
+def _event_for_caller(event: OperatorEvent, caller: Principal | None) -> OperatorEvent:
+    """``event`` as ``caller`` may read it: another key's id removed for a non-operator.
+
+    A keyless engine (no ``caller``) has no keys to hide.
+    """
+    if caller is None or not _hides_other_key_ids(caller) or not event.payload:
+        return event
+    key_id = event.payload.get(HTTP_KEY_ID_FIELD)
+    if key_id is None or key_id == caller.key_id:
+        return event
+    payload = {k: v for k, v in event.payload.items() if k != HTTP_KEY_ID_FIELD}
+    return event.model_copy(update={"payload": payload})
 
 
 # ---------------------------------------------------------------------------
 # MCP read parity — thin GETs the routed MCP read tools need that
 # no pre-existing endpoint covered. Declared BEFORE `/particles/{particle_id}`
 # so the static `/particles/search` and `/particles/contested` paths win the
-# route match over the `{particle_id}` capture. These reads carry `ReadAuthDep`
+# route match over the `{particle_id}` capture. These reads carry `READ_GATE`
 # — unauthenticated by default, but bearer-gated when `api.require_auth_for_reads`
 # is set (security review F2). The bulk read surface (`/quality`, `/subjects`,
 # `/corpus`, …) follows the same posture; `/query`, `/events`, and `/digest`
-# carry the unconditional `AuthDep` instead (gated regardless of the flag).
+# carry the unconditional `AUTH_GATE` instead (gated regardless of the flag).
 # ---------------------------------------------------------------------------
 
 
-@app.get("/particles", response_model=list[Particle])
+@app.get("/particles", dependencies=[READ_GATE], response_model=list[Particle])
 async def list_particles_endpoint(
     session: SessionDep,
-    _auth: ReadAuthDep,
     status: str | None = None,
     subject_id: str | None = None,
     limit: int | None = Query(None, ge=1),
@@ -2193,11 +2934,10 @@ async def list_particles_endpoint(
     )
 
 
-@app.get("/particles/search", response_model=list[Particle])
+@app.get("/particles/search", dependencies=[READ_GATE], response_model=list[Particle])
 async def search_particles_by_fingerprint(
     fingerprint: str,
     session: SessionDep,
-    _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
     observer_project: Annotated[str | None, Query(min_length=1)] = None,
 ) -> list[Particle]:
@@ -2234,8 +2974,8 @@ async def search_particles_by_fingerprint(
     return (await in_view(session, found, observer_project))[:bounded]
 
 
-@app.get("/particles/contested", response_model=dict[str, str])
-async def particle_contested_backrefs(session: SessionDep, _auth: ReadAuthDep) -> dict[str, str]:
+@app.get("/particles/contested", dependencies=[READ_GATE], response_model=dict[str, str])
+async def particle_contested_backrefs(session: SessionDep) -> dict[str, str]:
     """Map each ACTIVE belief an open INCONSISTENCY references → that INCONSISTENCY
     id. Backs the contested marker the routed MCP ``query`` /
     ``particles_list`` tools apply to recalled beliefs."""
@@ -2250,11 +2990,14 @@ class ContestedBadgesRequest(BaseModel):
     particle_ids: list[str] = Field(default_factory=list)
 
 
-@app.post("/particles/contested-badges", response_model=dict[str, ContestedBadge])
+@app.post(
+    "/particles/contested-badges",
+    dependencies=[READ_GATE],
+    response_model=dict[str, ContestedBadge],
+)
 async def particle_contested_badges(
     body: ContestedBadgesRequest,
     session: SessionDep,
-    _auth: ReadAuthDep,
 ) -> dict[str, ContestedBadge]:
     """Compose the contested badge for the requested ids.
 
@@ -2280,10 +3023,9 @@ async def particle_contested_badges(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/taxonomies", response_model=list[TaxonomyDefinition])
+@app.get("/taxonomies", dependencies=[READ_GATE], response_model=list[TaxonomyDefinition])
 async def list_taxonomies_endpoint(
     session: SessionDep,
-    _auth: ReadAuthDep,
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
 ) -> list[TaxonomyDefinition]:
@@ -2315,10 +3057,11 @@ class DigestResponse(BaseModel):
     )
 
 
-@app.get("/digest/{store}", response_model=DigestResponse, responses=_ERR404)
+@app.get(
+    "/digest/{store}", dependencies=[AUTH_GATE], response_model=DigestResponse, responses=_ERR404
+)
 async def get_digest_endpoint(
     store: str,
-    _auth: AuthDep,
     project: Annotated[str | None, Query(min_length=1)] = None,
 ) -> DigestResponse:
     """Render the session-start memory digest for a store.
@@ -2377,6 +3120,7 @@ class MemoryProjectionResponse(BaseModel):
 
 @app.post(
     "/memory/projection/{store}",
+    dependencies=[AUTH_GATE],
     response_model=MemoryProjectionResponse,
     responses={
         **_ERR404,
@@ -2387,7 +3131,7 @@ class MemoryProjectionResponse(BaseModel):
     },
 )
 async def memory_projection_endpoint(
-    store: str, req: MemoryProjectionRequest, _auth: AuthDep
+    store: str, req: MemoryProjectionRequest
 ) -> MemoryProjectionResponse:
     """Render the ``MEMORY.md`` region body for a thin client.
 
@@ -2436,9 +3180,20 @@ class SessionExposureResponse(BaseModel):
     id: int
 
 
-@app.post("/session-exposures", response_model=SessionExposureResponse)
+@app.post(
+    "/session-exposures",
+    dependencies=[AGENT_GATE],
+    response_model=SessionExposureResponse,
+    responses={
+        403: {
+            "model": ErrorResponse,
+            "description": "Another project than the key's, or writes disabled on the store",
+        },
+        422: {"model": ErrorResponse, "description": "More beliefs than one request may name"},
+    },
+)
 async def record_session_exposure_endpoint(
-    req: SessionExposure, session: StoreWriteSessionDep, _auth: AuthDep
+    req: SessionExposure, _rl: RateLimitDep, store: StoreDep
 ) -> SessionExposureResponse:
     """Append the beliefs one session was shown at session start.
 
@@ -2446,11 +3201,46 @@ async def record_session_exposure_endpoint(
     byte budget. Short ``p-`` ids are resolved to full ids here. Rows are only
     appended, and no route reads them back. ``store`` selects the store the
     digest was read from (404 on an unknown handle).
+
+    The row records the key's principal and the engine's own receipt time, not
+    a time the body names. A project-bound key records its own project, and a
+    body naming another is refused (403). The store must be in
+    ``mcp.write.enabled_stores`` (403), a request names at most
+    ``storage.max_page_size`` beliefs (422), and the route is rate-limited per
+    principal (``api.rate_limit_per_minute``).
     """
     from particles.store.session_exposure_store import record_session_exposure
 
-    row_id = await record_session_exposure(session, req)
-    await session.commit()
+    # Every refusal (the write-enable and project 403s, the size 422, and the
+    # body's own 422) comes before the writer lock (security review
+    # 2026-10-28-1, O47).
+    _require_belief_writes_enabled(store)
+    if len(req.beliefs) > get_config().storage.max_page_size:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"A session exposure names at most {get_config().storage.max_page_size} "
+                f"beliefs (storage.max_page_size); this one names {len(req.beliefs)}."
+            ),
+        )
+    principal = current_principal()
+    project = _bound_project(req.project_key) or req.project_key
+    if names_a_project(project):
+        # The project key every other agent route applies: refused when it
+        # reads as another project's, stored in NFC (security review
+        # 2026-10-28-2, AA47, AA61).
+        reason = lookalike_reason(project)
+        if reason is not None:
+            raise HTTPException(status_code=422, detail=f"project_key {reason}")
+        project = canonical_project_key(project)
+    else:
+        project = ""
+    exposure = req.model_copy(update={"project_key": project, "recorded_at": datetime.now(UTC)})
+    async with session_scope(store, write=True) as session:
+        row_id = await record_session_exposure(
+            session, exposure, recorded_by=principal.id if principal is not None else None
+        )
+        await session.commit()
     return SessionExposureResponse(id=row_id)
 
 
@@ -2465,10 +3255,10 @@ async def record_session_exposure_endpoint(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/particles/{particle_id}", response_model=Particle, responses=_ERR404)
-async def get_particle_endpoint(
-    particle_id: str, session: SessionDep, _auth: ReadAuthDep
-) -> Particle:
+@app.get(
+    "/particles/{particle_id}", dependencies=[READ_GATE], response_model=Particle, responses=_ERR404
+)
+async def get_particle_endpoint(particle_id: str, session: SessionDep) -> Particle:
     """Fetch a single particle by ID (HTTP mirror of `particle show`). 404 if absent."""
     from particles.store.particle_store import get_particle
 
@@ -2491,26 +3281,40 @@ class ParticleTagsResponse(BaseModel):
     tags: list[str]
 
 
-@app.post("/particles/{particle_id}/tags", response_model=ParticleTagsResponse)
+@app.post(
+    "/particles/{particle_id}/tags",
+    dependencies=[OPERATOR_GATE],
+    response_model=ParticleTagsResponse,
+)
 async def add_particle_tags_endpoint(
-    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: OperatorAuthDep
+    particle_id: str, req: ParticleTagsRequest
 ) -> ParticleTagsResponse:
     """Add tags to a particle (HTTP mirror of `particle tag`). Idempotent.
 
     The operator form: it tags any belief, so it needs a real bearer (503 under
     the dev-key skip) and 403 when belief writes are disabled. An agent
-    tags its own beliefs through `POST /particles/tag`."""
-    from particles.store.taxonomy_store import add_particle_tags
+    tags its own beliefs through `POST /particles/tag`. The memory-server
+    migration's tag is refused (400): only the migration stamps it."""
+    from particles.store.taxonomy_store import ReservedTagError, add_particle_tags
 
+    # Refused before the writer lock (security review 2026-10-28-2, AA6).
     _require_belief_writes_enabled()
-    added = await add_particle_tags(session, particle_id, req.tags)
-    await session.commit()
+    async with session_scope(write=True) as session:
+        try:
+            added = await add_particle_tags(session, particle_id, req.tags)
+        except ReservedTagError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return ParticleTagsResponse(particle_id=particle_id, tags=added)
 
 
-@app.delete("/particles/{particle_id}/tags", response_model=ParticleTagsResponse)
+@app.delete(
+    "/particles/{particle_id}/tags",
+    dependencies=[OPERATOR_GATE],
+    response_model=ParticleTagsResponse,
+)
 async def remove_particle_tags_endpoint(
-    particle_id: str, req: ParticleTagsRequest, session: WriteSessionDep, _auth: OperatorAuthDep
+    particle_id: str, req: ParticleTagsRequest
 ) -> ParticleTagsResponse:
     """Remove tags from a particle (HTTP mirror of `particle untag`). Idempotent.
 
@@ -2518,8 +3322,9 @@ async def remove_particle_tags_endpoint(
     from particles.store.taxonomy_store import remove_particle_tags
 
     _require_belief_writes_enabled()
-    removed = await remove_particle_tags(session, particle_id, req.tags)
-    await session.commit()
+    async with session_scope(write=True) as session:
+        removed = await remove_particle_tags(session, particle_id, req.tags)
+        await session.commit()
     return ParticleTagsResponse(particle_id=particle_id, tags=removed)
 
 
@@ -2535,17 +3340,17 @@ class LinkRequest(BaseModel):
     # that surface (the MCP server's launch binding), not by the agent. With it,
     # a CO_EVIDENTIAL link between beliefs whose observer scopes differ is
     # refused (400), because the link would change those scopes.
-    project_key: str | None = None
+    project_key: ProjectKey = None
 
 
 class LinkDeleteResponse(BaseModel):
     deleted: bool
 
 
-@app.post("/links", response_model=ParticleRelation, responses=_ERR400)
-async def create_link_endpoint(
-    req: LinkRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> ParticleRelation:
+@app.post(
+    "/links", dependencies=[OPERATOR_GATE], response_model=ParticleRelation, responses=_ERR400
+)
+async def create_link_endpoint(req: LinkRequest) -> ParticleRelation:
     """Create a typed relation between two particles (HTTP mirror of `links add`).
 
     The operator form: it links any two beliefs, so it needs a real bearer (503
@@ -2561,25 +3366,27 @@ async def create_link_endpoint(
         raise HTTPException(
             status_code=400, detail=f"Unknown relation_type {req.relation_type!r}"
         ) from exc
-    try:
-        relation = await link_particles(
-            session,
-            req.particle_a,
-            req.particle_b,
-            relation_type=rtype.value,
-            confidence=req.confidence,
-            project_key=req.project_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    # Both refusals come before the writer lock (security review 2026-10-28-2, AA6).
+    async with session_scope(write=True) as session:
+        try:
+            relation = await link_particles(
+                session,
+                req.particle_a,
+                req.particle_b,
+                relation_type=rtype.value,
+                confidence=req.confidence,
+                project_key=req.project_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return relation
 
 
-@app.delete("/links", response_model=LinkDeleteResponse, responses=_ERR400)
-async def delete_link_endpoint(
-    req: LinkRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> LinkDeleteResponse:
+@app.delete(
+    "/links", dependencies=[OPERATOR_GATE], response_model=LinkDeleteResponse, responses=_ERR400
+)
+async def delete_link_endpoint(req: LinkRequest) -> LinkDeleteResponse:
     """Delete a typed relation between two particles (HTTP mirror of `links remove`).
 
     It removes a relation of any provenance, a judged one included, so it is
@@ -2594,8 +3401,9 @@ async def delete_link_endpoint(
         raise HTTPException(
             status_code=400, detail=f"Unknown relation_type {req.relation_type!r}"
         ) from exc
-    deleted = await delete_relation(session, req.particle_a, req.particle_b, rtype)
-    await session.commit()
+    async with session_scope(write=True) as session:
+        deleted = await delete_relation(session, req.particle_a, req.particle_b, rtype)
+        await session.commit()
     return LinkDeleteResponse(deleted=deleted)
 
 
@@ -2612,11 +3420,12 @@ class SubjectAliasResponse(BaseModel):
 
 @app.post(
     "/subjects/{subject_id}/aliases",
+    dependencies=[OPERATOR_GATE],
     response_model=SubjectAliasResponse,
     responses=_ERR404,
 )
 async def add_subject_aliases_endpoint(
-    subject_id: str, req: SubjectAliasRequest, session: WriteSessionDep, _auth: OperatorAuthDep
+    subject_id: str, req: SubjectAliasRequest
 ) -> SubjectAliasResponse:
     """Append aliases to a subject (HTTP mirror of `subjects alias`). 404 if absent.
 
@@ -2624,10 +3433,13 @@ async def add_subject_aliases_endpoint(
     the dev-key skip)."""
     from particles.store.subject_store import add_aliases, get_subject
 
-    if await get_subject(session, subject_id) is None:
-        raise HTTPException(status_code=404, detail="Subject not found")
-    subject, added = await add_aliases(session, subject_id, req.aliases)
-    await session.commit()
+    # The writer lock is taken in the handler, after the body validated, never
+    # as a parameter dependency (security review 2026-10-30-1, AB54).
+    async with session_scope(write=True) as session:
+        if await get_subject(session, subject_id) is None:
+            raise HTTPException(status_code=404, detail="Subject not found")
+        subject, added = await add_aliases(session, subject_id, req.aliases)
+        await session.commit()
     return SubjectAliasResponse(subject=subject, added=added)
 
 
@@ -2707,11 +3519,12 @@ async def _merge_subjects_response(
 
 @app.post(
     "/subjects/merge",
+    dependencies=[AUTH_GATE],
     response_model=SubjectMergeResponse,
     responses={**_ERR404, **_ERR400},
 )
 async def merge_subjects_many_endpoint(
-    req: SubjectMergeManyRequest, session: WriteSessionDep, _auth: AuthDep
+    req: SubjectMergeManyRequest, session: SessionDep
 ) -> SubjectMergeResponse:
     """Merge several source subjects into one target (HTTP mirror of `subjects merge`).
 
@@ -2722,27 +3535,31 @@ async def merge_subjects_many_endpoint(
     400 if a source is the target or is listed twice. A real merge is refused
     (503) under the dev-key skip, even from loopback; a `dry_run` plan is served
     as before."""
-    if not req.dry_run:
-        require_operator_credential()
-    return await _merge_subjects_response(
-        session, req.source_ids, req.target_id, dry_run=req.dry_run
-    )
+    if req.dry_run:
+        return await _merge_subjects_response(session, req.source_ids, req.target_id, dry_run=True)
+    require_operator_credential()
+    # The writer lock is taken only after the credential check, so a refused
+    # merge never holds it (security review 2026-10-25, Q12).
+    async with write_transaction(session):
+        return await _merge_subjects_response(session, req.source_ids, req.target_id, dry_run=False)
 
 
 @app.post(
     "/subjects/{source_id}/merge",
+    dependencies=[OPERATOR_GATE],
     response_model=SubjectMergeResponse,
     responses={**_ERR404, **_ERR400},
 )
-async def merge_subjects_endpoint(
-    source_id: str, req: SubjectMergeRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> SubjectMergeResponse:
+async def merge_subjects_endpoint(source_id: str, req: SubjectMergeRequest) -> SubjectMergeResponse:
     """Merge one source subject into a target (the one-source form of `POST /subjects/merge`).
 
     Irreversible: the source is deleted and its particles + aliases fold into the
     target. 404 if either subject is absent; 400 on an invalid merge. Refused
     (503) under the dev-key skip, even from loopback."""
-    return await _merge_subjects_response(session, [source_id], req.target_id, dry_run=False)
+    # The writer lock is taken after the body validated (security review
+    # 2026-10-30-1, AB54).
+    async with session_scope(write=True) as session:
+        return await _merge_subjects_response(session, [source_id], req.target_id, dry_run=False)
 
 
 class TrustRuleRequest(BaseModel):
@@ -2756,10 +3573,10 @@ class TrustRuleRequest(BaseModel):
     rationale: str | None = None
 
 
-@app.post("/trust/rules", response_model=StatusResponse, responses=_ERR400)
-async def set_trust_rule_endpoint(
-    req: TrustRuleRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> StatusResponse:
+@app.post(
+    "/trust/rules", dependencies=[OPERATOR_GATE], response_model=StatusResponse, responses=_ERR400
+)
+async def set_trust_rule_endpoint(req: TrustRuleRequest) -> StatusResponse:
     """Add or update a source-trust rule (HTTP mirror of `trust set`).
 
     Trust policy is the operator's judgment, and it decides future conflicts.
@@ -2769,15 +3586,18 @@ async def set_trust_rule_endpoint(
 
     if req.scope not in ("domain", "url_pattern"):
         raise HTTPException(status_code=400, detail="scope must be 'domain' or 'url_pattern'")
-    await upsert_trust_rule(
-        session,
-        scope=req.scope,
-        pattern=req.pattern,
-        score=req.score,
-        modifier=req.modifier,
-        rationale=req.rationale,
-    )
-    await session.commit()
+    # The writer lock is taken after the body's refusals (security review
+    # 2026-10-30-1, AB54).
+    async with session_scope(write=True) as session:
+        await upsert_trust_rule(
+            session,
+            scope=req.scope,
+            pattern=req.pattern,
+            score=req.score,
+            modifier=req.modifier,
+            rationale=req.rationale,
+        )
+        await session.commit()
     return StatusResponse(status="trust rule saved")
 
 
@@ -2799,10 +3619,13 @@ class TrustStatementResponse(BaseModel):
     cascade_resolved: int
 
 
-@app.post("/trust/statements", response_model=TrustStatementResponse, responses=_ERR400)
-async def set_trust_statement_endpoint(
-    req: TrustStatementRequest, session: WriteSessionDep, _auth: OperatorAuthDep
-) -> TrustStatementResponse:
+@app.post(
+    "/trust/statements",
+    dependencies=[OPERATOR_GATE],
+    response_model=TrustStatementResponse,
+    responses=_ERR400,
+)
+async def set_trust_statement_endpoint(req: TrustStatementRequest) -> TrustStatementResponse:
     """Write an OPERATOR_DIRECT SourceTrustStatement and run its cascade.
 
     The cascade can resolve a held conflict, so this route carries a review's
@@ -2830,11 +3653,14 @@ async def set_trust_statement_endpoint(
         source_ref=SourceRef(type=ref_type, value=req.source_ref_value),
         trust_rank=req.trust_rank,
         policy_provenance=PolicyProvenance.OPERATOR_DIRECT,
-        asserted_by="api-user",
+        asserted_by=_actor_label(),
         basis=req.basis,
     )
-    resolved = await set_trust_statement(session, stmt, actor="api-trust-statement")
-    await session.commit()
+    # The writer lock is taken after the body's refusals (security review
+    # 2026-10-30-1, AB54).
+    async with session_scope(write=True) as session:
+        resolved = await set_trust_statement(session, stmt, actor="api-trust-statement")
+        await session.commit()
     return TrustStatementResponse(cascade_resolved=resolved)
 
 
@@ -2885,7 +3711,7 @@ class ParticleAssertRequest(BaseModel):
     # that surface (the MCP server's launch binding), not by the agent. With it,
     # the belief's deposited excerpt carries the key, and a ``corpus_entry_id``
     # that is not one of that project's sources is refused (400).
-    project_key: str | None = None
+    project_key: ProjectKey = None
 
 
 class ParticleSupersedeRequest(ParticleAssertRequest):
@@ -2905,7 +3731,7 @@ class ParticleRetractRequest(BaseModel):
     reason: str
     # the project a project-bound agent surface retracts as. With it,
     # a belief not in view for that project is refused (400).
-    project_key: str | None = None
+    project_key: ProjectKey = None
 
 
 class ParticleRetractEndpointResponse(BaseModel):
@@ -2915,12 +3741,86 @@ class ParticleRetractEndpointResponse(BaseModel):
     verdict: str
 
 
-@app.post("/particles/assert", response_model=AgentWriteResult, responses=_ERR400)
+def _bound_project(body_project: str | None) -> str | None:
+    """The project an agent route writes as: a bound key's, else the body's.
+
+    A body that names no project takes the key's; one that names the key's own
+    is accepted; one that names another is refused with 403 and changes
+    nothing. An unbound key, and an operator key, keep the body's value, which
+    ``require_project_binding`` then checks as before.
+    """
+    principal = current_principal()
+    if principal is None or principal.project is None:
+        return body_project
+    if body_project is None or not names_a_project(body_project):
+        return principal.project
+    if hides_a_character(body_project) or canonical_project_key(body_project) != (
+        principal.project
+    ):
+        raise _provenance_refusal(
+            principal,
+            f"its writes are bound to project {principal.project!r}, not {body_project!r}",
+        )
+    return principal.project
+
+
+def _agent_identity() -> str | None:
+    """Who an agent route asserts as: an agent key's principal (rule 2).
+
+    ``None`` for an operator key, so the operation falls back to
+    ``mcp.write.asserter_identity`` exactly as every caller did before: the
+    agent routes are the agent's surface whoever calls them, and an MCP server
+    still holding the legacy key never gains the operator's attribution. The
+    operator's own edits belong on the operator routes.
+    """
+    principal = current_principal()
+    if principal is None or principal.can(Capability.OPERATOR_WRITE):
+        return None
+    return principal.id
+
+
+def _mutating_identity() -> str | None:
+    """:func:`_agent_identity` for a route that changes a belief; 403 for a writer's label.
+
+    An agent key minted under a store writer's label (an extractor, the
+    interchange import, a maintenance pass) matches every belief that writer
+    asserted, so the own-beliefs rule alone let it retire or rewrite them
+    (security review 2026-10-27-1, G30, G39). Changing those is an operator's
+    act.
+    """
+    identity = _agent_identity()
+    if identity is not None and identity in _keys.store_writer_labels():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"This key's principal, {identity}, is a store writer's label; an agent key "
+                "under it changes no existing belief. The operator routes make that change."
+            ),
+        )
+    return identity
+
+
+def _agent_mutation_checks(store: str, body_project: str | None) -> tuple[str | None, str | None]:
+    """Every refusal an agent's belief change can meet before its session opens.
+
+    The write-enable 403, the writer-label 403 (:func:`_mutating_identity`) and
+    the bound-project 403 (:func:`_bound_project`) all come before the store's
+    writer lock is taken, so a refused request never holds it (security review
+    2026-10-28-1, O47). Returns ``(identity, project_key)``.
+    """
+    _require_belief_writes_enabled(store)
+    return _mutating_identity(), _bound_project(body_project)
+
+
+@app.post(
+    "/particles/assert",
+    dependencies=[AGENT_GATE],
+    response_model=AgentWriteResult,
+    responses=_ERR400,
+)
 async def particle_assert_endpoint(
     req: ParticleAssertRequest,
-    session: StoreSessionDep,
     store: StoreDep,
-    _auth: AuthDep,
     _rl: RateLimitDep,
 ) -> AgentWriteResult:
     """Assert a belief through the §6.6 ladder (HTTP mirror of MCP ``particle_assert``).
@@ -2934,31 +3834,52 @@ async def particle_assert_endpoint(
     ``/query``: the reconciliation ladder's contradiction and update probes call
     the model."""
     _require_belief_writes_enabled(store)
+    project_key = _bound_project(req.project_key)
+    identity = _agent_identity()
     try:
-        result = await assert_belief(
-            session,
-            store=store,
+        # The body's own refusals come before the session opens, so a refused
+        # body takes no lock (security review 2026-10-30-2, AC7).
+        check_belief_body(
             content=req.content,
             subject_names=req.subject_names,
-            confidence=req.confidence,
-            source_excerpt=req.source_excerpt,
-            corpus_entry_id=req.corpus_entry_id,
             uncertainty_nature=req.uncertainty_nature,
-            tags=req.tags,
-            project_key=req.project_key,
         )
+        async with session_scope(store) as session:
+            await require_project_binding(session, project_key)
+            # The belief's writes (its subjects, excerpt, trust seed and the
+            # ladder's insert) commit under the store's writer lock, so SQLite's
+            # write lock is never held while the advisory lock is free (security
+            # review 2026-10-30-1, AB4, AB68). The subject lookups, embedding
+            # and model probes run before it (security review 2026-10-30-2,
+            # AC1, AC3).
+            result = await assert_belief(
+                session,
+                store=store,
+                content=req.content,
+                subject_names=req.subject_names,
+                confidence=req.confidence,
+                source_excerpt=req.source_excerpt,
+                corpus_entry_id=req.corpus_entry_id,
+                uncertainty_nature=req.uncertainty_nature,
+                tags=req.tags,
+                project_key=project_key,
+                identity=identity,
+                commit_under_lock=True,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
     return result
 
 
-@app.post("/particles/supersede", response_model=AgentWriteResult, responses=_ERR400)
+@app.post(
+    "/particles/supersede",
+    dependencies=[AGENT_GATE],
+    response_model=AgentWriteResult,
+    responses=_ERR400,
+)
 async def particle_supersede_endpoint(
     req: ParticleSupersedeRequest,
-    session: StoreSessionDep,
     store: StoreDep,
-    _auth: AuthDep,
     _rl: RateLimitDep,
 ) -> AgentWriteResult:
     """Revise a belief (HTTP mirror of MCP ``particle_supersede``). Own-beliefs-only;
@@ -2966,49 +3887,123 @@ async def particle_supersede_endpoint(
     granularity violation; 403 when belief writes are disabled for
     the store; 404 on an unknown ``store``. Rate-limited like
     ``particle_assert``, whose ladder it runs."""
-    _require_belief_writes_enabled(store)
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
     try:
-        result = await supersede_belief(
-            session,
-            store=store,
-            supersedes_id=req.supersedes_id,
+        check_belief_body(
             content=req.content,
             subject_names=req.subject_names,
-            confidence=req.confidence,
-            source_excerpt=req.source_excerpt,
-            corpus_entry_id=req.corpus_entry_id,
             uncertainty_nature=req.uncertainty_nature,
-            tags=req.tags,
-            reason=req.reason,
-            project_key=req.project_key,
         )
+        async with session_scope(store) as session:
+            await require_project_binding(session, project_key)
+            # Retiring the predecessor and asserting its successor commit
+            # together under the store's writer lock (security review
+            # 2026-10-30-1, AB4, AB68); the successor's lookups and probes run
+            # before it (security review 2026-10-30-2, AC1, AC3).
+            result = await supersede_belief(
+                session,
+                store=store,
+                supersedes_id=req.supersedes_id,
+                content=req.content,
+                subject_names=req.subject_names,
+                confidence=req.confidence,
+                source_excerpt=req.source_excerpt,
+                corpus_entry_id=req.corpus_entry_id,
+                uncertainty_nature=req.uncertainty_nature,
+                tags=req.tags,
+                reason=req.reason,
+                project_key=project_key,
+                identity=identity,
+                commit_under_lock=True,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
     return result
 
 
-@app.post("/particles/retract", response_model=ParticleRetractEndpointResponse, responses=_ERR400)
+@app.post(
+    "/particles/retract",
+    dependencies=[AGENT_GATE],
+    response_model=ParticleRetractEndpointResponse,
+    responses=_ERR400,
+)
 async def particle_retract_endpoint(
-    req: ParticleRetractRequest, session: StoreSessionDep, store: StoreDep, _auth: AuthDep
+    req: ParticleRetractRequest, store: StoreDep
 ) -> ParticleRetractEndpointResponse:
     """Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;
     operator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard
     violation or empty reason; 403 when belief writes are disabled for
     the store; 404 on an unknown ``store``."""
-    _require_belief_writes_enabled(store)
-    try:
-        await retract_belief(
-            session,
-            store=store,
-            particle_id=req.particle_id,
-            reason=req.reason,
-            project_key=req.project_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            await retract_belief(
+                session,
+                store=store,
+                particle_id=req.particle_id,
+                reason=req.reason,
+                project_key=project_key,
+                identity=identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return ParticleRetractEndpointResponse(particle_id=req.particle_id, verdict="RETRACTED")
+
+
+class AgentDepositRequest(BaseModel):
+    """Deposit conversational material as the agent (MCP ``deposit_text``). The
+    depositor, author, source type and scope tags are set server-side."""
+
+    text: str
+    tags: list[str] | None = None
+    # set by a project-bound agent surface, not by the agent.
+    project_key: ProjectKey = None
+
+
+class AgentDepositResponse(BaseModel):
+    """Identifiers for the agent's corpus entry and its snapshot."""
+
+    entry_id: str
+    snapshot_id: str
+
+
+@app.post(
+    "/particles/deposit",
+    dependencies=[AGENT_GATE],
+    response_model=AgentDepositResponse,
+    responses=_ERR400,
+)
+async def agent_deposit_endpoint(
+    req: AgentDepositRequest,
+    _rl: RateLimitDep,
+    store: StoreDep,
+) -> AgentDepositResponse:
+    """Deposit text as the agent (HTTP mirror of MCP ``deposit_text``). The entry
+    is a CONVERSATION deposit attributed to the agent identity and deduplicated
+    only onto the agent's own entries in the same scope, so identical bytes
+    another principal or project deposited are never reused or rescoped. 400 on
+    a guard violation; 403 when belief writes are disabled for the store; 404 on
+    an unknown ``store``; 429 past ``api.rate_limit_per_minute``, since each
+    deposit queues a snapshot for model extraction."""
+    # The 403s come before the writer lock (security review 2026-10-28-1, O47).
+    _require_belief_writes_enabled(store)
+    project_key = _bound_project(req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            entry_id, snapshot_id = await deposit_conversation_text(
+                session,
+                text=req.text,
+                tags=req.tags,
+                project_key=project_key,
+                identity=_agent_identity(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
+    return AgentDepositResponse(entry_id=entry_id, snapshot_id=snapshot_id)
 
 
 class AgentLinkRequest(BaseModel):
@@ -3019,7 +4014,7 @@ class AgentLinkRequest(BaseModel):
     particle_b: str
     relation_type: str = "CO_EVIDENTIAL"
     # set by a project-bound agent surface, not by the agent.
-    project_key: str | None = None
+    project_key: ProjectKey = None
 
 
 class AgentTagRequest(BaseModel):
@@ -3029,87 +4024,114 @@ class AgentTagRequest(BaseModel):
     particle_id: str
     tags: list[str]
     # set by a project-bound agent surface, not by the agent.
-    project_key: str | None = None
+    project_key: ProjectKey = None
 
 
-@app.post("/particles/link", response_model=ParticleRelation, responses=_ERR400)
-async def agent_link_endpoint(
-    req: AgentLinkRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
-) -> ParticleRelation:
+@app.post(
+    "/particles/link", dependencies=[AGENT_GATE], response_model=ParticleRelation, responses=_ERR400
+)
+async def agent_link_endpoint(req: AgentLinkRequest, store: StoreDep) -> ParticleRelation:
     """Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both
     endpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for
     ``project_key``. 400 on a guard violation; 403 when belief writes are
     disabled for the store; 404 on an unknown ``store``."""
-    _require_belief_writes_enabled(store)
-    try:
-        relation = await link_beliefs(
-            session,
-            req.particle_a,
-            req.particle_b,
-            relation_type=req.relation_type,
-            project_key=req.project_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            relation = await link_beliefs(
+                session,
+                req.particle_a,
+                req.particle_b,
+                relation_type=req.relation_type,
+                project_key=project_key,
+                identity=identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return relation
 
 
-@app.post("/particles/unlink", response_model=LinkDeleteResponse, responses=_ERR400)
-async def agent_unlink_endpoint(
-    req: AgentLinkRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
-) -> LinkDeleteResponse:
+@app.post(
+    "/particles/unlink",
+    dependencies=[AGENT_GATE],
+    response_model=LinkDeleteResponse,
+    responses=_ERR400,
+)
+async def agent_unlink_endpoint(req: AgentLinkRequest, store: StoreDep) -> LinkDeleteResponse:
     """Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on
     a guard violation, including a link an agent did not write; 403 when belief
     writes are disabled for the store; 404 on an unknown ``store``."""
-    _require_belief_writes_enabled(store)
-    try:
-        deleted = await unlink_beliefs(
-            session,
-            req.particle_a,
-            req.particle_b,
-            relation_type=req.relation_type,
-            project_key=req.project_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            deleted = await unlink_beliefs(
+                session,
+                req.particle_a,
+                req.particle_b,
+                relation_type=req.relation_type,
+                project_key=project_key,
+                identity=identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return LinkDeleteResponse(deleted=deleted)
 
 
-@app.post("/particles/tag", response_model=ParticleTagsResponse, responses=_ERR400)
-async def agent_tag_endpoint(
-    req: AgentTagRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
-) -> ParticleTagsResponse:
+@app.post(
+    "/particles/tag",
+    dependencies=[AGENT_GATE],
+    response_model=ParticleTagsResponse,
+    responses=_ERR400,
+)
+async def agent_tag_endpoint(req: AgentTagRequest, store: StoreDep) -> ParticleTagsResponse:
     """Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a
     guard violation; 403 when belief writes are disabled for the store; 404 on
     an unknown ``store``."""
-    _require_belief_writes_enabled(store)
-    try:
-        added = await tag_belief(
-            session, particle_id=req.particle_id, tags=req.tags, project_key=req.project_key
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            added = await tag_belief(
+                session,
+                particle_id=req.particle_id,
+                tags=req.tags,
+                project_key=project_key,
+                identity=identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return ParticleTagsResponse(particle_id=req.particle_id, tags=added)
 
 
-@app.post("/particles/untag", response_model=ParticleTagsResponse, responses=_ERR400)
-async def agent_untag_endpoint(
-    req: AgentTagRequest, session: StoreWriteSessionDep, store: StoreDep, _auth: AuthDep
-) -> ParticleTagsResponse:
+@app.post(
+    "/particles/untag",
+    dependencies=[AGENT_GATE],
+    response_model=ParticleTagsResponse,
+    responses=_ERR400,
+)
+async def agent_untag_endpoint(req: AgentTagRequest, store: StoreDep) -> ParticleTagsResponse:
     """Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on
     a guard violation; 403 when belief writes are disabled for the store; 404
     on an unknown ``store``."""
-    _require_belief_writes_enabled(store)
-    try:
-        removed = await untag_belief(
-            session, particle_id=req.particle_id, tags=req.tags, project_key=req.project_key
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    identity, project_key = _agent_mutation_checks(store, req.project_key)
+    async with session_scope(store, write=True) as session:
+        try:
+            await require_project_binding(session, project_key)
+            removed = await untag_belief(
+                session,
+                particle_id=req.particle_id,
+                tags=req.tags,
+                project_key=project_key,
+                identity=identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return ParticleTagsResponse(particle_id=req.particle_id, tags=removed)
 
 
@@ -3123,10 +4145,10 @@ async def agent_untag_endpoint(
 # SECURITY: the operator path can mutate ANY belief, so it MUST stay gated by
 # `mcp.write.enabled_stores` + the bearer exactly like the agent
 # belief-writes — `_require_belief_writes_enabled()` enforces the store gate and
-# the route's `OperatorAuthDep` the bearer. It NEVER rides the dev-key loopback
-# skip: `OperatorAuthDep` refuses (503) while PARTICLES_API_KEY is the dev-key
-# sentinel, so a loopback process with no key cannot reach it. The agent
-# own-beliefs routes above keep `AuthDep` and the skip.
+# the route's `OPERATOR_GATE` the bearer. It refuses (503) while
+# PARTICLES_API_KEY is the dev-key sentinel, so a loopback process with no key
+# cannot reach it; since the agent own-beliefs routes above
+# (`AGENT_GATE`) are refused on a keyless engine too.
 # The agent_write operator path skips only the ownership check; the HUMAN_REVIEW
 # guard and ACTIVE-status check still apply.
 # ---------------------------------------------------------------------------
@@ -3156,9 +4178,16 @@ class OperatorRetractRequest(BaseModel):
     reason: str
 
 
-@app.post("/particles/{particle_id}/supersede", response_model=AgentWriteResult, responses=_ERR400)
+@app.post(
+    "/particles/{particle_id}/supersede",
+    dependencies=[OPERATOR_GATE],
+    response_model=AgentWriteResult,
+    responses=_ERR400,
+)
 async def operator_supersede_endpoint(
-    particle_id: str, req: OperatorSupersedeRequest, session: SessionDep, _auth: OperatorAuthDep
+    particle_id: str,
+    req: OperatorSupersedeRequest,
+    _rl: RateLimitDep,
 ) -> AgentWriteResult:
     """Operator-supersede any belief, incl. an extracted one.
 
@@ -3168,37 +4197,52 @@ async def operator_supersede_endpoint(
     audit event. 400 on a guard / granularity violation or an empty reason; 403
     when curation writes are disabled.
     Refused (503) under the dev-key skip, even from loopback: it needs a real
-    bearer."""
+    bearer. Rate-limited like the agent ``/particles/supersede``: the
+    replacement runs the same reconciliation ladder and its model calls
+    (security review 2026-10-24-2, N10)."""
     store = _require_belief_writes_enabled()
     try:
-        result = await supersede_belief(
-            session,
-            store=store,
-            supersedes_id=particle_id,
+        # The body's own refusals come before the session opens (security
+        # review 2026-10-30-2, AC7).
+        check_operator_supersede(reason=req.reason, confidence=req.confidence)
+        check_belief_body(
             content=req.content,
             subject_names=req.subject_names,
-            confidence=req.confidence,
-            source_excerpt=req.source_excerpt,
-            corpus_entry_id=req.corpus_entry_id,
             uncertainty_nature=req.uncertainty_nature,
-            tags=req.tags,
-            operator=True,
-            actor="http:/particles/{id}/supersede",
-            reason=req.reason,
         )
+        # The retirement and its successor commit together under the store's
+        # writer lock, after the 403 (security review 2026-10-30-1, AB68); the
+        # successor's lookups and probes run before it (AC1, AC3).
+        async with session_scope(store) as session:
+            result = await supersede_belief(
+                session,
+                store=store,
+                supersedes_id=particle_id,
+                content=req.content,
+                subject_names=req.subject_names,
+                confidence=req.confidence,
+                source_excerpt=req.source_excerpt,
+                corpus_entry_id=req.corpus_entry_id,
+                uncertainty_nature=req.uncertainty_nature,
+                tags=req.tags,
+                operator=True,
+                actor="http:/particles/{id}/supersede",
+                reason=req.reason,
+                commit_under_lock=True,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
     return result
 
 
 @app.post(
     "/particles/{particle_id}/retract",
+    dependencies=[OPERATOR_GATE],
     response_model=ParticleRetractEndpointResponse,
     responses=_ERR400,
 )
 async def operator_retract_endpoint(
-    particle_id: str, req: OperatorRetractRequest, session: SessionDep, _auth: OperatorAuthDep
+    particle_id: str, req: OperatorRetractRequest
 ) -> ParticleRetractEndpointResponse:
     """Operator-retract any belief, incl. an extracted one.
 
@@ -3208,19 +4252,22 @@ async def operator_retract_endpoint(
     HUMAN_REVIEW guard and ACTIVE-status check still apply. 400 on a guard
     violation or empty reason; 403 when curation writes are disabled.
     Refused (503) under the dev-key skip, even from loopback: it needs a real bearer."""
+    # The write-enable 403 comes before the writer lock (security review
+    # 2026-10-28-1, O47).
     store = _require_belief_writes_enabled()
-    try:
-        await retract_belief(
-            session,
-            store=store,
-            particle_id=particle_id,
-            reason=req.reason,
-            operator=True,
-            actor="http:/particles/{id}/retract",
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    async with session_scope(store, write=True) as session:
+        try:
+            await retract_belief(
+                session,
+                store=store,
+                particle_id=particle_id,
+                reason=req.reason,
+                operator=True,
+                actor="http:/particles/{id}/retract",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
     return ParticleRetractEndpointResponse(particle_id=particle_id, verdict="RETRACTED")
 
 
@@ -3243,9 +4290,14 @@ class ParticleSubjectAssignRequest(BaseModel):
     subject_name: str | None = None
 
 
-@app.post("/particles/{particle_id}/subjects", response_model=AgentWriteResult, responses=_ERR400)
+@app.post(
+    "/particles/{particle_id}/subjects",
+    dependencies=[OPERATOR_GATE],
+    response_model=AgentWriteResult,
+    responses=_ERR400,
+)
 async def assign_subject_endpoint(
-    particle_id: str, req: ParticleSubjectAssignRequest, session: SessionDep, _auth: OperatorAuthDep
+    particle_id: str, req: ParticleSubjectAssignRequest
 ) -> AgentWriteResult:
     """Attach a subject to a belief that has none (in place since).
 
@@ -3256,18 +4308,23 @@ async def assign_subject_endpoint(
     Refused (503) under the dev-key skip, even from loopback: it needs a real
     bearer."""
     store = _require_belief_writes_enabled()
-    try:
-        result = await assign_subject_belief(
-            session,
-            store=store,
-            particle_id=particle_id,
-            subject_id=req.subject_id,
-            subject_name=req.subject_name,
-            actor="http:/particles/{id}/subjects",
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await session.commit()
+    # The subject link commits under the store's writer lock, after the 403, as
+    # the extract pipeline's subject resolution does (security review
+    # 2026-10-28-2, Z47). A name's live authority lookups run before the lock
+    # (security review 2026-10-31-1).
+    async with session_scope(store) as session:
+        try:
+            result = await assign_subject_belief(
+                session,
+                store=store,
+                particle_id=particle_id,
+                subject_id=req.subject_id,
+                subject_name=req.subject_name,
+                actor="http:/particles/{id}/subjects",
+                commit_under_lock=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
 
 
@@ -3284,10 +4341,13 @@ class RelinkGatedRequest(BaseModel):
     seed: int = 0
 
 
-@app.post("/subjects/relink-gated", response_model=RelinkReport, responses=_ERR400)
-async def relink_gated_endpoint(
-    req: RelinkGatedRequest, session: SessionDep, _auth: AuthDep
-) -> RelinkReport:
+@app.post(
+    "/subjects/relink-gated",
+    dependencies=[AUTH_GATE],
+    response_model=RelinkReport,
+    responses=_ERR400,
+)
+async def relink_gated_endpoint(req: RelinkGatedRequest, session: SessionDep) -> RelinkReport:
     """Link subjectless beliefs to the project-scoped subjects they name.
 
     Recovers each belief's names from its own gated-subjects record, its
@@ -3302,8 +4362,10 @@ async def relink_gated_endpoint(
     plan = await plan_gated_relink(session, tiers=req.tiers)
     if req.dry_run:
         return build_report(plan, sample=req.sample, seed=req.seed)
-    result = await apply_gated_relink(session, plan, actor="http:/subjects/relink-gated")
-    await session.commit()
+    # The relink commits under the store's writer lock; the plan's reads ran
+    # outside it (security review 2026-10-30-1, AB68).
+    async with write_transaction(session):
+        result = await apply_gated_relink(session, plan, actor="http:/subjects/relink-gated")
     return build_report(plan, sample=req.sample, seed=req.seed, result=result)
 
 
@@ -3312,8 +4374,8 @@ async def relink_gated_endpoint(
 # ---------------------------------------------------------------------------
 
 
-@app.post("/db/init", response_model=StatusResponse)
-async def db_init(_auth: OperatorAuthDep) -> StatusResponse:
+@app.post("/db/init", dependencies=[OPERATOR_GATE], response_model=StatusResponse)
+async def db_init() -> StatusResponse:
     """Idempotently create database tables. Safe to call on a
     fully-initialised store; existing tables are not touched. It migrates the
     store, an operator step, so it is refused (503) under the dev-key skip;

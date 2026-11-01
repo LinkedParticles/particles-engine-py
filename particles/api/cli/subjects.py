@@ -21,6 +21,7 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.core.schema import Subject
 from particles.db import session_scope
 
@@ -198,91 +199,101 @@ def subjects_cmd(
             subjects = run(_list_phantom_subjects())
         else:
             if order not in ("name", "degree"):
-                typer.echo("--order must be 'name' or 'degree'.", err=True)
+                terminal_echo("--order must be 'name' or 'degree'.", err=True)
                 raise typer.Exit(code=1)
             subjects = run(backend.subjects_list(order="degree" if order == "degree" else "name"))
         if not subjects:
-            typer.echo("No phantom subjects found." if phantoms_only else "No subjects found.")
+            terminal_echo("No phantom subjects found." if phantoms_only else "No subjects found.")
             return
         # Phantom markers need per-subject particle counts (no endpoint), so they
         # render local-only and degrade in remote mode.
         counts = {} if backend.remote else run(_subject_particle_counts([s.id for s in subjects]))
         for s in subjects:
-            ext = ", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids)
+            ext = terminal_field(", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids))
             phantom = "  (phantom)" if (not backend.remote and counts.get(s.id, 0) == 0) else ""
-            typer.echo(
-                f"  {s.id[:8]}…  {s.canonical_name}" + (f"  [{ext}]" if ext else "") + phantom
+            terminal_echo(
+                f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}"
+                + (f"  [{ext}]" if ext else "")
+                + phantom
             )
 
     elif action == "search":
         if not args:
-            typer.echo("Provide a search query.", err=True)
+            terminal_echo("Provide a search query.", err=True)
             raise typer.Exit(1)
         subjects = run(backend.subjects_search(args[0]))
         needle = args[0].lower()
         for s in subjects:
-            ext = ", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids)
+            ext = terminal_field(", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids))
             # Name the alias that matched when the canonical name did not.
             via = (
                 ""
                 if needle in s.canonical_name.lower()
-                else next((f"  (alias: {a})" for a in s.aliases if needle in a.lower()), "")
+                else next(
+                    (f"  (alias: {terminal_field(a)})" for a in s.aliases if needle in a.lower()),
+                    "",
+                )
             )
-            typer.echo(f"  {s.id[:8]}…  {s.canonical_name}{via}" + (f"  [{ext}]" if ext else ""))
+            terminal_echo(
+                f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}{via}"
+                + (f"  [{ext}]" if ext else "")
+            )
         if not subjects:
-            typer.echo(f"No subjects matching '{args[0]}'.")
+            terminal_echo(f"No subjects matching '{args[0]}'.")
 
     elif action == "show":
         if not args:
-            typer.echo("Provide a subject ID or name.", err=True)
+            terminal_echo("Provide a subject ID or name.", err=True)
             raise typer.Exit(1)
         try:
             subject = run(backend.subject_show(args[0], by_name=True))
         except ValueError as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(1) from None
         if subject is None:
-            typer.echo(f"No subject matches {args[0]!r} by ID, ID prefix, or name.", err=True)
+            terminal_echo(f"No subject matches {args[0]!r} by ID, ID prefix, or name.", err=True)
             raise typer.Exit(1)
-        typer.echo(f"ID:          {subject.id}")
-        typer.echo(f"Name:        {subject.canonical_name}")
+        terminal_echo(f"ID:          {subject.id}")
+        terminal_echo(f"Name:        {terminal_field(subject.canonical_name)}")
         if subject.description:
-            typer.echo(f"Description: {subject.description}")
+            terminal_echo(f"Description: {terminal_field(subject.description)}")
         if subject.aliases:
-            typer.echo(f"Aliases:     {', '.join(subject.aliases)}")
+            terminal_echo(f"Aliases:     {', '.join(terminal_field(a) for a in subject.aliases)}")
         for ref in subject.external_ids:
-            typer.echo(
-                f"External:    {ref.namespace}:{ref.id}" + (f"  {ref.uri}" if ref.uri else "")
-            )
+            line = f"{ref.namespace}:{ref.id}" + (f"  {ref.uri}" if ref.uri else "")
+            terminal_echo(f"External:    {terminal_field(line)}")
 
     elif action == "alias":
         if len(args) < 2:
-            typer.echo("Usage: subjects alias SUBJECT_ID NAME [NAME ...]", err=True)
+            terminal_echo("Usage: subjects alias SUBJECT_ID NAME [NAME ...]", err=True)
             raise typer.Exit(1)
         subject_id, new_aliases = args[0], args[1:]
         try:
             alias_outcome = run(backend.subject_alias(subject_id, new_aliases))
         except ValueError as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(1) from exc
         subject, added = alias_outcome.subject, alias_outcome.added
         ext = ", ".join(f"{r.namespace}:{r.id}" for r in subject.external_ids)
-        typer.echo(f"  {subject.id[:8]}…  {subject.canonical_name}" + (f"  [{ext}]" if ext else ""))
+        terminal_echo(
+            f"  {subject.id[:8]}…  {terminal_field(subject.canonical_name)}"
+            + (f"  [{ext}]" if ext else "")
+        )
         if added:
             for a in added:
-                typer.echo(f"  + alias: {a}")
+                terminal_echo(f"  + alias: {terminal_field(a)}")
         else:
-            typer.echo("  (no new aliases — all names already present)")
+            terminal_echo("  (no new aliases — all names already present)")
 
     elif action == "fix-labels":
         fixed, skipped, repaired, cleared = run(_fix_subject_labels())
-        typer.echo(f"Fixed: {fixed}  Skipped (no label found): {skipped}")
-        typer.echo(
+        terminal_echo(f"Fixed: {fixed}  Skipped (no label found): {skipped}")
+        terminal_echo(
             f"Label cache: {repaired} repaired, {cleared} cleared"
             " (Wikidata unreachable; re-fetched on next use)"
         )
         if repaired or cleared:
-            typer.echo(
+            terminal_echo(
                 "Wikidata snapshots extracted while those labels were cached may have"
                 " dropped statements; re-extract them with"
                 " `particles reindex --extractor-id wikidata-extractor`."
@@ -290,7 +301,7 @@ def subjects_cmd(
 
     elif action == "relink-gated":
         if tier is not None and any(t not in (1, 2, 3) for t in tier):
-            typer.echo("--tier must be 1, 2 or 3.", err=True)
+            terminal_echo("--tier must be 1, 2 or 3.", err=True)
             raise typer.Exit(1)
         report = run(_relink_gated(apply=apply, tiers=tier, sample=sample, seed=seed))
         _print_relink_report(report)
@@ -304,21 +315,21 @@ def subjects_cmd(
     elif action == "find-duplicates":
         pairs = run(_find_duplicate_subjects())
         if pairs is None:
-            typer.echo("Embedding model unavailable; cannot compute name similarity.", err=True)
+            terminal_echo("Embedding model unavailable; cannot compute name similarity.", err=True)
             raise typer.Exit(1)
         if not pairs:
-            typer.echo("No candidate-duplicate subjects found.")
+            terminal_echo("No candidate-duplicate subjects found.")
             return
-        typer.echo(f"{len(pairs)} candidate-duplicate pair(s) (review, then `subjects merge`):")
+        terminal_echo(f"{len(pairs)} candidate-duplicate pair(s) (review, then `subjects merge`):")
         for s_a, s_b, sim in pairs:
-            typer.echo(
-                f"  {sim:.3f}  {s_a.id[:8]}… {s_a.canonical_name}"
-                f"  ~  {s_b.id[:8]}… {s_b.canonical_name}"
+            terminal_echo(
+                f"  {sim:.3f}  {s_a.id[:8]}… {terminal_field(s_a.canonical_name)}"
+                f"  ~  {s_b.id[:8]}… {terminal_field(s_b.canonical_name)}"
             )
 
     elif action == "merge":
         if len(args) < 2:
-            typer.echo(
+            terminal_echo(
                 "Usage: subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]",
                 err=True,
             )
@@ -327,25 +338,25 @@ def subjects_cmd(
 
     elif action == "delete":
         if not args:
-            typer.echo("Usage: subjects delete SUBJECT_ID [--force]", err=True)
+            terminal_echo("Usage: subjects delete SUBJECT_ID [--force]", err=True)
             raise typer.Exit(1)
         subject = run(backend.subject_show(args[0]))
         if subject is None:
-            typer.echo(f"Subject {args[0]!r} not found.", err=True)
+            terminal_echo(f"Subject {args[0]!r} not found.", err=True)
             raise typer.Exit(1)
         active = run(_subject_particle_counts([subject.id]))[subject.id]
         if active > 0 and not force:
-            typer.echo(
-                f"Refusing to delete {subject.id[:8]}… ({subject.canonical_name}): "
+            terminal_echo(
+                f"Refusing to delete {subject.id[:8]}… ({terminal_field(subject.canonical_name)}): "
                 f"it has {active} ACTIVE particle(s). It is not a phantom. Re-link or "
                 f"retract them first, or pass --force to delete anyway.",
                 err=True,
             )
             raise typer.Exit(1)
         detached = run(_delete_subject(subject.id))
-        typer.echo(f"Deleted {subject.id[:8]}… ({subject.canonical_name}).")
+        terminal_echo(f"Deleted {subject.id[:8]}… ({terminal_field(subject.canonical_name)}).")
         if detached:
-            typer.echo(f"  Detached from {detached} particle(s).")
+            terminal_echo(f"  Detached from {detached} particle(s).")
 
     elif action in ("gc", "prune-empty"):
         # : sweep every phantom subject (zero ACTIVE CLAIM
@@ -353,92 +364,97 @@ def subjects_cmd(
         # `delete` guard). Useful after split/merge churn leaves stragglers.
         pruned, detached = run(_gc_phantom_subjects(dry_run=dry_run))
         if not pruned:
-            typer.echo("No phantom subjects to prune.")
+            terminal_echo("No phantom subjects to prune.")
             return
-        typer.echo(f"{'Would prune' if dry_run else 'Pruned'} {len(pruned)} phantom subject(s):")
+        terminal_echo(f"{'Would prune' if dry_run else 'Pruned'} {len(pruned)} phantom subject(s):")
         for s in pruned:
-            typer.echo(f"  {s.id[:8]}…  {s.canonical_name}")
+            terminal_echo(f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}")
         if dry_run:
-            typer.echo("  (no changes made)")
+            terminal_echo("  (no changes made)")
         elif detached:
-            typer.echo(f"  Detached from {detached} non-active particle(s).")
+            terminal_echo(f"  Detached from {detached} non-active particle(s).")
 
     elif action == "set-class":
         # : operator override of the resolver's Nomisma class.
         if len(args) < 2:
-            typer.echo(
+            terminal_echo(
                 "Usage: subjects set-class SUBJECT_ID CLASS (e.g. nmo:NumismaticObject)",
                 err=True,
             )
             raise typer.Exit(1)
         subject_id, new_class = args[0], args[1]
         if not new_class.strip():
-            typer.echo("CLASS must be a non-empty value (e.g. nmo:Material).", err=True)
+            terminal_echo("CLASS must be a non-empty value (e.g. nmo:Material).", err=True)
             raise typer.Exit(1)
         subject = run(backend.subject_show(subject_id))
         if subject is None:
-            typer.echo(f"Subject {subject_id!r} not found.", err=True)
+            terminal_echo(f"Subject {subject_id!r} not found.", err=True)
             raise typer.Exit(1)
         updated, previous = run(_set_subject_class_command(subject.id, new_class))
         if previous == new_class:
-            typer.echo(
-                f"  {updated.id[:8]}… ({updated.canonical_name}) already classed "
+            terminal_echo(
+                f"  {updated.id[:8]}… ({terminal_field(updated.canonical_name)}) already classed "
                 f"{new_class} — no change."
             )
         else:
             prev_label = previous if previous is not None else "(unset)"
-            typer.echo(
-                f"Reclassified {updated.id[:8]}… ({updated.canonical_name}): "
+            terminal_echo(
+                f"Reclassified {updated.id[:8]}… ({terminal_field(updated.canonical_name)}): "
                 f"{prev_label} → {new_class}"
             )
-            typer.echo("  Re-export to apply the matching exporter template.")
+            terminal_echo("  Re-export to apply the matching exporter template.")
 
     elif action == "confirm":
         if len(args) < 2:
-            typer.echo("Usage: subjects confirm SUBJECT_ID NAMESPACE:ID", err=True)
+            terminal_echo("Usage: subjects confirm SUBJECT_ID NAMESPACE:ID", err=True)
             raise typer.Exit(1)
         subject_id, ref_label = args[0], args[1]
         if ":" not in ref_label:
-            typer.echo("NAMESPACE:ID must contain a colon (e.g. wikidata:Q47462183).", err=True)
+            terminal_echo("NAMESPACE:ID must contain a colon (e.g. wikidata:Q47462183).", err=True)
             raise typer.Exit(1)
         namespace, ref_id = ref_label.split(":", 1)
         subject = run(backend.subject_show(subject_id))
         if subject is None:
-            typer.echo(f"Subject {subject_id!r} not found.", err=True)
+            terminal_echo(f"Subject {subject_id!r} not found.", err=True)
             raise typer.Exit(1)
         ok = run(_confirm_subject_link(subject.id, namespace, ref_id))
         if not ok:
-            typer.echo(f"No {namespace}:{ref_id} link found on {subject.canonical_name}.", err=True)
+            terminal_echo(
+                f"No {namespace}:{ref_id} link found on {terminal_field(subject.canonical_name)}.",
+                err=True,
+            )
             raise typer.Exit(1)
-        typer.echo(
-            f"Confirmed {namespace}:{ref_id} on {subject.id[:8]}… ({subject.canonical_name})."
+        terminal_echo(
+            f"Confirmed {namespace}:{ref_id} on {subject.id[:8]}… ("
+            f"{terminal_field(subject.canonical_name)})."
         )
-        typer.echo("  Confidence set to 1.0 — re-export to update Obsidian notes.")
+        terminal_echo("  Confidence set to 1.0 — re-export to update Obsidian notes.")
 
     elif action == "unlink":
         if len(args) < 2:
-            typer.echo("Usage: subjects unlink SUBJECT_ID NAMESPACE:ID", err=True)
+            terminal_echo("Usage: subjects unlink SUBJECT_ID NAMESPACE:ID", err=True)
             raise typer.Exit(1)
         subject_id, ref_label = args[0], args[1]
         if ":" not in ref_label:
-            typer.echo("NAMESPACE:ID must contain a colon (e.g. wikidata:Q37230).", err=True)
+            terminal_echo("NAMESPACE:ID must contain a colon (e.g. wikidata:Q37230).", err=True)
             raise typer.Exit(1)
         namespace, ref_id = ref_label.split(":", 1)
         subject = run(backend.subject_show(subject_id))
         if subject is None:
-            typer.echo(f"Subject {subject_id!r} not found.", err=True)
+            terminal_echo(f"Subject {subject_id!r} not found.", err=True)
             raise typer.Exit(1)
         ok = run(_unlink_subject_ref(subject.id, namespace, ref_id))
         if not ok:
-            typer.echo(
-                f"No {namespace}:{ref_id} link found on {subject.canonical_name}.",
+            terminal_echo(
+                f"No {namespace}:{ref_id} link found on {terminal_field(subject.canonical_name)}.",
                 err=True,
             )
             raise typer.Exit(1)
-        typer.echo(
-            f"Removed {namespace}:{ref_id} from {subject.id[:8]}… ({subject.canonical_name})."
+        terminal_echo(
+            f"Removed {namespace}:{ref_id} from {subject.id[:8]}… ("
+            f"{terminal_field(subject.canonical_name)})."
         )
-        typer.echo(
+        terminal_echo(
             "  Subject and its particles are unchanged; re-export to drop the "
             "stale link from Obsidian notes."
         )
@@ -447,7 +463,7 @@ def subjects_cmd(
         # re-link some particles off a source Subject onto a new
         # one created via the resolver (either by-name lookup or by-ID).
         if not args:
-            typer.echo(
+            terminal_echo(
                 "Usage: subjects split SOURCE_ID --particle PID [--particle PID ...] "
                 "(--new-name NAME | --new-external-id NS:ID) [--dry-run]",
                 err=True,
@@ -456,17 +472,17 @@ def subjects_cmd(
         source_id_arg = args[0]
         particle_ids = list(particle or [])
         if not particle_ids:
-            typer.echo("subjects split requires at least one --particle PID.", err=True)
+            terminal_echo("subjects split requires at least one --particle PID.", err=True)
             raise typer.Exit(1)
         if not new_name and not new_external_id:
-            typer.echo(
+            terminal_echo(
                 "subjects split requires --new-name or --new-external-id.",
                 err=True,
             )
             raise typer.Exit(1)
         source = run(backend.subject_show(source_id_arg))
         if source is None:
-            typer.echo(f"Source subject {source_id_arg!r} not found.", err=True)
+            terminal_echo(f"Source subject {source_id_arg!r} not found.", err=True)
             raise typer.Exit(1)
         try:
             split_outcome = run(
@@ -484,12 +500,12 @@ def subjects_cmd(
         split_relinked = split_outcome.relinked_particle_ids
         not_bound = split_outcome.not_bound_particle_ids
         if dry_run:
-            typer.echo(
+            terminal_echo(
                 f"Dry run: would split {len(split_relinked)} particle(s) off "
-                f"{source.id[:8]}… ({source.canonical_name})"
+                f"{source.id[:8]}… ({terminal_field(source.canonical_name)})"
             )
-            typer.echo(
-                f"  New subject: {new_subject.canonical_name}"
+            terminal_echo(
+                f"  New subject: {terminal_field(new_subject.canonical_name)}"
                 + (
                     f"  [{', '.join(f'{r.namespace}:{r.id}' for r in new_subject.external_ids)}]"
                     if new_subject.external_ids
@@ -497,21 +513,21 @@ def subjects_cmd(
                 )
             )
             if new_subject.subject_class:
-                typer.echo(f"  Class: {new_subject.subject_class}")
+                terminal_echo(f"  Class: {terminal_field(new_subject.subject_class)}")
             if not_bound:
-                typer.echo(
+                terminal_echo(
                     f"  Warning: {len(not_bound)} particle(s) were not bound to source; skipped:"
                 )
                 for pid in not_bound:
-                    typer.echo(f"    {pid[:8]}…")
-            typer.echo("  (no changes made)")
+                    terminal_echo(f"    {pid[:8]}…")
+            terminal_echo("  (no changes made)")
             return
-        typer.echo(
+        terminal_echo(
             f"Split {len(split_relinked)} particle(s) off {source.id[:8]}…"
-            f" ({source.canonical_name})"
+            f" ({terminal_field(source.canonical_name)})"
         )
-        typer.echo(
-            f"  → {new_subject.id[:8]}… ({new_subject.canonical_name})"
+        terminal_echo(
+            f"  → {new_subject.id[:8]}… ({terminal_field(new_subject.canonical_name)})"
             + (
                 f"  [{', '.join(f'{r.namespace}:{r.id}' for r in new_subject.external_ids)}]"
                 if new_subject.external_ids
@@ -519,17 +535,17 @@ def subjects_cmd(
             )
         )
         if not_bound:
-            typer.echo(
+            terminal_echo(
                 f"  Skipped {len(not_bound)} particle(s) not bound to the source: "
                 + ", ".join(pid[:8] + "…" for pid in not_bound)
             )
-        typer.echo(
+        terminal_echo(
             "  Next: re-export to render the corrected attribution; "
             "optionally re-lint for stale relation edges."
         )
 
     else:
-        typer.echo(
+        terminal_echo(
             f"Unknown action: {action}."
             " Use list, search, show, alias, merge, split, delete, gc, set-class,"
             " confirm, unlink, fix-labels, find-duplicates, relink-gated, rebuild-aliases,"
@@ -564,29 +580,30 @@ def _merge_subjects(
     try:
         plan = run(backend.subject_merge(source_ids, target_id, dry_run=True))
     except ValueError as exc:
-        typer.echo(str(exc), err=True)
+        terminal_echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
     target = plan.subject
     verb = "Would merge" if dry_run else "Merging"
-    typer.echo(
-        f"{verb} {len(plan.sources)} subject(s) into {target.id[:8]}… ({target.canonical_name}):"
+    terminal_echo(
+        f"{verb} {len(plan.sources)} subject(s) into {target.id[:8]}… "
+        f"({terminal_field(target.canonical_name)}):"
     )
     for src in plan.sources:
-        typer.echo(
-            f"  {src.subject_id[:8]}… {src.canonical_name}"
+        terminal_echo(
+            f"  {src.subject_id[:8]}… {terminal_field(src.canonical_name)}"
             f"  ({src.particles_relinked} particle link(s))"
         )
         for ref in src.refs_carried:
-            typer.echo(f"    carries {ref} to the target")
+            terminal_echo(f"    carries {ref} to the target")
         for ref in src.refs_withheld:
-            typer.echo(f"    drops {ref}: it names another project")
+            terminal_echo(f"    drops {ref}: it names another project")
     if plan.aliases_added:
-        typer.echo(f"  Aliases to add: {', '.join(plan.aliases_added)}")
-    typer.echo(f"  Particle links to re-point: {plan.particles_relinked}")
-    typer.echo("  The source subjects are deleted. A merge cannot be undone.")
+        terminal_echo(f"  Aliases to add: {', '.join(plan.aliases_added)}")
+    terminal_echo(f"  Particle links to re-point: {plan.particles_relinked}")
+    terminal_echo("  The source subjects are deleted. A merge cannot be undone.")
     if dry_run:
-        typer.echo("  (no changes made)")
+        terminal_echo("  (no changes made)")
         return
     if not yes:
         confirm(f"Merge {len(plan.sources)} subject(s)?", abort=True)
@@ -596,42 +613,42 @@ def _merge_subjects(
     try:
         outcome = run(backend.subject_merge([s.subject_id for s in plan.sources], target.id))
     except ValueError as exc:
-        typer.echo(str(exc), err=True)
+        terminal_echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     updated = outcome.subject
-    typer.echo(
+    terminal_echo(
         f"Merged {len(outcome.sources)} subject(s)"
-        f" into {updated.id[:8]}… ({updated.canonical_name})"
+        f" into {updated.id[:8]}… ({terminal_field(updated.canonical_name)})"
     )
     if outcome.aliases_added:
-        typer.echo(f"  Aliases added: {', '.join(outcome.aliases_added)}")
-    typer.echo(f"  Particles re-linked: {outcome.particles_relinked}")
-    typer.echo("  Source subjects deleted.")
+        terminal_echo(f"  Aliases added: {', '.join(outcome.aliases_added)}")
+    terminal_echo(f"  Particles re-linked: {outcome.particles_relinked}")
+    terminal_echo("  Source subjects deleted.")
 
 
 def _print_relink_report(report: RelinkReport) -> None:
     tiers = ", ".join(str(t) for t in report.tiers)
-    typer.echo(f"Subjectless beliefs that owe a subject: {report.orphans}")
-    typer.echo(f"Recoverable with tiers {tiers}: {report.recoverable}")
+    terminal_echo(f"Subjectless beliefs that owe a subject: {report.orphans}")
+    terminal_echo(f"Recoverable with tiers {tiers}: {report.recoverable}")
     for t, n in report.by_tier.items():
-        typer.echo(f"  tier {t}: {n}")
+        terminal_echo(f"  tier {t}: {n}")
     for cls, n in report.by_class.items():
-        typer.echo(f"  {cls}: {n} name(s)")
-    typer.echo(
+        terminal_echo(f"  {cls}: {n} name(s)")
+    terminal_echo(
         f"Withheld, no project key: {report.fail_closed_no_key}; "
         f"several projects: {report.fail_closed_several}; "
         f"nothing recoverable: {report.unrecovered}"
     )
     for item in report.sample:
         names = ", ".join(f"{n.name} [{n.token_class}, tier {n.tier}]" for n in item.names)
-        typer.echo(f"\n  {item.particle_id[:8]}…  {names}\n    {item.content}")
+        terminal_echo(f"\n  {item.particle_id[:8]}…  {names}\n    {item.content}")
     if report.applied:
-        typer.echo(
+        terminal_echo(
             f"\nRelinked {report.relinked} belief(s) to {report.subjects} subject(s); "
             f"skipped {report.skipped}."
         )
     else:
-        typer.echo("\nNothing written. Re-run with --apply to link them.")
+        terminal_echo("\nNothing written. Re-run with --apply to link them.")
 
 
 def _checkout_files(repo: Path) -> tuple[str, list[str]]:
@@ -644,18 +661,24 @@ def _checkout_files(repo: Path) -> tuple[str, list[str]]:
     import subprocess
 
     from particles.api.cli._claude_code import claude_project_slug, repository_root
-    from particles.url_safety import GIT_LOCAL_ARGS, local_git_env
+    from particles.url_safety import GIT_LOCAL_ARGS, local_git_env, pinned_subprocess_env
 
     root = repository_root(repo.expanduser().absolute())
+    # git, and any program it runs, is looked up only on the PATH entries no
+    # other user may write (the child's PATH is the one searched): a relative
+    # entry would find one the checkout ships (security review 2026-10-28-2,
+    # AA13).
+    env = local_git_env(os.environ)
+    env["PATH"] = pinned_subprocess_env({"PATH": os.environ.get("PATH", "")})["PATH"]
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
             ["git", *GIT_LOCAL_ARGS, "-C", str(repo), "ls-files", "-z"],  # noqa: S607
             capture_output=True,
             check=True,
-            env=local_git_env(os.environ),
+            env=env,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        typer.echo(f"Cannot list the files of {repo}: {exc}", err=True)
+        terminal_echo(f"Cannot list the files of {repo}: {exc}", err=True)
         raise typer.Exit(2) from exc
     files = [f for f in done.stdout.decode("utf-8", "replace").split("\0") if f]
     return claude_project_slug(root), files
@@ -678,16 +701,16 @@ def _fold_artifacts(
         try:
             moved = run(_undo())
         except ValueError as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(1) from exc
-        typer.echo(f"Undid fold {undo}: {len(moved)} particle link(s) moved back.")
+        terminal_echo(f"Undid fold {undo}: {len(moved)} particle link(s) moved back.")
         return
 
     files: list[str] | None = None
     if repo is not None:
         repo_key, files = _checkout_files(repo)
         if namespace is not None and namespace != repo_key:
-            typer.echo(
+            terminal_echo(
                 f"--repo {repo} is project {repo_key}, not {namespace}; refusing to fold"
                 " one project against another's files.",
                 err=True,
@@ -695,7 +718,9 @@ def _fold_artifacts(
             raise typer.Exit(1)
         namespace = repo_key
     if namespace is None:
-        typer.echo("Provide --repo DIR (or --namespace KEY to fold absolute paths only).", err=True)
+        terminal_echo(
+            "Provide --repo DIR (or --namespace KEY to fold absolute paths only).", err=True
+        )
         raise typer.Exit(1)
 
     async def _fold() -> FoldReport:
@@ -718,30 +743,30 @@ def _print_fold_report(report: FoldReport, *, applied: bool) -> None:
         return f"{span.claims} claims, {span.first:%Y-%m-%d}..{span.last:%Y-%m-%d}"
 
     source = f"{report.repo_files} files in the checkout" if report.repo_files else "no checkout"
-    typer.echo(f"Project {report.namespace_key} ({source}).")
+    terminal_echo(f"Project {report.namespace_key} ({source}).")
     for fold in report.folds:
-        typer.echo(
+        terminal_echo(
             f"  {fold.rule.value:8s} {fold.source_name}  [{_span(fold.source_id)}]"
             f"\n           -> {fold.target_path}  [{_span(fold.target_id)}]"
         )
     by_rule = Counter(f.rule.value for f in report.folds)
-    typer.echo(
+    terminal_echo(
         f"\n{len(report.folds)} fold(s): "
         + (", ".join(f"{n} {rule}" for rule, n in sorted(by_rule.items())) or "none")
     )
     if report.refusals:
-        typer.echo(f"{len(report.refusals)} left as they are:")
+        terminal_echo(f"{len(report.refusals)} left as they are:")
         for reason, n in Counter(r.reason.value for r in report.refusals).most_common():
-            typer.echo(f"  {n:5d}  {reason}")
+            terminal_echo(f"  {n:5d}  {reason}")
         for r in report.refusals:
-            typer.echo(f"  {r.rule.value:8s} {r.name}: {r.reason.value}")
+            terminal_echo(f"  {r.rule.value:8s} {r.name}: {r.reason.value}")
     if applied:
-        typer.echo(
+        terminal_echo(
             f"\nApplied {len(report.applied_events)} fold(s). Undo one with"
             " `particles subjects fold-artifacts --undo EVENT_ID`."
         )
     else:
-        typer.echo("\nNothing written. Re-run with --apply to merge them.")
+        terminal_echo("\nNothing written. Re-run with --apply to merge them.")
 
 
 def _rebuild_aliases(*, check: bool) -> None:
@@ -759,20 +784,20 @@ def _rebuild_aliases(*, check: bool) -> None:
             return written
 
     if not check:
-        typer.echo(f"Alias index rebuilt: {run(_rebuild())} row(s).")
+        terminal_echo(f"Alias index rebuilt: {run(_rebuild())} row(s).")
         return
     drift = run(_check())
     if drift.clean:
-        typer.echo("Alias index matches the recorded aliases.")
+        terminal_echo("Alias index matches the recorded aliases.")
         return
-    typer.echo(
+    terminal_echo(
         f"Alias index differs from a rebuild: {drift.missing} missing, {drift.extra} extra,"
         f" {drift.orphaned} for deleted subjects, across {len(drift.subject_ids)} subject(s)."
         " Run `particles subjects rebuild-aliases` to repair it.",
         err=True,
     )
     for sid in drift.subject_ids[:20]:
-        typer.echo(f"  {sid}", err=True)
+        terminal_echo(f"  {sid}", err=True)
     raise typer.Exit(1)
 
 
@@ -848,7 +873,7 @@ async def _fix_subject_labels() -> tuple[int, int, int, int]:
             elif fetched != entity_id:
                 await set_label(session, entity_id, fetched)
                 repaired += 1
-                typer.echo(f"  cache {entity_id} → {fetched}")
+                terminal_echo(f"  cache {entity_id} → {fetched}")
 
         result = await session.execute(_select(SubjectRow))
         rows = [r for r in result.scalars() if _QID_RE.match(r.canonical_name)]
@@ -865,7 +890,7 @@ async def _fix_subject_labels() -> tuple[int, int, int, int]:
             if label and label != qid:
                 row.canonical_name = label
                 fixed += 1
-                typer.echo(f"  {qid} → {label}")
+                terminal_echo(f"  {qid} → {label}")
             else:
                 skipped += 1
 

@@ -7,7 +7,7 @@ hygiene, tuning, and the things that go wrong.
 |---|---|
 | [Configuration](configuration.md) | `config.yaml` structure, env vars, precedence |
 | [Running in a container](container-deployment.md) | The OCI image, compose, the Helm chart, resident daemon mode, the `/data` volume |
-| [Remote engine](remote-engine.md) | Client-server split, the bearer token, network exposure |
+| [Remote engine](remote-engine.md) | Client-server split, engine keys and roles, network exposure |
 | [Lint and review](lint-and-review.md) | `PROVENANCE_STALE`, `INCONSISTENCY`, the review → trust workflow |
 | [Co-evidential curation](co-evidential.md) | Finding and linking duplicate claims with `links suggest` |
 | [Citation-signal deposits](citation-signals.md) | Surfacing frequently-cited undeposited primary sources with `corpus links suggest` |

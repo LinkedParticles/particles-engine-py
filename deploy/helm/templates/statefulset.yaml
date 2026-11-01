@@ -52,11 +52,17 @@ spec:
               containerPort: 8000
               protocol: TCP
           env:
+            {{- if or .Values.auth.apiKey .Values.auth.existingSecret }}
             - name: PARTICLES_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "linkedparticles-engine.secretName" . }}
                   key: {{ .Values.auth.apiKeySecretKey }}
+                  {{- if .Values.auth.keysFileOnly }}
+                  # A per-client key on the volume satisfies the gate alone.
+                  optional: true
+                  {{- end }}
+            {{- end }}
             {{- if or .Values.auth.anthropicApiKey .Values.auth.existingSecret }}
             - name: ANTHROPIC_API_KEY
               valueFrom:
@@ -64,6 +70,12 @@ spec:
                   name: {{ include "linkedparticles-engine.secretName" . }}
                   key: {{ .Values.auth.anthropicApiKeySecretKey }}
                   optional: true
+            {{- end }}
+            {{- with .Values.podSecurityContext.fsGroup }}
+            # The fsGroup volume is the one group-writable key directory the
+            # engine accepts (api.keys_dir_group).
+            - name: PARTICLES_API_KEYS_DIR_GROUP
+              value: {{ . | quote }}
             {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}

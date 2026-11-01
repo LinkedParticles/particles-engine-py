@@ -197,11 +197,13 @@ behind **View More**.
 ### Reaching the engine from the phone
 
 A phone is not on loopback, so the engine has to bind somewhere the phone can
-reach it, and the moment it does, a real `PARTICLES_API_KEY` becomes
-**mandatory**. The fail-closed gate refuses to start a non-loopback
-bind that still has the development key, which is the one guard standing
-between "share sheet deposit" and "an unauthenticated write endpoint on your
-network". Do not work around it.
+reach it, and the moment it does, a key becomes **mandatory**: a real
+`PARTICLES_API_KEY`, or a per-client key minted with `particles engine keys
+create`. The fail-closed gate refuses to start an engine with
+neither on a non-loopback bind, and an engine with no key refuses every HTTP
+write wherever it listens; together they stand between "share sheet deposit"
+and "an unauthenticated write endpoint on your network". Do not work around
+either.
 
 Three exposures, best first:
 
@@ -230,12 +232,24 @@ credential store: the token sits in the action's header field, syncs with your
 shortcuts through iCloud, and travels inside any copy of the shortcut you
 share or export. Anyone who can unlock the device can read it.
 
-**It is a full-privilege credential.** The engine compares one key
-(`PARTICLES_API_KEY`) for every authenticated route; there is no read-only or
-deposit-only scope today. A token on the phone is therefore equivalent to
-write access to the store, not just deposit access. Rotate it by changing the
-value on the engine and editing the shortcut; there is nothing finer-grained
-to revoke.
+**Give the phone a key of its own.** `PARTICLES_API_KEY` is an operator key:
+on the phone it carries the operator's authority over the whole store, not
+just deposit access. The engine also accepts per-client keys,
+each with a role. An agent key deposits and writes only as its own principal,
+so mint one under the principal the shortcut names as its depositor:
+
+```bash
+particles engine keys create --role agent --principal ios-share-sheet
+```
+
+`create` writes the key to a file only you can read, beside the key file, and
+prints that file's path; paste the key from it into the shortcut, then delete
+the file. Its deposits may name no other depositor, so the shortcut's `deposited_by`
+field must be that principal or be left out. Add `--project KEY` to bind its
+writes to one project. A lost phone then costs one key, which
+`particles engine keys revoke <key_id>` revokes alone, with no restart and no
+change to any other client. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#deployment-posture-authentication-and-the-read-surface)
+says what each role may do.
 
 **Consequences worth accepting deliberately:**
 
@@ -260,8 +274,8 @@ space, then the token. Check for a trailing space or newline pasted in with
 the token, and that it matches the engine's `PARTICLES_API_KEY` exactly.
 
 **`503 Refusing to serve an unauthenticated request…`.** The engine is still
-running with the development key and your phone isn't loopback. Set a real
-`PARTICLES_API_KEY` on the engine and restart it.
+running without a key and your phone isn't loopback. Mint the phone an agent
+key (above), or set a real `PARTICLES_API_KEY` on the engine and restart it.
 
 **`400 Could not deposit the provided URL`.** Either the address is blocked by
 the SSRF guard (above), or the fetch failed. The engine log names the actual

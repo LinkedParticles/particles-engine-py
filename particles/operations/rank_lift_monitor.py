@@ -46,7 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.observer_scope import visible
+from particles.core.observer_scope import canonical_project_key, names_a_project, visible
 from particles.core.schema import Particle
 from particles.core.scoring.relevance import sweep_owner_rank_lift
 from particles.core.scoring.utility import (
@@ -62,6 +62,7 @@ from particles.core.scoring.utility import (
     target_transitions,
 )
 from particles.core.status import Status, StatusReason
+from particles.operations.utility_exposure import exposure_recorders
 from particles.operations.utility_sweep import (
     DEFAULT_GRID_MAX,
     DEFAULT_GRID_STEPS,
@@ -70,7 +71,7 @@ from particles.operations.utility_sweep import (
 from particles.store.event_store import OperatorEventType, list_events
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
 from particles.store.particle_store import ParticleRow, get_particles_by_status
-from particles.store.session_exposure_store import SessionExposureRow
+from particles.store.session_exposure_store import SessionExposureRow, recorded_by_one_of
 from particles.store.utility_store import SOURCE_EXPLICIT, SOURCE_MINED, UtilityEventRow
 
 #: The run record key the report is stored under.
@@ -245,13 +246,19 @@ async def _mined_events_since(session: AsyncSession, since: datetime) -> list[tu
 
 
 async def _shown_by_session(session: AsyncSession, session_ids: set[str]) -> dict[str, set[str]]:
-    """Every belief each session's start-context rows name, unioned."""
+    """Every belief each session's start-context rows name, unioned.
+
+    Only the rows the session frame trusts (``exposure_recorders``): an agent
+    key names the session it records for, so its rows fed the monitor's shown
+    sets (security review 2026-10-28-1, O51).
+    """
+    trusted = recorded_by_one_of(exposure_recorders())
     shown: dict[str, set[str]] = {}
     ids = sorted(session_ids)
     for start in range(0, len(ids), _IN_CHUNK):
         rows = await session.execute(
             select(SessionExposureRow.session_id, SessionExposureRow.beliefs).where(
-                SessionExposureRow.session_id.in_(ids[start : start + _IN_CHUNK])
+                SessionExposureRow.session_id.in_(ids[start : start + _IN_CHUNK]), trusted
             )
         )
         for sid, beliefs in rows.all():
@@ -346,17 +353,22 @@ async def live_project_keys(session: AsyncSession, since: datetime) -> set[str]:
 
     The record names each session's project and whether its read went
     through that project's observer. A key no session read through is a view
-    nobody sees (a removed worktree, say), so it is not judged.
+    nobody sees (a removed worktree, say), so it is not judged. Only the rows
+    the session frame trusts count, so an agent key's chosen project string is
+    never judged as a live view (security review 2026-10-28-1, O51).
     """
     rows = await session.execute(
         select(SessionExposureRow.project_key)
         .where(
             SessionExposureRow.recorded_at >= since,
             SessionExposureRow.observer_scope_applied.is_(True),
+            recorded_by_one_of(exposure_recorders()),
         )
         .distinct()
     )
-    return {key for (key,) in rows.all() if key}
+    # One project in two normalisation forms is one view (security review
+    # 2026-10-30-1, AB69).
+    return {canonical_project_key(key) for (key,) in rows.all() if names_a_project(key)}
 
 
 async def view_ids(

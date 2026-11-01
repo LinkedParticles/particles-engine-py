@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.db import session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
@@ -105,12 +107,12 @@ async def _corpus_list(source_type_filter: str | None, json_out: bool) -> None:
             typer.echo(json.dumps(records, indent=2, sort_keys=True))
             return
 
-        typer.echo(f"{'ENTRY':8}  {'TYPE':14}  {'STATUS':12}  {'PARTS':5}  SOURCE")
-        typer.echo("-" * 80)
+        terminal_echo(f"{'ENTRY':8}  {'TYPE':14}  {'STATUS':12}  {'PARTS':5}  SOURCE")
+        terminal_echo("-" * 80)
         for rec in records:
             label = (rec["uri_r"] or "").replace("file://", "")
-            label = label[-60:] if len(label) > 60 else label
-            typer.echo(
+            label = terminal_field(label[-60:] if len(label) > 60 else label)
+            terminal_echo(
                 f"{rec['entry_id'][:8]}  {rec['source_type']:14s}  "
                 f"{rec['extraction_status']:12s}  {rec['particle_count']:5d}  {label}"
             )
@@ -135,7 +137,7 @@ async def _corpus_show(entry_id_prefix: str, limit: int) -> None:
         # GET /corpus/{id} endpoint serves and degrades the rich block.
         entry = await backend.corpus_show(entry_id_prefix)
         if entry is None:
-            typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+            terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
             raise typer.Exit(1)
         _render_corpus_entry_header(entry)
         return
@@ -144,7 +146,7 @@ async def _corpus_show(entry_id_prefix: str, limit: int) -> None:
         resolved_id = await _resolve_show_entry_id(session, entry_id_prefix)
         entry = await backend.corpus_show(resolved_id)
         if entry is None:
-            typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+            terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
             raise typer.Exit(1)
         _render_corpus_entry_header(entry)
         await _render_corpus_entry_detail(session, entry, limit)
@@ -183,17 +185,17 @@ async def _corpus_cat(selector: str, raw: bool) -> None:
     try:
         result = await backend.corpus_blob(selector)
     except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
+        terminal_echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     if result is None:
-        typer.echo(
+        terminal_echo(
             f"No blob found for {selector!r} — unknown ID, or the blob is missing "
             "on the engine host.",
             err=True,
         )
         raise typer.Exit(1)
 
-    typer.echo(
+    terminal_echo(
         f"snapshot {result.snapshot_id}  sha256:{result.content_hash[:12]}…  "
         f"{len(result.content)} bytes",
         err=True,
@@ -206,14 +208,16 @@ async def _corpus_cat(selector: str, raw: bool) -> None:
 
     text = content_to_text(result.content)
     if not text.strip():
-        typer.echo(
+        terminal_echo(
             "(empty text preview — the source rendered to no extractable text, "
             "which is why extraction produced 0 particles. Use --raw to see the "
             "stored bytes.)",
             err=True,
         )
         return
-    typer.echo(text)
+    # A snapshot's text is a source author's bytes: shown, never interpreted
+    # by the terminal (security review 2026-10-30-1, AB37).
+    terminal_echo(text)
 
 
 async def _resolve_show_entry_id(session: AsyncSession, entry_id_prefix: str) -> str:
@@ -238,15 +242,18 @@ async def _resolve_show_entry_id(session: AsyncSession, entry_id_prefix: str) ->
 def _render_corpus_entry_header(entry: Any) -> None:
     """Render the entry metadata + snapshot list (transport-agnostic)."""
     label = (entry.uri_r or "(no uri)").replace("file://", "")
-    typer.echo(f"Entry:       {entry.entry_id}")
-    typer.echo(f"Source:      {entry.source_type}")
-    typer.echo(f"Location:    {label}")
-    typer.echo(
-        f"Deposited:   {entry.created_at.strftime('%Y-%m-%d %H:%M')}  by {entry.deposited_by}"
+    terminal_echo(f"Entry:       {entry.entry_id}")
+    terminal_echo(f"Source:      {entry.source_type}")
+    # The location and the depositor are stored text a source or an agent
+    # key chose, so each is one line with no live control (AB37).
+    terminal_echo(f"Location:    {terminal_field(label)}")
+    terminal_echo(
+        f"Deposited:   {entry.created_at.strftime('%Y-%m-%d %H:%M')}"
+        f"  by {terminal_field(entry.deposited_by)}"
     )
-    typer.echo("Snapshots:")
+    terminal_echo("Snapshots:")
     for snap in sorted(entry.snapshots, key=lambda s: s.captured_at):
-        typer.echo(
+        terminal_echo(
             f"  {snap.snapshot_id[:8]}…  {snap.extraction_status:12s}"
             f"  {snap.captured_at.strftime('%Y-%m-%d %H:%M')}"
         )
@@ -282,20 +289,20 @@ async def _render_corpus_entry_detail(session: AsyncSession, entry: Any, limit: 
     for p in prows:
         subject_ids.update(_json.loads(p.subject_ids_json))
 
-    typer.echo(
+    terminal_echo(
         f"\nParticles:   {len(prows)} active CLAIM particles across {len(subject_ids)} subjects"
     )
 
     if subject_ids:
-        typer.echo("\nSubjects:")
+        terminal_echo("\nSubjects:")
         for sid in sorted(subject_ids):
             srow = await session.get(SubjectRow, sid)
             name = srow.canonical_name if srow else sid
-            typer.echo(f"  {sid[:8]}…  {name}")
+            terminal_echo(f"  {sid[:8]}…  {terminal_field(name)}")
 
-    typer.echo(f"\nParticles (first {limit}):")
+    terminal_echo(f"\nParticles (first {limit}):")
     for p in prows[:limit]:
-        typer.echo(f"  [{p.confidence_value:.2f}] {p.id[:8]}…  {p.content[:90]}")
+        terminal_echo(f"  [{p.confidence_value:.2f}] {p.id[:8]}…  {terminal_field(p.content[:90])}")
 
     await _render_follow_edges(session, entry.entry_id)
 
@@ -333,19 +340,19 @@ async def _render_follow_edges(session: AsyncSession, entry_id: str) -> None:
     def _label(eid: str) -> str:
         uri = label_map.get(eid, "")
         short = uri[-60:] if len(uri) > 60 else uri
-        return f"{eid[:8]}…  {short}".rstrip()
+        return f"{eid[:8]}…  {terminal_field(short)}".rstrip()
 
     if out_edges:
-        typer.echo(f"\nOutgoing follows ({len(out_edges)}):")
+        terminal_echo(f"\nOutgoing follows ({len(out_edges)}):")
         for e in out_edges:
-            typer.echo(
+            terminal_echo(
                 f"  → {_label(e.target_entry_id)}"
                 f"  [{e.link_type}, {e.discovered_at.date().isoformat()}]"
             )
     if in_edges:
-        typer.echo(f"\nIncoming follows ({len(in_edges)}):")
+        terminal_echo(f"\nIncoming follows ({len(in_edges)}):")
         for e in in_edges:
-            typer.echo(
+            terminal_echo(
                 f"  ← {_label(e.via_entry_id)}"
                 f"  [{e.link_type}, {e.discovered_at.date().isoformat()}]"
             )
@@ -383,7 +390,7 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
         entry_id = await _resolve_entry_id(session, entry_id_prefix)
         entry = await get_entry(session, entry_id)
         if entry is None:
-            typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+            terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
             raise typer.Exit(1)
 
         plan = await plan_entry_deletion(session, entry_id)
@@ -392,16 +399,16 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
         n_moved = sum(1 for s in plan.decision.to_strip if s.anchor_moved)
 
         label = (entry.uri_r or entry_id).replace("file://", "")
-        typer.echo(f"Entry:     {entry_id[:8]}…  {label}")
-        typer.echo(f"Snapshots: {plan.snapshots}")
-        typer.echo(f"Particles: {n_delete} will be deleted (this entry is their only source)")
+        terminal_echo(f"Entry:     {entry_id[:8]}…  {terminal_field(label)}")
+        terminal_echo(f"Snapshots: {plan.snapshots}")
+        terminal_echo(f"Particles: {n_delete} will be deleted (this entry is their only source)")
         strip_line = f"           {n_strip} kept, other sources remain; this entry's refs removed"
         if n_moved:
             strip_line += f" ({n_moved} with a new earliest source)"
-        typer.echo(strip_line)
+        terminal_echo(strip_line)
         n_judged = len(plan.judgments_deleted)
         if n_judged:
-            typer.echo(
+            terminal_echo(
                 f"Judgments: {n_judged} of the deleted particles were retired by a judgment;"
                 " the judgment is erased with them, and a later deposit of the same claim"
                 " mints it ACTIVE again"
@@ -422,7 +429,7 @@ async def _corpus_delete(entry_id_prefix: str, yes: bool) -> None:
         parts.append(f"{result.subjects_orphaned} orphaned subjects")
     if result.synthesis_rows_deleted:
         parts.append(f"{result.synthesis_rows_deleted} synthesis-cache rows")
-    typer.echo(f"Deleted entry {entry_id[:8]}… ({', '.join(parts)}).")
+    terminal_echo(f"Deleted entry {entry_id[:8]}… ({', '.join(parts)}).")
 
 
 @corpus_app.command("retract")
@@ -467,10 +474,10 @@ async def _resolve_entry_id(session: AsyncSession, entry_id_prefix: str) -> str:
         .all()
     )
     if not rows:
-        typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+        terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
     if len(rows) > 1:
-        typer.echo(
+        terminal_echo(
             f"Entry prefix {entry_id_prefix!r} is ambiguous ({len(rows)} matches).",
             err=True,
         )
@@ -494,26 +501,26 @@ async def _corpus_retract(
 
     entry = await backend.corpus_show(entry_id)
     if entry is None:
-        typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+        terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
         raise typer.Exit(1)
     entry_id = entry.entry_id
 
     plan = await backend.corpus_retract(entry_id, reason=reason, dry_run=True)
     label = (entry.uri_r or entry_id).replace("file://", "")
-    typer.echo(f"Entry:     {entry_id[:8]}…  {label}")
-    typer.echo(f"Snapshots: {len(entry.snapshots)} (preserved)")
-    typer.echo(f"Retract:   {len(plan.retracted_ids)} live particle(s)")
+    terminal_echo(f"Entry:     {entry_id[:8]}…  {terminal_field(label)}")
+    terminal_echo(f"Snapshots: {len(entry.snapshots)} (preserved)")
+    terminal_echo(f"Retract:   {len(plan.retracted_ids)} live particle(s)")
     for pid in plan.retracted_ids:
-        typer.echo(f"  {pid[:8]}…  → RETRACTED")
+        terminal_echo(f"  {pid[:8]}…  → RETRACTED")
     if plan.skipped:
         skip_desc = ", ".join(f"{n} {s}" for s, n in sorted(plan.skipped.items()))
-        typer.echo(f"Skipped:   {skip_desc} (not live)")
+        terminal_echo(f"Skipped:   {skip_desc} (not live)")
 
     if dry_run:
-        typer.echo("Dry run — no changes written.")
+        terminal_echo("Dry run — no changes written.")
         return
     if not plan.retracted_ids:
-        typer.echo("Nothing to retract.")
+        terminal_echo("Nothing to retract.")
         return
     if not yes:
         confirm(
@@ -523,7 +530,7 @@ async def _corpus_retract(
 
     result = await backend.corpus_retract(entry_id, reason=reason, dry_run=False)
 
-    typer.echo(
+    terminal_echo(
         f"Retracted {len(result.retracted_ids)} particle(s) from {entry_id[:8]}… "
         f"(corpus + snapshots preserved). Run `particles lint` to cascade."
     )
@@ -590,15 +597,15 @@ async def _corpus_prune_orphans(yes: bool) -> None:
         )
 
         total = n_join + n_tag + n_rel + n_subj + n_synth
-        typer.echo("Orphaned rows found:")
-        typer.echo(f"  particle_subjects (dangling): {n_join}")
-        typer.echo(f"  particle_tag_edges (dangling): {n_tag}")
-        typer.echo(f"  particle_relations (dangling): {n_rel}")
-        typer.echo(f"  subjects (no link):            {n_subj}")
-        typer.echo(f"  synthesis_cache (dangling):    {n_synth}")
+        terminal_echo("Orphaned rows found:")
+        terminal_echo(f"  particle_subjects (dangling): {n_join}")
+        terminal_echo(f"  particle_tag_edges (dangling): {n_tag}")
+        terminal_echo(f"  particle_relations (dangling): {n_rel}")
+        terminal_echo(f"  subjects (no link):            {n_subj}")
+        terminal_echo(f"  synthesis_cache (dangling):    {n_synth}")
 
         if total == 0:
-            typer.echo("Nothing to prune.")
+            terminal_echo("Nothing to prune.")
             return
 
         if not yes:
@@ -616,7 +623,7 @@ async def _corpus_prune_orphans(yes: bool) -> None:
         await session.commit()
 
     synth_total = synth_from_subj + (synth_res.rowcount or 0)
-    typer.echo(
+    terminal_echo(
         f"Pruned: {n_join} join, {n_tag} tag, {n_rel} relation rows; "
         f"{subj_removed} subjects; {synth_total} synthesis-cache rows."
     )
@@ -680,7 +687,7 @@ async def _corpus_refresh_backfill(yes: bool) -> None:
     async with session_scope() as session:
         preview = await backfill_superseded_generations(session, dry_run=True)
 
-    typer.echo(
+    terminal_echo(
         f"MUTABLE entries with more than one snapshot: {preview.entries_scanned}"
         + (
             f" ({preview.entries_unextracted} have no extracted snapshot yet — skipped)"
@@ -689,20 +696,20 @@ async def _corpus_refresh_backfill(yes: bool) -> None:
         )
     )
     if preview.demoted == 0:
-        typer.echo("No particles are anchored to a superseded snapshot. Nothing to do.")
+        terminal_echo("No particles are anchored to a superseded snapshot. Nothing to do.")
         return
 
-    typer.echo(
+    terminal_echo(
         f"{preview.demoted} ACTIVE particle(s) across {preview.entries_affected} "
         f"entr{'y' if preview.entries_affected == 1 else 'ies'} are anchored to a "
         f"superseded snapshot:"
     )
     for entry_id, uri_r, count in preview.per_entry[:10]:
         label = uri_r or entry_id
-        typer.echo(f"  {count:>6}  {label[-72:]}")
+        terminal_echo(f"  {count:>6}  {label[-72:]}")
     if len(preview.per_entry) > 10:
-        typer.echo(f"  … and {len(preview.per_entry) - 10} more entries")
-    typer.echo(
+        terminal_echo(f"  … and {len(preview.per_entry) - 10} more entries")
+    terminal_echo(
         "\nThey will be demoted ACTIVE → PROVENANCE_STALE. This is a demotion, not a "
         "delete: content, provenance and confidence are kept, the particles surface "
         "in `particles curate`, and the change is reversible."
@@ -714,7 +721,7 @@ async def _corpus_refresh_backfill(yes: bool) -> None:
     async with session_scope(write=True) as session:
         applied = await backfill_superseded_generations(session, dry_run=False)
         await session.commit()
-    typer.echo(
+    terminal_echo(
         f"Demoted {applied.demoted} particle(s) across {applied.entries_affected} "
         f"entr{'y' if applied.entries_affected == 1 else 'ies'}."
     )
@@ -724,8 +731,20 @@ async def _corpus_refresh(
     entry_id: str | None, force: bool, backfill_cascade: bool, yes: bool
 ) -> None:
     from particles.api.cli._remote import ensure_local
+    from particles.corpus.fetch import (
+        RefreshRefusal,
+        RefusalCounts,
+        config_file_judgement,
+        cwd_relative_store,
+        store_file_judgement,
+        store_refusal,
+    )
     from particles.corpus.refresh_outcome import RefreshOutcome
-    from particles.corpus.store import list_refreshable_local_entries, resolve_entry_id
+    from particles.corpus.store import (
+        CorpusEntryRow,
+        list_refreshable_local_entries,
+        resolve_entry_id,
+    )
     from particles.egress import EgressRefused
     from particles.operations.corpus_refresh import refresh_entries
 
@@ -739,21 +758,64 @@ async def _corpus_refresh(
         if entry_id is not None:
             resolved = await resolve_entry_id(session, entry_id)
             if resolved is None:
-                typer.echo(f"Error: no corpus entry matches {entry_id!r}", err=True)
+                terminal_echo(f"Error: no corpus entry matches {entry_id!r}", err=True)
                 raise typer.Exit(1)
-            targets = [(resolved, "")]
+            row = await session.get(CorpusEntryRow, resolved)
+            targets = [(resolved, (row.uri_r or "") if row is not None else "")]
         else:
             targets = await list_refreshable_local_entries(session)
 
+        store = cwd_relative_store(session)
+        if (
+            store is not None
+            and store_refusal(session) is RefreshRefusal.STORE_WRITABLE_BY_OTHERS
+            and any(uri.startswith("file://") for _id, uri in targets)
+        ):
+            # A store file other users may write holds rows they may have
+            # written, so it chooses no host file either (security review
+            # 2026-10-27-1, G16).
+            judgement = store_file_judgement(store)
+            cause = "a file other users may write" if judgement is None else judgement.cause
+            terminal_echo(
+                f"Error: the store is {store}, {cause}. Its rows may not be yours, so its "
+                "local sources are not read.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if store is not None and any(uri.startswith("file://") for _id, uri in targets):
+            # a store found in the working directory, or in a git
+            # work tree, chooses no host file to read, through its rows or its
+            # entries (security review 2026-10-26-1, W15).
+            terminal_echo(
+                f"Error: the store ({store}) resolves against the working directory, lies "
+                "inside a git work tree, or is another user's file, so it may be one a cloned "
+                "repository shipped, and its local sources are not read. Name a store of your "
+                "own outside any repository with an absolute DATABASE_URL to refresh it.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if (config := config_file_judgement()) is not None and any(
+            uri.startswith("file://") for _id, uri in targets
+        ):
+            # The config chooses the roots the refresh reads, so one others may
+            # write chooses no host file either.
+            terminal_echo(
+                f"Error: the config file is {config[0]}, {config[1].cause}. It chooses the "
+                "roots the refresh reads, so its local sources are not read.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
         if not targets:
-            typer.echo(
+            terminal_echo(
                 "No refreshable local sources. An entry is refreshable when it has a "
                 "file:// URI-R and fetch_policy=LAZY — deposit with "
                 "`--fetch-policy LAZY --mutability MUTABLE` to opt a file in."
             )
             return
 
-        changed = unchanged = missing = refused = outside = 0
+        changed = unchanged = missing = recorded = refused = 0
+        outside: list[RefreshRefusal] = []
         async for result in refresh_entries(
             session, (target_id for target_id, _uri in targets), force=force
         ):
@@ -762,38 +824,41 @@ async def _corpus_refresh(
                 case None if isinstance(result.error, EgressRefused):
                     # A policy, not an outage: counted apart.
                     refused += 1
-                    typer.echo(f"  {short}  refused (network.egress): {result.error}", err=True)
+                    terminal_echo(f"  {short}  refused (network.egress): {result.error}", err=True)
                 case None:
-                    typer.echo(f"  {short}  error: {result.error}", err=True)
+                    terminal_echo(f"  {short}  error: {result.error}", err=True)
                 case RefreshOutcome.MISSING:
                     missing += 1
-                    typer.echo(f"  {short}  missing (source unavailable)")
+                    terminal_echo(f"  {short}  missing (source unavailable)")
+                case RefreshOutcome.ABSENT_RECORDED:
+                    recorded += 1
+                    terminal_echo(f"  {short}  deleted (absence already recorded)")
                 case RefreshOutcome.UNCHANGED_MTIME | RefreshOutcome.UNCHANGED_HASH:
                     unchanged += 1
                 case RefreshOutcome.CHANGED:
                     changed += 1
-                    typer.echo(
+                    terminal_echo(
                         f"  {short}  changed → snapshot {(result.snapshot_id or '')[:8]} PENDING"
                     )
                 case RefreshOutcome.REFUSED:
-                    outside += 1
-                    typer.echo(f"  {short}  not read (outside the allowed roots)")
+                    reason = result.refusal or RefreshRefusal.OUTSIDE_ROOTS
+                    outside.append(reason)
+                    terminal_echo(f"  {short}  not read ({reason.note})")
 
     refused_note = f", {refused} refused (network.egress)" if refused else ""
-    if outside:
-        refused_note += f", {outside} outside the allowed roots"
-    typer.echo(
+    for reason, count in sorted(Counter(outside).items()):
+        refused_note += f", {count} {reason.note}"
+    terminal_echo(
         f"\nChecked {len(targets)} {'source' if entry_id is not None else 'local source(s)'}: "
         f"{changed} changed, "
-        f"{unchanged} unchanged, {missing} missing{refused_note}."
+        f"{unchanged} unchanged, {missing} missing"
+        + (f", {recorded} recorded as deleted" if recorded else "")
+        + f"{refused_note}."
     )
     if changed:
         typer.echo("Run `particles extract --all-pending` to turn the new snapshots into beliefs.")
-    if outside:
-        typer.echo(
-            "Run `particles rules sync` from the project that holds them to record its root, "
-            "or add their directory to local_refresh.allowed_roots."
-        )
+    for line in RefusalCounts.tally(outside).lines():
+        terminal_echo(line)
 
 
 @corpus_app.command("fsck")
@@ -848,7 +913,7 @@ async def _corpus_fsck(search: list[Path], re_home: bool, dry_run: bool) -> None
     # on the exact question being asked. Same guard `config validate` uses.
     database_url = get_config().storage.database_url
     if store_file_missing(database_url):
-        typer.echo(
+        terminal_echo(
             f"No store at {database_url} — nothing to audit, and opening it would "
             "create an empty database here. If you expected a store, you are "
             "probably running from the wrong directory or with the wrong "
@@ -860,22 +925,22 @@ async def _corpus_fsck(search: list[Path], re_home: bool, dry_run: bool) -> None
     async with session_scope() as session:
         report = await audit_blobs(session, search_dirs=search)
 
-    typer.echo(f"Blob dir:  {report.blob_dir}")
+    terminal_echo(f"Blob dir:  {report.blob_dir}")
     for directory in report.search_dirs:
-        typer.echo(f"Search:    {directory}")
-    typer.echo(f"\nBlobs referenced by the store: {report.total}")
-    typer.echo(f"  present:         {len(report.present)}")
-    typer.echo(f"  found elsewhere: {len(report.elsewhere)}")
-    typer.echo(f"  missing:         {len(report.missing)}")
+        terminal_echo(f"Search:    {directory}")
+    terminal_echo(f"\nBlobs referenced by the store: {report.total}")
+    terminal_echo(f"  present:         {len(report.present)}")
+    terminal_echo(f"  found elsewhere: {len(report.elsewhere)}")
+    terminal_echo(f"  missing:         {len(report.missing)}")
 
     _echo_fsck_rejections(report.rejected)
 
     if report.healthy:
-        typer.echo("\nEvery referenced blob is where extraction will look for it.")
+        terminal_echo("\nEvery referenced blob is where extraction will look for it.")
         return
 
     if report.elsewhere and not (re_home or dry_run):
-        typer.echo(
+        terminal_echo(
             f"\n{len(report.elsewhere)} blob(s) are recoverable — re-run with --re-home "
             "to copy them into the blob dir (the source tree is left untouched)."
         )
@@ -891,39 +956,39 @@ def _echo_fsck_rejections(rejected: Sequence[RejectedBlob]) -> None:
     """Report candidates found at the right path whose bytes hash to something else."""
     if not rejected:
         return
-    typer.echo(f"\nRejected {len(rejected)} candidate(s) — digest does not match the filename:")
+    terminal_echo(f"\nRejected {len(rejected)} candidate(s) — digest does not match the filename:")
     for bad in rejected:
-        typer.echo(f"  {bad.ref.content_hash[:12]}…  {bad.source}")
-        typer.echo(f"    hashes to {bad.actual_digest[:12]}… — not copied.")
+        terminal_echo(f"  {bad.ref.content_hash[:12]}…  {bad.source}")
+        terminal_echo(f"    hashes to {bad.actual_digest[:12]}… — not copied.")
 
 
 def _echo_rehome_outcome(outcome: RehomeOutcome) -> None:
     """Report what the re-home copied, or (dry run) what it would copy."""
     if outcome.dry_run:
-        typer.echo(f"\nDry run — would copy {len(outcome.copied)} blob(s) into the blob dir:")
+        terminal_echo(f"\nDry run — would copy {len(outcome.copied)} blob(s) into the blob dir:")
         for stray in outcome.copied:
-            typer.echo(f"  {stray.ref.content_hash[:12]}…  ← {stray.source}")
-        typer.echo("Dry run — no files were written.")
+            terminal_echo(f"  {stray.ref.content_hash[:12]}…  ← {stray.source}")
+        terminal_echo("Dry run — no files were written.")
         return
 
-    typer.echo(f"\nCopied {len(outcome.copied)} blob(s) into the blob dir.")
+    terminal_echo(f"\nCopied {len(outcome.copied)} blob(s) into the blob dir.")
     for stray, error in outcome.failed:
-        typer.echo(f"  FAILED {stray.ref.content_hash[:12]}…  {stray.source}: {error}", err=True)
+        terminal_echo(f"  FAILED {stray.ref.content_hash[:12]}…  {stray.source}: {error}", err=True)
 
 
 def _echo_fsck_missing(missing: Sequence[BlobRef]) -> None:
     """Report the unrecoverable remainder with enough identity to act on it."""
     if not missing:
         return
-    typer.echo(
+    terminal_echo(
         f"\n{len(missing)} blob(s) could not be found. The rows survive as pointers to "
         "content that is not on disk; extraction of those snapshots will fail with "
         "`Blob not found for hash …`."
     )
     for ref in missing:
-        typer.echo(f"  {ref.content_hash[:12]}…  {ref.label[-64:]}")
-        typer.echo(f"    entries: {', '.join(e[:8] for e in ref.entry_ids)}")
-    typer.echo(
+        terminal_echo(f"  {ref.content_hash[:12]}…  {ref.label[-64:]}")
+        terminal_echo(f"    entries: {', '.join(e[:8] for e in ref.entry_ids)}")
+    terminal_echo(
         "\nNothing was written to the database. Re-deposit each source to recover it, "
         "or `particles corpus retract <entry>` to retire the beliefs it carries."
     )
@@ -959,7 +1024,7 @@ def corpus_links_list_cmd(
     / Mastodon posts amplified which external sources.
     """
     if direction not in ("out", "in", "both"):
-        typer.echo(f"Invalid --direction {direction!r}; use out/in/both.", err=True)
+        terminal_echo(f"Invalid --direction {direction!r}; use out/in/both.", err=True)
         raise typer.Exit(1)
     run(_corpus_links_list(entry_id, direction))
 
@@ -996,12 +1061,12 @@ async def _corpus_links_list(entry_id_prefix: str | None, direction: str) -> Non
             )
             edges = list(result.scalars())
             if not edges:
-                typer.echo("No follow edges recorded.")
+                terminal_echo("No follow edges recorded.")
                 return
-            typer.echo(f"{'VIA':10}  {'TARGET':10}  {'TYPE':12}  DISCOVERED")
-            typer.echo("-" * 80)
+            terminal_echo(f"{'VIA':10}  {'TARGET':10}  {'TYPE':12}  DISCOVERED")
+            terminal_echo("-" * 80)
             for e in edges:
-                typer.echo(
+                terminal_echo(
                     f"{e.via_entry_id[:8]}…  {e.target_entry_id[:8]}…  "
                     f"{e.link_type:12s}  {e.discovered_at.date().isoformat()}"
                 )
@@ -1018,32 +1083,32 @@ async def _corpus_links_list(entry_id_prefix: str | None, direction: str) -> Non
             )
             entry_row = entry_result.scalar_one_or_none()
             if entry_row is None:
-                typer.echo(f"Entry {entry_id_prefix!r} not found.", err=True)
+                terminal_echo(f"Entry {entry_id_prefix!r} not found.", err=True)
                 raise typer.Exit(1)
             entry_id = entry_row.entry_id
         else:
             entry_id = entry_id_prefix
 
-        typer.echo(f"Entry:  {_label(entry_id)}")
+        terminal_echo(f"Entry:  {_label(entry_id)}")
 
         if direction in ("out", "both"):
             out_edges = await get_follow_targets(session, entry_id)
-            typer.echo(f"\nOutgoing follows ({len(out_edges)}):")
+            terminal_echo(f"\nOutgoing follows ({len(out_edges)}):")
             if not out_edges:
-                typer.echo("  (none)")
+                terminal_echo("  (none)")
             for e in out_edges:
-                typer.echo(
+                terminal_echo(
                     f"  → {_label(e.target_entry_id)}"
                     f"  [{e.link_type}, {e.discovered_at.date().isoformat()}]"
                 )
 
         if direction in ("in", "both"):
             in_edges = await get_follow_sources(session, entry_id)
-            typer.echo(f"\nIncoming follows ({len(in_edges)}):")
+            terminal_echo(f"\nIncoming follows ({len(in_edges)}):")
             if not in_edges:
-                typer.echo("  (none)")
+                terminal_echo("  (none)")
             for e in in_edges:
-                typer.echo(
+                terminal_echo(
                     f"  ← {_label(e.via_entry_id)}"
                     f"  [{e.link_type}, {e.discovered_at.date().isoformat()}]"
                 )
@@ -1075,7 +1140,7 @@ def corpus_links_suggest_cmd(
     silence one with ``particles corpus links dismiss <url>``.
     """
     if output_format not in ("table", "json"):
-        typer.echo(f"Invalid --output-format {output_format!r}; use table/json.", err=True)
+        terminal_echo(f"Invalid --output-format {output_format!r}; use table/json.", err=True)
         raise typer.Exit(1)
     run(_corpus_links_suggest(limit, min_sources, output_format))
 
@@ -1088,29 +1153,33 @@ async def _corpus_links_suggest(
     report = await get_backend().corpus_links_suggest(limit=limit, min_sources=min_sources)
 
     if output_format == "json":
-        typer.echo(report.model_dump_json(indent=2))
+        import json
+
+        # ASCII JSON, so no stored control or format character reaches the
+        # terminal raw (security review 2026-10-30-1, AB37).
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
         return
 
     if not report.suggestions:
-        typer.echo(
+        terminal_echo(
             "No deposit suggestions — nothing is cited by enough distinct sources yet, "
             "or every candidate is already deposited or dismissed."
         )
         return
 
     capped = " (rank-capped)" if report.capped else ""
-    typer.echo(
+    terminal_echo(
         f"Showing {len(report.suggestions)} of {report.total_candidates} suggestion(s){capped}"
     )
-    typer.echo(f"{'SCORE':>7}  {'SRCS':>4}  {'LAST SEEN':10}  URL")
-    typer.echo("-" * 80)
+    terminal_echo(f"{'SCORE':>7}  {'SRCS':>4}  {'LAST SEEN':10}  URL")
+    terminal_echo("-" * 80)
     for s in report.suggestions:
-        typer.echo(
+        terminal_echo(
             f"{s.score:7.2f}  {s.distinct_sources:>4}  "
             f"{s.most_recent.date().isoformat():10}  {s.canonical_url}"
         )
-    typer.echo("\nDeposit one with:  particles deposit <url>")
-    typer.echo("Dismiss one with:  particles corpus links dismiss <url> [--snooze DAYS]")
+    terminal_echo("\nDeposit one with:  particles deposit <url>")
+    terminal_echo("Dismiss one with:  particles corpus links dismiss <url> [--snooze DAYS]")
 
 
 @corpus_links_app.command("dismiss")
@@ -1137,16 +1206,16 @@ async def _corpus_links_dismiss(url: str, snooze: int | None) -> None:
     # for the same error message; the dismiss itself routes.
     canon = canonicalize_url(url)
     if canon is None:
-        typer.echo(f"Not a usable http(s) URL: {url!r}", err=True)
+        terminal_echo(f"Not a usable http(s) URL: {url!r}", err=True)
         raise typer.Exit(1)
     outcome = await get_backend().corpus_links_dismiss(url=canon, snooze_days=snooze)
     if snooze:
-        typer.echo(
+        terminal_echo(
             f"Snoozed {outcome.canonical_url} for {snooze} day(s) "
             f"(until {outcome.suppressed_until.date().isoformat()})."
         )
     else:
-        typer.echo(
+        terminal_echo(
             f"Dismissed {outcome.canonical_url}; it will no longer appear in "
             f"`corpus links suggest`."
         )

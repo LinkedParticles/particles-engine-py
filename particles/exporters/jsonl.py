@@ -17,7 +17,6 @@ store*; reach for ``export jsonl`` when you want your particles *as data*.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.status import Status
 from particles.exporters.summaries import JsonlSummary
+from particles.interchange.jsonl import json_line
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,7 +89,9 @@ class JsonlExporter:
             if eff < min_particle_confidence:
                 dropped += 1
                 continue
-            lines.append(json.dumps(p.model_dump(mode="json"), ensure_ascii=False))
+            # One line per particle, whatever line separator its text holds
+            # (security review 2026-10-30-1, AB35).
+            lines.append(json_line(p.model_dump(mode="json")))
 
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("".join(line + "\n" for line in lines), encoding="utf-8")

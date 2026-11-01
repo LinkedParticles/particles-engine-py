@@ -28,12 +28,16 @@ from typer.testing import CliRunner
 
 from particles.api.cli import app
 from particles.api.cli._claude_code import (
+    DIGEST_BUDGET_CEILING,
+    HOOK_CONTEXT_MAX_CHARS,
     distill_transcript,
     filter_memory_file_for_deposit,
     redact_secrets,
+    session_start_budget,
     transcript_started_at,
     truncate_on_line_boundary,
 )
+from particles.config import ClaudeCodeConfig
 from tests._claude_projects import bind_hooks_to_store, isolate_claude_code
 
 # ---------------------------------------------------------------------------
@@ -282,12 +286,155 @@ class TestRedaction:
         assert key in out
         assert not any(v in out for v in ("hunter2", "abcdef123456", "zyxwvu", "s3cr3t"))
 
+    # Security review 2026-10-24-2, P25: ``_`` is a word character, so the old
+    # leading ``\b`` never matched a prefixed environment-style name.
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "password",
+            "DB_PASSWORD",
+            "PARTICLES_API_KEY",
+            "OPENAI_API_KEY",
+            "PARTICLES_ENGINE_TOKEN",
+            "MY_TOKEN",
+            "GITHUB-TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "STRIPE_SECRET_KEY",
+            "SSH_PRIVATE_KEY",
+            "export DB_PASSWORD",
+        ],
+    )
+    def test_prefixed_secret_name_value_is_masked(self, name: str) -> None:
+        value = "q7Rv2LmX9pTz4Wk"
+        out = redact_secrets(f"{name}={value}\n")
+        assert value not in out, out
+        assert out.startswith(f"{name}=")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "TOKENIZER=whitespace-split",
+            "PASSWORD_FILE=/etc/app/password.txt",
+            "keyboard: dvorak-layout",
+            "monkey=banana-split",
+        ],
+    )
+    def test_names_that_only_contain_a_secret_word_are_kept(self, text: str) -> None:
+        assert redact_secrets(text) == text
+
+    @pytest.mark.parametrize(
+        ("secret", "label"),
+        [
+            ("sk" + "_live_" + "A1b2C3d4" * 3, "[REDACTED API KEY]"),
+            ("rk" + "_test_" + "A1b2C3d4" * 3, "[REDACTED API KEY]"),
+            ("gl" + "pat-" + "A1b2C3d4E5" * 2, "[REDACTED GITLAB TOKEN]"),
+            ("hf" + "_" + "A1b2C3d4E5" * 3 + "xy", "[REDACTED HUGGING FACE TOKEN]"),
+            ("npm" + "_" + "A1b2C3d4E5f6" * 3, "[REDACTED NPM TOKEN]"),
+            ("ya" + "29." + "a" * 40, "[REDACTED GOOGLE TOKEN]"),
+            ("xa" + "pp-1-" + "A" * 30, "[REDACTED SLACK TOKEN]"),
+            ("xo" + "xc-" + "1" * 30, "[REDACTED SLACK TOKEN]"),
+        ],
+    )
+    def test_more_token_shapes(self, secret: str, label: str) -> None:
+        out = redact_secrets(f"note: {secret} end")
+        assert secret not in out
+        assert label in out
+
+    # Security review 2026-10-25-1, Q28: the audit's six shapes, plus a few of
+    # each kind. The Basic value is base64 of a synthetic ``admin:<secret>``.
+    @pytest.mark.parametrize(
+        ("text", "secret"),
+        [
+            ("PGPASSWORD=Zq7xTr0Pq7xTr0Pq", "Zq7xTr0Pq7xTr0Pq"),
+            ("export MYSQLPASSWORD=Zq7xTr0Pq7xTr0Pq", "Zq7xTr0Pq7xTr0Pq"),
+            ("GHTOKEN: Zq7xTr0Pq7xTr0Pq", "Zq7xTr0Pq7xTr0Pq"),
+            ('DB_PASSWORD="Zq7xTr0Pq7xTr0Pq two"', "Zq7xTr0Pq7xTr0Pq"),
+            ('password: "Zq7xTr0Pq7xTr0Pq,x"', "Zq7xTr0Pq7xTr0Pq"),
+            ("api_key = 'Zq7x Tr0P, q7xT'", "Tr0P"),
+            ("DATABASE_URL=postgres://admin:Zq7xTr0Pq7xTr0Pq@db.example.invalid/x", "Zq7xTr0Pq"),
+            ("clone https://bot:Zq7xTr0Pq7xTr0Pq@git.example.invalid/r.git", "Zq7xTr0Pq"),
+            (
+                "Authorization: Basic " + "YWRtaW46WnE3eFRyMFBx" + "N3hUcjBQcQ==",
+                "YWRtaW46WnE3eFRyMFBx",
+            ),
+            ("curl -H 'authorization: basic " + "YWRtaW46WnE3eFRyMFBx" + "N3hUcjBQcQ=='", "N3hU"),
+        ],
+    )
+    def test_q28_credential_shapes_are_masked(self, text: str, secret: str) -> None:
+        out = redact_secrets(text)
+        assert secret not in out, out
+        assert "[REDACTED]" in out
+
+    def test_q28_masks_keep_their_labels(self) -> None:
+        assert redact_secrets("PGPASSWORD=Zq7xTr0Pq7xTr0Pq") == "PGPASSWORD=[REDACTED]"
+        assert redact_secrets('DB_PASSWORD="a b c d e f"') == 'DB_PASSWORD="[REDACTED]"'
+        assert (
+            redact_secrets("postgres://admin:Zq7xTr0Pq@db/x") == "postgres://admin:[REDACTED]@db/x"
+        )
+        assert redact_secrets("Basic YWRtaW46aHVudGVyMjI=") == "Basic [REDACTED]"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Basic configuration comes first; Basic textbook material",
+            "Basic aGVsbG8gd29ybGQ=",  # base64 of a phrase with no colon
+            "see https://example.invalid:8443/path@v2",
+            "ssh://git@github.com/org/repo.git",
+            "max_tokens: 4096000",
+            "input_token_count=1234567",
+            'password: "short"',
+        ],
+    )
+    def test_q28_lookalikes_are_kept(self, text: str) -> None:
+        assert redact_secrets(text) == text
+
+    @pytest.mark.parametrize("unit", ["x-", "a_", "a:", "Basic QUJD"])
+    def test_redaction_stays_linear_on_long_runs(self, unit: str) -> None:
+        import time
+
+        start = time.monotonic()
+        redact_secrets(unit * 40_000)
+        assert time.monotonic() - start < 5
+
     def test_memory_file_intake_redacts(self, tmp_path: Path) -> None:
         secret = "ghp" + "_" + "Z9y8X7w6" * 5
         text = f"# Note\n\nThe deploy token is {secret}.\n"
         out = filter_memory_file_for_deposit(text, snapshot_bodies={})
         assert secret not in out
         assert "[REDACTED GITHUB TOKEN]" in out
+
+    def test_the_fold_archive_harvest_is_masked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fold-and-archive deposit applies the MEMORY.md mask (Q30, the audit's proof)."""
+        import asyncio
+
+        import particles.api.cli._claude_code as cc
+        import particles.api.client as client_mod
+        from particles.api.cli import hook
+
+        isolate_claude_code(monkeypatch, tmp_path)
+        secret = "Zq7xTr0Pq7xTr0Pq"
+        archive = tmp_path / "MEMORY.archive.md"
+        archive.write_text(
+            f"\n<!-- folded from MEMORY.md -->\n- [Staging](staging.md) - api_key: {secret}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cc, "memory_archive_path", lambda memory_dir=None: archive)
+        captured: list[str] = []
+
+        class _Backend:
+            remote = False
+
+            async def deposit_text_at_uri(self, **kwargs: Any) -> object:
+                captured.append(kwargs["text"])
+                return object()
+
+        monkeypatch.setattr(client_mod, "get_backend", lambda: _Backend())
+        asyncio.run(hook._harvest_archive("default", tmp_path / "memory", "proj"))
+        assert captured, "the archive was not harvested"
+        assert secret not in captured[0]
+        assert "api_key: [REDACTED]" in captured[0]
 
     def test_rule_file_intake_redacts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -302,6 +449,29 @@ class TestRedaction:
 # ---------------------------------------------------------------------------
 # Digest byte budget (§2)
 # ---------------------------------------------------------------------------
+
+
+class TestSessionStartBudget:
+    def test_default_budget_fits_the_harness_cap_with_margin(self) -> None:
+        # Over the cap Claude Code shows the model a 2 KB preview of the digest.
+        default = ClaudeCodeConfig().digest_max_bytes
+        assert session_start_budget(default) == default
+        assert default <= 9_000 < HOOK_CONTEXT_MAX_CHARS
+
+    @pytest.mark.parametrize("configured", [0, 24_000, 10_000])
+    def test_no_setting_reaches_the_harness_cap(self, configured: int) -> None:
+        budget = session_start_budget(configured)
+        assert budget == DIGEST_BUDGET_CEILING < HOOK_CONTEXT_MAX_CHARS
+
+    def test_smaller_budget_is_kept(self) -> None:
+        assert session_start_budget(1500) == 1500
+
+    def test_cut_digest_is_under_the_cap_in_characters(self) -> None:
+        # Non-ASCII lines: the byte budget bounds the character count too.
+        text = "".join(f"- **0.70** Ünïcödé belief {i:04d} — 🧪 {'é' * 60}\n" for i in range(400))
+        out = truncate_on_line_boundary(text, session_start_budget(24_000))
+        assert len(out) < HOOK_CONTEXT_MAX_CHARS
+        assert len(out.encode("utf-16-le")) // 2 < HOOK_CONTEXT_MAX_CHARS
 
 
 class TestTruncateOnLineBoundary:
@@ -801,6 +971,31 @@ class TestHookDoctor:
         )
         assert "general-extractor calibration: none for this pairing" in result.stdout
 
+    def test_names_each_refresh_refusal_cause_with_its_fix(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """an outside-root entry and an untrusted depositor's differ in fix."""
+        from particles.corpus import fetch
+        from particles.corpus.fetch import RefusalCounts
+
+        async def _counts(_session: Any) -> RefusalCounts:
+            return RefusalCounts(outside_roots=2, untrusted_depositor=3)
+
+        monkeypatch.setattr(fetch, "count_refused_local_entries", _counts)
+        result = runner.invoke(app, ["hook", "doctor", "--store", "default"])
+
+        assert result.exit_code == 0, result.output  # reported, never fatal
+        lines = [line.strip() for line in result.stdout.splitlines() if "LAZY local source" in line]
+        assert len(lines) == 2
+        assert lines[0].startswith("refresh roots:  ⚠ 2 LAZY local source(s) lie outside")
+        assert "particles rules sync" in lines[0]
+        assert lines[1].startswith("⚠ 3 LAZY local source(s) were enrolled by")
+        assert "local_refresh.allowed_roots" in lines[1]
+
     def test_undeclared_store_exits_nonzero(
         self, runner: CliRunner, cli_db: Path, hook_home: Path
     ) -> None:
@@ -1291,3 +1486,77 @@ def test_hook_body_runs_with_the_no_egress_backstop_armed(
     finally:
         egress.disarm_backstop()
     assert seen == ["refused"]
+
+
+@pytest.mark.parametrize("token", [None, "engine-token-0123456789"])
+def test_doctor_engine_line_does_not_echo_the_userinfo(
+    monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    """R36 (SECURITY_REVIEW_20261025-2): ``hook doctor`` names the engine without its userinfo."""
+    from particles.api.cli.hook import _engine_line
+    from particles.config import reset_config
+
+    secret = "userinfo-secret-0123456789"
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", f"https://op:{secret}@engine.example.test")
+    if token is not None:
+        monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", token)
+    reset_config()
+    line = _engine_line()
+    assert "https://engine.example.test" in line
+    assert secret not in line
+
+
+def test_the_working_directory_refusal_names_the_engine_without_its_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R36 (SECURITY_REVIEW_20261026-1, W58): the hook's relative-store refusal,
+    written to the hook log, carries no URL credential."""
+    from particles.api.cli import hook
+    from particles.config import reset_config
+
+    monkeypatch.setenv(
+        "PARTICLES_ENGINE_BASE_URL", "https://operator:audit6-userinfo-pw@engine.example.test:8443"
+    )
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///./audit6-relative.db")
+    reset_config()
+    refusal = hook._working_directory_store_refusal("default")
+    assert refusal is not None
+    assert "https://engine.example.test:8443" in refusal
+    assert "audit6-userinfo-pw" not in refusal
+
+
+def test_a_hook_on_a_loop_the_backstop_cannot_see_runs_nothing_and_exits_0(
+    hook_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security review 2026-10-26-1, U13: the hook refuses an uncovered loop and still degrades."""
+    import asyncio
+    import io
+    import warnings
+
+    uvloop = pytest.importorskip("uvloop")
+    from particles import egress
+    from particles.api.cli.hook import _run_hook
+    from particles.config import NetworkConfig, get_config
+
+    monkeypatch.setattr(get_config(), "network", NetworkConfig(egress="none"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    ran: list[str] = []
+
+    async def impl(_store: str, _payload: dict[str, Any], _record: dict[str, Any]) -> None:
+        ran.append("body")
+        return None
+
+    with warnings.catch_warnings():
+        # The loop-policy API is deprecated from Python 3.14 and still honoured.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        previous = asyncio.get_event_loop_policy()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        try:
+            _run_hook("SessionStart", "default", impl)
+        finally:
+            asyncio.set_event_loop_policy(previous)
+            egress.disarm_backstop()
+    assert ran == []
+    (entry,) = _hook_log_lines(hook_home)
+    assert entry["outcome"] == "error"
+    assert entry["error"].startswith("UncoveredEventLoop")

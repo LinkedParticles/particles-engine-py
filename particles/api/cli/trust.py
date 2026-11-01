@@ -9,6 +9,7 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo
 from particles.db import session_scope
 
 trust_app = typer.Typer(help="Manage source trust rules.", no_args_is_help=True)
@@ -39,15 +40,15 @@ async def _trust_list() -> None:
             .scalars()
             .all()
         )
-    typer.echo(f"{'SCOPE':12}  {'SCORE/MOD':9}  {'PATTERN'}")
-    typer.echo("-" * 72)
+    terminal_echo(f"{'SCOPE':12}  {'SCORE/MOD':9}  {'PATTERN'}")
+    terminal_echo("-" * 72)
     for r in rows:
         if r.scope == "domain":
             val = f"{r.score:.2f}     " if r.score is not None else "—        "
         else:
             mod = r.modifier or 0.0
             val = f"{mod:+.2f}    " if r.modifier is not None else "—        "
-        typer.echo(f"{r.scope:12}  {val}  {r.pattern}")
+        terminal_echo(f"{r.scope:12}  {val}  {r.pattern}")
 
 
 @trust_app.command("set")
@@ -76,7 +77,7 @@ async def _trust_set(pattern: str, score: float, is_modifier: bool, rationale: s
         modifier=score if is_modifier else None,
         rationale=rationale,
     )
-    typer.echo(
+    terminal_echo(
         f"Trust rule saved: [{scope}] {pattern} → {score:+.2f}"
         if is_modifier
         else f"Trust rule saved: [{scope}] {pattern} = {score:.2f}"
@@ -106,11 +107,11 @@ async def _trust_show(uri: str) -> None:
         base = await _lookup_domain_score(session, domain)
         mod = await _lookup_url_modifier(session, uri)
         effective = max(0.0, min(1.0, base + mod))
-    typer.echo(f"URI:       {uri}")
-    typer.echo(f"Domain:    {domain}  (base score: {base:.2f})")
+    terminal_echo(f"URI:       {uri}")
+    terminal_echo(f"Domain:    {domain}  (base score: {base:.2f})")
     if mod:
-        typer.echo(f"Modifier:  {mod:+.2f}")
-    typer.echo(f"Effective: {effective:.2f}")
+        terminal_echo(f"Modifier:  {mod:+.2f}")
+    terminal_echo(f"Effective: {effective:.2f}")
 
 
 @trust_app.command("statement-set")
@@ -127,7 +128,7 @@ def trust_statement_set_cmd(
 ) -> None:
     """Write an OPERATOR_DIRECT SourceTrustStatement and trigger cascade."""
     if not 0.0 <= trust_rank <= 1.0:
-        typer.echo("trust_rank must be in [0.0, 1.0]", err=True)
+        terminal_echo("trust_rank must be in [0.0, 1.0]", err=True)
         raise typer.Exit(1)
     run(_trust_statement_set(domain, source_ref_type, source_ref_value, trust_rank, basis))
 
@@ -150,7 +151,7 @@ async def _trust_statement_set(
     try:
         ref_type = SourceRefType(source_ref_type.upper())
     except ValueError:
-        typer.echo(
+        terminal_echo(
             f"Unknown source_ref_type {source_ref_type!r}. "
             "Use: CORPUS_ENTRY, SOURCE_TYPE, or AUTHOR",
             err=True,
@@ -168,12 +169,12 @@ async def _trust_statement_set(
 
     resolved = await get_backend().trust_statement_set(stmt)
 
-    typer.echo(
+    terminal_echo(
         f"Statement saved: domain={domain!r} {ref_type.value}={source_ref_value!r}"
         f" trust_rank={trust_rank:.2f} (OPERATOR_DIRECT)"
     )
     if resolved:
-        typer.echo(f"  Cascade resolved {resolved} INCONSISTENCY particle(s).")
+        terminal_echo(f"  Cascade resolved {resolved} INCONSISTENCY particle(s).")
 
 
 @trust_app.command("set-entry")
@@ -196,7 +197,7 @@ def trust_set_entry_cmd(
     applicability clause, e.g. WEB_PAGE / PDF).
     """
     if not 0.0 <= trust_rank <= 1.0:
-        typer.echo("trust_rank must be in [0.0, 1.0]", err=True)
+        terminal_echo("trust_rank must be in [0.0, 1.0]", err=True)
         raise typer.Exit(1)
     run(_trust_set_entry(entry_id, trust_rank, domain, basis))
 
@@ -216,12 +217,12 @@ async def _trust_set_entry(
     async with session_scope() as session:
         entry = await get_entry(session, entry_id)
         if entry is None:
-            typer.echo(f"No corpus entry with entry_id {entry_id!r}.", err=True)
+            terminal_echo(f"No corpus entry with entry_id {entry_id!r}.", err=True)
             raise typer.Exit(1)
 
         effective_domain = domain or infer_domain(entry.source_type)
         if effective_domain is None:
-            typer.echo(
+            terminal_echo(
                 f"Cannot infer a domain for source_type {entry.source_type!r} "
                 f"(no MUST applicability clause). The §6.6 cascade looks up "
                 f"per-entry trust by domain, so pass --domain explicitly.",
@@ -261,7 +262,7 @@ async def _trust_cascade(domain_filter: str | None, dry_run: bool) -> None:
         rows = (await session.execute(q)).scalars().all()
 
         if not rows:
-            typer.echo("No OPERATOR_DIRECT statements found.")
+            terminal_echo("No OPERATOR_DIRECT statements found.")
             return
 
         total = 0
@@ -291,7 +292,7 @@ async def _trust_cascade(domain_filter: str | None, dry_run: bool) -> None:
                 from particles.store.particle_store import get_inconsistency_particles_by_domain
 
                 candidates = await get_inconsistency_particles_by_domain(session, row.domain)
-                typer.echo(
+                terminal_echo(
                     f"  [dry-run] domain={row.domain!r} ref={row.source_ref_value!r}"
                     f" → {len(candidates)} candidate(s)"
                 )
@@ -299,14 +300,14 @@ async def _trust_cascade(domain_filter: str | None, dry_run: bool) -> None:
                 resolved = await run_trust_cascade(session, stmt)
                 total += resolved
                 if resolved:
-                    typer.echo(
+                    terminal_echo(
                         f"  domain={row.domain!r} ref={row.source_ref_value!r}"
                         f" → resolved {resolved}"
                     )
 
         if not dry_run:
             await session.commit()
-            typer.echo(f"Cascade complete. Total resolved: {total}")
+            terminal_echo(f"Cascade complete. Total resolved: {total}")
 
 
 # ---------------------------------------------------------------------------
@@ -335,13 +336,13 @@ async def _lens_list() -> None:
     async with session_scope() as session:
         rows = await list_lenses(session)
     if not rows:
-        typer.echo("No lenses materialised. Deposit a TrustLensDefinition JSON to publish one.")
+        terminal_echo("No lenses materialised. Deposit a TrustLensDefinition JSON to publish one.")
         return
-    typer.echo(f"{'ADOPTED':8}  {'VERSION':7}  {'NAME':28}  PUBLISHER")
-    typer.echo("-" * 72)
+    terminal_echo(f"{'ADOPTED':8}  {'VERSION':7}  {'NAME':28}  PUBLISHER")
+    terminal_echo("-" * 72)
     for row, adopted in rows:
         mark = "yes" if adopted else "—"
-        typer.echo(f"{mark:8}  v{row.version:<6}  {row.name:28}  {row.publisher or '—'}")
+        terminal_echo(f"{mark:8}  v{row.version:<6}  {row.name:28}  {row.publisher or '—'}")
 
 
 @lens_app.command("show")
@@ -361,20 +362,20 @@ async def _lens_show(name: str) -> None:
     async with session_scope() as session:
         lens = await get_lens(session, name)
     if lens is None:
-        typer.echo(f"No materialised lens named {name!r}.", err=True)
+        terminal_echo(f"No materialised lens named {name!r}.", err=True)
         raise typer.Exit(code=1)
-    typer.echo(f"{lens.name} v{lens.version}  (publisher: {lens.publisher or '—'})")
+    terminal_echo(f"{lens.name} v{lens.version}  (publisher: {lens.publisher or '—'})")
     if lens.description:
-        typer.echo(f"  {lens.description}")
+        terminal_echo(f"  {lens.description}")
     for s in lens.statements:
-        typer.echo(f"  statement   [{s.domain}] {s.source_type} → {s.trust_rank:.2f}")
+        terminal_echo(f"  statement   [{s.domain}] {s.source_type} → {s.trust_rank:.2f}")
     for r in lens.url_rules:
         if r.scope == "domain":
-            typer.echo(f"  domain      {r.pattern} = {r.score:.2f}")
+            terminal_echo(f"  domain      {r.pattern} = {r.score:.2f}")
         else:
-            typer.echo(f"  url_pattern {r.pattern} → {(r.modifier or 0.0):+.2f}")
+            terminal_echo(f"  url_pattern {r.pattern} → {(r.modifier or 0.0):+.2f}")
     for extractor_id, weight in lens.extractor_weights.items():
-        typer.echo(f"  extractor   {extractor_id} → {weight:.2f}")
+        terminal_echo(f"  extractor   {extractor_id} → {weight:.2f}")
 
 
 @lens_app.command("adopt")
@@ -395,10 +396,10 @@ async def _lens_adopt(name: str) -> None:
         try:
             await adopt_lens(session, name)
         except ValueError as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
         await session.commit()
-    typer.echo(f"Adopted lens {name!r}. Local trust rules still override it per key.")
+    terminal_echo(f"Adopted lens {name!r}. Local trust rules still override it per key.")
 
 
 @lens_app.command("unadopt")
@@ -419,7 +420,7 @@ async def _lens_unadopt(name: str) -> None:
         try:
             await unadopt_lens(session, name)
         except ValueError as exc:
-            typer.echo(str(exc), err=True)
+            terminal_echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
         await session.commit()
-    typer.echo(f"Unadopted lens {name!r}.")
+    terminal_echo(f"Unadopted lens {name!r}.")

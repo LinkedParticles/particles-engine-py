@@ -15,7 +15,9 @@ remembered answer means stays with each pass.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import contextlib
+from collections.abc import Iterable, Iterator, Mapping
+from contextvars import ContextVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +31,27 @@ from particles.store.probe_verdict_store import (
     record_verdicts,
 )
 
-__all__ = ["model_label", "recall", "remember", "remember_rungs"]
+__all__ = ["model_label", "recall", "recording_suspended", "remember", "remember_rungs"]
+
+#: False inside :func:`recording_suspended`: the ledger is read, never written.
+_RECORDING: ContextVar[bool] = ContextVar("particles_probe_ledger_recording", default=True)
+
+
+@contextlib.contextmanager
+def recording_suspended() -> Iterator[None]:
+    """Read the ledger but record nothing, and take no writer lock, inside the block.
+
+    For a caller that may not write the store: the HTTP engine opens it for a
+    request that carries no write credential, so a semantic report served to
+    such a request (``POST /lint``, ``GET /curation``) stays a read (security
+    review 2026-10-25-2, R5). Remembered verdicts are still consulted; fresh
+    ones are simply not kept.
+    """
+    token = _RECORDING.set(False)
+    try:
+        yield
+    finally:
+        _RECORDING.reset(token)
 
 
 def model_label(purpose: str) -> str:
@@ -64,8 +86,9 @@ async def remember(
     Committed at once, so a pass that stops part-way (the breaker opened, the
     process died) keeps what it paid for. Anything the session holds
     uncommitted is committed with it, as with every ``write_transaction``.
+    Writes nothing inside :func:`recording_suspended`.
     """
-    if not verdicts:
+    if not verdicts or not _RECORDING.get():
         return 0
     async with write_transaction(session):
         return await record_verdicts(
@@ -93,7 +116,7 @@ async def remember_rungs(
     load is on the run tally and no reader wants a row per pair it decided.
     Returns the rows written.
     """
-    if not any(verdicts.values()):
+    if not any(verdicts.values()) or not _RECORDING.get():
         return 0
     written = 0
     async with write_transaction(session):

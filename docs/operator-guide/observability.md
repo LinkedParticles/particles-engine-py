@@ -85,12 +85,14 @@ checks and the one the exporter is given.
 
 ## What you get
 
-- **Traces**: auto-instrumented FastAPI (server spans, which record the route
-  template such as `/particles/{particle_id}` and never the concrete path or
-  query string), httpx (client spans, which record only the destination's
-  scheme, host and port, plus `traceparent` propagation), and SQLAlchemy/aiosqlite (DB spans, including the
-  write-lock wait), plus hand-rolled `extract.snapshot` → `embed.batch` /
-  `llm.complete` spans on the extraction path.
+- **Traces**: auto-instrumented FastAPI (server spans, recorded by route
+  template such as `/particles/{particle_id}`), httpx (client spans, plus
+  `traceparent` propagation), and hand-rolled `extract.snapshot` → `embed.batch` /
+  `llm.complete` spans on the extraction path. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#outbound-connections) states
+  what a span may and may not carry (paths, queries, exception messages,
+  bound values), and what an httpx client span carries when traces are off.
+  The SQLAlchemy instrumentation is installed too, but with the SQLAlchemy
+  release the project locks it exports no database span.
 - **Metrics**: LLM- and embed-call duration histograms, the
   `particles.extracted` throughput counter, and the **`particles.sqlite.busy`**
   counter, incremented on every `database is locked` at the DB boundary, so it

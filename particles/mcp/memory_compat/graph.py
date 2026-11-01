@@ -59,6 +59,8 @@ import logging
 from typing import Any
 
 from particles.config import get_config
+from particles.core.schema import ProvenanceRefType
+from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 
 # The reference vocabulary is defined Client-side, in the module that owns the
@@ -66,6 +68,7 @@ from particles.core.status import Status
 # writes are byte-for-byte the same record — one encoding, not two kept in
 # sync. Surface → Client is the allowed direction.
 from particles.extraction.mcp_memory import (
+    IMPORT_TAG,
     OBSERVATION_TAG,
     RELATION_TAG,
     TOMBSTONE_TAG,
@@ -77,6 +80,7 @@ from particles.extraction.mcp_memory import (
     relation_from_particle,
     relation_tags,
 )
+from particles.extraction.mcp_memory import SOURCE_TYPE as MIGRATION_SOURCE_TYPE
 
 __all__ = [
     "OBSERVATION_TAG",
@@ -97,6 +101,73 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 
+def _facade_record(particle: Any, facade: str, migration_entries: frozenset[str]) -> bool:
+    """Whether a tagged particle carries the façade's own provenance (P50).
+
+    The tags are caller-supplied on the native write path, so a tag alone would
+    let another principal tombstone, annotate or relate any Subject in the
+    façade's view (security review 2026-10-24-2, P50). A record counts when the
+    façade asserted it, or, for an observation or relation, when the
+    migration imported it: the migration's tag, the ``IMPORTED`` calibration
+    source, and a source ref to an export the local migration deposited
+    (``migration_entries``, from :func:`_migration_entries`). The tag and the
+    calibration alone are not enough, since an interchange bundle or a tag verb
+    could once supply both (security review 2026-10-25-2, R26). Only the façade
+    writes tombstones. A particle that carries none of the façade's tags is not
+    a façade record either way.
+    """
+    if particle.asserted_by == facade:
+        return True
+    if is_tombstone(particle):
+        return False
+    return bool(
+        IMPORT_TAG in (particle.tags or ())
+        and particle.confidence.calibration_source == CalibrationSource.IMPORTED
+        and any(
+            ref.type is ProvenanceRefType.SOURCE and ref.corpus_entry_id in migration_entries
+            for ref in particle.provenance
+        )
+    )
+
+
+def _migration_candidates(particles: list[Any]) -> set[str]:
+    """The entries a particle that may be a migrated record cites, for one lookup."""
+    return {
+        ref.corpus_entry_id
+        for particle in particles
+        if IMPORT_TAG in (particle.tags or ())
+        and particle.confidence.calibration_source == CalibrationSource.IMPORTED
+        for ref in particle.provenance
+        if ref.type is ProvenanceRefType.SOURCE
+    }
+
+
+async def _migration_entries(session: Any, entry_ids: set[str]) -> frozenset[str]:
+    """Which of ``entry_ids`` are memory-server exports the local migration deposited.
+
+    Only ``particles import mcp-memory`` writes an entry of the migration's
+    source type: the HTTP deposit routes refuse it (R26), so the type is a
+    server-owned mark of a local migration run.
+    """
+    if not entry_ids:
+        return frozenset()
+    from sqlalchemy import select
+
+    from particles.corpus.store import CorpusEntryRow
+
+    found: set[str] = set()
+    listed = sorted(entry_ids)
+    for start in range(0, len(listed), 500):
+        rows = await session.execute(
+            select(CorpusEntryRow.entry_id).where(
+                CorpusEntryRow.entry_id.in_(listed[start : start + 500]),
+                CorpusEntryRow.source_type == MIGRATION_SOURCE_TYPE,
+            )
+        )
+        found.update(rows.scalars())
+    return frozenset(found)
+
+
 class Subgraph:
     """An in-memory projection of the façade's view of the store.
 
@@ -111,6 +182,7 @@ class Subgraph:
         subjects_by_id: dict[str, Any],
         particles: list[Any],
         pairs: list[tuple[str, str]],
+        migration_entries: frozenset[str] = frozenset(),
     ) -> None:
         self._subjects_by_id = subjects_by_id
         self._by_name: dict[str, Any] = {}
@@ -126,8 +198,11 @@ class Subgraph:
         self.tombstoned_subject_ids: set[str] = set()
         self._tombstones_by_subject: dict[str, list[Any]] = {}
 
+        facade = get_config().mcp.memory_compat.asserter_identity
         for particle in sorted(particles, key=lambda p: (p.asserted_at, p.id)):
-            if particle.status != Status.ACTIVE:
+            if particle.status != Status.ACTIVE or not _facade_record(
+                particle, facade, migration_entries
+            ):
                 continue
             linked = subject_ids_by_particle.get(particle.id, [])
             if is_tombstone(particle):
@@ -287,7 +362,9 @@ async def load_subgraph(session: Any, *, subject_ids: list[str] | None = None) -
     pairs = await list_particle_subject_pairs(session)
     relevant = [(pid, sid) for pid, sid in pairs if sid in subjects_by_id]
     particles_by_id = await get_particles_by_ids(session, [pid for pid, _ in relevant])
-    return Subgraph(subjects_by_id, list(particles_by_id.values()), relevant)
+    particles = list(particles_by_id.values())
+    migration_entries = await _migration_entries(session, _migration_candidates(particles))
+    return Subgraph(subjects_by_id, particles, relevant, migration_entries)
 
 
 def caps() -> tuple[int, int, int]:

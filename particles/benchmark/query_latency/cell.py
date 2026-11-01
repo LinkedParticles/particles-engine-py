@@ -16,7 +16,6 @@ rename, so a result on disk is always a finished one.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import platform
 import resource
@@ -26,6 +25,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from particles import egress
 from particles.benchmark.query_latency.schema import (
     CellResult,
     CellSpec,
@@ -35,6 +35,7 @@ from particles.benchmark.query_latency.schema import (
     StoreManifest,
     Variant,
 )
+from particles.url_safety import pinned_subprocess_env
 
 
 def peak_rss_bytes() -> int:
@@ -44,8 +45,18 @@ def peak_rss_bytes() -> int:
 
 
 def _cmd(*args: str) -> str | None:
+    # The program is looked up on the PATH entries no other user may write, so
+    # a relative or shared entry supplies no ``git`` or ``sysctl`` (security
+    # review 2026-10-30-1, E31).
     try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=10, check=True)
+        out = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+            env=pinned_subprocess_env(os.environ),
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() or None
@@ -262,7 +273,9 @@ def main(argv: list[str]) -> int:
         sys.stderr.write("usage: python -m particles.benchmark.query_latency.cell <spec.json>\n")
         return 2
     spec = CellSpec.model_validate_json(Path(argv[0]).read_text())
-    result = asyncio.run(run_cell(spec))
+    # Armed like every entry point that starts its own loop, so a refusing
+    # network.egress holds in the child too (security review 2026-10-28-2).
+    result = egress.run_armed(run_cell(spec))
     write_result(result, Path(spec.result_path))
     return 0
 

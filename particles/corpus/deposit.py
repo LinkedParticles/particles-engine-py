@@ -10,23 +10,28 @@ Any agent or user can deposit at any time without schema knowledge.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import hashlib
 import json
 import logging
 import mimetypes
 import os
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 import yaml
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles import egress
 from particles.config import get_config, resolve_store_adjacent_path
+from particles.core import bounded_yaml
 from particles.core.observer_scope import EntryScope, classify_entry, project_keys, project_tag
 from particles.core.schema import (
     CorpusEntry,
@@ -36,6 +41,12 @@ from particles.core.schema import (
     Snapshot,
     SourceType,
     WarcRecordType,
+)
+from particles.corpus.blob_io import BlobRefused, read_blob, write_blob
+from particles.corpus.harvest_marks import (
+    HARVEST_DEPOSITORS,
+    REFRESH_MASKED_TAGS,
+    strip_reserved_tags,
 )
 from particles.corpus.local_read import read_local_file, within
 from particles.corpus.store import (
@@ -49,12 +60,67 @@ from particles.corpus.store import (
     get_snapshot,
     list_snapshots_for_entry,
 )
+from particles.db import _open_sqlite_transaction, write_transaction
 from particles.extraction.general import sniff_image_media_type
 from particles.extraction.rdf import RDF_CONTENT_TYPES, RDF_SUFFIXES
 from particles.http import get_capped, particles_client
 from particles.observability import traced
+from particles.url_safety import is_network_uri
 
 log = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+#: True inside :func:`writes_committed_under_lock` and outside any write unit.
+_LOCK_EACH_WRITE: ContextVar[bool] = ContextVar("particles_deposit_lock_each_write", default=False)
+
+
+@contextlib.contextmanager
+def writes_committed_under_lock() -> Iterator[None]:
+    """Commit each write unit of a deposit under the store's writer lock.
+
+    For a caller that holds no writer lock across a deposit that fetches (the
+    HTTP URL route): the fetches run unlocked, and each write unit (an entry
+    and its snapshot, a follow edge, the mention reconciliation) takes the
+    lock and commits before releasing it, so the lock is never held across a
+    fetch (security review 2026-10-25-2, R4). Outside the block a deposit
+    writes on the caller's session and the caller commits, as before.
+    """
+    token = _LOCK_EACH_WRITE.set(True)
+    try:
+        yield
+    finally:
+        _LOCK_EACH_WRITE.reset(token)
+
+
+@contextlib.asynccontextmanager
+async def _write_unit(session: AsyncSession) -> AsyncIterator[None]:
+    """One write unit: under :func:`writes_committed_under_lock`, locked and committed."""
+    if not _LOCK_EACH_WRITE.get():
+        yield
+        return
+    # A unit nested in another (a follow's entry inside its edge) joins it: the
+    # writer lock is not re-entrant.
+    token = _LOCK_EACH_WRITE.set(False)
+    try:
+        async with write_transaction(session):
+            yield
+    finally:
+        _LOCK_EACH_WRITE.reset(token)
+
+
+def _in_write_unit(fn: Callable[_P, Awaitable[_R]]) -> Callable[_P, Awaitable[_R]]:
+    """Run ``fn``, whose ``session`` argument is first or named, as one write unit."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        session = kwargs.get("session", args[0] if args else None)
+        assert isinstance(session, AsyncSession)
+        async with _write_unit(session):
+            return await fn(*args, **kwargs)
+
+    return wrapper
 
 
 # A blob is content-addressed by its SHA-256 hex digest. Every internal caller
@@ -90,12 +156,16 @@ def blob_path(content_hash: str) -> Path:
 
 
 def save_blob(content: bytes, content_hash: str) -> str:
-    """Write bytes to the content-addressed blob store; return the file path."""
+    """Write bytes to the content-addressed blob store; return the file path.
+
+    The write never follows a symlink out of the blob directory (security
+    review 2026-10-25, Q4; :mod:`particles.corpus.blob_io`).
+
+    Raises:
+        BlobRefused: a symlink or non-regular file on the blob's path.
+    """
     path = blob_path(content_hash)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_bytes(content)
-    return str(path)
+    return str(write_blob(path.parent.parent, content_hash, content))
 
 
 def sha256(data: bytes) -> str:
@@ -153,6 +223,28 @@ def _detect_source_type(
     return SourceType.LOCAL_FILE
 
 
+# The largest file whose JSON shape is sniffed for a self-declared source type.
+# A policy document (taxonomy, trust lens, vocabulary) is a hand-authored file
+# far below this; a larger one is an ordinary file unless the operator names its
+# type. Parsing builds the whole document at many bytes per input byte, and the
+# HTTP upload route sniffs every agent upload (security review 2026-10-30-2, AC2).
+_SNIFF_MAX_BYTES = 1024 * 1024
+
+
+def _sniffed_json(content: bytes) -> Any:
+    """``content`` parsed as JSON for a type sniff, or ``None`` when it is not sniffable.
+
+    Over ``_SNIFF_MAX_BYTES``, malformed, or nested past the decoder's depth
+    (``RecursionError``), the content is an ordinary file, never an error.
+    """
+    if len(content) > _SNIFF_MAX_BYTES:
+        return None
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return None
+
+
 def _is_taxonomy_definition(content: bytes, suffix: str) -> bool:
     """Return True if ``content`` parses as a TaxonomyDefinition JSON.
 
@@ -163,10 +255,10 @@ def _is_taxonomy_definition(content: bytes, suffix: str) -> bool:
     """
     if suffix != ".json":
         return False
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
+    return _taxonomy_shape(_sniffed_json(content))
+
+
+def _taxonomy_shape(data: Any) -> bool:
     return (
         isinstance(data, dict)
         and isinstance(data.get("name"), str)
@@ -183,10 +275,10 @@ def _is_trust_lens_definition(content: bytes, suffix: str) -> bool:
     """
     if suffix != ".json":
         return False
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
+    return _trust_lens_shape(_sniffed_json(content))
+
+
+def _trust_lens_shape(data: Any) -> bool:
     return isinstance(data, dict) and data.get("kind") == "TrustLensDefinition"
 
 
@@ -199,10 +291,10 @@ def _is_vocabulary_document(content: bytes, suffix: str) -> bool:
     """
     if suffix not in (".json", ".jsonld"):
         return False
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
+    return _vocabulary_shape(_sniffed_json(content))
+
+
+def _vocabulary_shape(data: Any) -> bool:
     if not isinstance(data, dict):
         return False
     types = data.get("@type")
@@ -363,14 +455,32 @@ def _resolve_source_type(path: Path, content: bytes, override: str | None) -> st
     if sniff_image_media_type(content) is not None:
         return SourceType.IMAGE
     suffix = path.suffix.lower()
-    if _is_trust_lens_definition(content, suffix):
-        return SourceType.TRUST_LENS_DEFINITION
-    if _is_vocabulary_document(content, suffix):
-        return SourceType.VOCABULARY_DOCUMENT
-    if _is_taxonomy_definition(content, suffix):
-        return SourceType.TAXONOMY_DEFINITION
+    if suffix in (".json", ".jsonld"):
+        # Parsed once, within _SNIFF_MAX_BYTES, for all three shapes (AC2).
+        data = _sniffed_json(content)
+        if suffix == ".json" and _trust_lens_shape(data):
+            return SourceType.TRUST_LENS_DEFINITION
+        if _vocabulary_shape(data):
+            return SourceType.VOCABULARY_DOCUMENT
+        if suffix == ".json" and _taxonomy_shape(data):
+            return SourceType.TAXONOMY_DEFINITION
     mime, _ = mimetypes.guess_type(str(path))
     return _detect_source_type(None, mime, path)
+
+
+def resolve_upload_source_type(path: Path) -> str:
+    """The ``source_type`` :func:`deposit_file` would record for ``path`` with no override.
+
+    The engine's HTTP route reads it for an agent key, which may not name a type
+    and may not deposit one of the policy types a file can self-declare
+    (rule 4). Only the first ``_SNIFF_MAX_BYTES + 1`` bytes are read:
+    the image sniff needs the magic bytes, and a longer file is too large for the
+    JSON sniff, so the prefix resolves exactly as the whole file would. Blocking
+    I/O: an async caller runs it in a worker thread.
+    """
+    with path.open("rb") as fh:
+        prefix = fh.read(_SNIFF_MAX_BYTES + 1)
+    return _resolve_source_type(path, prefix, None)
 
 
 def _resolve_content_published_at(
@@ -414,6 +524,7 @@ async def deposit_file(
     out_unchanged: list[bool] | None = None,
     identify_by_path: bool = False,
     walked_root: Path | None = None,
+    untrusted_caller: bool = False,
 ) -> tuple[str, str]:
     """Deposit a local file into the corpus.
 
@@ -446,6 +557,10 @@ async def deposit_file(
             parent swapped after the walk, deposits nothing (security review
             N24). An operator naming one file leaves it ``None``, and a link
             they name is followed.
+        untrusted_caller: ``deposited_by`` is a string the caller chose (the
+            HTTP upload route), so a content-hash match may not join or retype
+            an entry the engine enrolled from its own disk (security review
+            P19; see :func:`write_entry_and_snapshot`).
 
     The read refuses a pipe, a device, and a file over ``local_files.max_bytes``
     with :class:`~particles.corpus.local_read.LocalReadRefused`, an ``OSError``.
@@ -486,6 +601,7 @@ async def deposit_file(
         content_date_explicit=content_date is not None,
         out_unchanged=out_unchanged,
         identified_by_uri=identify_by_path,
+        untrusted_caller=untrusted_caller,
     )
 
 
@@ -544,8 +660,12 @@ async def split_file_by_date(
 
     Raises:
         ValueError: If ``path`` is not UTF-8-decodable.
+        LocalReadRefused: If ``path`` is not a regular file or is over
+            ``local_files.max_bytes`` (security review 2026-10-26-1, W63).
     """
-    content = path.read_bytes()
+    content = read_local_file(
+        path, follow_symlinks=True, max_bytes=get_config().local_files.max_bytes
+    ).content
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -888,6 +1008,11 @@ def _iter_clipper_markdown(captures_dir: Path) -> list[Path]:
     return _iter_tree(captures_dir, {".md", ".markdown"}, lambda p: p.startswith(("_", ".")))
 
 
+# Characters of a capture the frontmatter split reads for its header: the 8 KiB
+# head the supersession and extractor frontmatter reads use.
+_FRONTMATTER_HEAD_CHARS = 8192
+
+
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     """Split a leading ``--- … ---`` YAML frontmatter block from the body.
 
@@ -897,22 +1022,29 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     degrade gracefully** (§ Consequences): a malformed header never
     raises, so one bad capture cannot abort a whole folder scan. The body keeps
     its original bytes minus the stripped header, so the extractor sees the
-    article, not the YAML.
+    article, not the YAML. Aliases count toward a node budget linear in the
+    header, so a short header cannot expand into a large value (security
+    review 2026-10-26-1, W7). The closing fence must end within the first
+    ``_FRONTMATTER_HEAD_CHARS`` characters, as the supersession and extractor
+    reads require, so a capture's header costs no more to parse than theirs
+    (security review 2026-10-27-1, G18).
     """
     if not text.startswith("---"):
         return {}, text
     # The opening fence is the first line; it must be exactly `---` (allowing a
     # trailing CR). Anything else (e.g. a `***` horizontal rule) is not a fence.
-    lines = text.splitlines(keepends=True)
+    lines = text[:_FRONTMATTER_HEAD_CHARS].splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
         return {}, text
-    # Find the closing fence.
+    # Find the closing fence. A last line the head cut short is not one.
+    if not lines[-1].endswith(("\n", "\r")) and len(text) > _FRONTMATTER_HEAD_CHARS:
+        lines.pop()
     for idx in range(1, len(lines)):
         if lines[idx].rstrip("\r\n") == "---":
             header_text = "".join(lines[1:idx])
-            body = "".join(lines[idx + 1 :])
+            body = text[sum(len(line) for line in lines[: idx + 1]) :]
             try:
-                parsed = yaml.safe_load(header_text)
+                parsed = bounded_yaml.load(header_text)
             except yaml.YAMLError:
                 return {}, text
             if not isinstance(parsed, dict):
@@ -985,13 +1117,26 @@ def _parse_frontmatter_date(value: Any) -> datetime | None:
     return None
 
 
+#: The depositor id the web-capture intakes stamp by default: ``particles import
+#: web-clipper`` and the daemon's captures watcher.
+WEB_CLIPPER_DEPOSITOR = "web-clipper"
+
+#: The depositors whose entries hold a capture: a file a third party may have
+#: written, whose frontmatter named the URL the entry is keyed on. A deposit by
+#: any other depositor never joins such an entry (security review 2026-10-25-2,
+#: R13). A capture run under another ``--deposited-by`` is that operator's
+#: choice of identity, and joins as theirs.
+CAPTURE_DEPOSITORS = frozenset({WEB_CLIPPER_DEPOSITOR})
+
+
 async def deposit_web_clipper(
     session: AsyncSession,
     captures_dir: Path,
-    deposited_by: str = "web-clipper",
+    deposited_by: str = WEB_CLIPPER_DEPOSITOR,
     tags: list[str] | None = None,
     content_date: datetime | None = None,
     progress: Callable[[str], None] | None = None,
+    skipped: list[Path] | None = None,
 ) -> list[tuple[str, str]]:
     """Deposit a folder of frontmatter-Markdown captures as ``WEB_PAGE`` entries.
 
@@ -1015,6 +1160,14 @@ async def deposit_web_clipper(
     bytes are hashed (frontmatter stripped), so re-clips that differ only in
     clip-time metadata collapse to one entry, and a page clipped twice (same
     ``source:``) collapses on its ``uri_r`` rather than two ``file://`` paths.
+    Both tiers join only ``deposited_by``'s own entries: a capture is a file a
+    third party may have written, so one whose ``source:`` names a URL another
+    depositor's entry holds is deposited as a plain local file, and a body
+    matching another depositor's snapshot gets an entry of its own (security
+    review P21; security review 2026-10-25-1, Q20). The reverse order holds
+    too: a later deposit of a captured URL by another depositor never joins the
+    capture's entry, which gives up the URL (:func:`write_entry_and_snapshot`;
+    security review 2026-10-25-2, R13).
     One-shot scan; the watching daemon is deferred.
 
     Args:
@@ -1030,10 +1183,18 @@ async def deposit_web_clipper(
             ``"[i/N] depositing path"``-style message (mirrors ``deposit_vault``).
         out_unchanged: As for :func:`deposit_vault`: one bool per file, ``True``
             for a file skipped as unchanged.
+        skipped: Optional list that receives each capture the scan skipped
+            because its read was refused or failed; the other captures are
+            still deposited.
 
     Returns:
         List of ``(entry_id, snapshot_id)`` tuples in deposit order; empty if
         ``captures_dir`` contains no Markdown captures.
+
+    A capture that cannot be read or deposited (a hard link, a refused read, a
+    deposit confinement refuses, any other error its deposit raises) is logged
+    and skipped, its writes rolled back to a savepoint, and the scan goes on
+    (security review 2026-10-27-1, G17; 2026-10-28-1, O4).
 
     Raises:
         ValueError: If ``captures_dir`` does not exist or is not a directory.
@@ -1047,7 +1208,6 @@ async def deposit_web_clipper(
             progress(f"No .md captures found under {captures_dir}")
         return []
 
-    cfg = get_config().web_clipper
     run_tags = tags or []
 
     results: list[tuple[str, str]] = []
@@ -1060,83 +1220,175 @@ async def deposit_web_clipper(
                 rel = path
             progress(f"[{i}/{total}] depositing {rel}")
 
-        raw = read_local_file(
-            path,
-            max_bytes=get_config().local_files.max_bytes,
-            allowed=within(captures_dir),
-        ).content
+        # Each capture deposits under its own savepoint, and one that cannot be
+        # read or deposited (a hard link, a header that cannot be built, a
+        # refusal, a store error) is logged and skipped with its writes rolled
+        # back, so one capture never aborts the scan or the daemon's tick
+        # (security review 2026-10-27-1, G17; 2026-10-28-1, O4). Cancellation
+        # is not an ``Exception`` and still ends the scan. The savepoint nests
+        # in a real transaction, so a scan under a plain session (``import
+        # web-clipper``) that fails after a capture keeps nothing (security
+        # review 2026-10-28-2, AA56).
         try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # A non-UTF-8 capture cannot carry frontmatter; deposit it verbatim
-            # through the ordinary local-file path so the scan never aborts.
-            entry_id, snapshot_id = await deposit_file(
-                session,
-                path,
-                deposited_by=deposited_by,
-                tags=run_tags,
-                content_date=content_date,
-                walked_root=captures_dir,
-            )
-            results.append((entry_id, snapshot_id))
+            await _open_sqlite_transaction(session)
+            async with session.begin_nested():
+                deposited = await _deposit_capture(
+                    session,
+                    path,
+                    captures_dir=captures_dir,
+                    deposited_by=deposited_by,
+                    run_tags=run_tags,
+                    content_date=content_date,
+                )
+        except Exception as exc:
+            log.warning("web-clipper: skipped %s: %s: %s", path, type(exc).__name__, exc)
+            if skipped is not None:
+                skipped.append(path)
             continue
-
-        frontmatter, body = _split_frontmatter(text)
-
-        uri_r_value = _first_frontmatter_value(frontmatter, cfg.url_keys)
-        if not frontmatter or uri_r_value is None:
-            # No parseable frontmatter, or no source URL → fall back to a plain
-            # LOCAL_MARKDOWN body deposit (§ Consequences): the capture
-            # still onboards, just without the restored provenance. file:// uri_r
-            # via deposit_file; the leading-date / mtime path still runs.
-            entry_id, snapshot_id = await deposit_file(
-                session,
-                path,
-                deposited_by=deposited_by,
-                source_type=SourceType.LOCAL_MARKDOWN,
-                tags=run_tags,
-                content_date=content_date,
-                walked_root=captures_dir,
-            )
-            results.append((entry_id, snapshot_id))
-            continue
-
-        uri_r = _strip_url_fragment(str(uri_r_value))
-
-        # precedence: explicit --date wins; else the frontmatter date.
-        if content_date is not None:
-            content_published_at: datetime | None = content_date
-        else:
-            content_published_at = _parse_frontmatter_date(
-                _first_frontmatter_value(frontmatter, cfg.date_keys)
-            )
-
-        # Per-file frontmatter tags ∪ run-wide --tags, order-stable + de-duped.
-        merged_tags: list[str] = []
-        for tag in (*_frontmatter_tags(frontmatter, cfg.tag_keys), *run_tags):
-            if tag not in merged_tags:
-                merged_tags.append(tag)
-
-        content = body.encode("utf-8")
-        content_hash = sha256(content)
-        archive_path = save_blob(content, content_hash)
-
-        entry_id, snapshot_id = await write_entry_and_snapshot(
-            session=session,
-            uri_r=uri_r,
-            source_type=cfg.source_type,
-            mutability=Mutability.STABLE,
-            fetch_policy=FetchPolicy.NEVER,
-            content=content,
-            content_hash=content_hash,
-            archive_path=archive_path,
-            deposited_by=deposited_by,
-            tags=merged_tags,
-            warc_record_type=WarcRecordType.RESPONSE,
-            content_published_at=content_published_at,
-        )
-        results.append((entry_id, snapshot_id))
+        results.append(deposited)
     return results
+
+
+async def _deposit_capture(
+    session: AsyncSession,
+    path: Path,
+    *,
+    captures_dir: Path,
+    deposited_by: str,
+    run_tags: list[str],
+    content_date: datetime | None,
+) -> tuple[str, str]:
+    """Deposit one web capture for :func:`deposit_web_clipper`; ``(entry_id, snapshot_id)``."""
+    cfg = get_config().web_clipper
+    raw = read_local_file(
+        path,
+        max_bytes=get_config().local_files.max_bytes,
+        allowed=within(captures_dir),
+    ).content
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # A non-UTF-8 capture cannot carry frontmatter; deposit it verbatim
+        # through the ordinary local-file path so the scan never aborts.
+        entry_id, snapshot_id = await deposit_file(
+            session,
+            path,
+            deposited_by=deposited_by,
+            tags=run_tags,
+            content_date=content_date,
+            walked_root=captures_dir,
+        )
+        return entry_id, snapshot_id
+
+    frontmatter, body = _split_frontmatter(text)
+
+    uri_r_value = _first_frontmatter_value(frontmatter, cfg.url_keys)
+    if not frontmatter or not isinstance(uri_r_value, str):
+        # No parseable frontmatter, or no source URL (a string) → fall back to a plain
+        # LOCAL_MARKDOWN body deposit (§ Consequences): the capture
+        # still onboards, just without the restored provenance. file:// uri_r
+        # via deposit_file; the leading-date / mtime path still runs.
+        entry_id, snapshot_id = await deposit_file(
+            session,
+            path,
+            deposited_by=deposited_by,
+            source_type=SourceType.LOCAL_MARKDOWN,
+            tags=run_tags,
+            content_date=content_date,
+            walked_root=captures_dir,
+        )
+        return entry_id, snapshot_id
+
+    uri_r = _strip_url_fragment(uri_r_value)
+    if not is_network_uri(uri_r):
+        # The source names the entry the capture joins. A capture is a
+        # third party's file, so a file:// (or any non-web) source could
+        # pick an entry the engine enrolled from its own disk and append to
+        # it (security review P21); such a capture onboards as a plain
+        # local file instead.
+        log.info(
+            "web-clipper: %s names a non-web source %r; deposited as a local file",
+            path,
+            uri_r,
+        )
+        entry_id, snapshot_id = await deposit_file(
+            session,
+            path,
+            deposited_by=deposited_by,
+            source_type=SourceType.LOCAL_MARKDOWN,
+            tags=run_tags,
+            content_date=content_date,
+            walked_root=captures_dir,
+        )
+        return entry_id, snapshot_id
+
+    # An http(s) source joins the entry that already holds that URL, so a
+    # capture naming a URL another depositor deposited would append to (and
+    # retype) their entry. Such a capture onboards as a plain local file
+    # instead (security review 2026-10-25-1, Q20).
+    joined = await get_entry_by_uri(session, uri_r)
+    if joined is not None and joined.deposited_by != deposited_by:
+        log.info(
+            "web-clipper: %s names %r, which another depositor's entry holds; "
+            "deposited as a local file",
+            path,
+            uri_r,
+        )
+        entry_id, snapshot_id = await deposit_file(
+            session,
+            path,
+            deposited_by=deposited_by,
+            source_type=SourceType.LOCAL_MARKDOWN,
+            tags=run_tags,
+            content_date=content_date,
+            walked_root=captures_dir,
+        )
+        return entry_id, snapshot_id
+
+    # precedence: explicit --date wins; else the frontmatter date.
+    if content_date is not None:
+        content_published_at: datetime | None = content_date
+    else:
+        content_published_at = _parse_frontmatter_date(
+            _first_frontmatter_value(frontmatter, cfg.date_keys)
+        )
+        # The capture states its own date, so it may not claim a moment
+        # after the deposit (the N6 rule; security review P21).
+        if content_published_at is not None:
+            content_published_at = min(content_published_at, datetime.now(UTC))
+
+    # Per-file frontmatter tags ∪ run-wide --tags, order-stable + de-duped.
+    # A capture's frontmatter is the page's to write, so it never carries a
+    # harvester's tag into the entry (security review 2026-10-24-2, P5).
+    merged_tags: list[str] = []
+    captured_tags = strip_reserved_tags(_frontmatter_tags(frontmatter, cfg.tag_keys))
+    for tag in (*captured_tags, *run_tags):
+        if tag not in merged_tags:
+            merged_tags.append(tag)
+
+    content = body.encode("utf-8")
+    content_hash = sha256(content)
+    archive_path = save_blob(content, content_hash)
+
+    entry_id, snapshot_id = await write_entry_and_snapshot(
+        session=session,
+        uri_r=uri_r,
+        source_type=cfg.source_type,
+        mutability=Mutability.STABLE,
+        fetch_policy=FetchPolicy.NEVER,
+        content=content,
+        content_hash=content_hash,
+        archive_path=archive_path,
+        deposited_by=deposited_by,
+        tags=merged_tags,
+        warc_record_type=WarcRecordType.RESPONSE,
+        content_published_at=content_published_at,
+        # A content-hash match joins only this depositor's own entry: a
+        # capture's body could otherwise reproduce an older snapshot of
+        # another depositor's page and append it as a revert (Q20).
+        own_entries_only=True,
+    )
+    return entry_id, snapshot_id
 
 
 def _skip_source_part(part: str, ignore_dirs: set[str]) -> bool:
@@ -1242,6 +1494,7 @@ async def deposit_url(
     follow_comment_links: bool | None = None,
     out_follow_targets: list[tuple[str, str, str]] | None = None,
     out_unchanged: list[bool] | None = None,
+    out_follow_refused: list[str] | None = None,
 ) -> tuple[str, str]:
     """Fetch a URL and deposit it into the corpus.
 
@@ -1271,6 +1524,11 @@ async def deposit_url(
     the secondary corpus entry. Operator-facing surface (the CLI uses
     this to print the follow result so operators see both entries),
     not API-load-bearing.
+
+    ``out_follow_refused`` (optional): receives each primary URL the follow
+    did not deposit because another principal's entry holds it under
+    :func:`own_entries_only_for`, so the depositing caller can tell a refused
+    follow from a made one (security review 2026-10-28-1, O80).
 
     ``out_unchanged`` (optional): receives ``True`` when the generic
     fetch path found the entry's latest snapshot already holding these bytes and
@@ -1331,6 +1589,7 @@ async def deposit_url(
                     tags=tags or [],
                     follow_post_links=follow_post_links,
                     out_follow_targets=out_follow_targets,
+                    out_follow_refused=out_follow_refused,
                 )
                 await _reconcile_mentions_for_deposit(session, url=url, entry_id=entry_id)
                 return entry_id, snapshot_id
@@ -1378,6 +1637,23 @@ async def deposit_url(
     return entry_id, snapshot_id
 
 
+@contextlib.asynccontextmanager
+async def _follow_unit(session: AsyncSession) -> AsyncIterator[None]:
+    """Run a follow's nested deposit so a failure leaves none of its writes behind.
+
+    Under :func:`writes_committed_under_lock` each of the nested deposit's write
+    units commits or rolls back on its own, and holding a savepoint across the
+    fetch would hold the writer lock with it. Otherwise its writes share the
+    caller's transaction, so they run under a savepoint that a failed follow
+    rolls back.
+    """
+    if _LOCK_EACH_WRITE.get():
+        yield
+        return
+    async with session.begin_nested():
+        yield
+
+
 async def _maybe_follow_primary_url(
     session: AsyncSession,
     importer: Any,
@@ -1388,6 +1664,7 @@ async def _maybe_follow_primary_url(
     tags: list[str],
     follow_post_links: bool | None,
     out_follow_targets: list[tuple[str, str, str]] | None = None,
+    out_follow_refused: list[str] | None = None,
 ) -> None:
     """Depth-1 follow of a link-shaped post's primary URL.
 
@@ -1464,14 +1741,28 @@ async def _maybe_follow_primary_url(
     try:
         # Hardcode depth-1: the recursive call cannot itself trigger
         # further follows.
-        target_entry_id, target_snap_id = await deposit_url(
-            session,
+        async with _follow_unit(session):
+            target_entry_id, target_snap_id = await deposit_url(
+                session,
+                target_url,
+                deposited_by=deposited_by,
+                tags=tags,
+                follow_post_links=False,
+                follow_comment_links=False,
+            )
+    except ForeignEntryRefused as exc:
+        # A confinement refusal, not a fetch failure: the target is another
+        # principal's entry, and nothing the nested deposit wrote survives
+        # (security review 2026-10-27-1, G59, G73).
+        log.warning(
+            "Follow refused for %s (via %s): %s Primary deposit unaffected.",
             target_url,
-            deposited_by=deposited_by,
-            tags=tags,
-            follow_post_links=False,
-            follow_comment_links=False,
+            entry_id[:8],
+            exc,
         )
+        if out_follow_refused is not None:
+            out_follow_refused.append(target_url)
+        return
     except Exception as exc:
         log.warning(
             "Follow failed for %s (via %s): %s; primary deposit unaffected",
@@ -1485,12 +1776,13 @@ async def _maybe_follow_primary_url(
     # (via, target, link_type) so re-deposits don't create duplicates.
     from particles.corpus.follow_edges import LINK_TYPE_POST, add_follow_edge
 
-    await add_follow_edge(
-        session,
-        via_entry_id=entry_id,
-        target_entry_id=target_entry_id,
-        link_type=LINK_TYPE_POST,
-    )
+    async with _write_unit(session):
+        await add_follow_edge(
+            session,
+            via_entry_id=entry_id,
+            target_entry_id=target_entry_id,
+            link_type=LINK_TYPE_POST,
+        )
     log.info("Recorded follow edge: %s → %s (POST_LINK)", entry_id[:8], target_entry_id[:8])
 
     if out_follow_targets is not None:
@@ -1506,26 +1798,40 @@ async def _reconcile_mentions_for_deposit(
     ``url_mentions`` rows reconcile to the new entry and each citing source
     gains a ``COMMENT_LINK`` follow edge — closing the
     suggestion → deposit loop and finally using the reserved sentinel. Best-
-    effort: any failure is logged and swallowed so it never fails the deposit.
-    """
-    try:
-        from particles.corpus.follow_edges import LINK_TYPE_COMMENT, add_follow_edge
-        from particles.store.url_mention_store import reconcile_url_to_entry
-        from particles.url_canonical import canonicalize_url
+    effort: a database failure is logged with its traceback and never fails
+    the deposit; any other exception is a defect and propagates.
 
-        canon = canonicalize_url(url)
-        if canon is None:
-            return
-        vias = await reconcile_url_to_entry(session, canonical_url=canon, target_entry_id=entry_id)
-        for via in vias:
-            if via == entry_id:
-                continue  # an entry that cited its own URL doesn't self-link
-            await add_follow_edge(
+    Under :func:`own_entries_only_for` only the mentions recorded from the
+    depositor's own entries reconcile, so a confined deposit neither rebinds
+    another principal's mentions nor adds a follow edge from another
+    principal's entry (security review 2026-10-26-1, N2).
+    """
+    from particles.corpus.follow_edges import LINK_TYPE_COMMENT, add_follow_edge
+    from particles.store.url_mention_store import reconcile_url_to_entry
+    from particles.url_canonical import canonicalize_url
+
+    canon = canonicalize_url(url)
+    if canon is None:
+        return
+    confined_to = _own_entries_depositor.get()
+    source_depositors = None if confined_to is None else _owners_of(confined_to)
+    try:
+        async with _write_unit(session):
+            vias = await reconcile_url_to_entry(
                 session,
-                via_entry_id=via,
+                canonical_url=canon,
                 target_entry_id=entry_id,
-                link_type=LINK_TYPE_COMMENT,
+                source_depositors=source_depositors,
             )
+            for via in vias:
+                if via == entry_id:
+                    continue  # an entry that cited its own URL doesn't self-link
+                await add_follow_edge(
+                    session,
+                    via_entry_id=via,
+                    target_entry_id=entry_id,
+                    link_type=LINK_TYPE_COMMENT,
+                )
         if vias:
             log.info(
                 "Reconciled %d prior mention(s) of %s → entry %s (COMMENT_LINK)",
@@ -1533,8 +1839,8 @@ async def _reconcile_mentions_for_deposit(
                 canon,
                 entry_id[:8],
             )
-    except Exception as exc:
-        log.warning("URL-mention reconciliation failed for entry %s: %s", entry_id[:8], exc)
+    except SQLAlchemyError:
+        log.warning("URL-mention reconciliation failed for entry %s", entry_id[:8], exc_info=True)
 
 
 @traced("deposit")
@@ -1621,6 +1927,14 @@ async def deposit_text_versioned(
     ``LAZY``; this parameter is how they do it. Passing nothing never mutates a
     stored policy.
 
+    Under :func:`own_entries_only_for` an entry another principal holds is
+    refused before anything is reconciled onto it, unchanged bytes included,
+    and an entry a web capture holds gives up its URL here as it does in
+    :func:`write_entry_and_snapshot` (security review 2026-10-26-1, W2, W26).
+    An enrolment that opts an entry into ``LAZY`` also gives it the request's
+    masking tags (:data:`REFRESH_MASKED_TAGS`), so an entry another depositor
+    created at the path is masked when the refresh re-reads it (W21).
+
     Returns ``(entry_id, snapshot_id, unchanged)``; does not commit — the
     caller owns the transaction.
     """
@@ -1629,8 +1943,15 @@ async def deposit_text_versioned(
 
     existing = await get_entry_by_uri(session, uri_r)
     if existing is not None:
+        _refuse_foreign_entry(existing, uri_r)
+        if _foreign_capture_entry(existing, deposited_by=deposited_by):
+            await _release_capture_uri(session, existing, deposited_by=deposited_by)
+            existing = None
+    if existing is not None:
         await _reconcile_fetch_policy(session, existing, fetch_policy)
         await _reconcile_project_keys(session, existing, tags)
+        if fetch_policy is FetchPolicy.LAZY:
+            await _reconcile_masked_tags(session, existing, tags)
         snapshots = await list_snapshots_for_entry(session, existing.entry_id)
         if snapshots:
             latest = max(snapshots, key=lambda s: s.captured_at)
@@ -1679,6 +2000,115 @@ def _keyed_deposit_onto_global_entry(existing: CorpusEntry, tags: list[str] | No
         return False
     harness_tags = get_config().observer_scope.harness_tags
     return classify_entry(existing.tags, harness_tags) is EntryScope.GLOBAL
+
+
+def _foreign_capture_entry(existing: CorpusEntry, *, deposited_by: str) -> bool:
+    """Whether ``existing`` holds a web capture another depositor must not join (R13).
+
+    A capture's entry is keyed on the URL its frontmatter named, and its tags
+    and depositor are the capture's. A deposit of that URL by anyone else is a
+    different observation of the page and is never appended to it.
+    """
+    return existing.deposited_by in CAPTURE_DEPOSITORS and existing.deposited_by != deposited_by
+
+
+async def _release_capture_uri(
+    session: AsyncSession, existing: CorpusEntry, *, deposited_by: str
+) -> None:
+    """Clear a capture entry's URI-R so a deposit by another depositor can hold the URL (R13).
+
+    The entry keeps its snapshots, tags and depositor; only the URL it took
+    from a capture's frontmatter is released, the same identity a capture gets
+    when it names a URL another depositor already holds (Q20). The release is
+    a change to another depositor's entry, so it is recorded as a
+    ``CORPUS_ENTRY_URI_RELEASED`` event naming the entry, the URL and the
+    depositor that now holds it (security review 2026-10-26-1, W26). A deposit
+    confined to its own entries never reaches here: :func:`_refuse_foreign_entry`
+    refuses it first.
+    """
+    row = await session.get(CorpusEntryRow, existing.entry_id)
+    if row is None:
+        return
+    released = row.uri_r
+    log.warning(
+        "Entry %s held %s on a web capture's say-so; the URL now belongs to the new "
+        "deposit and the capture's entry keeps no URI-R",
+        existing.entry_id,
+        released,
+    )
+    row.uri_r = None
+    await session.flush()
+    # Deferred: corpus -> store is a pinned cycle-break seam (AGENTS.md § Deferred imports, case 1).
+    from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+
+    await record_event(
+        session,
+        actor="deposit",
+        event_type=OperatorEventType.CORPUS_ENTRY_URI_RELEASED,
+        refs=[(EventRefKind.CORPUS_ENTRY, existing.entry_id)],
+        payload={"uri_r": released, "released_to": deposited_by},
+    )
+
+
+def _refuse_foreign_entry(existing: CorpusEntry, uri_r: str | None) -> None:
+    """Raise :class:`ForeignEntryRefused` when a confined deposit's URI names another's entry.
+
+    Runs before anything touches ``existing``: the capture release, the policy
+    and project-key reconciles, and the unchanged-bytes return (
+    rule 3; security review 2026-10-26-1, W2, W3, W52). Outside
+    :func:`own_entries_only_for` it does nothing.
+    """
+    confined_to = _own_entries_depositor.get()
+    if confined_to is not None and existing.deposited_by not in _owners_of(confined_to):
+        raise ForeignEntryRefused(
+            f"{uri_r} is held by an entry {existing.deposited_by!r} deposited; this key "
+            f"deposits as {confined_to!r} and may not write another principal's entry. "
+            "An operator key may append to it."
+        )
+
+
+async def _reconcile_masked_tags(
+    session: AsyncSession, existing: CorpusEntry, tags: list[str] | None
+) -> None:
+    """Give an entry a ``LAZY`` enrolment adopts the request's masking tags (W21).
+
+    The local refresh masks credentials only in an entry tagged ``rule-file``
+    or ``memory-file`` (:data:`REFRESH_MASKED_TAGS`). An entry another
+    depositor created at the path first keeps its own tags, so without this
+    the refresh would archive the file's later bytes unmasked. Only those tags
+    are added: neither changes the entry's observer scope.
+    """
+    missing = sorted((REFRESH_MASKED_TAGS & set(tags or [])) - set(existing.tags or []))
+    if not missing:
+        return
+    await add_entry_tags(session, existing.entry_id, missing)
+    log.info("Added masking tag(s) %s to entry %s on LAZY enrolment", missing, existing.entry_id)
+
+
+def _foreign_local_entry(
+    existing: CorpusEntry,
+    *,
+    deposited_by: str,
+    source_type: str,
+    untrusted_caller: bool,
+) -> bool:
+    """Whether a content-hash match onto ``existing`` must not be joined (security review P19, P21).
+
+    A ``file://`` entry names a file on the engine's disk. A deposit by another
+    depositor whose bytes happen to match it (an HTTP upload of a public
+    ``AGENTS.md``, a web capture with a rule file's body) would otherwise append
+    to that entry and retype it, so it gets an entry of its own. A caller whose
+    ``deposited_by`` is a free string (``untrusted_caller``, the HTTP upload
+    route) may not join a ``LAZY`` one, which the engine re-reads from its own
+    disk, or retype one, even under a matching name.
+    """
+    if not (existing.uri_r or "").startswith("file://"):
+        return False
+    if existing.deposited_by != deposited_by:
+        return True
+    return untrusted_caller and (
+        existing.fetch_policy is FetchPolicy.LAZY or existing.source_type != source_type
+    )
 
 
 async def _reconcile_project_keys(
@@ -1808,6 +2238,65 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC)
 
 
+def _not_after(value: datetime | None, now: datetime) -> datetime | None:
+    """``value``, or ``now`` when ``value`` is later (naive values read as UTC).
+
+    No source may date itself after its deposit: a future date would order it
+    after every later observation of the same lineage (security review N6;
+    2026-10-24-2, P5). The clamp sits on the one write every deposit path takes,
+    so a caller-declared date (an HTTP ``content_date`` or
+    ``content_published_at``, a capture's frontmatter date, a split-by-date
+    section heading, the CLI ``--date``) is held to it like a leading date line.
+    """
+    aware = _as_utc(value)
+    if aware is not None and aware > now:
+        return now
+    return value
+
+
+class ForeignEntryRefused(Exception):
+    """A deposit under :func:`own_entries_only_for` would have written another principal's entry."""
+
+
+#: The depositor whose deposits in the current scope may touch only its own
+#: entries (:func:`own_entries_only_for`), or ``None``.
+_own_entries_depositor: ContextVar[str | None] = ContextVar(
+    "particles_own_entries_depositor", default=None
+)
+
+
+@contextlib.contextmanager
+def own_entries_only_for(depositor: str) -> Iterator[None]:
+    """Confine every deposit in this scope to ``depositor``'s own entries (rule 3).
+
+    The engine's HTTP routes wrap an agent key's deposit in it, whatever path
+    the deposit takes (the generic fetch, a domain importer, the text and file
+    routes), since every one of them ends in :func:`write_entry_and_snapshot`:
+
+    - a content-hash match takes only an entry ``depositor`` deposited, as
+      ``own_entries_only`` does, so a match onto anyone else's entry yields a
+      new entry of the agent's own;
+    - a URI-R match onto another depositor's entry raises
+      :class:`ForeignEntryRefused`, because a URI names one entry and the agent
+      may not append to, retype or re-key another principal's. The route
+      answers 409.
+
+    The two harvester depositors count as one owner: the first-run audit
+    deposits a memory file and the SessionEnd harvest later enrols the same
+    entry, which keeps ``audit`` as its depositor.
+    """
+    token = _own_entries_depositor.set(depositor)
+    try:
+        yield
+    finally:
+        _own_entries_depositor.reset(token)
+
+
+def _owners_of(depositor: str) -> frozenset[str]:
+    return HARVEST_DEPOSITORS if depositor in HARVEST_DEPOSITORS else frozenset({depositor})
+
+
+@_in_write_unit
 async def write_entry_and_snapshot(
     session: AsyncSession,
     uri_r: str | None,
@@ -1828,6 +2317,7 @@ async def write_entry_and_snapshot(
     out_unchanged: list[bool] | None = None,
     identified_by_uri: bool = False,
     own_entries_only: bool = False,
+    untrusted_caller: bool = False,
 ) -> tuple[str, str]:
     """Core deposit logic: check for existing entry, create/update, return IDs.
 
@@ -1853,16 +2343,44 @@ async def write_entry_and_snapshot(
     content hash (the vault walk's path identity).
 
     ``own_entries_only``: match by content hash only an entry ``deposited_by``
-    deposited under the same scope tags (an agent deposit; see
+    deposited under the same scope tags and source type (an agent deposit; see
     :func:`deposit_text`). The matched entry's tags then already equal the
-    incoming ones, so no project key is reconciled onto it.
+    incoming ones, so no project key is reconciled onto it, and its type is
+    never changed.
+
+    A content-hash match never joins another depositor's ``file://`` entry, and
+    with ``untrusted_caller`` (an HTTP upload, whose ``deposited_by`` the caller
+    chose) never joins a ``LAZY`` one or retypes one either
+    (:func:`_foreign_local_entry`; security review P19, P21).
+
+    Neither tier joins a web capture's entry for another depositor
+    (:data:`CAPTURE_DEPOSITORS`). A URI-R match releases the URL from the
+    capture's entry, which keeps its snapshots, tags and depositor under no
+    URI-R, and this deposit gets an entry of its own under the URL (security
+    review 2026-10-25-2, R13).
     """
+    content_published_at = _not_after(content_published_at, datetime.now(UTC))
     # Check for existing entry: URI-R first, then content hash (deduplicates same
     # file deposited from different paths or re-deposited after a move) — except
     # for a keyed MUTABLE deposit, which is one project's own file.
     existing: CorpusEntry | None = None
     if uri_r:
         existing = await get_entry_by_uri(session, uri_r)
+        if existing is not None:
+            # A confined deposit is refused before the capture release, which
+            # would change another principal's entry (security review
+            # 2026-10-26-1, W52).
+            _refuse_foreign_entry(existing, uri_r)
+        if existing is not None and _foreign_capture_entry(existing, deposited_by=deposited_by):
+            # The URL was named by a capture's frontmatter, which a third party
+            # may have written; joining it would hand this deposit the capture's
+            # depositor, tags and policy. The capture's entry keeps its
+            # snapshots and gives up the URL, so the URL belongs to whoever
+            # deposits it, in either order (security review 2026-10-25-2, R13).
+            await _release_capture_uri(session, existing, deposited_by=deposited_by)
+            existing = None
+    if _own_entries_depositor.get() is not None:
+        own_entries_only = True
     if existing is None and not _identified_by_uri_alone(
         mutability, tags, by_path=identified_by_uri
     ):
@@ -1870,12 +2388,33 @@ async def write_entry_and_snapshot(
             existing = await get_own_entry_by_content_hash(
                 session, content_hash, deposited_by=deposited_by, scope_tags=tags
             )
+            if existing is not None and existing.source_type != source_type:
+                # An agent's deposit never retypes even its own entry: a
+                # CONVERSATION entry retyped by an upload of the same bytes
+                # would leave the agent-memory trust domain its beliefs rank
+                # in (security review 2026-10-26-1, W35, Q32).
+                existing = None
         else:
             existing = await get_entry_by_content_hash(session, content_hash)
         if existing is not None and _keyed_deposit_onto_global_entry(existing, tags):
             # A project's deposit must not ride an operator's global entry into
             # view for every project just because the bytes match:
             # it gets an entry of its own, carrying its own key.
+            existing = None
+        if existing is not None and (
+            _foreign_local_entry(
+                existing,
+                deposited_by=deposited_by,
+                source_type=source_type,
+                untrusted_caller=untrusted_caller,
+            )
+            or _foreign_capture_entry(existing, deposited_by=deposited_by)
+        ):
+            log.info(
+                "Deposit matches local entry %s by content hash, but that entry is not this "
+                "depositor's; depositing a new entry",
+                existing.entry_id,
+            )
             existing = None
         if existing is not None:
             log.info(
@@ -1926,8 +2465,18 @@ async def write_entry_and_snapshot(
         session.add(snap_row)
         # If the new source_type is more specific than the existing one, update it.
         # This handles re-depositing a WEB_PAGE URL as WIKIDATA_API after the
-        # domain-aware extractor is added.
-        if existing.source_type != source_type:
+        # domain-aware extractor is added. A confined deposit keeps the type, as
+        # its content-hash match does: the type an agent's server answers with
+        # would otherwise choose the entry's trust and extraction (security
+        # review 2026-10-27-1, G58).
+        if existing.source_type != source_type and own_entries_only:
+            log.info(
+                "Kept source_type %s for entry %s; a confined deposit does not retype it to %s",
+                existing.source_type,
+                existing.entry_id,
+                source_type,
+            )
+        elif existing.source_type != source_type:
             row = await session.get(CorpusEntryRow, existing.entry_id)
             if row is not None:
                 row.source_type = source_type
@@ -2004,13 +2553,21 @@ def blob_size(content_hash: str) -> int | None:
 def load_blob(content_hash: str) -> bytes:
     """Retrieve raw content from the blob store by SHA-256 hash.
 
+    The read never follows a symlink, and returns only bytes that hash to
+    ``content_hash`` (security review 2026-10-25, Q4; see
+    :mod:`particles.corpus.blob_io`).
+
     Raises:
-        FileNotFoundError: If no blob exists for the given hash.
+        FileNotFoundError: If no blob exists for the given hash, or the one
+            there is refused (:class:`~particles.corpus.blob_io.BlobRefused`).
     """
     path = blob_path(content_hash)
-    if not path.exists():
-        raise FileNotFoundError(f"Blob not found for hash {content_hash}")
-    return path.read_bytes()
+    try:
+        return read_blob(path.parent.parent, content_hash)
+    except BlobRefused:
+        raise
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Blob not found for hash {content_hash}") from exc
 
 
 def _parse_last_modified(value: str | None) -> datetime | None:

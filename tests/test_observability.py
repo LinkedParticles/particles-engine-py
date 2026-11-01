@@ -12,6 +12,9 @@ pollutes the shared test process's write-once OTel globals.
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -21,6 +24,21 @@ import pytest
 from particles.config import get_config, reset_config
 from particles.observability import instrument_fastapi_app, setup_observability
 from particles.observability import setup as obs
+
+#: The exporter session the OTLP path builds is a ``requests`` one, and
+#: ``requests`` arrives with the ``otel`` extra (the OTLP HTTP exporter needs
+#: it), so a base install never reaches that path: the bootstrap degrades first.
+needs_otel_extra = pytest.mark.skipif(
+    importlib.util.find_spec("requests") is None,
+    reason="the otel extra (and its requests) is not installed",
+)
+
+
+def _endpoint_only(kwargs: dict[str, object] | None) -> dict[str, object] | None:
+    """``kwargs`` without the session every exporter gets (it writes no TLS key log)."""
+    if kwargs is None:
+        return None
+    return {k: v for k, v in kwargs.items() if k != "session"}
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +107,7 @@ def test_instrument_fastapi_app_noop_when_disabled() -> None:
     assert obs._fastapi_instrumented is False
 
 
+@needs_otel_extra
 def test_otlp_kwargs_appends_signal_path_and_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "https://collector:4318/")
     monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok,x-team=a")
@@ -101,13 +120,15 @@ def test_otlp_kwargs_appends_signal_path_and_headers(monkeypatch: pytest.MonkeyP
     assert kwargs["headers"] == {"authorization": "Bearer tok", "x-team": "a"}
 
 
+@needs_otel_extra
 def test_otlp_kwargs_name_the_sdk_default_without_endpoint_or_headers() -> None:
     # Default config: the SDK's own default, passed explicitly; no headers.
-    assert obs._otlp_kwargs(get_config().observability, "metrics") == {
+    assert _endpoint_only(obs._otlp_kwargs(get_config().observability, "metrics")) == {
         "endpoint": "http://localhost:4318/v1/metrics"
     }
 
 
+@needs_otel_extra
 class TestOtlpEndpointIsTheCheckedOne:
     """D21 (SECURITY_REVIEW_20261023-1): what is egress-checked is what is sent to."""
 
@@ -141,7 +162,7 @@ class TestOtlpEndpointIsTheCheckedOne:
         )
         assert obs._otlp_kwargs(cfg.observability, "traces") is None
         # The metrics signal has no override, so it is the default and allowed.
-        assert obs._otlp_kwargs(cfg.observability, "metrics") == {
+        assert _endpoint_only(obs._otlp_kwargs(cfg.observability, "metrics")) == {
             "endpoint": "http://localhost:4318/v1/metrics"
         }
 
@@ -150,14 +171,14 @@ class TestOtlpEndpointIsTheCheckedOne:
     ) -> None:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.invalid/")
         kwargs = obs._otlp_kwargs(get_config().observability, "traces")
-        assert kwargs == {"endpoint": "https://collector.example.invalid/v1/traces"}
+        assert _endpoint_only(kwargs) == {"endpoint": "https://collector.example.invalid/v1/traces"}
 
     def test_config_endpoint_wins_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.invalid")
         monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://127.0.0.1:4318")
         reset_config()
         kwargs = obs._otlp_kwargs(get_config().observability, "traces")
-        assert kwargs == {"endpoint": "http://127.0.0.1:4318/v1/traces"}
+        assert _endpoint_only(kwargs) == {"endpoint": "http://127.0.0.1:4318/v1/traces"}
 
 
 class TestOtlpHeadersOverCleartext:
@@ -182,6 +203,7 @@ class TestOtlpHeadersOverCleartext:
         reset_config()
         assert obs._otlp_kwargs(get_config().observability, "traces") is None
 
+    @needs_otel_extra
     @pytest.mark.parametrize(
         "endpoint", ["https://collector.example.invalid", "http://127.0.0.1:4318"]
     )
@@ -195,6 +217,7 @@ class TestOtlpHeadersOverCleartext:
         assert kwargs is not None
         assert kwargs["headers"] == {"authorization": "Bearer tok"}
 
+    @needs_otel_extra
     def test_allow_plaintext_headers_opts_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
         monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", "authorization=Bearer tok")
@@ -204,11 +227,471 @@ class TestOtlpHeadersOverCleartext:
         assert kwargs is not None
         assert kwargs["headers"] == {"authorization": "Bearer tok"}
 
+    @needs_otel_extra
     def test_no_headers_no_refusal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://collector.example.invalid")
         reset_config()
         kwargs = obs._otlp_kwargs(get_config().observability, "traces")
-        assert kwargs == {"endpoint": "http://collector.example.invalid/v1/traces"}
+        assert _endpoint_only(kwargs) == {"endpoint": "http://collector.example.invalid/v1/traces"}
+
+
+class TestOtlpHeaderSecretHandling:
+    """Q45 and Q47 (SECURITY_REVIEW_20261025-1): the header secret stays out of logs and proxies."""
+
+    _SECRET = "otlp-audit-header-value"
+
+    @pytest.fixture(autouse=True)
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "NO_PROXY",
+            "no_proxy",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_a_malformed_item_is_never_logged(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Q45: HTTP-header form (``name: value``) is rejected without its text."""
+        monkeypatch.setenv(
+            "PARTICLES_OTEL_EXPORTER_HEADERS", f"x-api-key: {self._SECRET},x-tenant=acme"
+        )
+        with caplog.at_level("WARNING"):
+            headers = obs._otlp_headers()
+        assert self._SECRET not in caplog.text
+        assert "item(s) 1" in caplog.text
+        assert headers == {"x-tenant": "acme"}
+
+    @pytest.mark.parametrize("allow", [False, pytest.param(True, marks=needs_otel_extra)])
+    def test_a_plaintext_warning_does_not_echo_the_userinfo(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, allow: bool
+    ) -> None:
+        """R36 (SECURITY_REVIEW_20261025-2): the endpoint is logged without its userinfo."""
+        secret = "userinfo-secret-0123456789"
+        monkeypatch.setenv(
+            "PARTICLES_OBSERVABILITY_ENDPOINT", f"http://op:{secret}@collector.example.invalid"
+        )
+        monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", f"x-api-key={self._SECRET}")
+        reset_config()
+        monkeypatch.setattr(get_config().observability, "allow_plaintext_headers", allow)
+        obs._otlp_refusals_logged.clear()
+        with caplog.at_level("WARNING"):
+            kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert (kwargs is not None) is allow
+        assert "unencrypted" in caplog.text
+        assert "collector.example.invalid" in caplog.text
+        assert secret not in caplog.text
+
+    def test_well_formed_items_parse_as_before(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "PARTICLES_OTEL_EXPORTER_HEADERS", "Authorization=Bearer%20tok , x-tenant=acme"
+        )
+        assert obs._otlp_headers() == {"authorization": "Bearer tok", "x-tenant": "acme"}
+
+    @needs_otel_extra
+    def test_a_loopback_collector_gets_a_session_that_ignores_a_proxy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Q47: the headers reach the loopback collector, never an HTTP_PROXY.
+
+        Two loopback servers: one is the collector, the other stands where the
+        environment's proxy would be. A request on the session the exporter is
+        handed reaches the collector only.
+        """
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        seen: dict[str, list[str | None]] = {"collector": [], "proxy": []}
+
+        def server(role: str) -> HTTPServer:
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self) -> None:  # noqa: N802
+                    seen[role].append(self.headers.get("x-api-key"))
+                    self.send_response(200)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+                def log_message(self, *_args: object) -> None:
+                    return None
+
+            httpd = HTTPServer(("127.0.0.1", 0), Handler)
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            return httpd
+
+        collector, proxy = server("collector"), server("proxy")
+        try:
+            endpoint = f"http://127.0.0.1:{collector.server_address[1]}"
+            monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_address[1]}")
+            monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_address[1]}")
+            monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", endpoint)
+            monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", f"x-api-key={self._SECRET}")
+            reset_config()
+            kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+            assert kwargs is not None and "session" in kwargs
+            kwargs["session"].post(kwargs["endpoint"], headers=kwargs["headers"], data=b"x")
+        finally:
+            collector.shutdown()
+            proxy.shutdown()
+        assert seen == {"collector": [self._SECRET], "proxy": []}
+
+    @needs_otel_extra
+    def test_no_session_without_headers_and_the_proxy_kept_off_loopback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No header, a session that still follows redirects.
+
+        A remote https collector's session keeps the environment proxy.
+        """
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "http://127.0.0.1:4318")
+        reset_config()
+        import requests
+
+        plain = (obs._otlp_kwargs(get_config().observability, "traces") or {})["session"]
+        assert type(plain) is requests.Session
+        monkeypatch.setenv("PARTICLES_OBSERVABILITY_ENDPOINT", "https://collector.example.invalid")
+        monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", f"x-api-key={self._SECRET}")
+        reset_config()
+        kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+        assert kwargs is not None and kwargs["session"].trust_env is True
+
+
+@needs_otel_extra
+class TestOtlpHeadersFollowNoRedirect:
+    """R8 (SECURITY_REVIEW_20261025-2): the header secret never reaches a redirect target.
+
+    An exporter older than 1.45.1, which the published engine's ``otel`` extra
+    used to admit, follows a collector's 3xx with the session's headers. The
+    session :func:`_otlp_kwargs` hands every header-carrying exporter follows
+    none, so the guarantee does not rest on the installed exporter version.
+    """
+
+    _SECRET = "otlp-secret-0123456789abcdef"
+
+    @pytest.mark.parametrize("remote", [False, True])
+    def test_a_collector_redirect_is_not_followed(
+        self, monkeypatch: pytest.MonkeyPatch, remote: bool
+    ) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        import requests
+
+        got: list[str | None] = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                got.append(self.headers.get("x-api-key"))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args: object) -> None:
+                return None
+
+        target = HTTPServer(("127.0.0.1", 0), Target)
+        tport = target.server_address[1]
+
+        class Collector(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(307)
+                self.send_header("Location", f"http://127.0.0.1:{tport}/v1/traces")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args: object) -> None:
+                return None
+
+        collector = HTTPServer(("127.0.0.1", 0), Collector)
+        for httpd in (target, collector):
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            monkeypatch.setenv(
+                "PARTICLES_OBSERVABILITY_ENDPOINT",
+                # The remote case: an https collector, judged by the plaintext
+                # rule as fine; its session is the one under test, so it posts
+                # to the loopback collector directly.
+                "https://collector.example.invalid"
+                if remote
+                else f"http://127.0.0.1:{collector.server_address[1]}",
+            )
+            monkeypatch.setenv("PARTICLES_OTEL_EXPORTER_HEADERS", f"x-api-key={self._SECRET}")
+            reset_config()
+            kwargs = obs._otlp_kwargs(get_config().observability, "traces")
+            assert kwargs is not None
+            session: requests.Session = kwargs["session"]
+            response = session.post(
+                f"http://127.0.0.1:{collector.server_address[1]}/v1/traces",
+                headers=kwargs["headers"],
+                data=b"x",
+                # What an exporter before 1.45.1 sends: the requests default.
+                allow_redirects=True,
+            )
+        finally:
+            target.shutdown()
+            collector.shutdown()
+        assert response.status_code == 307
+        assert got == []
+
+
+def test_otlp_headers_follow_no_redirect_through_the_exporter_in_subprocess() -> None:
+    # R8 with the installed exporter: a collector answering 307 never sees its
+    # header secret resent to the Location. Subprocess-isolated (write-once OTel
+    # globals). Skips when the `otel` extra is absent.
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http")
+    secret = "otlp-secret-0123456789abcdef"
+    code = textwrap.dedent(
+        """
+        import json, os, threading, http.server, socketserver
+        os.environ["PARTICLES_CONFIG"] = "/nonexistent-observability-test.yaml"
+        got = []
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                got.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(200); self.end_headers()
+            def log_message(self, *a): pass
+        target = socketserver.TCPServer(("127.0.0.1", 0), Target)
+        tport = target.server_address[1]
+        class Collector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                self.send_response(307)
+                self.send_header("Location", f"http://127.0.0.1:{tport}/v1/traces")
+                self.end_headers()
+            def log_message(self, *a): pass
+        collector = socketserver.TCPServer(("127.0.0.1", 0), Collector)
+        cport = collector.server_address[1]
+        for s in (target, collector):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from particles.config import ObservabilityConfig
+        from particles.observability import setup as st
+        cfg = ObservabilityConfig(enabled=True, exporter="otlp", endpoint=f"http://127.0.0.1:{cport}")
+        kwargs = st._otlp_kwargs(cfg, "traces")
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(OTLPSpanExporter(**kwargs)))
+        provider.get_tracer("probe").start_span("probe").end()
+        print(json.dumps({"trust_env": kwargs["session"].trust_env, "redirect_target": got}))
+        """
+    )
+    env = {**os.environ, "PARTICLES_OTEL_EXPORTER_HEADERS": f"x-api-key={secret}"}
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out == {"trust_env": False, "redirect_target": []}
+
+
+class _RecordingSpan:
+    def __init__(self, sink: dict[str, object]) -> None:
+        self._sink = sink
+
+    def set_attribute(self, key: str, value: object) -> None:
+        self._sink[key] = value
+
+    def __enter__(self) -> _RecordingSpan:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+class _RecordingTracer:
+    def __init__(self, sink: dict[str, object]) -> None:
+        self._sink = sink
+
+    def start_as_current_span(self, _name: str, *_a: object, **_k: object) -> _RecordingSpan:
+        return _RecordingSpan(self._sink)
+
+
+class TestCliRootSpanCarriesNoArguments:
+    """Q16 (SECURITY_REVIEW_20261025-1): the CLI root span names the verb, never its arguments.
+
+    The span is already named ``cli.<verb>``; ``cli.command`` used to carry
+    the whole command line.
+
+    The route-template rule of the server spans: a query's text, a deposited
+    URL with its query string or a particle id would otherwise reach the
+    collector past every URL scrub.
+    """
+
+    _QUESTION = "what did the audit find about project-zeta"
+
+    @staticmethod
+    async def _noop() -> None:
+        return None
+
+    def test_outside_a_command_the_verb_alone_is_recorded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opentelemetry import trace
+
+        from particles.api.cli import run
+
+        attributes: dict[str, object] = {}
+        monkeypatch.setattr(trace, "get_tracer", lambda *_a, **_k: _RecordingTracer(attributes))
+        monkeypatch.setattr(sys, "argv", ["particles", "query", self._QUESTION])
+        run(self._noop())
+        assert attributes == {"cli.command": "query"}
+
+    def test_inside_a_command_group_the_verb_alone_is_recorded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import typer
+        from opentelemetry import trace
+        from typer.testing import CliRunner
+
+        from particles.api.cli import run
+
+        attributes: dict[str, object] = {}
+        monkeypatch.setattr(trace, "get_tracer", lambda *_a, **_k: _RecordingTracer(attributes))
+        root = typer.Typer()
+        group = typer.Typer()
+        root.add_typer(group, name="particle")
+
+        @group.command("show")
+        def show(particle_id: str, verbose: bool = False) -> None:
+            run(self._noop())
+
+        @root.callback()
+        def main() -> None:
+            return None
+
+        argv = ["particle", "show", "p-secret-id", "--verbose"]
+        monkeypatch.setattr(sys, "argv", ["particles", *argv])
+        result = CliRunner().invoke(root, argv, prog_name="particles")
+        assert result.exit_code == 0, result.output
+        assert attributes == {"cli.command": "particle"}
+
+
+class _ExceptionRecordingSpan:
+    """A span that behaves as the SDK's does when an exception leaves it.
+
+    ``start_as_current_span`` records an ``exception`` event carrying the
+    exception's message unless it is opened with ``record_exception=False``,
+    and marks the span ERROR unless ``set_status_on_exception=False``.
+    """
+
+    def __init__(self, sink: dict[str, object], kwargs: dict[str, object]) -> None:
+        self._sink = sink
+        self._kwargs = kwargs
+
+    def set_attribute(self, key: str, value: object) -> None:
+        self._sink[key] = value
+
+    def set_status(self, status: object) -> None:
+        self._sink["status"] = getattr(getattr(status, "status_code", None), "name", status)
+
+    def __enter__(self) -> _ExceptionRecordingSpan:
+        return self
+
+    def __exit__(self, _type: object, exc: BaseException | None, _tb: object) -> None:
+        if exc is None:
+            return None
+        if self._kwargs.get("record_exception", True):
+            self._sink["exception.message"] = str(exc)
+        if self._kwargs.get("set_status_on_exception", True):
+            self._sink["status"] = "ERROR"
+        return None
+
+
+class _ExceptionRecordingTracer:
+    def __init__(self, sink: dict[str, object]) -> None:
+        self._sink = sink
+
+    def start_as_current_span(
+        self, _name: str, *_a: object, **kwargs: object
+    ) -> _ExceptionRecordingSpan:
+        return _ExceptionRecordingSpan(self._sink, kwargs)
+
+
+class TestCliRootSpanCarriesNoExceptionMessage:
+    """R7 (SECURITY_REVIEW_20261025-2): a failed verb exports no exception message.
+
+    A deposit of a URL answering 404 fails with ``raise_for_status``, whose
+    text is the URL with its query string. Recorded as the root span's
+    exception event, it would reach the collector past every URL scrub.
+    """
+
+    _ARG = "https://files.example.test/report.pdf?X-Amz-Signature=audit0123456789abcdef"
+
+    def test_the_root_span_records_the_exception_type_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+        from opentelemetry import trace
+
+        from particles.api.cli import run
+
+        sink: dict[str, object] = {}
+        monkeypatch.setattr(trace, "get_tracer", lambda *_a, **_k: _ExceptionRecordingTracer(sink))
+        monkeypatch.setattr(sys, "argv", ["particles", "deposit", self._ARG])
+
+        async def verb() -> None:
+            request = httpx.Request("GET", self._ARG)
+            httpx.Response(404, request=request).raise_for_status()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            run(verb())
+        assert "X-Amz-Signature" not in repr(sink)
+        assert sink == {
+            "cli.command": "deposit",
+            "error.type": "HTTPStatusError",
+            "status": "ERROR",
+        }
+
+
+def test_cli_root_span_exports_no_argument_inside_a_recorded_exception_in_subprocess() -> None:
+    # R7 with the real SDK: every exported span and event of a failed verb is
+    # free of its argument. Subprocess-isolated (write-once OTel globals + argv).
+    pytest.importorskip("opentelemetry.sdk")
+    arg = "https://files.example.test/report.pdf?X-Amz-Signature=audit0123456789abcdef"
+    code = textwrap.dedent(
+        """
+        import json, os, sys
+        os.environ["PARTICLES_CONFIG"] = "/nonexistent-observability-test.yaml"
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        ARG = sys.argv[1]
+        sys.argv = ["particles", "deposit", ARG]
+        import httpx
+        from particles.api.cli import run
+        async def verb():
+            request = httpx.Request("GET", ARG)
+            httpx.Response(404, request=request).raise_for_status()
+        try:
+            run(verb())
+        except BaseException:
+            pass
+        spans = []
+        for s in exporter.get_finished_spans():
+            spans.append({"name": s.name,
+                          "status": s.status.status_code.name,
+                          "attributes": {k: str(v) for k, v in s.attributes.items()},
+                          "events": [{k: str(v) for k, v in e.attributes.items()}
+                                     for e in s.events]})
+        print(json.dumps(spans))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, arg], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    exported = result.stdout.strip().splitlines()[-1]
+    assert "X-Amz-Signature" not in exported
+    assert arg not in exported
+    assert '"name": "cli.deposit"' in exported
+    assert '"status": "ERROR"' in exported
 
 
 class _FakeSpan:
@@ -492,11 +975,16 @@ def test_sqlalchemy_span_has_no_user_literal_in_subprocess() -> None:
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    # The DB span was exported with the parameterized statement (placeholder)...
+    # The bound user literal never reaches any exported attribute...
+    assert "SENTINELSUBJECTXYZ" not in result.stdout
+    if "falls outside of that range" in result.stderr:
+        # The instrumentor declines a SQLAlchemy release it does not list as
+        # supported and exports no DB span at all, so the literal cannot leak
+        # through one; the placeholder half below has nothing to read.
+        pytest.skip("the SQLAlchemy instrumentor does not support this SQLAlchemy")
+    # ...and the DB span was exported with the parameterized statement.
     assert "db.statement" in result.stdout
     assert "WHERE name = ?" in result.stdout
-    # ...and the bound user literal never reaches any exported attribute.
-    assert "SENTINELSUBJECTXYZ" not in result.stdout
 
 
 class TestTracingEmbeddingModel:
@@ -533,3 +1021,70 @@ class TestTracingEmbeddingModel:
                 return []
 
         assert _TracingEmbeddingModel(_Inner()).sentinel == "delegated"
+
+
+class TestChildSpansCarryNoExceptionMessage:
+    """R7 (SECURITY_REVIEW_20261026-1, W13): no span below the root records a message.
+
+    The ``@traced`` operation spans, the extraction, embedding and LLM spans
+    and the MCP tool spans each record the exception's type alone: a failed URL
+    deposit's message is the URL with its query string.
+    """
+
+    _SECRET = "X-Amz-Signature=audit6childspan0123456789"
+    _URL = f"https://files.example.test/report.pdf?{_SECRET}"
+
+    def test_a_failed_url_deposit_span_carries_no_part_of_the_query(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed URL deposit's operation span carries no part of the deposited URL's query."""
+        import asyncio
+        from typing import Any
+
+        import httpx
+
+        from particles.corpus import deposit as deposit_mod
+        from particles.observability import spans
+
+        sink: dict[str, object] = {}
+        monkeypatch.setattr(spans, "_tracer", _ExceptionRecordingTracer(sink))
+        monkeypatch.setattr("particles.url_safety.validate_fetch_url", lambda _url: None)
+
+        async def fake_get_capped(_client: Any, url: str, **_kw: Any) -> httpx.Response:
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(deposit_mod, "get_capped", fake_get_capped)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(deposit_mod.deposit_url(None, self._URL, source_type="web"))  # type: ignore[arg-type]
+        assert self._SECRET not in repr(sink)
+        assert sink == {"error.type": "HTTPStatusError", "status": "ERROR"}
+
+    def test_every_hand_rolled_span_opens_without_exception_recording(self) -> None:
+        """Every ``start_as_current_span`` call in the package passes both opt-outs."""
+        import ast
+        from pathlib import Path
+
+        import particles
+
+        root = Path(particles.__file__).parent
+        unguarded: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "start_as_current_span"
+                ):
+                    continue
+                kwargs = {
+                    kw.arg: kw.value.value
+                    for kw in node.keywords
+                    if isinstance(kw.value, ast.Constant)
+                }
+                if (
+                    kwargs.get("record_exception") is not False
+                    or kwargs.get("set_status_on_exception") is not False
+                ):
+                    unguarded.append(f"{path.relative_to(root.parent)}:{node.lineno}")
+        assert not unguarded, unguarded

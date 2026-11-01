@@ -374,7 +374,7 @@ class TestSubjectsSplitCli:
         )
 
         async def fake_resolve(
-            session: object, name: str, asserted_by: str = "general-extractor"
+            session: object, name: str, asserted_by: str = "general-extractor", **_: object
         ) -> Subject:
             from particles.store.subject_store import insert_subject
 

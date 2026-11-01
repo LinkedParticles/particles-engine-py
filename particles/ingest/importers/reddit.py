@@ -95,7 +95,9 @@ class RedditImporter:
         """
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # RecursionError: a body nested past the decoder's depth
+            # (security review 2026-10-30, AB17).
             return None
         post = _get_post(data)
         if not post:
@@ -352,7 +354,9 @@ async def _arctic_shift_get(
         )
     try:
         body = resp.json()
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
+        # RecursionError: a body nested past the decoder's depth (security
+        # review 2026-10-30, AB17).
         raise SourceFetchError(
             f"The Arctic Shift archive returned a body that is not JSON for {url}", url=url
         ) from exc

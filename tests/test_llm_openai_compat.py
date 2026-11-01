@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -205,6 +207,24 @@ def test_complete_omits_optional_fields_when_unset(
     assert body["messages"] == [{"role": "user", "content": "p"}]
 
 
+def test_the_request_offers_the_model_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The body is built from fixed keys, so no caller option offers the model a tool.
+
+    Stored text reaches every prompt, so a model offered a tool could be steered
+    into calling it (security review 2026-10-27-1, J11).
+    """
+    client = _mock_client([_ok_response("ok")])
+    _install_client(monkeypatch, client)
+    tool = {"type": "function", "function": {"name": "fetch", "parameters": {}}}
+    asyncio.run(
+        OpenAICompatProvider(name="local", model="m").complete(
+            "p", max_tokens=8, tools=[tool], tool_choice="auto", functions=[tool]
+        )
+    )
+    body = client.post.call_args.kwargs["json"]
+    assert set(body) <= {"model", "messages", "max_tokens"}, body
+
+
 def test_complete_sends_auth_header_when_key_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -242,6 +262,23 @@ def test_key_is_refused_over_cleartext_to_a_non_loopback_host(
     with pytest.raises(PlaintextKeyRefused, match="allow_plaintext_key"):
         asyncio.run(OpenAICompatProvider(name="lan", model="m").complete("p", max_tokens=8))
     client.post.assert_not_called()
+
+
+def test_a_refusal_and_its_warning_do_not_echo_the_userinfo(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R36 (SECURITY_REVIEW_20261025-2): the endpoint is named without its userinfo."""
+    secret = "userinfo-secret-0123456789"
+    url = f"http://op:{secret}@models.example.invalid:8000/v1"
+    with pytest.raises(PlaintextKeyRefused) as refused:
+        oc_mod._check_plaintext_key("lan", url, allow=False)
+    assert secret not in str(refused.value)
+    assert "http://models.example.invalid:8000/v1" in str(refused.value)
+    oc_mod._warn_plaintext_key_once.cache_clear()
+    with caplog.at_level("WARNING", logger=oc_mod.__name__):
+        oc_mod._check_plaintext_key("lan", url, allow=True)
+    assert "unencrypted" in caplog.text
+    assert secret not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -502,6 +539,51 @@ def test_scrub_response_body_redacts_bearer_token() -> None:
     assert "SECRET2" not in _scrub_response_body("error: bearer SECRET2")
     # Truncation still applies (cap at 500 chars).
     assert len(_scrub_response_body("x" * 1000)) == 500
+
+
+_ECHOED_KEY = "audit-provider-key-6f1c2e9b0a"
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        "invalid api key: {key}",
+        '{{"error": {{"message": "Incorrect API key provided: {key}"}}}}',
+        "x-api-key={key}",
+    ],
+    ids=["bare", "json", "header-form"],
+)
+async def test_a_gateway_error_never_carries_the_provider_key(
+    monkeypatch: pytest.MonkeyPatch, echo: str
+) -> None:
+    """Q13 (SECURITY_REVIEW_20261025-1): the key the request sent, in any spelling.
+
+    The Bearer scrub matched one spelling only; an endpoint that echoes the key
+    another way had it copied into the error, and from there into the hook
+    log, stderr and a consolidation pass's stored status.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        return httpx.Response(401, text=echo.format(key=token))
+
+    @asynccontextmanager
+    async def mock_client(**_kwargs: Any) -> Any:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            yield client
+
+    monkeypatch.setattr(oc_mod, "egress_client", mock_client)
+    with pytest.raises(oc_mod.OpenAICompatCompletionError) as caught:
+        await oc_mod._post_with_retry(
+            "https://llm.example/v1/chat/completions",
+            {"model": "m"},
+            {"Authorization": f"Bearer {_ECHOED_KEY}"},
+            max_retries=0,
+            backoff=0.0,
+            timeout=1.0,
+        )
+    assert _ECHOED_KEY not in str(caught.value)
+    assert caught.value.status_code == 401
 
 
 def test_error_does_not_surface_echoed_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -770,3 +852,12 @@ def test_cache_prefix_is_folded_into_system_content(monkeypatch: pytest.MonkeyPa
     # The prefix is prepended to the system message; no cache_control leaks out.
     assert body["messages"][0] == {"role": "system", "content": "FIXED RULES VARIABLE"}
     assert "cache_control" not in json.dumps(body)
+
+
+def test_scrub_response_body_redacts_every_credential_header_sent() -> None:
+    """Q13 (SECURITY_REVIEW_20261026-1): a credential header of any name the
+    request sent is scrubbed, not only the three well-known ones."""
+    headers = {"Content-Type": "application/json", "X-Gateway-Token": "audit6-gw-token-01234"}
+    scrubbed = _scrub_response_body("echo: audit6-gw-token-01234", headers=headers)
+    assert "audit6-gw-token" not in scrubbed
+    assert "application/json" in _scrub_response_body("application/json", headers=headers)

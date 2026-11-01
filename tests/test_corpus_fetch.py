@@ -898,9 +898,13 @@ class TestRefreshAllowlist:
     def test_a_recorded_worktree_root_also_admits_the_main_checkout(self, tmp_path: Path) -> None:
         main = (tmp_path / "main").resolve()
         worktree = main / ".claude" / "worktrees" / "wt"
-        (main / ".git" / "worktrees" / "wt").mkdir(parents=True)
+        gitdir = main / ".git" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
         worktree.mkdir(parents=True)
-        (worktree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n")
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+        # The back-link and commondir git writes (security review K6).
+        (gitdir / "gitdir").write_text(f"{worktree / '.git'}\n")
+        (gitdir / "commondir").write_text("../..\n")
 
         assert is_refresh_allowed(main / "AGENTS.md", recorded_roots=[worktree])
         assert is_refresh_allowed(worktree / "AGENTS.md", recorded_roots=[worktree])
@@ -980,7 +984,7 @@ class TestLocalRefreshProvenanceAndSwap:
         """The ids the local enrolment paths record are the ones the derived roots admit."""
         import inspect
 
-        from particles.corpus.fetch import LOCAL_LAZY_DEPOSITORS
+        from particles.corpus.fetch import LOCAL_LAZY_DEPOSITORS, MEMORY_FILE_DEPOSITORS
         from particles.corpus.rule_sources import sync_rule_sources
 
         default = inspect.signature(sync_rule_sources).parameters["deposited_by"].default
@@ -989,6 +993,42 @@ class TestLocalRefreshProvenanceAndSwap:
         assert 'deposited_by="claude-code-hook"' in hook.read_text(encoding="utf-8")
         init = hook.with_name("init.py").read_text(encoding="utf-8")
         assert 'deposited_by="init"' in init
+        # ``particles audit`` deposits memory files; only the memory-file root admits it.
+        audit = hook.with_name("audit.py").read_text(encoding="utf-8")
+        assert 'deposited_by="audit"' in audit
+        assert LOCAL_LAZY_DEPOSITORS | {"audit"} == MEMORY_FILE_DEPOSITORS
+        assert "audit" not in LOCAL_LAZY_DEPOSITORS
+
+    @pytest.mark.asyncio
+    async def test_an_audit_enrolled_memory_file_still_refreshes(
+        self, db_session: Any, _isolated_home: Path
+    ) -> None:
+        note = self._memory_file(_isolated_home)
+        entry = await _add_entry(db_session, **_local_entry_kwargs(note), deposited_by="audit")
+        await db_session.commit()
+
+        snap = await maybe_refetch(db_session, entry.entry_id, force=True)
+        assert snap is not None
+        assert snap.content_hash == sha256(b"another project's memory")
+
+    def test_the_refusal_names_its_cause(self, tmp_path: Path, _isolated_home: Path) -> None:
+        from particles.corpus.fetch import RefreshRefusal, refresh_refusal
+
+        note = self._memory_file(_isolated_home)
+        repo = (tmp_path / "repo").resolve()
+        repo.mkdir()
+        assert refresh_refusal(note, deposited_by="audit") is None
+        assert refresh_refusal(note, deposited_by="api-user") is (
+            RefreshRefusal.UNTRUSTED_DEPOSITOR
+        )
+        rule = repo / "AGENTS.md"
+        assert refresh_refusal(rule, recorded_roots=[repo], deposited_by="rule-sync") is None
+        assert refresh_refusal(rule, recorded_roots=[repo], deposited_by="audit") is (
+            RefreshRefusal.UNTRUSTED_DEPOSITOR
+        )
+        # Outside every root the depositor does not matter.
+        for by in ("rule-sync", "api-user", None):
+            assert refresh_refusal(rule, deposited_by=by) is RefreshRefusal.OUTSIDE_ROOTS
 
     @pytest.mark.asyncio
     async def test_a_parent_swapped_after_the_root_check_is_not_read(

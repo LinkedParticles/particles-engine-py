@@ -19,8 +19,9 @@ import pytest
 
 
 def make_repo(root: Path) -> Path:
-    """A main checkout: a directory with a ``.git`` *directory*."""
-    (root / ".git").mkdir(parents=True)
+    """A main checkout: a directory with a ``.git`` *directory* holding HEAD and objects."""
+    (root / ".git" / "objects").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     return root
 
 
@@ -31,6 +32,7 @@ def make_worktree(repo: Path, worktree: Path, name: str = "wt") -> Path:
     (git_dir / "commondir").write_text("../..\n")
     worktree.mkdir(parents=True)
     (worktree / ".git").write_text(f"gitdir: {git_dir}\n")
+    (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n")
     return worktree
 
 

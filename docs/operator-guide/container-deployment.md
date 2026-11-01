@@ -31,8 +31,14 @@ gh attestation verify oci://ghcr.io/linkedparticles/engine:latest --owner Linked
 ```
 
 Each platform image also carries a signed **SBOM**, a CycloneDX 1.6
-inventory of its Debian packages, its Python closure, and the exact revision of
-the embedding encoder baked into it (see [What is in the image](#what-is-in-the-image)).
+inventory of its Debian packages, its Python closure, and the revision of the
+embedding encoder baked into it, which the code pins and the image workflow
+checks (see [What is in the image](#what-is-in-the-image)). The job that signs
+it runs no code from the image or a package index, starts no builder
+container, and signs only an SBOM that names that image's own digests and the
+pinned encoder. No job that holds a write or signing identity runs the image:
+the post-publish smoke test runs in a job of its own that can
+only read, with each container cut off from the network.
 Verify it and print it in one step:
 
 ```bash
@@ -66,8 +72,9 @@ export PARTICLES_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urls
 docker compose -f deploy/compose.yaml up --build
 ```
 
-`http://localhost:8000/health` is open (no auth gate). Everything else,
-**including the web UI's app shell**, requires the bearer:
+`http://localhost:8000/health` is open (no auth gate). Everything else except
+the API schema, the web UI's static shell and the `/` redirect requires the
+bearer:
 
 ```bash
 curl -s -H "Authorization: Bearer $PARTICLES_API_KEY" http://localhost:8000/curation
@@ -114,22 +121,35 @@ Mount one volume at `/data` and the whole store is backed up, moved, or
 inspected as a unit. There is no cwd-relative default left in the image to
 mis-fire.
 
+Use a Docker named volume, as the commands on this page do: only the image's
+user (uid `10001`) writes it. A host directory bind-mounted at `/data`
+(`-v /srv/particles:/data`) brings the host's other accounts back to the
+store, the key file and the blobs, so give it a directory only uid `10001` can
+write. The engine refuses a key file in a group-writable directory unless
+`api.keys_dir_group` names that group, which the Helm chart sets from its
+`fsGroup`; leave it unset for a bind mount. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#deployment-posture-authentication-and-the-read-surface)
+says which protections that keeps.
+
 ## The key is mandatory
 
 The image's entrypoint is `particles engine serve 0.0.0.0:8000 --daemon`.
 Binding non-loopback arms the fail-closed gate, so **the
-container refuses to start without a real `PARTICLES_API_KEY`**:
+container refuses to start with no key**: no real `PARTICLES_API_KEY` and no
+live per-client key in `/data/engine-keys.json`:
 
 ```
-Refusing to start: bearer auth is disabled (PARTICLES_API_KEY is unset or
-'dev-key') and the bind from api.bind_host, '0.0.0.0', is not a loopback
+Refusing to start: bearer auth is disabled (PARTICLES_API_KEY is unset, empty
+or 'dev-key') and the bind from api.bind_host, '0.0.0.0', is not a loopback
 address …
 ```
 
 That refusal is a tested property of the image, not a hope: the image cannot
-come up open by accident. Set the variable to a real secret (compose's
-`PARTICLES_API_KEY:?…` fails the `up` with the same message rather than letting
-the container crash-loop).
+come up keyless on `0.0.0.0` by accident. Set the variable to a real secret,
+or mint a per-client key on the volume, which also satisfies the gate. Since
+`1.221.7` the compose file leaves `PARTICLES_API_KEY` optional (with neither,
+the container restarts on the refusal), and the Helm chart runs without it
+when `auth.keysFileOnly` is set. `PARTICLES_API_KEY` is the operator's key, so
+an engine run on per-client keys alone holds no shared operator secret.
 
 `ANTHROPIC_API_KEY` is optional. Without it the engine serves every read and
 write verb; the LLM-priced work (extraction, semantic lint, the consolidation
@@ -139,16 +159,19 @@ rather than failing quietly.
 ## Reads require the bearer too
 
 The image's baked config sets `api.require_auth_for_reads: true`, so every read
-route asks for the same bearer as the writes. Only `GET /health`, the API
-schema at `GET /openapi.json` and the web UI shell at `/app` stay open. Without it, a client that reached the port could
+route asks for a key, as the writes do; a key of any role passes, a reader's
+included. Only `GET /health`, the API
+schema at `GET /openapi.json`, the web UI shell at `/app` and the redirect at
+`/`, which carries no data, stay open. Without it, a client that reached the port could
 list the store and read the raw deposited bytes (`GET /corpus/blob/{selector}`,
 `GET /particles/{id}/source`) with no credential, because the image binds
 `0.0.0.0`.
 
-Every client already sends the bearer on every call: the CLI's remote backend
+Every client already sends its key on every call: the CLI's remote backend
 (`PARTICLES_ENGINE_TOKEN`), the web UI (the token in its settings), and the
 Obsidian plugin. A script that read the engine with a bare `curl` now gets a
-`401` and needs `-H "Authorization: Bearer $PARTICLES_API_KEY"`.
+`401` and needs `-H "Authorization: Bearer <key>"`, a reader key when it only
+reads.
 
 **Upgrading.** This changed in 1.210.5. An image from an earlier release served
 reads unauthenticated. A config you mount over `/etc/particles/config.yaml`
@@ -157,8 +180,13 @@ replaces the baked one, and the image also sets
 any file, so a mounted config no longer opens the reads by leaving the line out.
 Open them only when the network itself is your read-access control (a private
 mesh with no other tenants), with `-e PARTICLES_API_REQUIRE_AUTH_FOR_READS=false`.
-`particles engine serve` prints a warning whenever it binds beyond loopback with
-the reads open.
+`particles engine serve`, the image's command, prints a warning whenever it
+binds beyond loopback with the reads open, and the engine logs one at startup
+for the bind it can read: from `engine serve` or a `uvicorn` command line, and
+on the first request of a launch with `--lifespan off`. A script that calls
+`uvicorn.run` gives it no bind to read, so there the startup warning follows
+`api.bind_host`, and the first request on a non-loopback
+address logs it.
 
 ## Browser requests from other sites are refused
 
@@ -166,7 +194,7 @@ Every gated route refuses a request that a web page on another site sends, so
 a page open in the operator's browser cannot deposit into the engine or start
 paid work through it. The browser marks such a request itself
 (`Sec-Fetch-Site: cross-site`, or an `Origin` that is not the engine's own), and
-a request carrying a valid bearer is still served. The web UI at `/app` is
+a request carrying a valid key is still served. The web UI at `/app` is
 same-origin and is unaffected. To let another browser origin call the engine,
 list it in `api.allowed_origins`.
 
@@ -174,7 +202,9 @@ A DNS-rebinding page is different: it reaches the engine's address under its
 own hostname, and the browser treats it as same-origin. List the names the
 engine answers on in `api.allowed_hosts` (for example `engine.example.org` or
 `*.tailnet.example`) and every other `Host` is refused on every path. The
-loopback names stay allowed, so the image's own health check keeps working; a
+image binds `0.0.0.0`, so with the list empty it refuses no `Host` (an engine
+bound to loopback answers only the loopback names whatever the list holds).
+The loopback names stay allowed, so the image's own health check keeps working; a
 Kubernetes probe that sends the pod address as its `Host` needs that address
 listed, or a `Host` header set on the probe.
 
@@ -212,8 +242,30 @@ Open `http://localhost:8000/app` in a browser. The app shell (the static
 **unauthenticated**, so the page loads with no header.
 
 Everything with data behind it is still gated. On first load the app asks for
-the engine bearer; paste `$PARTICLES_API_KEY` into its settings and the
-`/curation`, `/query`, and `/graph` calls it makes from then on carry it.
+the engine bearer; paste `$PARTICLES_API_KEY` (or an operator or reader key of
+its own, below) into its settings and the `/curation`, `/query`, and `/graph`
+calls it makes from then on carry it.
+
+### Keys for each client
+
+`PARTICLES_API_KEY` is the operator's key. Give every other client a key of its
+own, minted inside the container so the key file lands on the data
+volume (`api.keys_file: /data/engine-keys.json` in the baked config):
+
+```bash
+docker compose exec engine particles engine keys create --role agent --principal mcp:claude-code
+docker compose exec engine particles engine keys list
+```
+
+`create` writes the new key to a file beside the key file, readable only by
+uid `10001` (`/data/<key id>.key`, its path printed), and shows it nowhere
+else; hand it to its client and delete the file, or pass `--print-token` to
+print it instead.
+`docker compose exec` and `kubectl exec` run as the image's user (uid 10001),
+which is the engine's own, so the file they write is one the engine accepts.
+The verbs refuse to create the file as root. See
+[Remote engine → Per-client keys and roles](remote-engine.md#per-client-keys-and-roles)
+for the roles and which key each client holds.
 
 This was the other way round until, and it did not work: a browser
 navigation cannot send an `Authorization` header, and the settings view where
@@ -283,7 +335,10 @@ web-clipper watcher, mount your captures directory read-only and point
 ### Watching the daemon
 
 `GET /health` is both the liveness and the readiness probe, and in daemon mode
-it discloses the tasks:
+it discloses the tasks. With reads closed, as the image ships them, it shows
+them only to a request that carries a key the engine accepts, so a request
+with no key (the image's own health check among them) gets the status without
+the `daemon` block:
 
 ```json
 {
@@ -389,7 +444,10 @@ config.
 ## What is in the image
 
 - Python 3.11-slim, the wheel, and its locked dependency closure
-  (`uv sync --frozen --no-dev`).
+  (`uv sync --frozen --no-dev`) in an image you build from a checkout. The
+  published image installs the released pair from PyPI instead, with its
+  dependencies resolved at build time under a date cutoff and not
+  hash-locked; its SBOM lists what was resolved.
 - The committed web-UI bundle, so `/app` always registers; the wheel excludes
   it, the image must not.
 - **The embedding encoder, baked at build time** (`all-MiniLM-L6-v2`).
@@ -426,9 +484,16 @@ config.
   the pushed image, then signed and pushed to the registry beside it (see
   [Quick start](#quick-start-docker-run) for the verify command). A scanner
   cannot see model weights, so the encoder is added explicitly as a
-  `machine-learning-model` component with its Hugging Face commit. That
-  commit is worth reading: the code names the model but not a revision, so the
-  SBOM is the only record of which weights a given image baked.
+  `machine-learning-model` component with its Hugging Face commit. The code
+  pins that commit. Before it pushes the version and `latest` tags, the image
+  workflow copies the encoder cache out of a container it never starts and
+  hashes every file under the pinned snapshot against the commit's recorded
+  file digests, failing on any other file, snapshot or cache of the encoder,
+  and it refuses to sign an SBOM whose encoder is not the pin. Images built
+  by the workflow of an earlier release were checked less strictly (the
+  changelog says which); for an image before `1.215.1` the SBOM entry is the
+  only record of which weights it baked. A workflow change reaches the public
+  repository with the next release exported to it.
 - The Alembic migrations, which the wheel now force-includes under
   `particles/_alembic`, so the first boot creates a *stamped* schema
   and later `alembic upgrade head` works.

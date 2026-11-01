@@ -45,10 +45,12 @@ from mcp.server.lowlevel import Server
 from pydantic import AnyUrl
 
 from particles import __version__
+from particles.config import get_config
 from particles.db import DEFAULT_STORE
-from particles.egress import ensure_backstop
+from particles.egress import ensure_backstop, require_covered_loop
 from particles.mcp.limits import admit
 from particles.mcp.memory_compat import ops
+from particles.url_safety import url_without_userinfo
 
 log = logging.getLogger(__name__)
 
@@ -462,6 +464,28 @@ def _resolve_write_store(store: str | None) -> str:
     return _resolve_store(store)
 
 
+def _remote_engine_refusal() -> str | None:
+    """Why the façade cannot serve while ``engine.base_url`` names an engine, else ``None``.
+
+    The façade reads and writes its store in process, with no route through
+    the engine, so with an engine configured its memory would land in a local
+    store the operator does not use (security review 2026-10-25-2, M2). Until
+    it routes through the engine it refuses, as the native server's tools
+    never fall back to the local store.
+    """
+    base_url = get_config().engine.base_url
+    if not base_url:
+        return None
+    return (
+        "The memory-server façade cannot serve while engine.base_url is set "
+        f"({url_without_userinfo(base_url)}): "
+        "it reads and writes a local store in process and has no route to a remote engine, "
+        "so its memory would land in the wrong store. Run `particles memory serve` on the "
+        "engine's host against the engine's own store, or unset engine.base_url to use a "
+        "local store."
+    )
+
+
 def build_server(store: str | None = None) -> Server[Any, Any]:
     """Construct the façade server bound to ``store``.
 
@@ -498,6 +522,9 @@ def build_server(store: str | None = None) -> Server[Any, Any]:
     async def read_resource(uri: AnyUrl) -> str:
         from particles.db import session_scope
 
+        refusal = _remote_engine_refusal()
+        if refusal is not None:
+            raise ValueError(refusal)
         async with session_scope(read_store) as session:
             graph, _notes = await ops.read_graph(session)
         return json.dumps(graph, indent=2)
@@ -524,20 +551,37 @@ def build_server(store: str | None = None) -> Server[Any, Any]:
     async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         from particles.db import session_scope
 
+        refusal = _remote_engine_refusal()
+        if refusal is not None:
+            return _error_result(refusal)
         if name in _WRITE_TOOLS:
             try:
                 write_store = _resolve_write_store(store)
-                # Every façade write asserts through the §6.6 ladder, whose
-                # probe may call a model (security review D30).
-                admit(name)
+                if write_store != read_store:
+                    # The façade writes only the store it reads and the
+                    # stdio store rule checked: a sole allowlisted store
+                    # named nowhere else may be a relative file a cloned
+                    # repository ships (security review 2026-10-30-1, AB31).
+                    raise ValueError(
+                        f"The memory façade reads store {read_store!r} and writes only "
+                        f"that store; {write_store!r} is the store "
+                        "mcp.write.enabled_stores names. Start it with "
+                        f"`particles memory serve --store {write_store}`."
+                    )
+                # Every façade assertion runs the §6.6 ladder, whose probe may
+                # call a model, so the call is charged one token per assertion
+                # it can run, not one per call (security review D30, P26).
+                admit(name, _assertion_cost(name, arguments), store=write_store)
             except ValueError as exc:
                 return _error_result(str(exc))
-            async with session_scope(write_store, write=True) as session:
+            # No writer lock for the whole call: each operation commits its own
+            # writes under it, and each assertion's embedding and model probes
+            # run before it (security review 2026-10-31-1, AD3, AD5).
+            async with session_scope(write_store) as session:
                 try:
                     result = await _dispatch_write(session, write_store, name, arguments)
                 except ValueError as exc:
                     return _error_result(str(exc))
-                await session.commit()
             await _notify_graph_updated()
             return result
 
@@ -545,6 +589,38 @@ def build_server(store: str | None = None) -> Server[Any, Any]:
             return await _dispatch_read(session, name, arguments)
 
     return server
+
+
+def _items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _assertion_cost(name: str, arguments: dict[str, Any]) -> int:
+    """The §6.6 assertions a façade write can run: its rate-cap charge (P26).
+
+    Counted from the request before anything runs, so a refused call writes
+    nothing and probes nothing. It is an upper bound: an observation the store
+    already holds is skipped without a ladder run. A delete of observations or
+    relations only retracts, and a tool that asserts nothing still costs one.
+    """
+    match name:
+        case "create_entities":
+            return sum(
+                len(_items(e.get("observations")))
+                for e in _items(arguments.get("entities"))
+                if isinstance(e, dict)
+            )
+        case "add_observations":
+            return sum(
+                len(_items(o.get("contents")))
+                for o in _items(arguments.get("observations"))
+                if isinstance(o, dict)
+            )
+        case "create_relations":
+            return len(_items(arguments.get("relations")))
+        case "delete_entities":
+            return len(_items(arguments.get("entityNames")))  # one tombstone each
+    return 1
 
 
 async def _dispatch_write(
@@ -615,6 +691,9 @@ def main(store: str | None = None) -> None:
     server = build_server(store)
 
     async def _run() -> None:
+        # Refuse a loop the backstop cannot see before serving (security review
+        # 2026-10-26-1, U13); `particles memory serve` reports it and exits 1.
+        require_covered_loop()
         init_options = server.create_initialization_options()
         # The SDK hardcodes subscribe=False when deriving capabilities; the
         # reference declares {resources: {subscribe: true}} and clients check it

@@ -33,12 +33,13 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from opentelemetry import trace
 
 from particles import __version__
-from particles.config import get_config
-from particles.egress import ensure_backstop
+from particles.config import environment_engine_url, get_config
+from particles.egress import ensure_backstop, require_covered_loop
 from particles.mcp.resources import register_digest_resources
 from particles.mcp.tools.corpus import corpus_links_suggest, list_corpus_entries
 from particles.mcp.tools.diagnostics import quality_report
@@ -60,6 +61,7 @@ from particles.mcp.tools.write import (
     particle_tag,
     particle_untag,
 )
+from particles.url_safety import url_without_userinfo
 
 log = logging.getLogger(__name__)
 
@@ -140,8 +142,17 @@ def _traced_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with _mcp_tracer.start_as_current_span(f"mcp.{fn.__name__}"):
-            return await fn(*args, **kwargs)
+        # The exception's type alone, never its message (security review
+        # 2026-10-26-1, R7): a tool's error text can carry its arguments.
+        with _mcp_tracer.start_as_current_span(
+            f"mcp.{fn.__name__}", record_exception=False, set_status_on_exception=False
+        ) as span:
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
+                raise
 
     return wrapper
 
@@ -174,8 +185,48 @@ def build_server() -> FastMCP:
     return server
 
 
+def _note_the_engine_origin() -> None:
+    """Log once when the engine this server reaches was named by its environment (E2).
+
+    ``init claude-code`` pins ``PARTICLES_ENGINE_BASE_URL`` empty in the
+    registration, so the engine comes from the pinned config; a server whose
+    engine came from an inherited variable says so, naming it without any
+    userinfo, since Claude Code keeps the server's log (2026-10-27-1, W58).
+    """
+    inherited = environment_engine_url()
+    if inherited:
+        log.warning(
+            "MCP server: reaching the engine %s, named by PARTICLES_ENGINE_BASE_URL in this "
+            "server's environment rather than by its config",
+            url_without_userinfo(inherited),
+        )
+
+
+def _warn_on_an_operator_token() -> None:
+    """Log once when the server reaches a remote engine with an operator's key.
+
+    The MCP server is an agent: an agent with a shell reads its environment, so
+    an operator or legacy key there hands it every operator action.
+    """
+    if not get_config().engine.base_url:
+        return
+    from particles.api._keys import client_token_warning
+    from particles.secrets import get_engine_token_optional, get_particles_api_key
+
+    legacy = get_particles_api_key()
+    warning = client_token_warning(
+        get_engine_token_optional(), None if legacy == "dev-key" else legacy, agent_side=True
+    )
+    if warning is not None:
+        log.warning("MCP server: %s", warning)
+
+
 def main() -> None:
     """Entry point for ``particles mcp serve``.
+
+    Reached only through that verb, which applies the stdio store rule first.
+    The module has no ``__main__`` entry, since a
+    ``python -m`` launch would skip the rule (security review P47).
 
     Builds the server and runs it over stdio. The calling MCP client
     (Claude Code, Claude Desktop, etc.) spawns this as a child process
@@ -189,9 +240,14 @@ def main() -> None:
     # Arm the no-egress backstop before anything can connect.
     ensure_backstop()
     setup_observability()
+    _note_the_engine_origin()
+    _warn_on_an_operator_token()
     server = build_server()
-    server.run(transport="stdio")
 
+    async def _serve() -> None:
+        # Refuse a loop the backstop cannot see before serving (security review
+        # 2026-10-26-1, U13); `particles mcp serve` reports it and exits 1.
+        require_covered_loop()
+        await server.run_stdio_async()
 
-if __name__ == "__main__":
-    main()
+    anyio.run(_serve)

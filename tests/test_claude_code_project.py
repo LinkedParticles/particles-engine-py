@@ -98,6 +98,159 @@ class TestRepositoryRoot:
         assert repository_root(gone) == repo
 
 
+class TestPlantedGitFile:
+    """Security review 2026-10-24-2, P22: a ``.git`` file is a claim, checked against git."""
+
+    def _plant(self, tmp_path: Path) -> tuple[Path, Path]:
+        # The audit's proof layout: a pointer directory the planter owns whose
+        # commondir names another repository.
+        victim = make_repo(tmp_path / "victim")
+        planted = tmp_path / "unpacked"
+        pointer = planted / "meta"
+        pointer.mkdir(parents=True)
+        (planted / ".git").write_text("gitdir: meta\n", encoding="utf-8")
+        (pointer / "commondir").write_text("../../victim/.git\n", encoding="utf-8")
+        return victim, planted
+
+    def test_planted_gitfile_does_not_resolve_to_another_repository(self, tmp_path: Path) -> None:
+        victim, planted = self._plant(tmp_path)
+        assert repository_root(planted) == planted != victim
+
+    def test_planted_gitfile_does_not_bind_the_server_to_another_project(
+        self, tmp_path: Path
+    ) -> None:
+        from particles.api.cli._claude_code import server_project_key
+
+        victim, planted = self._plant(tmp_path)
+        assert server_project_key(planted) != claude_project_slug(victim)
+
+    def test_a_worktree_entry_without_its_back_pointer_is_refused(self, tmp_path: Path) -> None:
+        # The gitdir names a real worktree entry of the victim, but that entry's
+        # back-pointer names the victim's own worktree, not this checkout.
+        victim = make_repo(tmp_path / "victim")
+        make_worktree(victim, tmp_path / "real-wt")
+        planted = tmp_path / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(f"gitdir: {victim / '.git' / 'worktrees' / 'wt'}\n")
+        assert repository_root(planted) == planted
+
+    def test_a_gitdir_outside_the_worktrees_directory_is_refused(self, tmp_path: Path) -> None:
+        victim = make_repo(tmp_path / "victim")
+        git_dir = tmp_path / "fake" / "worktrees" / "wt"
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text(f"{victim / '.git'}\n")
+        planted = tmp_path / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(f"gitdir: {git_dir}\n")
+        (git_dir / "gitdir").write_text(f"{planted / '.git'}\n")
+        assert repository_root(planted) == planted
+
+    def test_a_relative_back_pointer_is_accepted(self, tmp_path: Path) -> None:
+        # ``worktree.useRelativePaths`` writes the back-pointer relative to the entry.
+        repo = make_repo(tmp_path / "repo")
+        worktree = make_worktree(repo, tmp_path / "wt")
+        (repo / ".git" / "worktrees" / "wt" / "gitdir").write_text("../../../../wt/.git\n")
+        assert repository_root(worktree) == repo
+
+    def test_a_real_git_worktree_resolves(self, tmp_path: Path) -> None:
+        import os
+        import shutil
+        import subprocess
+
+        if shutil.which("git") is None:
+            pytest.skip("needs git")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", str(repo), *args], check=True, capture_output=True, env=env
+            )
+
+        git("init", "-q")
+        git(
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.test",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "init",
+        )
+        git("worktree", "add", "-q", str(tmp_path / "wt"))
+        assert repository_root(tmp_path / "wt") == repo
+
+
+class TestLinkedGitFile:
+    """Security review 2026-10-25-1, Q26: a ``.git`` file that is a link is not believed.
+
+    The audit's proofs: a directory whose ``.git`` is a symbolic or hard link to
+    a live worktree's ``.git`` file passed every layout check, since the
+    back-pointer names that same file.
+    """
+
+    def test_a_symlinked_dot_git_file_does_not_adopt_another_repository(
+        self, tmp_path: Path
+    ) -> None:
+        victim = make_repo(tmp_path / "victim")
+        worktree = make_worktree(victim, tmp_path / "victim-wt")
+        planted = tmp_path / "planted-symlink"
+        planted.mkdir()
+        (planted / ".git").symlink_to(worktree / ".git")
+        assert repository_root(planted) == planted
+
+    def test_a_hardlinked_dot_git_file_does_not_adopt_another_repository(
+        self, tmp_path: Path
+    ) -> None:
+        import os
+
+        victim = make_repo(tmp_path / "victim")
+        worktree = make_worktree(victim, tmp_path / "victim-wt")
+        planted = tmp_path / "planted-hardlink"
+        planted.mkdir()
+        os.link(worktree / ".git", planted / ".git")
+        assert repository_root(planted) == planted
+        # Nor does the worktree itself while its .git has a second name: the
+        # two entries cannot be told apart, so neither is believed.
+        assert repository_root(worktree) == worktree
+
+    def test_a_linked_dot_git_file_does_not_bind_the_server(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import server_project_key
+
+        victim = make_repo(tmp_path / "victim")
+        worktree = make_worktree(victim, tmp_path / "victim-wt")
+        planted = tmp_path / "planted"
+        planted.mkdir()
+        (planted / ".git").symlink_to(worktree / ".git")
+        assert server_project_key(planted) != claude_project_slug(victim)
+
+    def test_the_verified_reading_refuses_a_linked_dot_git_file(self, tmp_path: Path) -> None:
+        import os
+
+        from particles.corpus.worktree import verified_main_checkout
+
+        victim = make_repo(tmp_path / "victim")
+        worktree = make_worktree(victim, tmp_path / "victim-wt")
+        assert verified_main_checkout(worktree) == victim.resolve()
+        planted = tmp_path / "planted"
+        planted.mkdir()
+        os.link(worktree / ".git", planted / ".git")
+        assert verified_main_checkout(planted) is None
+        assert verified_main_checkout(worktree) is None
+
+    def test_a_worktree_reached_through_a_symlinked_ancestor_still_resolves(
+        self, tmp_path: Path
+    ) -> None:
+        repo = make_repo(tmp_path / "repo")
+        make_worktree(repo, tmp_path / "real" / "wt")
+        (tmp_path / "alias").symlink_to(tmp_path / "real")
+        assert repository_root(tmp_path / "alias" / "wt") == repo
+
+
 class TestLaunchDirectory:
     def test_picks_the_candidate_that_reproduces_the_directory_name(self) -> None:
         assert launch_directory("-a-repo", ["/somewhere/else", "/a/repo"]) == Path("/a/repo")
@@ -482,3 +635,89 @@ class TestProjectKeyCollisions:
         record_project_root(claude_project_slug(here), here)
 
         assert "is shared by" not in "\n".join(_observer_binding_lines(here))
+
+
+class TestSessionTranscriptLookup:
+    """Security review 2026-10-25-2, R28: a session URI names only a transcript under the root."""
+
+    def _planted(self, tmp_path: Path) -> Path:
+        import json
+
+        projects = tmp_path / "projects"
+        (projects / "proj").mkdir(parents=True)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "planted.jsonl").write_text(
+            json.dumps({"timestamp": "2099-01-01T00:00:00Z", "cwd": str(outside)}) + "\n",
+            encoding="utf-8",
+        )
+        return projects
+
+    @pytest.mark.parametrize(
+        "session_id", ["../../elsewhere/planted", "../elsewhere/planted", "*", "pl?nted", ""]
+    )
+    def test_an_id_that_is_not_a_session_id_names_no_transcript(
+        self, tmp_path: Path, session_id: str
+    ) -> None:
+        from particles.api.cli._claude_code import (
+            entry_project_key,
+            session_started_at,
+            session_transcripts,
+        )
+
+        projects = self._planted(tmp_path)
+        uri = f"claude-code://session/{session_id}"
+        assert session_transcripts(uri, projects) == []
+        assert session_started_at(uri, projects) is None
+        assert entry_project_key(uri, ["claude-code"], projects) is None
+
+    def test_a_symlinked_transcript_outside_the_root_is_not_read(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import session_started_at, session_transcripts
+
+        projects = self._planted(tmp_path)
+        (projects / "proj" / "abc123.jsonl").symlink_to(tmp_path / "elsewhere" / "planted.jsonl")
+        uri = "claude-code://session/abc123"
+        assert session_transcripts(uri, projects) == []
+        assert session_started_at(uri, projects) is None
+
+    def test_a_session_id_finds_its_transcript(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import session_started_at, session_transcripts
+
+        projects = self._planted(tmp_path)
+        transcript = projects / "proj" / "3f2a9c1e-0b7d-4e8a-9c2f-1d5e6a7b8c9d.jsonl"
+        transcript.write_text('{"timestamp": "2026-10-09T05:12:00Z"}\n', encoding="utf-8")
+        uri = f"claude-code://session/{transcript.stem}"
+        assert session_transcripts(uri, projects) == [transcript]
+        started = session_started_at(uri, projects)
+        assert started is not None and started.year == 2026
+
+    def test_flat_finds_a_transcript_in_the_root_itself(self, tmp_path: Path) -> None:
+        # A folder of transcripts copied out of the projects layout, the shape
+        # `audit --transcripts DIR` reads; only `flat` looks there.
+        from particles.api.cli._claude_code import session_started_at, session_transcripts
+
+        projects = self._planted(tmp_path)
+        transcript = projects / "abc123.jsonl"
+        transcript.write_text('{"timestamp": "2026-08-22T09:15:00Z"}\n', encoding="utf-8")
+        uri = "claude-code://session/abc123"
+        assert session_transcripts(uri, projects) == []
+        assert session_transcripts(uri, projects, flat=True) == [transcript]
+        started = session_started_at(uri, projects, flat=True)
+        assert started is not None and started.date().isoformat() == "2026-08-22"
+
+    def test_flat_does_not_follow_a_link_out_of_the_root(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import session_started_at, session_transcripts
+
+        projects = self._planted(tmp_path)
+        (projects / "abc123.jsonl").symlink_to(tmp_path / "elsewhere" / "planted.jsonl")
+        uri = "claude-code://session/abc123"
+        assert session_transcripts(uri, projects, flat=True) == []
+        assert session_started_at(uri, projects, flat=True) is None
+
+    @pytest.mark.parametrize("session_id", ["../elsewhere/planted", "*", ""])
+    def test_flat_keeps_the_session_id_shape_check(self, tmp_path: Path, session_id: str) -> None:
+        from particles.api.cli._claude_code import session_transcripts
+
+        projects = self._planted(tmp_path)
+        uri = f"claude-code://session/{session_id}"
+        assert session_transcripts(uri, projects, flat=True) == []

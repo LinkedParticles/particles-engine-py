@@ -96,11 +96,45 @@ recorded worktree, and `~/.claude`), never under the directory it happens to
 run from, so the nightly run admits the same files wherever it starts and a
 cloned repository's rule files are never read. `particles rules`
 lists the recorded roots, marks one that no longer exists as missing, and
-counts any enrolled source outside every allowed root; `particles hook doctor`
-and the nightly run's summary report the same count. After the upgrade that
-introduced recorded roots, run `particles rules sync` once from each project
-whose rule files you track: until then those files are reported and not
-refreshed.
+counts the enrolled sources the refresh refuses, one line per cause with the
+fix for it; `particles hook doctor` prints the same lines, and the nightly
+run's summary gives the total. A source **outside every allowed root** is fixed
+by a root: after the upgrade that introduced recorded roots, run
+`particles rules sync` once from each project whose rule files you track, since
+until then those files are reported and not refreshed. A source **enrolled by a
+depositor the local refresh does not trust** (see the knobs below) is not fixed
+by a sync, because an entry keeps the depositor that first created it; if the
+files are yours, add their directory to `local_refresh.allowed_roots`.
+
+A recorded root counts only while you own its directory, and a rule file read
+through one (or through the main checkout of a recorded worktree) must be yours
+too, judged on the open file. Whether a file must
+be yours is decided from the path of the file that was opened, not from the
+name looked up before the open, so a directory swapped between the two cannot
+skip the check. This keeps another user on a shared machine from replacing a
+recorded directory, or writing into one, to put their rule files into your
+store. `particles rules` marks a recorded root another user owns, and the
+sources under it are counted as **under a recorded root another user owns**.
+If you trust that directory (a shared team checkout, for example), add it to
+`local_refresh.allowed_roots`, which these checks do not cover; otherwise
+remove the row with `particles rules forget`. A rule file another user wrote
+under a root you own is refused at the read and logged with its owner, and
+`particles rules`, `particles hook doctor` and
+`particles rules forget` count it as refused, as they count a hard-linked
+file, rather than as refreshed. `rules sync` does not record a directory
+another user owns.
+
+One check decides every one of these questions: a
+store, its SQLite sidecars, the config file and a rule file under a recorded
+root are trusted only when you own the file, no other user may write it, and
+no user but you and root may change a directory its name resolves through,
+including a directory a symbolic link on the way sits in. A config file other
+users may write, or one in a directory they may write into, stops the refresh
+as a store others may write does: `particles corpus refresh` exits naming the
+file, the nightly run records `refresh_skipped: config_writable_by_others`,
+and `particles rules` and `particles hook doctor` count the sources it holds
+back, with `chmod go-w`, or moving the file to a directory only you may write,
+as the fix.
 
 ### Why the tag matters beyond addressability
 
@@ -425,10 +459,16 @@ Knobs, all under `local_refresh` in `config.yaml`:
 | `enabled` | `true` | The consolidation pass on/off |
 | `max_entries` | `200` | Per-run cap, oldest-entry-first |
 | `follow_symlinks` | `false` | Whether a path that has since become a symlink is followed |
+| `allowed_roots` | `[]` | Directories whose files are refreshed whoever enrolled them |
 
 Under the rule-file roots and `~/.claude/projects`, an entry is refreshed only
 when a local command enrolled it: `rules sync`, `init claude-code`, the
-SessionEnd harvest or `particles deposit`. Every refresh reads the file through
+SessionEnd harvest or `particles deposit`. Under `~/.claude/projects` the
+memory files `particles audit` first deposited are refreshed too, once the
+SessionEnd harvest has enrolled them. An entry an HTTP caller enrolled since
+`1.210.4` is not refreshed in either place (SECURITY.md names the case of one
+enrolled earlier); `local_refresh.allowed_roots` admits any entry under
+the directories it names. Every refresh reads the file through
 one descriptor and checks where that descriptor points, so a folder swapped for
 a symlink after the root check is not followed. A file larger than
 `local_files.max_bytes` (default 256 MiB) is skipped like an unreadable one;

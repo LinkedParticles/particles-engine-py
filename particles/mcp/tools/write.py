@@ -133,7 +133,7 @@ async def particle_assert(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
-    admit("particle_assert")  # the §6.6 probe may call a model (security review D30)
+    admit("particle_assert", store=handle)  # the §6.6 probe may call a model (security review D30)
     result = await get_backend().particle_assert(
         content=content,
         subject_names=subject_names,
@@ -189,7 +189,9 @@ async def particle_supersede(
     from particles.api.client import get_backend
 
     handle = _resolve_store(store)
-    admit("particle_supersede")  # the §6.6 probe may call a model (security review D30)
+    admit(
+        "particle_supersede", store=handle
+    )  # the §6.6 probe may call a model (security review D30)
     result = await get_backend().particle_supersede(
         supersedes_id=supersedes_id,
         content=content,

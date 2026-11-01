@@ -1085,3 +1085,14 @@ class TestForeignSubjects:
         await ops.delete_entities(db_session, store=DEFAULT_STORE, entity_names=["Charlie"])
         await _create(db_session, [{**CHARLIE, "entityType": "robot"}])
         assert _entity(await _graph(db_session), "Charlie")["entityType"] == "robot"
+
+
+def test_the_remote_engine_refusal_names_the_engine_without_its_credential() -> None:
+    """E1 (SECURITY_REVIEW_20261026-1, W12/W37): the façade's remote-engine refusal,
+    returned to the model as a tool and resource error, carries no userinfo."""
+    get_config().engine.base_url = "https://svc-user:audit6-userinfo-pw@engine.invalid:8443"
+    message = server._remote_engine_refusal()
+    assert message is not None
+    assert "https://engine.invalid:8443" in message
+    assert "audit6-userinfo-pw" not in message
+    assert "svc-user" not in message

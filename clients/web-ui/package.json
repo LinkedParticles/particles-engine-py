@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "gen-api": "openapi-typescript ../../artifacts/openapi.json -o src/openapi.d.ts",
+    "gen-api": "openapi-typescript ../../artifacts/openapi.json -o src/openapi.d.ts --default-non-nullable false",
     "typecheck": "npm run gen-api && tsc --noEmit",
     "build": "npm run gen-api && node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs"

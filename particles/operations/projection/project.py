@@ -42,6 +42,13 @@ from particles.operations.projection.manifest import (
     DocManifest,
     MechanicalBlock,
 )
+from particles.operations.projection.paths import (
+    ManifestPathError,
+    containment_root,
+    read_block_text,
+    read_text_no_follow,
+    resolve_manifest_path,
+)
 from particles.operations.query import retrieve_ranked
 from particles.operations.query.effective_confidence import score_effective_confidence
 from particles.render.article_synthesis import (
@@ -62,6 +69,7 @@ from particles.render.markdown import (
     find_projected_regions,
     format_memory_bullet,
     format_sources_trailer,
+    inert_listing_text,
     neutralize_comment_delimiters,
 )
 from particles.store.particle_store import (
@@ -363,13 +371,14 @@ def _deterministic_section_body(particles: list[Selected]) -> str:
     effective confidence — all deterministic given the store — plus the sources
     trailer. This is the gate's selection-and-structure fingerprint.
 
-    Each belief is flattened to one line and its HTML comment delimiters are
-    escaped, as the ``bullets`` render does: a multi-line belief would otherwise
-    forge bullet lines, a sources trailer or an observer line, and a sentinel in
-    it would stop the region updating (security review N26).
+    Each belief is one inert line (:func:`inert_listing_text`): a multi-line
+    belief would otherwise forge bullet lines, a sources trailer or an observer
+    line, a sentinel in it would stop the region updating (security review
+    N26), and its markup would write live HTML, a remote image, or a second
+    handle and confidence figure (2026-10-30-1, AB22, AB36).
     """
     lines = [
-        f"- {neutralize_comment_delimiters(' '.join(particle.content.split()))} "
+        f"- {inert_listing_text(particle.content)} "
         f"`p-{_short_id(particle.id)}` _(confidence {eff:.2f})_"
         for particle, eff in particles
     ]
@@ -612,17 +621,18 @@ async def _synthesised_section_body(
     return body, True
 
 
-def _render_block(block: MechanicalBlock, base_dir: Path) -> str:
+def _render_block(block: MechanicalBlock, base_dir: Path, *, allow_outside_paths: bool) -> str:
     """Read a mechanical block's hand-authored fragment, spliced verbatim.
 
-    The path is resolved relative to the manifest's directory. Raises
+    The path is resolved relative to the manifest's directory and must stay
+    inside the manifest's tree unless ``allow_outside_paths`` (security review
+    2026-10-24-2, P3; see :mod:`particles.operations.projection.paths`). Raises
     ``FileNotFoundError`` when the fragment is missing — a manifest must not
-    reference a block that does not exist.
+    reference a block that does not exist — and ``ManifestPathError`` or
+    ``LocalReadRefused`` when the path is refused.
     """
-    path = Path(block.block)
-    if not path.is_absolute():
-        path = base_dir / path
-    return path.read_text(encoding="utf-8").strip() + "\n"
+    text = read_block_text(block.block, base_dir=base_dir, allow_outside=allow_outside_paths)
+    return text.strip() + "\n"
 
 
 @dataclass(frozen=True)
@@ -724,6 +734,7 @@ async def project_document(
     *,
     base_dir: Path,
     synthesize: bool,
+    allow_outside_paths: bool = False,
 ) -> ProjectionResult:
     """Render a manifest into one Markdown document.
 
@@ -739,7 +750,7 @@ async def project_document(
 
     for section in manifest.sections:
         if isinstance(section, MechanicalBlock):
-            parts.append(_render_block(section, base_dir))
+            parts.append(_render_block(section, base_dir, allow_outside_paths=allow_outside_paths))
             continue
 
         # A bullets section is deterministic by definition:
@@ -782,6 +793,7 @@ async def project_splice_body(
     synthesize: bool,
     observer_project: str | None = None,
     exclude_source_tags: Collection[str] = (),
+    allow_outside_paths: bool = False,
 ) -> ProjectionResult:
     """Render a manifest's *body* for splicing into a sentinel region.
 
@@ -809,7 +821,7 @@ async def project_splice_body(
 
     for section in manifest.sections:
         if isinstance(section, MechanicalBlock):
-            parts.append(_render_block(section, base_dir))
+            parts.append(_render_block(section, base_dir, allow_outside_paths=allow_outside_paths))
             continue
         header = "" if single_section else f"## {section.title}\n\n"
         part, used, backrefs = await _derived_section_part(
@@ -994,6 +1006,7 @@ async def check_drift(
     *,
     base_dir: Path,
     output_root: Path | None = None,
+    allow_outside_paths: bool = False,
 ) -> DriftResult:
     """Regenerate the deterministic snapshot and diff it against the committed copy.
 
@@ -1008,15 +1021,31 @@ async def check_drift(
     snapshot — the shipped host document itself must be re-spliced (and that
     re-splice is the explicit re-blessing act). A relative ``output`` resolves
     against ``output_root`` (never the process cwd); ``output_root=None`` skips
-    the region check for callers with no host-file anchor.
+    the region check for callers with no host-file anchor. The output path and
+    every block path stay inside the manifest's tree unless
+    ``allow_outside_paths`` (security review 2026-10-24-2, P3).
     """
     regenerated = (
-        await project_document(session, manifest, base_dir=base_dir, synthesize=False)
+        await project_document(
+            session,
+            manifest,
+            base_dir=base_dir,
+            synthesize=False,
+            allow_outside_paths=allow_outside_paths,
+        )
     ).document
     snap_path = snapshot_path_for(manifest, base_dir=base_dir)
-    committed = snap_path.read_text(encoding="utf-8") if snap_path.exists() else None
+    committed = read_text_no_follow(snap_path) if snap_path.exists() else None
 
-    region_issues = tuple(await _region_trailer_issues(session, manifest, output_root=output_root))
+    region_issues = tuple(
+        await _region_trailer_issues(
+            session,
+            manifest,
+            base_dir=base_dir,
+            output_root=output_root,
+            allow_outside_paths=allow_outside_paths,
+        )
+    )
     drifted = committed is None or committed != regenerated or bool(region_issues)
     return DriftResult(
         drifted=drifted,
@@ -1040,19 +1069,32 @@ async def _region_trailer_issues(
     session: AsyncSession,
     manifest: DocManifest,
     *,
+    base_dir: Path,
     output_root: Path | None,
+    allow_outside_paths: bool,
 ) -> list[str]:
     """Per-region trailer-vs-selection mismatches in the host file."""
     regions = manifest.region_sections()
     if not regions or output_root is None or manifest.output is None:
         return []
-    out_path = Path(manifest.output)
-    if not out_path.is_absolute():
-        out_path = output_root / out_path
+    try:
+        out_path = resolve_manifest_path(
+            manifest.output,
+            against=output_root,
+            root=containment_root(base_dir),
+            allow_outside=allow_outside_paths,
+            what="output",
+        )
+    except ManifestPathError as exc:
+        return [f"{exc} (regions {', '.join(regions)} unchecked)"]
     if not out_path.exists():
         return [f"output file {out_path} not found (regions {', '.join(regions)} unchecked)"]
 
-    host_regions = {r.region: r for r in find_projected_regions(out_path.read_text("utf-8"))}
+    try:
+        host_text = read_text_no_follow(out_path)
+    except OSError as exc:
+        return [f"output file {out_path} refused: {exc} (regions {', '.join(regions)} unchecked)"]
+    host_regions = {r.region: r for r in find_projected_regions(host_text)}
     issues: list[str] = []
     for region, section in regions.items():
         host = host_regions.get(region)

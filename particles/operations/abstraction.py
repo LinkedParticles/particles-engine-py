@@ -95,6 +95,7 @@ from particles.store.particle_store import (
     copy_particle_embedding,
     get_active_derived_particles,
     get_inconsistency_backrefs,
+    get_particle_status,
     get_particles_by_ids,
     get_superseding_particle,
     insert_particle,
@@ -348,6 +349,61 @@ async def _check_entailment(claim: str, premise_contents: list[str]) -> bool | N
     return parsed[0] is EntailmentVerdict.ENTAILED
 
 
+_PARAPHRASE_INSTRUCTIONS = (
+    "Decide whether the two claims in the user message assert the SAME "
+    "underlying fact (a paraphrase) or DIFFERENT facts.\n"
+    'Return a JSON object: {"verdict": "PARAPHRASE"|"DISTINCT"|"UNSURE"}.\n\n'
+)
+
+#: ``decided_by`` stamps for the revalidation ladder's two rungs that call no
+#: model (``name@version``).
+_STRUCTURAL_RUNG = "abstraction_structural@1"
+_FLOOR_RUNG = "abstraction_support_floor@1"
+
+
+def _entailment_rung() -> str:
+    return f"entailment_judge@{entailment_judge_version()}"
+
+
+def _paraphrase_rung() -> str:
+    # The instructions are the prompt's trusted text; the rendered prompt
+    # carries a fresh fence nonce per call.
+    return f"paraphrase_judge@{prompt_hash(_PARAPHRASE_INSTRUCTIONS)}"
+
+
+async def _record_retirement(
+    session: AsyncSession,
+    d: Particle,
+    *,
+    successor_id: str | None,
+    status: Status,
+    rung: int,
+    outcome: str,
+    decided_by: str,
+) -> None:
+    """Name one derived belief the ladder moved out of ACTIVE (security review 2026-10-25-2, R29).
+
+    Flushed with the status change it records; the caller commits both.
+    """
+    refs = [(EventRefKind.PARTICLE, d.id)]
+    if successor_id is not None:
+        refs.append((EventRefKind.PARTICLE, successor_id))
+    await record_event(
+        session,
+        actor=ABSTRACTION_ACTOR,
+        event_type=OperatorEventType.ABSTRACTION_RETIRED,
+        refs=refs,
+        payload={
+            "retired_id": d.id,
+            "successor_id": successor_id,
+            "status": status.value,
+            "rung": rung,
+            "outcome": outcome,
+            "decided_by": decided_by,
+        },
+    )
+
+
 async def _paraphrase_verdict(
     content_a: str, content_b: str, *, purpose: LLMPurpose = "abstraction"
 ) -> JudgeVerdictKind:
@@ -358,12 +414,7 @@ async def _paraphrase_verdict(
     from particles.llm import data_fence_instruction, fence, make_nonce
 
     nonce = make_nonce()
-    system = (
-        "Decide whether the two claims in the user message assert the SAME "
-        "underlying fact (a paraphrase) or DIFFERENT facts.\n"
-        'Return a JSON object: {"verdict": "PARAPHRASE"|"DISTINCT"|"UNSURE"}.\n\n'
-        + data_fence_instruction(nonce)
-    )
+    system = _PARAPHRASE_INSTRUCTIONS + data_fence_instruction(nonce)
     user = (
         f"Claim A:\n{fence(content_a, nonce, label='claim_a')}\n\n"
         f"Claim B:\n{fence(content_b, nonce, label='claim_b')}"
@@ -801,8 +852,14 @@ async def _updated_premises(
 
 
 async def _refresh_by_supersession(
-    session: AsyncSession, d: Particle, premises: list[Particle]
-) -> None:
+    session: AsyncSession,
+    d: Particle,
+    premises: list[Particle],
+    *,
+    rung: int,
+    outcome: str,
+    decided_by: str,
+) -> bool:
     """Supersede D with a same-text successor D* on the updated premises.
 
     Rungs 1, 2 (still entailed) and 3 (PARAPHRASE) keep D's claim but change
@@ -819,7 +876,13 @@ async def _refresh_by_supersession(
     successor.
 
     Commits under the writer lock, so the refresh is not held open
-    across the ladder's later judge calls.
+    across the ladder's later judge calls, with an
+    ``ABSTRACTION_RETIRED`` event naming D and D* (security review 2026-10-25-2,
+    R29). D's status is re-read inside that transaction, and nothing is written
+    unless D is still ACTIVE: the ladder read it before its judge calls, and a
+    belief another writer retired meanwhile must not come back as an ACTIVE
+    successor (security review 2026-10-26-1, W44). Returns whether D was
+    refreshed.
     """
     successor = _build_derived_particle(
         claim=d.content,
@@ -829,11 +892,23 @@ async def _refresh_by_supersession(
         tags=list(d.tags) if d.tags else None,
     )
     async with write_transaction(session):
+        if await get_particle_status(session, d.id) is not Status.ACTIVE:
+            return False
         await update_particle_status(
             session, d.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
         )
         await insert_particle(session, successor)
         await copy_particle_embedding(session, d.id, successor.id)
+        await _record_retirement(
+            session,
+            d,
+            successor_id=successor.id,
+            status=Status.SUPERSEDED,
+            rung=rung,
+            outcome=outcome,
+            decided_by=decided_by,
+        )
+    return True
 
 
 async def _revalidate(
@@ -856,13 +931,26 @@ async def _revalidate(
         # deferred under review: it mints no successor, so a later ruling
         # still finds a PROVENANCE_STALE claim to act on.
         if len(premises) < cfg.min_cluster_size:
-            update = await get_particles_by_ids(session, [d.id])  # re-check still ACTIVE
-            if update.get(d.id) is not None:
-                async with write_transaction(session):
+            async with write_transaction(session):
+                # Re-checked under the lock: a D another writer retired is left as it is.
+                retire = await get_particle_status(session, d.id) is Status.ACTIVE
+                if retire:
                     await update_particle_status(
                         session, d.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
                     )
-            counts.retired += 1
+                    await _record_retirement(
+                        session,
+                        d,
+                        successor_id=None,
+                        status=Status.PROVENANCE_STALE,
+                        rung=4,
+                        outcome="retired",
+                        decided_by=_FLOOR_RUNG,
+                    )
+            if retire:
+                counts.retired += 1
+            else:
+                counts.deferred += 1
             continue
 
         # Deferred while under review: superseding a side of an
@@ -876,8 +964,17 @@ async def _revalidate(
 
         # Rung 1 (no LLM): content-preserving change → same-text successor.
         if content_preserving:
-            await _refresh_by_supersession(session, d, premises)
-            counts.refreshed_structural += 1
+            if await _refresh_by_supersession(
+                session,
+                d,
+                premises,
+                rung=1,
+                outcome="refreshed_structural",
+                decided_by=_STRUCTURAL_RUNG,
+            ):
+                counts.refreshed_structural += 1
+            else:
+                counts.deferred += 1  # D left ACTIVE meanwhile
             continue
 
         if not budget.take():
@@ -892,8 +989,17 @@ async def _revalidate(
             counts.deferred += 1  # LLM unavailable; leave discounted for next cycle
             continue
         if entailed:
-            await _refresh_by_supersession(session, d, premises)
-            counts.refreshed_entailed += 1
+            if await _refresh_by_supersession(
+                session,
+                d,
+                premises,
+                rung=2,
+                outcome="refreshed_entailed",
+                decided_by=_entailment_rung(),
+            ):
+                counts.refreshed_entailed += 1
+            else:
+                counts.deferred += 1  # D left ACTIVE meanwhile
             continue
 
         # Rung 3: re-synthesize and compare.
@@ -912,8 +1018,17 @@ async def _revalidate(
         report.llm_calls += 1
         verdict = await _paraphrase_verdict(claim, d.content)
         if verdict is JudgeVerdictKind.PARAPHRASE:
-            await _refresh_by_supersession(session, d, premises)
-            counts.refreshed_paraphrase += 1
+            if await _refresh_by_supersession(
+                session,
+                d,
+                premises,
+                rung=3,
+                outcome="refreshed_paraphrase",
+                decided_by=_paraphrase_rung(),
+            ):
+                counts.refreshed_paraphrase += 1
+            else:
+                counts.deferred += 1  # D left ACTIVE meanwhile
             continue
         if verdict is JudgeVerdictKind.UNSURE:
             counts.deferred += 1  # keep the read-time discount; retry next cycle
@@ -926,6 +1041,11 @@ async def _revalidate(
         # next cycle — propagation is this ladder recursing one level per run.
         from particles.ingest.pipeline import reconcile_and_insert
 
+        # D was read before the judge calls; one another writer retired since
+        # then stays retired (W44).
+        if await get_particle_status(session, d.id) is not Status.ACTIVE:
+            counts.deferred += 1
+            continue
         await update_particle_status(
             session, d.id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
         )
@@ -935,7 +1055,16 @@ async def _revalidate(
             subject_ids=d.subject_ids or _shared_subject_ids(premises, ""),
             supersedes=d.id,
         )
-        await reconcile_and_insert(session, successor, fail_closed=True)
+        inserted = await reconcile_and_insert(session, successor, fail_closed=True)
+        await _record_retirement(
+            session,
+            d,
+            successor_id=inserted.id if inserted is not None else None,
+            status=Status.SUPERSEDED,
+            rung=3,
+            outcome="superseded",
+            decided_by=_paraphrase_rung(),
+        )
         # Committed now rather than at the end of the pass. The
         # §6.6 probes inside ``reconcile_and_insert`` still run with the
         # status flip above uncommitted, and outside the writer lock, which

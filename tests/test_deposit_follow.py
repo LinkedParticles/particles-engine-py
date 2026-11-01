@@ -443,6 +443,66 @@ class TestMentionReconciliation:
         sources = await get_follow_sources(db_session, "press-entry")
         assert len(sources) == 1  # no duplicate edge
 
+    async def test_a_confined_deposit_binds_only_its_own_entries_mentions(
+        self, db_session: Any
+    ) -> None:
+        """An agent key's deposit leaves other principals' mentions and entries alone."""
+        from particles.corpus.deposit import (
+            _reconcile_mentions_for_deposit,
+            deposit_text,
+            own_entries_only_for,
+        )
+        from particles.store.url_mention_store import (
+            list_undeposited_mentions,
+            record_url_mentions,
+        )
+
+        url = "https://press.example/release"
+        mine, _ = await deposit_text(db_session, "The agent's note.", deposited_by="agent:a")
+        theirs, _ = await deposit_text(db_session, "The operator's note.", deposited_by="operator")
+        await record_url_mentions(db_session, source_entry_id=mine, canonical_urls=[url])
+        await record_url_mentions(db_session, source_entry_id=theirs, canonical_urls=[url])
+
+        with own_entries_only_for("agent:a"):
+            await _reconcile_mentions_for_deposit(db_session, url=url, entry_id="agent-entry")
+        await db_session.commit()
+
+        assert [m.source_entry_id for m in await list_undeposited_mentions(db_session)] == [theirs]
+        sources = await get_follow_sources(db_session, "agent-entry")
+        assert [s.via_entry_id for s in sources] == [mine]
+
+    async def test_a_database_failure_is_logged_with_its_traceback(
+        self, db_session: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        from particles.corpus.deposit import _reconcile_mentions_for_deposit
+
+        failure = OperationalError("UPDATE url_mentions", {}, Exception("database is locked"))
+        with patch(
+            "particles.store.url_mention_store.reconcile_url_to_entry",
+            AsyncMock(side_effect=failure),
+        ):
+            await _reconcile_mentions_for_deposit(
+                db_session, url="https://press.example/release", entry_id="press-entry"
+            )
+        (record,) = [r for r in caplog.records if "reconciliation failed" in r.getMessage()]
+        assert record.exc_info is not None
+
+    async def test_a_defect_is_not_swallowed(self, db_session: Any) -> None:
+        from particles.corpus.deposit import _reconcile_mentions_for_deposit
+
+        with (
+            patch(
+                "particles.store.url_mention_store.reconcile_url_to_entry",
+                AsyncMock(side_effect=TypeError("a defect")),
+            ),
+            pytest.raises(TypeError, match="a defect"),
+        ):
+            await _reconcile_mentions_for_deposit(
+                db_session, url="https://press.example/release", entry_id="press-entry"
+            )
+
     async def test_reconcile_skips_self_citation(self, db_session: Any) -> None:
         from particles.corpus.deposit import _reconcile_mentions_for_deposit
         from particles.store.url_mention_store import record_url_mentions
@@ -453,3 +513,80 @@ class TestMentionReconciliation:
         await _reconcile_mentions_for_deposit(db_session, url=url, entry_id="press-entry")
         await db_session.commit()
         assert await get_follow_sources(db_session, "press-entry") == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_nested_follow_changes_no_row_of_another_principal(
+    db_session: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """A confined follow whose target another principal holds adds no entry, no snapshot
+    and no edge, and is reported as a refusal, not a failed fetch (G59, G73)."""
+    from sqlalchemy import func, select
+
+    from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
+    from particles.corpus import deposit as dep
+    from particles.corpus.follow_edges import CorpusFollowEdgeRow
+    from particles.corpus.store import CorpusEntryRow, list_snapshots_for_entry
+
+    target = "https://example.org/target"
+
+    async def write(session: Any, uri: str, body: bytes, by: str) -> tuple[str, str]:
+        digest = dep.sha256(body)
+        return await dep.write_entry_and_snapshot(
+            session=session,
+            uri_r=uri,
+            source_type="WEB_PAGE",
+            mutability=Mutability.MUTABLE,
+            fetch_policy=FetchPolicy.NEVER,
+            content=body,
+            content_hash=digest,
+            archive_path=dep.save_blob(body, digest),
+            deposited_by=by,
+            tags=[],
+            warc_record_type=WarcRecordType.RESPONSE,
+        )
+
+    async def entry_count() -> int:
+        stmt = select(func.count()).select_from(CorpusEntryRow)
+        return int((await db_session.execute(stmt)).scalar_one())
+
+    monkeypatch.setenv("PARTICLES_BLOB_DIR", str(tmp_path / "blobs"))
+    foreign_id, _ = await write(db_session, target, b"operator page", "operator")
+    with dep.own_entries_only_for("agent-a"):
+        primary_id, primary_snap = await write(
+            db_session, "https://example.org/post", b"post linking out", "agent-a"
+        )
+    before = await entry_count()
+
+    async def nested(session: Any, url: str, **kwargs: Any) -> tuple[str, str]:
+        # A nested deposit that writes an entry of its own before it is refused.
+        await write(session, "https://example.org/side", b"side write", kwargs["deposited_by"])
+        return await write(session, url, b"agent's copy", kwargs["deposited_by"])
+
+    monkeypatch.setattr(dep, "deposit_url", nested)
+    monkeypatch.setattr(dep.egress, "allows_url", lambda _u: True)
+
+    class _Importer:
+        DEFAULT_FOLLOW_POST_LINKS = True
+
+        @staticmethod
+        def primary_url(_content: bytes) -> str:
+            return target
+
+    caplog.set_level("WARNING", logger=dep.log.name)
+    with dep.own_entries_only_for("agent-a"):
+        await dep._maybe_follow_primary_url(
+            db_session,
+            _Importer(),
+            entry_id=primary_id,
+            snapshot_id=primary_snap,
+            deposited_by="agent-a",
+            tags=[],
+            follow_post_links=True,
+        )
+    await db_session.flush()
+    assert await entry_count() == before
+    assert len(await list_snapshots_for_entry(db_session, foreign_id)) == 1
+    assert (await db_session.execute(select(CorpusFollowEdgeRow))).scalars().all() == []
+    assert "Follow refused" in caplog.text
+    assert "may not write another principal's entry" in caplog.text

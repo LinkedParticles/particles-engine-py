@@ -79,6 +79,7 @@ from particles.operations.reindex_scope import (
     union_selectors,
 )
 from particles.operations.version_guard import active_stamps, assert_store_schema_current
+from particles.store.event_store import record_claims_retired
 from particles.store.particle_store import (
     get_active_particles_at_schema_versions,
     get_active_particles_for_entry,
@@ -92,6 +93,9 @@ from particles.store.particle_store import (
 log = logging.getLogger(__name__)
 
 DEFAULT_RATE_LIMIT_PER_MINUTE = 100
+
+#: The actor reindex's retirement events name (security review 2026-10-28-1, O36).
+REINDEX_ACTOR = "reindex"
 
 
 class SnapshotPlan(BaseModel):
@@ -457,7 +461,7 @@ async def reindex(
 
     lint_summary: dict[str, int] = {}
     if run_post_lint and succeeded:
-        lint_report = await run_lint(session, fix=True, semantic=False)
+        lint_report = await run_lint(session, fix=True, semantic=False, actor=REINDEX_ACTOR)
         lint_summary = lint_report.summary
         log.info("Post-reindex lint: %s", lint_summary)
 
@@ -1036,12 +1040,15 @@ async def _reindex_append_entry(
         previous = snapshot_id
 
     kept = set(carry_forward_ids) | set(suppressed_ids)
+    retired: list[str] = []
     for p in to_retire:
         if p.id in kept:
             continue
         await update_particle_status(
             session, p.id, Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_REINDEX
         )
+        retired.append(p.id)
+    await _record_reindex_retirements(session, retired, entry_id=entry_id, snapshot_id=None)
     # a snapshot that is not COMPLETE no longer vouches for text
     # whose claims were just retired. Its offset, marker and component record
     # go in the same transaction, so it is read next as the delta it is from
@@ -1059,6 +1066,26 @@ async def _reindex_append_entry(
         entry_id,
         len(snapshot_ids),
         len([p for p in to_retire if p.id not in kept]),
+    )
+
+
+async def _record_reindex_retirements(
+    session: AsyncSession, retired: list[str], *, entry_id: str, snapshot_id: str | None
+) -> None:
+    """Name the claims one reindexed entry or snapshot retired (security review 2026-10-28-1, O36).
+
+    Flushed with the status changes it records; the caller commits both.
+    """
+    await record_claims_retired(
+        session,
+        actor=REINDEX_ACTOR,
+        route="reindex",
+        retired_ids=retired,
+        status=Status.SUPERSEDED.value,
+        status_reason=StatusReason.SUPERSEDED_BY_REINDEX.value,
+        reason="reindex: the claim was replaced by a re-extraction of its source",
+        entry_id=entry_id,
+        snapshot_id=snapshot_id,
     )
 
 
@@ -1141,12 +1168,15 @@ async def _reindex_snapshot(
     # target is by construction some *other* ACTIVE particle — retiring it
     # would leave the re-observed claim with no ACTIVE copy at all.
     carry_forward = set(carry_forward_ids) | set(suppressed_ids)
+    retired: list[str] = []
     for p in to_supersede:
         if p.id in carry_forward:
             continue
         await update_particle_status(
             session, p.id, Status.SUPERSEDED, StatusReason.SUPERSEDED_BY_REINDEX
         )
+        retired.append(p.id)
+    await _record_reindex_retirements(session, retired, entry_id=entry_id, snapshot_id=snapshot_id)
 
     await session.commit()
     if carry_forward:

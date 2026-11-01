@@ -29,12 +29,15 @@ Each function:
 * returns an :class:`AgentWriteResult` carrying the §6.6 verdict — a conflict is
   a first-class result, not an error.
 
-The functions take an open session and **do not** open it, commit it, or gate
-the store: the *caller* (``LocalBackend``, which opens ``session_scope(store)``
-and commits; or the FastAPI endpoint, which uses ``SessionDep`` and commits)
-owns the transaction boundary, and the **store write-enablement gate is a
-surface concern** — ``mcp.write.enabled_stores`` is checked by the MCP tool's
-``_resolve_store`` locally and by the engine endpoint server-side.
+The functions take an open session and **do not** open it or gate the store.
+By default they do not commit either, and the caller owns the transaction
+boundary. ``assert_belief`` and ``supersede_belief`` also take
+``commit_under_lock``, which ``LocalBackend`` and the engine routes set: the
+subject lookups, the embedding and the §6.6 model probes then run first, and
+only the writes run, and commit, inside the store's writer lock
+(D2). The **store write-enablement gate is a surface concern** —
+``mcp.write.enabled_stores`` is checked by the MCP tool's ``_resolve_store``
+locally and by the engine endpoint server-side.
 ``store`` is threaded through only for the per-store §6.6 mode lookup.
 
 Mutating another principal's beliefs (supersede, retract, tag, untag, link,
@@ -45,8 +48,10 @@ project-bound surface the target must also be in view for that project.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -57,6 +62,7 @@ from particles.core.observer_scope import (
     UNATTRIBUTED_MARKER,
     BeliefScope,
     describe_scope,
+    names_a_project,
     project_keys,
     project_tag,
     same_scope,
@@ -81,6 +87,8 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import deposit_text as _deposit_text_seam
+from particles.corpus.harvest_marks import reserved_marks, reserved_marks_refusal
+from particles.db import write_transaction
 from particles.extraction.registry import infer_domain
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.observer_scope_join import lens_may_engage, load_scopes, own_attribution
@@ -88,6 +96,28 @@ from particles.store.observer_scope_store import ScopeTarget, add_widening
 from particles.store.particle_store import get_particle
 from particles.store.relation_store import create_relation, delete_relation, get_relation
 from particles.store.taxonomy_store import add_particle_tags, remove_particle_tags
+
+if TYPE_CHECKING:
+    from particles.ingest.pipeline import ReconcileGather
+    from particles.ingest.subject_resolver import SubjectPrefetch
+
+
+def _agent_owns_calibration(source: CalibrationSource, asserted_by: str) -> bool:
+    """Whether a belief ``asserted_by`` the caller, calibrated ``source``, is the caller's own.
+
+    An agent's own belief is what it asserted, or, for the memory-server
+    façade, what it migrated in. The agent path mutates nothing else
+    unless ``mcp.write.allow_cross_asserter``.
+
+    ``IMPORTED`` counts only for the façade's identity. Every
+    other ``IMPORTED`` belief was written under a store writer's label (the
+    interchange import's, or the extraction pipeline's for a migration), so an
+    agent key minted under that label owned all of them (security review
+    2026-10-27-1, G30, G39).
+    """
+    if source == CalibrationSource.IMPORTED:
+        return asserted_by == get_config().mcp.memory_compat.asserter_identity
+    return source == CalibrationSource.AGENT_ASSERTED
 
 
 class AgentWriteResult(BaseModel):
@@ -186,31 +216,87 @@ async def _resolve_provenance(
             own_entries_only=not operator,
         )
     if corpus_entry_id is not None:
-        from particles.corpus.store import get_entry
-
-        entry = await get_entry(session, corpus_entry_id)
-        if entry is None or not entry.snapshots:
-            raise ValueError(f"corpus_entry_id {corpus_entry_id!r} not found or has no snapshot.")
-        if project_key is not None and project_key not in project_keys(entry.tags):
-            # A belief's observer scope is read from its source. Letting a
-            # project-bound agent name any entry would let it choose that scope —
-            # a global entry would put its belief in front of every project.
-            # It may cite its own project's sources; for anything
-            # else it supplies the excerpt, which is deposited under its key.
-            raise ValueError(
-                f"corpus_entry_id {corpus_entry_id!r} is not a source of project "
-                f"{project_key!r}; pass `source_excerpt` instead."
-            )
-        if not operator and entry.deposited_by != identity:
-            raise ValueError(
-                f"corpus_entry_id {corpus_entry_id!r} was not deposited by {identity!r}; "
-                "an agent may cite only its own deposits. Pass `source_excerpt` instead."
-            )
+        entry = await _cited_entry(
+            session, identity, corpus_entry_id, project_key=project_key, operator=operator
+        )
         return corpus_entry_id, entry.snapshots[-1].snapshot_id
-    raise ValueError(
-        "An assertion requires provenance: pass `source_excerpt` (deposited as the "
-        "belief's source) or an existing `corpus_entry_id`."
+    raise ValueError(_NO_PROVENANCE)
+
+
+_NO_PROVENANCE = (
+    "An assertion requires provenance: pass `source_excerpt` (deposited as the "
+    "belief's source) or an existing `corpus_entry_id`."
+)
+
+
+async def _check_provenance(
+    session: Any,
+    identity: str,
+    *,
+    source_excerpt: str | None,
+    corpus_entry_id: str | None,
+    project_key: str | None,
+    operator: bool,
+) -> None:
+    """:func:`_resolve_provenance`'s refusals, read-only, before a write's gather.
+
+    A refused source is refused before the write asks any authority or model
+    (security review 2026-10-30-2, AC1). The apply resolves the provenance
+    again under the store's writer lock, which repeats these checks.
+    """
+    if source_excerpt is not None:
+        return
+    if corpus_entry_id is None:
+        raise ValueError(_NO_PROVENANCE)
+    await _cited_entry(
+        session, identity, corpus_entry_id, project_key=project_key, operator=operator
     )
+
+
+async def _cited_entry(
+    session: Any, identity: str, corpus_entry_id: str, *, project_key: str | None, operator: bool
+) -> Any:
+    """The corpus entry an assertion cites, or ``ValueError`` when it may not cite it."""
+    from particles.corpus.store import get_entry
+
+    entry = await get_entry(session, corpus_entry_id)
+    if entry is None or not entry.snapshots:
+        raise ValueError(f"corpus_entry_id {corpus_entry_id!r} not found or has no snapshot.")
+    if project_key is not None and project_key not in project_keys(entry.tags):
+        # A belief's observer scope is read from its source. Letting a
+        # project-bound agent name any entry would let it choose that scope —
+        # a global entry would put its belief in front of every project.
+        # It may cite its own project's sources; for anything
+        # else it supplies the excerpt, which is deposited under its key.
+        raise ValueError(
+            f"corpus_entry_id {corpus_entry_id!r} is not a source of project "
+            f"{project_key!r}; pass `source_excerpt` instead."
+        )
+    if not operator and not _is_own_agent_deposit(entry, identity, project_key):
+        raise ValueError(
+            f"corpus_entry_id {corpus_entry_id!r} was not deposited by {identity!r}; "
+            "an agent may cite only its own deposits. Pass `source_excerpt` instead."
+        )
+    return entry
+
+
+def _is_own_agent_deposit(entry: Any, identity: str, project_key: str | None) -> bool:
+    """Whether ``entry`` reads exactly as a deposit the agent path itself writes.
+
+    ``deposited_by`` alone is not enough (security review 2026-10-24-2, P29):
+    an HTTP depositor names it, and the source type and author with it, while
+    trust and attribution are read from the source type, the snapshot's author
+    and the URI. So the entry must also carry what the agent path stamps on
+    every deposit: a CONVERSATION source, the identity as the latest snapshot's
+    author, and the agent's scope marking (an unbound agent's material is
+    ``scope:unattributed``, never global). A belief citing such an entry ranks
+    and reads exactly as one citing the agent's own excerpt.
+    """
+    if entry.deposited_by != identity or entry.source_type != SourceType.CONVERSATION:
+        return False
+    if entry.snapshots[-1].author_id != identity:
+        return False
+    return project_key is not None or UNATTRIBUTED_MARKER in entry.tags
 
 
 def _scope_tags(tags: list[str] | None, project_key: str | None) -> list[str]:
@@ -230,55 +316,22 @@ def _scope_tags(tags: list[str] | None, project_key: str | None) -> list[str]:
     return kept
 
 
-async def _construct_and_insert(
-    session: Any,
-    store: str,
-    identity: str,
+def check_belief_body(
     *,
     content: str,
     subject_names: list[str],
-    confidence_value: float,
     uncertainty_nature: str,
-    source_excerpt: str | None,
-    corpus_entry_id: str | None,
-    tags: list[str] | None,
-    supersedes: str | None,
-    carry_over: Particle | None = None,
-    subject_ids: list[str] | None = None,
     granularity: tuple[int, int] | None = None,
-    project_key: str | None = None,
-    operator: bool = False,
-    excerpt_tags: list[str] | None = None,
-) -> tuple[str, Particle | None]:
-    """Server-side particle construction + §6.6 consensus/fail-closed insert (§4a/§6b).
+) -> UncertaintyNature:
+    """The refusals a belief write makes on its body alone, before any store read.
 
-    Returns ``(candidate_id, reconcile_result)``. ``candidate_id`` is the
-    constructed particle's own id — the agent's belief — which is persisted under
-    that id whether it lands ACTIVE or is quarantined as the loser of a conflict.
-    The reconcile result is the same particle (ACTIVE), the INCONSISTENCY particle
-    (conflict — a *different* id), or ``None`` (dropped); callers must not confuse
-    the result id with the belief id (that was the M6 review finding).
-
-    Provenance carry-over: when ``carry_over`` is a predecessor
-    particle, the successor copies its **full** ``confidence`` record (value +
-    calibration_source / calibration_method / calibration_ref), its
-    ``extractor_ref``, and its SOURCE provenance verbatim — it is the *same
-    extracted claim* with a corrected linkage, not a re-statement, so the
-    operator must not reset the calibrated confidence or re-attribute the
-    extractor's claim to themselves. ``confidence_value`` and the deposit /
-    ``corpus_entry_id`` provenance args are then ignored. ``subject_ids``, when
-    given, is used directly (already-resolved Subject ids) instead of resolving
-    ``subject_names``.
-
-    ``operator=True`` builds the operator's belief: ``identity`` is
-    then the operator principal, the confidence is the operator's value
-    labelled ``HUMAN_REVIEW`` (range-checked, never clamped by the agent
-    ceiling), and no AUTHOR trust is seeded, since the operator is the baseline
-    agent content is demoted against.
+    The surfaces call it before their session opens, so a refused body never
+    takes the store's writer lock (security review 2026-10-30-2, AC7); the
+    write verbs call it again first. Refuses an unknown ``uncertainty_nature``,
+    a claim the granularity gate rejects, and more subject names than
+    ``mcp.write.max_subject_names``, which bounds the lookups one write makes.
+    Raises ``ValueError``; returns the parsed nature.
     """
-    from particles.ingest.pipeline import reconcile_and_insert
-    from particles.ingest.subject_resolver import resolve_subjects
-
     try:
         nature = UncertaintyNature(uncertainty_nature)
     except ValueError as exc:
@@ -306,27 +359,211 @@ async def _construct_and_insert(
             "Split it into separate particle_assert calls (interim soft-gate; "
             "a compatibility interim)."
         )
+    limit = write_cfg.max_subject_names
+    if limit and len(subject_names) > limit:
+        raise ValueError(
+            f"Assertion names {len(subject_names)} subjects; one belief may name at most "
+            f"{limit} (mcp.write.max_subject_names). Split it into separate claims."
+        )
+    return nature
 
-    if subject_ids is None:
-        subject_ids = await resolve_subjects(
+
+def check_operator_supersede(*, reason: str | None, confidence: float) -> str:
+    """The operator supersede's body-only refusals; returns the stripped reason.
+
+    An operator supersede requires a non-empty reason, and its confidence is
+    range-checked here because the agent ceiling does not apply.
+    Called before the store's writer lock (security review 2026-10-30-2, AC7).
+    """
+    stripped = reason.strip() if reason else ""
+    if not stripped:
+        raise ValueError("An operator supersede requires a non-empty reason.")
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError(f"confidence must be between 0 and 1, got {confidence}.")
+    return stripped
+
+
+@asynccontextmanager
+async def _apply_phase(session: Any, store: str, commit_under_lock: bool) -> AsyncIterator[None]:
+    """The block a belief write's writes run in.
+
+    With ``commit_under_lock`` the writes commit inside the store's writer
+    lock, which the gather's subject lookups, embedding and model
+    probes never held (security review 2026-10-30-2, AC1, AC3). Without it the
+    caller owns the transaction, as before.
+    """
+    if not commit_under_lock:
+        yield
+        return
+    async with write_transaction(session, store):
+        yield
+
+
+@dataclass(frozen=True)
+class _BeliefGather:
+    """What a belief write learns before its writes: no store write, no lock."""
+
+    draft: Particle
+    """The belief as the apply will write it, less its provenance and the
+    subjects resolution mints."""
+    subjects: SubjectPrefetch | None
+    reconcile: ReconcileGather
+
+
+async def _gather_belief(
+    session: Any,
+    identity: str,
+    *,
+    content: str,
+    nature: UncertaintyNature,
+    names: list[str],
+    subject_ids: list[str] | None,
+    confidence_value: float,
+    tags: list[str] | None,
+    supersedes: str | None,
+    source_excerpt: str | None,
+    corpus_entry_id: str | None,
+    project_key: str | None = None,
+    carry_over: Particle | None = None,
+    operator: bool = False,
+) -> _BeliefGather:
+    """Ask the live subject authorities, embed, and run the §6.6 probes (D2).
+
+    Everything here that leaves the process (a subject lookup, the embedding,
+    the ladder's contradiction and update probes) runs before the store's
+    writer lock. ``supersedes`` is left out of the conflict search: the apply
+    retires it before the successor is written. A source the write may not
+    cite is refused first, so a refused write asks nothing.
+    """
+    from particles.ingest.pipeline import gather_reconcile
+    from particles.ingest.subject_resolver import prefetch_subjects
+
+    if carry_over is None:
+        await _check_provenance(
             session,
-            list(subject_names),
             identity,
-            particle_content=content,
-            source_type=SourceType.CONVERSATION,
+            source_excerpt=source_excerpt,
+            corpus_entry_id=corpus_entry_id,
+            project_key=project_key,
+            operator=operator,
         )
 
+    subjects = None
+    known = list(subject_ids or [])
+    if names:
+        subjects = await prefetch_subjects(
+            session, list(names), particle_content=content, source_type=SourceType.CONVERSATION
+        )
+        known = list(dict.fromkeys([*known, *subjects.known_ids]))
+
     if carry_over is not None:
-        # Linkage-correction successor: keep the predecessor's
-        # calibrated confidence, extractor attribution, and source provenance.
-        # No new deposit — the claim's origin is unchanged.
         confidence = carry_over.confidence
-        provenance = list(carry_over.provenance)
         extractor_ref = carry_over.extractor_ref
         # the production history travels with the attribution —
         # it is the same claim, produced once, by whatever produced it.
         provider_model = carry_over.extraction_provider_model
         asserted_by = carry_over.asserted_by
+    else:
+        if operator:
+            # Range-checked by check_operator_supersede before any write.
+            confidence = Confidence(
+                value=confidence_value, calibration_source=CalibrationSource.HUMAN_REVIEW
+            )
+        else:
+            confidence = Confidence(
+                value=_clamp_confidence(confidence_value),
+                calibration_source=CalibrationSource.AGENT_ASSERTED,
+            )
+        extractor_ref = None  # omitted (§4) — this is a direct assertion.
+        # Likewise omitted: no model produced this claim, the
+        # agent asserted it; ``calibration_source=AGENT_ASSERTED`` says so.
+        provider_model = None
+        asserted_by = identity
+
+    draft = Particle(
+        content=content,
+        confidence=confidence,
+        uncertainty_nature=nature,
+        provenance=[],
+        asserted_by=asserted_by,
+        status=Status.ACTIVE,
+        subject_ids=known,
+        tags=list(tags) if tags else None,
+        supersedes=supersedes,
+        extractor_ref=extractor_ref,
+        extraction_provider_model=provider_model,
+    )
+    reconcile = await gather_reconcile(
+        session,
+        draft,
+        exclude_ids=frozenset({supersedes}) if supersedes else frozenset(),
+    )
+    return _BeliefGather(draft=draft, subjects=subjects, reconcile=reconcile)
+
+
+async def _apply_belief(
+    session: Any,
+    store: str,
+    identity: str,
+    gathered: _BeliefGather,
+    *,
+    names: list[str],
+    subject_ids: list[str] | None,
+    source_excerpt: str | None,
+    corpus_entry_id: str | None,
+    carry_over: Particle | None = None,
+    project_key: str | None = None,
+    operator: bool = False,
+    excerpt_tags: list[str] | None = None,
+) -> tuple[str, Particle | None]:
+    """Server-side particle construction + §6.6 consensus/fail-closed insert (§4a/§6b).
+
+    The writes of a belief write, on what :func:`_gather_belief` found: they
+    call no model and no live authority, so they may run under the store's
+    writer lock.
+
+    Returns ``(candidate_id, reconcile_result)``. ``candidate_id`` is the
+    constructed particle's own id — the agent's belief — which is persisted under
+    that id whether it lands ACTIVE or is quarantined as the loser of a conflict.
+    The reconcile result is the same particle (ACTIVE), the INCONSISTENCY particle
+    (conflict — a *different* id), or ``None`` (dropped); callers must not confuse
+    the result id with the belief id (that was the M6 review finding).
+
+    Provenance carry-over: when ``carry_over`` is a predecessor
+    particle, the successor copies its **full** ``confidence`` record (value +
+    calibration_source / calibration_method / calibration_ref), its
+    ``extractor_ref``, and its SOURCE provenance verbatim — it is the *same
+    extracted claim* with a corrected linkage, not a re-statement, so the
+    operator must not reset the calibrated confidence or re-attribute the
+    extractor's claim to themselves. The deposit / ``corpus_entry_id``
+    provenance args are then ignored. ``subject_ids``, when given, are linked
+    directly (already-resolved Subject ids), ahead of any resolved ``names``.
+
+    ``operator=True`` builds the operator's belief: ``identity`` is
+    then the operator principal, the confidence is the operator's value
+    labelled ``HUMAN_REVIEW`` (range-checked, never clamped by the agent
+    ceiling), and no AUTHOR trust is seeded, since the operator is the baseline
+    agent content is demoted against.
+    """
+    from particles.ingest.pipeline import apply_reconcile
+    from particles.ingest.subject_resolver import resolve_subjects
+
+    ids = list(subject_ids) if subject_ids is not None else None
+    if names:
+        named = await resolve_subjects(
+            session,
+            list(names),
+            identity,
+            particle_content=gathered.draft.content,
+            source_type=SourceType.CONVERSATION,
+            answers=gathered.subjects.answers if gathered.subjects is not None else None,
+        )
+        ids = named if ids is None else list(dict.fromkeys([*ids, *named]))
+
+    if carry_over is not None:
+        # Linkage-correction successor: keep the predecessor's
+        # source provenance. No new deposit — the claim's origin is unchanged.
+        provenance = list(carry_over.provenance)
     else:
         entry_id, snapshot_id = await _resolve_provenance(
             session,
@@ -337,16 +574,6 @@ async def _construct_and_insert(
             excerpt_tags=excerpt_tags,
             operator=operator,
         )
-        if operator:
-            # Range-checked by supersede_belief before any write.
-            confidence = Confidence(
-                value=confidence_value, calibration_source=CalibrationSource.HUMAN_REVIEW
-            )
-        else:
-            confidence = Confidence(
-                value=_clamp_confidence(confidence_value),
-                calibration_source=CalibrationSource.AGENT_ASSERTED,
-            )
         provenance = [
             ProvenanceRef(
                 type=ProvenanceRefType.SOURCE,
@@ -354,30 +581,15 @@ async def _construct_and_insert(
                 snapshot_id=snapshot_id,
             )
         ]
-        extractor_ref = None  # omitted (§4) — this is a direct assertion.
-        # Likewise omitted: no model produced this claim, the
-        # agent asserted it; ``calibration_source=AGENT_ASSERTED`` says so.
-        provider_model = None
-        asserted_by = identity
 
-    particle = Particle(
-        content=content,
-        confidence=confidence,
-        uncertainty_nature=nature,
-        provenance=provenance,
-        asserted_by=asserted_by,
-        status=Status.ACTIVE,
-        subject_ids=subject_ids,
-        tags=list(tags) if tags else None,
-        supersedes=supersedes,
-        extractor_ref=extractor_ref,
-        extraction_provider_model=provider_model,
+    particle = gathered.draft.model_copy(
+        update={"provenance": provenance, "subject_ids": ids or []}
     )
     if not operator:
         await _seed_author_trust(session, identity)
     single = get_config().reconciliation_mode_for(store) == "single"
-    result = await reconcile_and_insert(
-        session, particle, single_trust_order=single, fail_closed=True
+    result = await apply_reconcile(
+        session, particle, gathered.reconcile, single_trust_order=single, fail_closed=True
     )
     return particle.id, result
 
@@ -488,16 +700,24 @@ async def _load_mutable_target(
                 "Review's job "
                 "."
             )
-    if (
-        not operator
-        and target.asserted_by != identity
-        and not get_config().mcp.write.allow_cross_asserter
-    ):
-        raise ValueError(
-            f"Particle {particle_id!r} was asserted by {target.asserted_by!r}, not "
-            f"{identity!r}; cross-asserter mutation requires "
-            "mcp.write.allow_cross_asserter=true."
-        )
+    if not operator and not get_config().mcp.write.allow_cross_asserter:
+        if target.asserted_by != identity:
+            raise ValueError(
+                f"Particle {particle_id!r} was asserted by {target.asserted_by!r}, not "
+                f"{identity!r}; cross-asserter mutation requires "
+                "mcp.write.allow_cross_asserter=true."
+            )
+        if not _agent_owns_calibration(target.confidence.calibration_source, target.asserted_by):
+            # An agent's own beliefs are agent-asserted (or a façade's migrated
+            # records). A matching name alone never reaches a belief the
+            # extraction pipeline or a maintenance pass made, so an agent whose
+            # principal equals a writer's label owns nothing that writer made
+            # (security review 2026-10-26-1, W5).
+            raise ValueError(
+                f"Particle {particle_id!r} is "
+                f"{target.confidence.calibration_source.value}, not an agent's own "
+                "assertion; changing it is an operator's act."
+            )
     if target.status != Status.ACTIVE:
         raise ValueError(f"Particle {particle_id!r} is {target.status.value}, not ACTIVE.")
     if not operator and project_key is not None and await lens_may_engage(session):
@@ -528,6 +748,7 @@ async def assert_belief(
     subject_ids: list[str] | None = None,
     granularity: tuple[int, int] | None = None,
     project_key: str | None = None,
+    commit_under_lock: bool = False,
 ) -> AgentWriteResult:
     """Assert one belief through the §6.6 ladder (the flagship).
 
@@ -549,32 +770,57 @@ async def assert_belief(
         granularity: ``(max_chars, max_sentences)`` overriding the
             ``mcp.write`` claim-granularity soft-gate, for a surface whose
             external contract sets its own limits.
+        commit_under_lock: Commit the belief's writes inside the store's
+            writer lock, which this call then takes for the writes alone: the
+            subject lookups, the embedding and the ladder's model probes run
+            before it (security review 2026-10-30-2, AC1, AC3). The
+            engine routes and the local backend set it. Without it the caller
+            owns the transaction.
     """
-    identity = identity or get_config().mcp.write.asserter_identity
-    candidate_id, result = await _construct_and_insert(
-        session,
-        store,
-        identity,
+    nature = check_belief_body(
         content=content,
         subject_names=subject_names,
-        confidence_value=confidence,
         uncertainty_nature=uncertainty_nature,
-        source_excerpt=source_excerpt,
-        corpus_entry_id=corpus_entry_id,
+        granularity=granularity,
+    )
+    identity = identity or get_config().mcp.write.asserter_identity
+    # Pre-resolved ids are linked as given and the names are not resolved
+    # (the façade); otherwise the names are.
+    names = list(subject_names) if subject_ids is None else []
+    gathered = await _gather_belief(
+        session,
+        identity,
+        content=content,
+        nature=nature,
+        names=names,
+        subject_ids=subject_ids,
+        confidence_value=confidence,
         tags=tags,
         supersedes=None,
-        subject_ids=subject_ids,
-        granularity=granularity,
+        source_excerpt=source_excerpt,
+        corpus_entry_id=corpus_entry_id,
         project_key=project_key,
     )
-    await record_event(
-        session,
-        actor=identity,
-        event_type=OperatorEventType.PARTICLE_ASSERTED,
-        # The belief is persisted (ACTIVE or quarantined) iff reconcile didn't drop it.
-        refs=[(EventRefKind.PARTICLE, candidate_id)] if result is not None else [],
-        payload={"store": store, "subjects": list(subject_names)},
-    )
+    async with _apply_phase(session, store, commit_under_lock):
+        candidate_id, result = await _apply_belief(
+            session,
+            store,
+            identity,
+            gathered,
+            names=names,
+            subject_ids=subject_ids,
+            source_excerpt=source_excerpt,
+            corpus_entry_id=corpus_entry_id,
+            project_key=project_key,
+        )
+        await record_event(
+            session,
+            actor=identity,
+            event_type=OperatorEventType.PARTICLE_ASSERTED,
+            # The belief is persisted (ACTIVE or quarantined) iff reconcile didn't drop it.
+            refs=[(EventRefKind.PARTICLE, candidate_id)] if result is not None else [],
+            payload={"store": store, "subjects": list(subject_names)},
+        )
     return _map_result(candidate_id, result, report_supersession=True)
 
 
@@ -596,6 +842,8 @@ async def supersede_belief(
     project_key: str | None = None,
     subject_ids: list[str] | None = None,
     card_key: str | None = None,
+    identity: str | None = None,
+    commit_under_lock: bool = False,
 ) -> AgentWriteResult:
     """Revise a belief: retire the predecessor to SUPERSEDED, then assert a successor.
 
@@ -624,18 +872,21 @@ async def supersede_belief(
     ``subject_ids`` links already-resolved Subject ids directly (
     the curation supersede inherits the predecessor's subjects by id rather than
     re-resolving their names). Any ``subject_names`` are resolved and appended.
+
+    ``commit_under_lock`` is :func:`assert_belief`'s: the guards are read and
+    the successor's lookups and probes run before the store's writer lock, and
+    the guards are read again under it before the predecessor is retired.
     """
-    from particles.ingest.subject_resolver import resolve_subjects
     from particles.store.particle_store import update_particle_status
 
-    reason = reason.strip() if reason else None
-    if operator and not reason:
-        raise ValueError("An operator supersede requires a non-empty reason.")
-    if operator and not 0.0 <= confidence <= 1.0:
-        # no agent ceiling on the operator path, so validate the range
-        # here, before the predecessor is retired.
-        raise ValueError(f"confidence must be between 0 and 1, got {confidence}.")
-    identity = get_config().mcp.write.asserter_identity
+    if operator:
+        reason = check_operator_supersede(reason=reason, confidence=confidence)
+    else:
+        reason = reason.strip() if reason else None
+    nature = check_belief_body(
+        content=content, subject_names=subject_names, uncertainty_nature=uncertainty_nature
+    )
+    identity = identity or get_config().mcp.write.asserter_identity
     event_actor = actor or identity
     predecessor = await _load_mutable_target(
         session, supersedes_id, identity, operator=operator, project_key=project_key
@@ -647,78 +898,87 @@ async def supersede_belief(
     # the successor's principal. The agent identity above still keys
     # the ownership check on the agent path.
     author = get_config().curation.operator_identity if operator else identity
-    # Retire the prior belief first so the successor reconciles against the rest
-    # of the store, not against the claim it is replacing.
-    await update_particle_status(
-        session, supersedes_id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
-    )
-    if subject_ids is not None:
-        named = await resolve_subjects(
-            session,
-            list(subject_names),
-            author,
-            particle_content=content,
-            source_type=SourceType.CONVERSATION,
-        )
-        subject_ids = list(dict.fromkeys([*subject_ids, *named]))
-    candidate_id, result = await _construct_and_insert(
+    gathered = await _gather_belief(
         session,
-        store,
         author,
         content=content,
-        subject_names=subject_names,
+        nature=nature,
+        names=list(subject_names),
+        subject_ids=subject_ids,
         confidence_value=confidence,
-        uncertainty_nature=uncertainty_nature,
-        source_excerpt=source_excerpt,
-        corpus_entry_id=corpus_entry_id,
         tags=tags,
         supersedes=supersedes_id,
-        subject_ids=subject_ids,
+        source_excerpt=source_excerpt,
+        corpus_entry_id=corpus_entry_id,
         project_key=project_key,
         operator=operator,
-        excerpt_tags=successor.tags if successor is not None else None,
     )
-    # A widening carries over only to a successor whose excerpt took the
-    # predecessor's attribution and that landed ACTIVE (decision 3).
-    # A cited entry decides its own scope, and a successor held for review has
-    # not replaced anything yet: neither gets reach as a side effect.
-    carried = False
-    if successor is not None and successor.widen and source_excerpt is not None:
-        landed = await get_particle(session, candidate_id)
-        carried = landed is not None and landed.status is Status.ACTIVE
-    if carried:
-        await add_widening(session, ScopeTarget.PARTICLE, candidate_id, created_by=event_actor)
+    async with _apply_phase(session, store, commit_under_lock):
+        if commit_under_lock:
+            # The guards again, under the lock: another writer may have retired
+            # or changed the predecessor since they were read.
+            await _load_mutable_target(
+                session, supersedes_id, identity, operator=operator, project_key=project_key
+            )
+        # Retire the prior belief first so the successor reconciles against the
+        # rest of the store, not against the claim it is replacing.
+        await update_particle_status(
+            session, supersedes_id, Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION
+        )
+        candidate_id, result = await _apply_belief(
+            session,
+            store,
+            author,
+            gathered,
+            names=list(subject_names),
+            subject_ids=subject_ids,
+            source_excerpt=source_excerpt,
+            corpus_entry_id=corpus_entry_id,
+            project_key=project_key,
+            operator=operator,
+            excerpt_tags=successor.tags if successor is not None else None,
+        )
+        # A widening carries over only to a successor whose excerpt took the
+        # predecessor's attribution and that landed ACTIVE (decision 3).
+        # A cited entry decides its own scope, and a successor held for review has
+        # not replaced anything yet: neither gets reach as a side effect.
+        carried = False
+        if successor is not None and successor.widen and source_excerpt is not None:
+            landed = await get_particle(session, candidate_id)
+            carried = landed is not None and landed.status is Status.ACTIVE
+        if carried:
+            await add_widening(session, ScopeTarget.PARTICLE, candidate_id, created_by=event_actor)
+            await record_event(
+                session,
+                actor=event_actor,
+                event_type=OperatorEventType.OBSERVER_SCOPE_WIDENED,
+                refs=[(EventRefKind.PARTICLE, candidate_id)],
+                payload={"carried_from": supersedes_id},
+            )
         await record_event(
             session,
             actor=event_actor,
-            event_type=OperatorEventType.OBSERVER_SCOPE_WIDENED,
-            refs=[(EventRefKind.PARTICLE, candidate_id)],
-            payload={"carried_from": supersedes_id},
+            event_type=OperatorEventType.PARTICLE_SUPERSEDED,
+            reason=reason,
+            refs=[
+                (EventRefKind.PARTICLE, supersedes_id),
+                *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
+            ],
+            payload={
+                "store": store,
+                "supersedes": supersedes_id,
+                "operator": operator,
+                # The curation card this supersession resolves, when it came from
+                # a `curate` gesture, so the precision report can
+                # attribute it after the card leaves the retained collections.
+                **({"card_key": card_key} if card_key else {}),
+            },
         )
-    await record_event(
-        session,
-        actor=event_actor,
-        event_type=OperatorEventType.PARTICLE_SUPERSEDED,
-        reason=reason,
-        refs=[
-            (EventRefKind.PARTICLE, supersedes_id),
-            *([(EventRefKind.PARTICLE, candidate_id)] if result is not None else []),
-        ],
-        payload={
-            "store": store,
-            "supersedes": supersedes_id,
-            "operator": operator,
-            # The curation card this supersession resolves, when it came from
-            # a `curate` gesture, so the precision report can
-            # attribute it after the card leaves the retained collections.
-            **({"card_key": card_key} if card_key else {}),
-        },
-    )
-    mapped = _map_result(candidate_id, result)
-    if successor is not None and await lens_may_engage(session):
-        mapped.successor_scope = successor.describe(
-            excerpt=source_excerpt is not None, carried=carried
-        )
+        mapped = _map_result(candidate_id, result)
+        if successor is not None and await lens_may_engage(session):
+            mapped.successor_scope = successor.describe(
+                excerpt=source_excerpt is not None, carried=carried
+            )
     return mapped
 
 
@@ -775,6 +1035,7 @@ async def assign_subject_belief(
     subject_id: str | None = None,
     subject_name: str | None = None,
     actor: str | None = None,
+    commit_under_lock: bool = False,
 ) -> AgentWriteResult:
     """Attach a subject to an orphan belief in place (amended).
 
@@ -791,49 +1052,73 @@ async def assign_subject_belief(
     the orphan is extracted, so the own-beliefs-only agent path cannot touch it.
     A belief that already has a subject is refused, since reassignment is a
     separate decision.
-    ``store`` is unused since the write no longer constructs a successor; it is
-    kept so the surfaces' call shape is unchanged. Does not commit — the caller
-    owns the transaction.
+
+    A name's live authority lookups run first, before any write; the resolver
+    replays their answers. ``commit_under_lock`` is :func:`assert_belief`'s:
+    the writes commit inside ``store``'s writer lock, which the lookups never
+    hold, and the guards are read again under it (security review
+    2026-10-31-1). Without it the caller owns the transaction.
     """
-    from particles.ingest.subject_resolver import resolve_subject
+    from particles.ingest.subject_resolver import prefetch_subjects, resolve_subject
     from particles.operations.subject_relink import relink_subjects
 
-    del store
     if (subject_id is None) == (subject_name is None):
         raise ValueError("Provide exactly one of subject_id or subject_name.")
 
     identity = get_config().mcp.write.asserter_identity
     event_actor = actor or identity
+    target = await _load_assign_target(session, particle_id, identity)
+
+    name: str | None = None
+    answers = None
+    if subject_id is not None:
+        from particles.store.subject_store import get_subject
+
+        if await get_subject(session, subject_id) is None:
+            raise ValueError(f"Subject {subject_id!r} not found.")
+    else:
+        assert subject_name is not None
+        if not subject_name.strip():
+            raise ValueError("subject_name must be non-empty.")
+        name = subject_name.strip()
+        answers = (
+            await prefetch_subjects(session, [name], particle_content=target.content)
+        ).answers
+
+    async with _apply_phase(session, store, commit_under_lock):
+        if commit_under_lock:
+            # The guards again, under the lock: another writer may have
+            # retired the belief or linked it since they were read.
+            target = await _load_assign_target(session, particle_id, identity)
+        if name is None:
+            assert subject_id is not None
+            linked = subject_id
+            names: list[str] = []
+        else:
+            subject = await resolve_subject(
+                session,
+                name,
+                asserted_by=event_actor,
+                particle_content=target.content,
+                answers=answers,
+            )
+            linked = subject.id
+            names = [name]
+        await relink_subjects(session, particle_id, [linked], actor=event_actor, names=names)
+    return AgentWriteResult(
+        asserted_particle_id=particle_id, verdict="SUBJECT_ASSIGNED", status=Status.ACTIVE.value
+    )
+
+
+async def _load_assign_target(session: Any, particle_id: str, identity: str) -> Particle:
+    """The orphan an assign-subject attaches to, or ``ValueError`` (the guards)."""
     target = await _load_mutable_target(session, particle_id, identity, operator=True)
     if target.subject_ids:
         raise ValueError(
             f"Particle {particle_id!r} already has a subject; assign-subject attaches a "
             "subject to a belief that has none."
         )
-
-    names: list[str] = []
-    if subject_id is not None:
-        from particles.store.subject_store import get_subject
-
-        subject = await get_subject(session, subject_id)
-        if subject is None:
-            raise ValueError(f"Subject {subject_id!r} not found.")
-    else:
-        assert subject_name is not None
-        if not subject_name.strip():
-            raise ValueError("subject_name must be non-empty.")
-        subject = await resolve_subject(
-            session,
-            subject_name.strip(),
-            asserted_by=event_actor,
-            particle_content=target.content,
-        )
-        names = [subject_name.strip()]
-
-    await relink_subjects(session, particle_id, [subject.id], actor=event_actor, names=names)
-    return AgentWriteResult(
-        asserted_particle_id=particle_id, verdict="SUBJECT_ASSIGNED", status=Status.ACTIVE.value
-    )
+    return target
 
 
 async def retract_belief(
@@ -906,8 +1191,16 @@ async def deposit_conversation_text(
         identity: Overrides the server-bound principal stamped as
             ``deposited_by`` / ``author_id``, so a surface asserting under its
             own principal (the façade) attributes its deposits to it.
+
+    Raises:
+        ValueError: ``tags`` names a tag only the owner's harvesters write
+            (``particles.corpus.harvest_marks``; security review 2026-10-24-2,
+            P5), or the identity is a harvester's depositor id.
     """
     identity = identity or get_config().mcp.write.asserter_identity
+    refusal = reserved_marks_refusal(reserved_marks(tags, identity))
+    if refusal is not None:
+        raise ValueError(refusal[0].upper() + refusal[1:])
     return await _deposit_text_seam(
         session,
         text,
@@ -917,6 +1210,30 @@ async def deposit_conversation_text(
         author_id=identity,
         own_entries_only=True,
     )
+
+
+async def require_project_binding(session: Any, project_key: str | None) -> None:
+    """Refuse a remote agent write that names no project on a rescoped store.
+
+    The engine holds no project binding of its own: the agent HTTP routes take
+    ``project_key`` from the request, sent by the project-bound MCP server that
+    launched the agent. Every project guard runs only when a key is present, so
+    a caller that left the field out skipped all of them (security review
+    2026-10-24-2, P27). Once the store is rescoped, scope is live, and an agent
+    route requires a key. Before that, no guard engages, and an omitted key
+    changes nothing. In-process MCP servers call the operations directly and
+    are unaffected: an unbound local server is unbound by its operator's launch.
+    An empty or whitespace-only key names no project and is refused like an
+    omitted one (security review 2026-10-25-1, Q54), and so is one of only
+    invisible characters (security review 2026-10-26-1, E9).
+    """
+    if not names_a_project(project_key) and await lens_may_engage(session):
+        raise ValueError(
+            "This store is rescoped, so an agent write over HTTP must name the project "
+            "it writes as (`project_key`). Launch the MCP server with "
+            "`--project-observer cwd`, or make the change as an operator from the CLI "
+            "."
+        )
 
 
 async def link_particles(
@@ -989,6 +1306,7 @@ async def link_beliefs(
     relation_type: str = RelationType.CO_EVIDENTIAL.value,
     confidence: float = 1.0,
     project_key: str | None = None,
+    identity: str | None = None,
 ) -> ParticleRelation:
     """An agent's link between two beliefs (MCP ``link_add``).
 
@@ -1002,7 +1320,7 @@ async def link_beliefs(
     commit.
     """
     rtype = _agent_relation_type(relation_type)
-    identity = get_config().mcp.write.asserter_identity
+    identity = identity or get_config().mcp.write.asserter_identity
     if particle_a == particle_b:
         raise ValueError("Cannot create a relation between a particle and itself")
     a = await _load_mutable_target(session, particle_a, identity, project_key=project_key)
@@ -1027,6 +1345,7 @@ async def unlink_beliefs(
     *,
     relation_type: str = RelationType.CO_EVIDENTIAL.value,
     project_key: str | None = None,
+    identity: str | None = None,
 ) -> bool:
     """An agent's withdrawal of a link (MCP ``link_remove``). Returns whether one was removed.
 
@@ -1037,7 +1356,7 @@ async def unlink_beliefs(
     identity. Does not commit.
     """
     rtype = _agent_relation_type(relation_type)
-    identity = get_config().mcp.write.asserter_identity
+    identity = identity or get_config().mcp.write.asserter_identity
     for pid in dict.fromkeys((particle_a, particle_b)):
         await _load_mutable_target(session, pid, identity, project_key=project_key)
     existing = await get_relation(session, particle_a, particle_b, rtype)
@@ -1057,7 +1376,12 @@ async def unlink_beliefs(
 
 
 async def tag_belief(
-    session: Any, *, particle_id: str, tags: list[str], project_key: str | None = None
+    session: Any,
+    *,
+    particle_id: str,
+    tags: list[str],
+    project_key: str | None = None,
+    identity: str | None = None,
 ) -> list[str]:
     """An agent's tag (MCP ``particle_tag``): the §6 guards, then the event under its identity.
 
@@ -1065,18 +1389,23 @@ async def tag_belief(
     belief and takes the guards a retract does. Returns the tags added. Does
     not commit.
     """
-    identity = get_config().mcp.write.asserter_identity
+    identity = identity or get_config().mcp.write.asserter_identity
     await _load_mutable_target(session, particle_id, identity, project_key=project_key)
     return await add_particle_tags(session, particle_id, tags, actor=identity)
 
 
 async def untag_belief(
-    session: Any, *, particle_id: str, tags: list[str], project_key: str | None = None
+    session: Any,
+    *,
+    particle_id: str,
+    tags: list[str],
+    project_key: str | None = None,
+    identity: str | None = None,
 ) -> list[str]:
     """An agent's untag (MCP ``particle_untag``); guarded as :func:`tag_belief` is.
 
     Returns the tags removed. Does not commit.
     """
-    identity = get_config().mcp.write.asserter_identity
+    identity = identity or get_config().mcp.write.asserter_identity
     await _load_mutable_target(session, particle_id, identity, project_key=project_key)
     return await remove_particle_tags(session, particle_id, tags, actor=identity)

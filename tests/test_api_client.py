@@ -30,6 +30,7 @@ from particles.api.client.local import LocalBackend
 from particles.core.schema import LintReport, QualityReport
 from particles.operations.projection import DocManifest
 from particles.operations.projection.memory_region import MemoryRegion
+from tests._engine_client import TEST_ENGINE_KEY
 
 
 class TestGetBackend:
@@ -86,12 +87,15 @@ def http_backend(
     # refuses a token over non-loopback http:// before it gets that far,
     # and the operator-verb tests send one.
     monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "https://engine.test")
-    monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
+    # A keyless engine serves reads only, and these tests write, so
+    # the engine has a key and the backend presents it.
+    monkeypatch.setenv("PARTICLES_API_KEY", TEST_ENGINE_KEY)
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", TEST_ENGINE_KEY)
     from particles.config import get_config, reset_config
 
     reset_config()
-    # The in-process engine runs under the dev-key skip, which serves only
-    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    # Served only for loopback names and api.allowed_hosts (security review
+    # 2026-10-24, N1).
     get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app
@@ -120,8 +124,8 @@ def operator_engine_key(http_backend: HttpBackend, monkeypatch: pytest.MonkeyPat
     test that drives one through the backend needs a key on both sides. It
     depends on ``http_backend`` so it runs after that fixture clears the token.
     """
-    monkeypatch.setenv("PARTICLES_API_KEY", "test-operator-key")
-    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "test-operator-key")
+    monkeypatch.setenv("PARTICLES_API_KEY", TEST_ENGINE_KEY)
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", TEST_ENGINE_KEY)
 
 
 @pytest.fixture
@@ -156,6 +160,62 @@ class TestHttpBackendRoundTrip:
             asyncio.run(http_backend.extract("nope", "nope", agent_id="t"))
         # The engine's 404 detail is carried through, not swallowed.
         assert "404" in str(excinfo.value)
+
+
+class TestHttpBackendSendsTheProjectKey:
+    """W72: every agent write the bound or rescoped-store backend sends
+    names its project, so the engine's binding check sees the key the caller
+    gave and a route the backend stops keying is caught here."""
+
+    def test_every_agent_route_carries_the_project_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: dict[str, dict[str, Any]] = {}
+
+        class _Sent(Exception):
+            pass
+
+        async def _record(
+            self: HttpBackend, path: str, payload: dict[str, Any], params: Any = None
+        ) -> Any:
+            sent[path] = payload
+            raise _Sent
+
+        monkeypatch.setattr(HttpBackend, "_post", _record)
+        backend = HttpBackend()
+        common: dict[str, Any] = {"store": "default", "project_key": "alpha"}
+        claim: dict[str, Any] = {
+            "content": "c",
+            "subject_names": ["s"],
+            "confidence": 0.5,
+            "source_excerpt": None,
+            "corpus_entry_id": None,
+            "uncertainty_nature": "EPISTEMIC",
+            "tags": None,
+        }
+        calls = [
+            backend.particle_assert(**claim, **common),
+            backend.particle_supersede(supersedes_id="p", **claim, **common),
+            backend.particle_retract(particle_id="p", reason="r", **common),
+            backend.agent_links_add("a", "b", relation_type="RELATED", **common),
+            backend.agent_links_remove("a", "b", relation_type="RELATED", **common),
+            backend.agent_particle_tag("p", ["t"], **common),
+            backend.agent_particle_untag("p", ["t"], **common),
+        ]
+        for call in calls:
+            with pytest.raises(_Sent):
+                asyncio.run(call)
+        assert set(sent) == {
+            "/particles/assert",
+            "/particles/supersede",
+            "/particles/retract",
+            "/particles/link",
+            "/particles/unlink",
+            "/particles/tag",
+            "/particles/untag",
+        }
+        for path, payload in sent.items():
+            assert payload["project_key"] == "alpha", path
 
 
 class TestHttpBackendRequiresBaseUrl:
@@ -830,10 +890,15 @@ async def _uris(store: str) -> list[str]:
 
 
 class TestHttpBackendStoreHandle:
-    """The routed writes carry their store handle."""
+    """The routed writes carry their store handle.
+
+    A harvest names the harvester's depositor id, which the deposit routes
+    accept only with a real bearer (security review 2026-10-24-2, P5), so these
+    run with ``operator_engine_key``.
+    """
 
     def test_a_harvest_deposit_lands_in_the_named_store(
-        self, http_backend: HttpBackend, other_store: str
+        self, http_backend: HttpBackend, other_store: str, operator_engine_key: None
     ) -> None:
         asyncio.run(
             http_backend.deposit_text_at_uri(
@@ -850,7 +915,30 @@ class TestHttpBackendStoreHandle:
         assert asyncio.run(_uris(other_store)) == ["file:///tmp/sess.jsonl"]
         assert asyncio.run(_uris("default")) == []
 
-    def test_a_lazy_file_harvest_is_sent_as_never(self, http_backend: HttpBackend) -> None:
+    def test_a_harvest_is_refused_by_a_dev_key_engine(
+        self, http_backend: HttpBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A keyless engine refuses the harvest, token or not: it serves reads only."""
+        from particles.api.client.http import EngineRefusedError
+
+        monkeypatch.setenv("PARTICLES_API_KEY", "dev-key")
+        with pytest.raises(EngineRefusedError, match="serves reads only"):
+            asyncio.run(
+                http_backend.deposit_text_at_uri(
+                    text="a memory note",
+                    uri_r="file:///tmp/memory/note.md",
+                    source_type="LOCAL_MARKDOWN",
+                    mutability="MUTABLE",
+                    tags=["claude-code", "memory-file"],
+                    deposited_by="claude-code-hook",
+                    content_published_at=None,
+                    store="default",
+                )
+            )
+
+    def test_a_lazy_file_harvest_is_sent_as_never(
+        self, http_backend: HttpBackend, operator_engine_key: None
+    ) -> None:
         """A remote engine cannot re-read this host's file, and refuses LAZY on one (D2).
 
         The harvest still lands, without enrolling the engine's refresh loop.
@@ -1021,6 +1109,26 @@ class TestPlaintextToken:
 
         with pytest.raises(PlaintextTokenRefused, match="allow_plaintext_token"):
             _check_plaintext_token("http://mac-mini:8000", has_token=True, allow=False)
+
+    def test_a_refusal_and_its_warning_do_not_echo_the_userinfo(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """R36 (SECURITY_REVIEW_20261025-2): the engine is named without its userinfo."""
+        import logging
+
+        from particles.api.client.http import PlaintextTokenRefused, _check_plaintext_token
+
+        secret = "userinfo-secret-0123456789"
+        url = f"http://op:{secret}@mac-mini:8000"
+        with pytest.raises(PlaintextTokenRefused) as refused:
+            _check_plaintext_token(url, has_token=True, allow=False)
+        assert secret not in str(refused.value)
+        assert "http://mac-mini:8000" in str(refused.value)
+        self._reset_warn_cache()
+        with caplog.at_level(logging.WARNING, logger="particles.api.client.http"):
+            _check_plaintext_token(url, has_token=True, allow=True)
+        assert "unencrypted" in caplog.text
+        assert secret not in caplog.text
 
     def test_allowed_non_loopback_http_warns_once_per_base_url(
         self, caplog: pytest.LogCaptureFixture

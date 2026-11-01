@@ -28,6 +28,7 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.operations.utility_feedback import (
     CLI_ACTOR,
+    OPERATOR_CREDIT_FIELD,
     BeliefNotCreditable,
     mark_belief_useful,
     rederive_explicit_credits,
@@ -134,6 +135,35 @@ class TestMarkBeliefUseful:
         assert await _score(db_session, pid, now=later) > 25.0
 
     @pytest.mark.asyncio
+    async def test_a_press_without_operator_authority_earns_no_credit(
+        self, db_session: AsyncSession
+    ) -> None:
+        """(amended 2026-10-27): only an operator press is credited."""
+        pid = await _seed(db_session, _belief("p-1", "a guideline"))
+
+        agent = await mark_belief_useful(db_session, pid, now=_NOW, operator=False)
+
+        assert agent.counted is False
+        assert agent.credit_key is None
+        assert await _score(db_session, pid) == 0.0
+        (event,) = await list_events(db_session, event_type=OperatorEventType.BELIEF_MARKED_USEFUL)
+        assert event.payload is not None
+        assert event.payload[OPERATOR_CREDIT_FIELD] is False
+        assert "credit_key" not in event.payload
+
+    @pytest.mark.asyncio
+    async def test_a_press_without_operator_authority_leaves_the_days_credit_free(
+        self, db_session: AsyncSession
+    ) -> None:
+        pid = await _seed(db_session, _belief("p-1", "a guideline"))
+
+        await mark_belief_useful(db_session, pid, now=_NOW, operator=False)
+        operator = await mark_belief_useful(db_session, pid, now=_NOW + timedelta(hours=1))
+
+        assert operator.counted is True
+        assert math.isclose(await _score(db_session, pid), 25.0, abs_tol=1e-9)
+
+    @pytest.mark.asyncio
     async def test_missing_belief_is_refused(self, db_session: AsyncSession) -> None:
         with pytest.raises(BeliefNotCreditable):
             await mark_belief_useful(db_session, "p-nope", now=_NOW)
@@ -185,6 +215,16 @@ class TestRebuildRederivation:
         # Two presses on one day collapse to one credit, exactly as when first
         # recorded — replaying cannot inflate the signal.
         assert math.isclose(await _score(db_session, pid), 25.0, abs_tol=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_rederivation_replays_no_credit_for_a_press_without_operator_authority(
+        self, db_session: AsyncSession
+    ) -> None:
+        pid = await _seed(db_session, _belief("p-1", "a guideline"))
+        await mark_belief_useful(db_session, pid, now=_NOW, operator=False)
+
+        assert await rederive_explicit_credits(db_session) == 0
+        assert await _score(db_session, pid) == 0.0
 
     @pytest.mark.asyncio
     async def test_rederivation_leaves_the_mined_channel_alone(

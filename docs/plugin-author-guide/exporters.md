@@ -170,12 +170,60 @@ raise `ValueError`. `particles.render.markdown.atomic_write_text` is the
 shared write-then-rename helper; use it for files a user may have open
 (a vault note) so a crash never leaves a half-written file.
 
-Claim text comes from deposited documents and is untrusted. A Markdown
-exporter passes it through `particles.render.markdown.neutralize_inline_markdown`
-before writing it into a note, so HTML, embeds, remote images, inline links and
-Logseq macros in a claim render as text and the claim stays on one line. Text
-used as the visible label of a link the exporter writes goes through
-`neutralize_link_label` instead.
+Every stored string is untrusted: claim text, subject names and display names,
+descriptions, classes and aliases, property names and values, taxonomy tags,
+external ids and URIs, extractor and asserter names, and a lint finding's
+detail. An agent key, an imported bundle, an authority label or an extraction
+of a hostile document chooses each one. An exporter writes a stored string
+only through the function of `particles.render.escape` named for the place it
+lands, so the string reads as text and adds no structure:
+
+| Where the string lands | Function |
+|---|---|
+| A Markdown heading, list item, callout line or paragraph | `md_text` |
+| The visible label of a link the exporter writes | `md_link_label` |
+| A link to a stored URI | `md_link` |
+| An inline code span | `md_code_span` |
+| A Markdown table cell | `md_table_cell` |
+| The target of a `[[wikilink]]` | `wikilink_target`, or `wikilink` for the whole link |
+| A YAML frontmatter value | `yaml_scalar` (always quoted, on one line) |
+| A Logseq block | `logseq_text` |
+| Neutralized article prose written as the lines of one Logseq block | `logseq_prose` |
+| A Logseq property value, alias or key | `logseq_property_value`, `logseq_alias`, `logseq_property_key` |
+| A Logseq page reference or tag | `logseq_page_ref`, `logseq_tag` |
+| An Anki card field or deck name | `anki_field`, `anki_deck` |
+| A block id or citation id | `identifier` |
+
+`md_text` escapes HTML, embeds, remote images, inline links, footnote
+references, Logseq macros and query blocks, Dataview inline queries, code-fence
+runs and a line-leading block marker, and keeps the string on one line. Every
+function drops invisible format characters (bidirectional overrides and
+isolates, zero-width characters) and the C0 and C1 controls other than tab and
+line breaks, `synthesized_prose` and `logseq_prose` included, except
+`yaml_scalar`, which writes each format character and control as an escape so
+the value round-trips, and writes the other invisible characters (variation
+selectors, the grapheme joiner, blank-rendering letters) as they are;
+`logseq_prose` also breaks every `((`, so no line it writes holds a live block
+reference; the file-name sanitiser drops them too and caps a name at 200 UTF-8
+bytes, though two stored names can still sanitise to one file name. Each function is applied once:
+the backslash form is not idempotent. An article from `render_article` arrives
+neutralized, the model-written prose and the structured listing written when
+synthesis is unavailable alike, so an exporter splices it as it is; prose from
+any other source goes through `synthesized_prose`.
+`tests/test_export_escaping_guard.py` fails on an exporter module that writes
+a value into its output without one of these functions through an f-string, a
+sink call's argument, or a `+` concatenation with a literal operand that the
+module appends, joins or returns (in a module-level statement, a function, a
+method or a nested class; an escape counts only as a bare name or as
+`escape.<function>`). It does not see every form a raw write can take, such as
+`%` or `.format()` formatting, `+=`, or a value bound to a name before it is
+appended, so review remains part of the check, and
+`tests/test_export_escaping.py` runs the Obsidian, Logseq, wiki and Anki
+exporters, without model synthesis, over a store whose stored fields all hold
+hostile text, a narrative among them, and parses what each wrote; a cached
+article is checked by its own test. The guard is a static check of the
+module's source, functions and methods alike, with the values the engine
+makes itself listed by name. A new exporter is added to both.
 
 ## API-target exporters & credentials
 

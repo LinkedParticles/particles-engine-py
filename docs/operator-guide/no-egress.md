@@ -91,13 +91,36 @@ including the deterministic extractors that never call a model. Route
 The check sits at the transports, so a code path cannot forget it: the shared
 fetch client, the subprocess pin that `curl` and `git` connect through, the
 clients for LLM endpoints and the remote engine, the encoder load, and the
-telemetry exporter. Under `none` and `allowlist` a process-wide backstop also
-refuses any other connection or name lookup the policy does not admit, in the
-CLI, the Claude Code hooks, the engine and the MCP servers. The backstop sees
-connections made through Python's socket layer, which uvloop's are not, so
-`particles engine serve` runs the standard event loop under a refusing
-posture; start a raw `uvicorn` launch with `--loop asyncio` for the same
-cover.
+telemetry exporter. The exporter's endpoint is judged once, when the exporter
+is built, not on each export. An exporter that carries headers
+follows no redirect, and the `otel` extra requires an exporter release that
+follows none, so a collector's redirect does not move the export to a
+destination the check never saw. Under `none` and `allowlist` a process-wide backstop also
+refuses what the policy does not admit, in the CLI, the Claude Code hooks, the
+engine and the MCP servers: a TCP connection, a forward or reverse name lookup,
+or a datagram sent to an address. A connect or datagram that names a host is
+judged before Python resolves the name, unless the code calls the raw
+`_socket.socket` type directly. It sees only what passes through Python's
+socket layer. uvloop's sockets do not, so `particles engine serve` runs the
+standard event loop under a refusing posture, and an engine started on uvloop
+(a raw `uvicorn` launch with the `uvicorn[standard]` extras installed) refuses
+to start and names `particles engine serve` and
+`--loop asyncio:SelectorEventLoop`. Only a selector event loop is admitted;
+on Windows the entry points select one before their loop starts. An engine
+launched with `--lifespan off` arms the backstop on its first request, before
+it serves anything. Every event loop the CLI, the hooks and
+the MCP servers start arms the backstop, the diagnostics' store probes and
+the remote `particles --version` included, and under a refusing posture a
+loop the backstop cannot see is refused: a CLI verb exits 1 with one line, a
+hook logs the refusal and exits 0, and `mcp serve` and `memory serve` refuse
+to start, and the benchmarks' child processes arm it too.
+
+One path Particles starts is not held to an allowlist. When the allowlist
+names `huggingface.co`, the encoder download's Xet-backed files are fetched by
+a native client, which the backstop cannot see, from storage hosts the list
+does not name, and the Hub client follows redirects without a check of its
+own. Warm the encoder cache before you restrict egress, or deny the
+download at the operating system.
 
 The setting is an in-process control. For a guarantee that holds even against a
 path Particles does not know about, also enforce it at the operating system, as

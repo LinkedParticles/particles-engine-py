@@ -34,9 +34,8 @@ file should rarely need to change.
 
 from __future__ import annotations
 
-import asyncio
 import os
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -129,7 +128,7 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     from particles.api.client.http import EngineHttpError
     from particles.core.schema import SchemaVersionMismatchError
     from particles.db import StoreDirectoryError, WriteLockTimeout
-    from particles.egress import EgressRefused, ensure_backstop
+    from particles.egress import EgressRefused, UncoveredEventLoop, ensure_backstop, run_armed
     from particles.llm import AccountLevelLLMError
 
     # Bootstrap observability once per CLI process. A no-op unless
@@ -145,9 +144,9 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     # Open a root span around the command. Without it every
     # auto-instrumented leaf (each DB query, each httpx call) is parentless and
     # becomes its OWN single-span trace — the fragmentation that makes a local
-    # `particles export` look like "1 span" in Tempo. Wrapping `asyncio.run` ties
+    # `particles export` look like "1 span" in Tempo. Wrapping the loop's run ties
     # them into one `cli.<verb>` tree. Uses the OTel API directly (no-op when
-    # observability is off). The span wraps only `asyncio.run`, so a translated
+    # observability is off). The span wraps only the loop's run, so a translated
     # operational error is recorded on it while the `typer.Exit` raised by the
     # handlers below stays outside it.
     from opentelemetry import trace as _otel_trace
@@ -163,10 +162,28 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
     try:
         with (
             heartbeat(_verb),
-            _cli_tracer.start_as_current_span(f"cli.{_verb}") as _span,
+            # No exception event either: its message is the failure's text,
+            # and a failed fetch's text is the deposited URL with its query
+            # string. The span records the exception's type alone (security
+            # review 2026-10-25-2, R7).
+            _cli_tracer.start_as_current_span(
+                f"cli.{_verb}", record_exception=False, set_status_on_exception=False
+            ) as _span,
         ):
-            _span.set_attribute("cli.command", " ".join(sys.argv[1:]) or _verb)
-            return asyncio.run(coro)
+            # The verb only, never its arguments: a query's text, a deposited
+            # URL or an id would otherwise reach the collector past the URL
+            # scrubs (security review 2026-10-25, Q16; the route-template rule
+            # of the server spans).
+            _span.set_attribute("cli.command", _verb)
+            try:
+                # The loop is checked too: under a refusing posture a loop whose
+                # sockets skip the backstop is refused (security review
+                # 2026-10-26-1, U13).
+                return run_armed(coro)
+            except Exception as exc:
+                _span.set_attribute("error.type", type(exc).__name__)
+                _span.set_status(_otel_trace.Status(_otel_trace.StatusCode.ERROR))
+                raise
     except (OperationalError, ProgrammingError) as exc:
         msg = str(exc).lower()
         if "no such table" in msg or "does not exist" in msg:
@@ -231,6 +248,9 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
                 err=True,
             )
         raise typer.Exit(1) from exc
+    except UncoveredEventLoop as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     except WriteLockTimeout as exc:
         # a writer could not acquire the cross-process write lock in
         # time — another particles process is mid-write. Retryable, not corruption.
@@ -284,7 +304,7 @@ def run(coro: Coroutine[Any, Any, _T]) -> _T:
         raise
 
 
-def _refuse_cwd_relative_default_store() -> None:
+def _refuse_cwd_relative_default_store(*, local_store: bool = False) -> None:
     """Exit with one line when a config-pinned server would serve ``./particles.db``.
 
     A server started with ``PARTICLES_CONFIG`` was installed on purpose (by
@@ -293,17 +313,20 @@ def _refuse_cwd_relative_default_store() -> None:
     an absolute ``default`` store, the read tools would open ``particles.db``
     in each session's directory, which a cloned repository can ship (security
     review N3, N17). An unpinned launch keeps its old behaviour, and so does a
-    thin client, which reads no local store.
+    thin client, which reads no local store. ``local_store`` marks a server
+    that reads the local store whatever ``engine.base_url`` says.
     """
     from particles.config import get_config, sqlite_file_path
 
     if not os.environ.get("PARTICLES_CONFIG") or os.environ.get("DATABASE_URL"):
         return
     cfg = get_config()
-    if cfg.engine.base_url:
+    if cfg.engine.base_url and not local_store:
         return
+    # The config expands a leading ``~`` (``StorageConfig``), so a path still
+    # relative here is the one SQLite would open against the directory (P13).
     db_file = sqlite_file_path(cfg.storage.database_url)
-    if db_file is None or Path(db_file).expanduser().is_absolute():
+    if db_file is None or Path(db_file).is_absolute():
         return
     typer.echo(
         f"Error: the default store ({cfg.storage.database_url}) resolves against the working "
@@ -315,7 +338,7 @@ def _refuse_cwd_relative_default_store() -> None:
     raise typer.Exit(1)
 
 
-def _anchor_unpinned_default_store() -> None:
+def _anchor_unpinned_default_store(*, local_store: bool = False) -> None:
     """Serve an unpinned server's relative ``default`` store from ``~/.particles/``.
 
     A stdio MCP server started with neither ``DATABASE_URL`` nor
@@ -330,18 +353,18 @@ def _anchor_unpinned_default_store() -> None:
     own process, the bootstrap ``engine serve`` uses for its bind, so the
     relative blob directory follows the store by the rule. One stderr
     line names the file, so a store the CLI does not use is never served
-    silently.
+    silently. ``local_store`` as for :func:`_refuse_cwd_relative_default_store`.
     """
     from particles.config import get_config, reset_config, sqlite_file_path, user_config_path
 
     if os.environ.get("PARTICLES_CONFIG") or os.environ.get("DATABASE_URL"):
         return
     cfg = get_config()
-    if cfg.engine.base_url:
+    if cfg.engine.base_url and not local_store:
         return
     url = cfg.storage.database_url
     db_file = sqlite_file_path(url)
-    if db_file is None or Path(db_file).expanduser().is_absolute():
+    if db_file is None or Path(db_file).is_absolute():
         return
     anchored = Path(os.path.normpath(user_config_path().parent / db_file))
     os.environ["DATABASE_URL"] = f"{url.split(':///', 1)[0]}:///{anchored}"
@@ -353,19 +376,89 @@ def _anchor_unpinned_default_store() -> None:
     )
 
 
-def prepare_stdio_server_store(store: str) -> None:
+def _refuse_relative_config_pin() -> None:
+    """Exit with one line when ``PARTICLES_CONFIG`` is relative (security review N15, P14).
+
+    The loader would read it against the session's working directory, so a
+    cloned repository with a file at that path would configure the server:
+    its write tools, its stores and the endpoints secrets go to. The CLI only
+    warns, since an operator chose its directory; a harness did not.
+    """
+    from particles.config import relative_config_pin
+
+    explicit = relative_config_pin()
+    if explicit is None:
+        return
+    typer.echo(
+        f"Error: PARTICLES_CONFIG names a relative path ({explicit}), which this server would "
+        "read from whatever directory the session starts in. Set an absolute path in the MCP "
+        "registration (write $HOME/... rather than ~/...), or re-run "
+        "`particles init claude-code` to pin it.",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+def _refuse_cwd_relative_named_stores(stores: Iterable[str], *, local_store: bool = False) -> None:
+    """Exit with one line when a named store this server serves resolves against the directory.
+
+    A named store's DSN always comes from a config file the operator wrote, so
+    there is no install to anchor and no pin that overrides it: a relative
+    SQLite path there would open a different file in each session's directory
+    (security review 2026-10-24-2, P15). Thin clients read no local store,
+    unless ``local_store`` says this server reads it anyway.
+    """
+    from particles.config import get_config, sqlite_file_path
+
+    cfg = get_config()
+    if cfg.engine.base_url and not local_store:
+        return
+    relative = sorted(
+        handle
+        for handle in stores
+        if (url := cfg.storage.stores.get(handle)) is not None
+        and (db_file := sqlite_file_path(url)) is not None
+        and not Path(db_file).is_absolute()
+    )
+    if not relative:
+        return
+    typer.echo(
+        "Error: the named store(s) "
+        + ", ".join(f"{h!r} ({cfg.storage.stores[h]})" for h in relative)
+        + " resolve against the working directory, so this server would read whatever "
+        "file the session's directory holds. Write an absolute path for each under "
+        "storage.stores in the config file.",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+def prepare_stdio_server_store(
+    store: str, *, every_store: bool = False, local_store: bool = False
+) -> None:
     """Apply the stdio MCP servers' store rule, then check the directory.
 
-    ``DATABASE_URL`` set: used as given. ``PARTICLES_CONFIG`` set with a
-    relative ``default`` store: refused. Neither set: a relative ``default``
-    store is anchored under ``~/.particles/``. Only the ``default`` store is
-    concerned; a named store's DSN comes from a config the operator chose.
+    A relative ``PARTICLES_CONFIG`` is refused first (P14). Then, for the
+    ``default`` store: ``DATABASE_URL`` set, used as given; ``PARTICLES_CONFIG``
+    set with a relative store, refused; neither set, a relative store is
+    anchored under ``~/.particles/``. A named store with a relative SQLite path
+    is refused, pinned or not (P15). ``every_store`` checks every configured
+    named store as well as ``store``: the native server reaches any of them per
+    tool call. ``local_store`` applies the rule even when ``engine.base_url``
+    is set, for a server that opens the local store regardless: the memory
+    facade has no remote backend (security review 2026-10-25-2, R11).
     """
+    from particles.config import get_config
     from particles.db import DEFAULT_STORE
 
+    _refuse_relative_config_pin()
     if store == DEFAULT_STORE:
-        _refuse_cwd_relative_default_store()
-        _anchor_unpinned_default_store()
+        _refuse_cwd_relative_default_store(local_store=local_store)
+        _anchor_unpinned_default_store(local_store=local_store)
+    named = set(get_config().storage.stores) if every_store else set()
+    if store != DEFAULT_STORE:
+        named.add(store)
+    _refuse_cwd_relative_named_stores(named, local_store=local_store)
     require_store_directory(store)
 
 
@@ -404,7 +497,12 @@ def _version_callback(value: bool) -> None:
 
     from particles import __version__
     from particles.config import get_config
+    from particles.egress import EgressRefused, UncoveredEventLoop, ensure_backstop, run_armed
+    from particles.url_safety import url_without_userinfo
 
+    # The eager callback runs before ``run()`` arms the backstop, and the
+    # remote branch below connects (security review 2026-10-26-1, E7).
+    ensure_backstop()
     base_url = get_config().engine.base_url
     if not base_url:
         typer.echo(f"particles {__version__}")
@@ -415,10 +513,10 @@ def _version_callback(value: bool) -> None:
 
     typer.echo(f"particles {__version__} (client)")
     try:
-        engine_version = asyncio.run(HttpBackend().health())
-        typer.echo(f"engine {engine_version} ({base_url})")
-    except EngineHttpError as exc:
-        typer.echo(f"engine unreachable ({base_url}): {exc}", err=True)
+        engine_version = run_armed(HttpBackend().health())
+        typer.echo(f"engine {engine_version} ({url_without_userinfo(base_url)})")
+    except (EngineHttpError, EgressRefused, UncoveredEventLoop) as exc:
+        typer.echo(f"engine unreachable ({url_without_userinfo(base_url)}): {exc}", err=True)
     raise typer.Exit()
 
 

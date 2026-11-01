@@ -14,7 +14,9 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
+from particles.api.cli._terminal import terminal_field
 from particles.api.client import get_backend
+from particles.corpus.harvest_marks import reserved_marks, reserved_marks_refusal
 from particles.db import DEFAULT_STORE
 from particles.http import SourceFetchError
 
@@ -29,6 +31,19 @@ def _parse_cli_date(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def refuse_reserved_marks(tags: list[str], deposited_by: str) -> None:
+    """Exit 1 when a hand deposit names a harvester's tag or depositor id.
+
+    Those marks are provenance the update rung and the refresh tier read
+    (``particles.corpus.harvest_marks``; security review 2026-10-24-2, P5).
+    Shared by ``deposit`` and the ``import`` verbs.
+    """
+    refusal = reserved_marks_refusal(reserved_marks(tags, deposited_by))
+    if refusal is not None:
+        typer.echo(f"Error: {refusal}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("deposit")
@@ -187,6 +202,7 @@ def deposit_cmd(
                 raise typer.Exit(1)
         st_text = source_type or ("JOURNAL" if journal else None)
         tag_list = [t.strip() for t in tags.split(",")] if tags else []
+        refuse_reserved_marks(tag_list, deposited_by)
         entry_id, snapshot_id = run(_deposit_text(text, deposited_by, st_text, tag_list))
         typer.echo(f"entry_id:    {entry_id}")
         typer.echo(f"snapshot_id: {snapshot_id}")
@@ -207,6 +223,7 @@ def deposit_cmd(
     mutability = mutability.upper() if mutability else None
     fetch_policy = fetch_policy.upper() if fetch_policy else None
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    refuse_reserved_marks(tag_list, deposited_by)
     st = source_type or ("JOURNAL" if journal else None)
     if split_by_date:
         # --date asserts one authorship date for the whole file, which
@@ -287,7 +304,8 @@ def deposit_cmd(
         for f_entry_id, f_snap_id, f_uri in follow_targets:
             typer.echo(f"  → entry_id:    {f_entry_id}")
             typer.echo(f"    snapshot_id: {f_snap_id}")
-            typer.echo(f"    uri_r:       {f_uri}")
+            # A followed URI is a link a source published (AB37).
+            typer.echo(f"    uri_r:       {terminal_field(f_uri)}")
 
 
 async def _deposit(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from particles.core.schema import Snapshot, UncertaintyNature
@@ -20,6 +21,7 @@ from particles.extraction.hackernews import (
     HackerNewsExtractor,
     _build_hn_chunks,
     _build_story_meta_candidate,
+    _fetch_item,
     _get_comments_map,
     _get_story,
     _parse_item_id,
@@ -27,6 +29,7 @@ from particles.extraction.hackernews import (
     _rewrite_hn_subjects,
     _walk_comments_dfs,
 )
+from particles.extraction.hackernews import _fetch_thread as hn_fetch_thread
 from particles.ingest.importers.hackernews import HackerNewsImporter
 from tests._capped_http import set_capped_responses
 
@@ -563,3 +566,155 @@ class TestRegistryIntegration:
         hn_idx = next(i for i, p in enumerate(plugins) if p.EXTRACTOR_ID == "hackernews-extractor")
         general_idx = next(i for i, p in enumerate(plugins) if isinstance(p, GeneralExtractor))
         assert hn_idx < general_idx
+
+
+# ---------------------------------------------------------------------------
+# Bounds on what the API sends (security review 2026-10-28-2: AA18, AA57),
+# through a real ``httpx.AsyncClient`` on an in-process ``MockTransport``.
+# ---------------------------------------------------------------------------
+
+
+def _mock_client(handler: object) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_hacker_news_body_nested_past_the_decoder_limit_reads_as_no_item() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"[" * 200_000)
+
+    async with _mock_client(handler) as client:
+        assert await _fetch_item(client, 1) is None
+
+
+# --- AA57: the Hacker News walks visit each item once -----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_hacker_news_kids_cycle_fetches_no_more_items_than_max_comments() -> None:
+    fetches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fetches
+        fetches += 1
+        item_id = int(request.url.path.rsplit("/", 1)[-1].split(".")[0])
+        body = {"id": item_id, "type": "story" if item_id == 1 else "comment", "kids": [2]}
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    max_comments = 5
+    async with _mock_client(handler) as client:
+        await hn_fetch_thread(client, 1, max_comments)
+    assert fetches <= max_comments + 1
+
+
+@pytest.mark.asyncio
+async def test_a_hacker_news_walk_of_distinct_ids_stops_at_max_comments_fetches() -> None:
+    fetches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fetches
+        fetches += 1
+        item_id = int(request.url.path.rsplit("/", 1)[-1].split(".")[0])
+        body = {"id": item_id, "text": f"c{item_id}", "kids": [item_id * 2, item_id * 2 + 1]}
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    async with _mock_client(handler) as client:
+        payload = await hn_fetch_thread(client, 1, 7)
+    assert fetches == 8
+    # Depth first: each reply sequence stays contiguous.
+    assert list(payload["comments"]) == ["2", "4", "8", "16", "32", "64", "128"]
+
+
+def test_a_comment_map_whose_kids_revisit_a_comment_renders_each_once() -> None:
+    story = {"id": 1, "kids": [2]}
+    comments = {
+        "2": {"id": 2, "text": "two", "kids": [3]},
+        "3": {"id": 3, "text": "three", "kids": [2, 3]},
+    }
+    walked = _walk_comments_dfs(story, comments, min_score=0)
+    assert [(depth, c["id"]) for depth, c in walked] == [(0, 2), (1, 3)]
+
+
+# --- Chunk budget and kid ids (security review 2026-10-30, AB18, AB63) ------
+
+
+def _hn_budget() -> tuple[int, int]:
+    from particles.config import get_config
+
+    ext = get_config().extraction
+    return ext.single_call_threshold_chars, ext.comment_chunk_chars
+
+
+def test_hackernews_one_long_comment_stays_within_the_chunk_budget() -> None:
+    """A single comment past the chunk budget is clipped to it, not sent as one call."""
+    from particles.extraction.hackernews import _build_hn_chunks
+
+    threshold, chunk_chars = _hn_budget()
+    story = {"id": 1, "by": "a", "title": "t", "kids": [2]}
+    comments = {"2": {"id": 2, "by": "b", "text": "x" * (threshold + chunk_chars)}}
+    chunks = _build_hn_chunks(story, comments, 2, 0, threshold, chunk_chars)
+    assert max(len(c.chunk_text) for c in chunks) <= threshold + 400
+
+
+def test_hackernews_story_text_stays_within_the_chunk_budget() -> None:
+    """A story text past the threshold is split into parts, none past the budget."""
+    from particles.extraction.hackernews import _build_hn_chunks
+
+    threshold, chunk_chars = _hn_budget()
+    story = {"id": 1, "by": "a", "title": "t", "text": "q" * (threshold + chunk_chars)}
+    chunks = _build_hn_chunks(story, {}, 2, 0, threshold, chunk_chars)
+    assert max(len(c.chunk_text) for c in chunks) <= threshold + 400
+    assert "".join(c.chunk_text for c in chunks).count("q") == threshold + chunk_chars
+
+
+def test_hackernews_short_story_keeps_its_single_story_chunk() -> None:
+    from particles.extraction.hackernews import _build_hn_chunks
+
+    chunks = _build_hn_chunks(_STORY, {}, 2, 0, 30_000, 10_000)
+    assert [c.chunk_id for c in chunks] == ["story"]
+    assert chunks[0].chunk_text == _render_hn_story_body(_STORY)
+
+
+async def test_hackernews_walk_fetches_only_integer_item_ids() -> None:
+    """Every URL the thread walk requests has the path /v0/item/<digits>.json."""
+    import json
+    import re
+
+    import httpx
+
+    from particles.extraction.hackernews import _fetch_thread
+
+    item_path = re.compile(r"^/v0/item/\d+\.json$")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.raw_path.decode())
+        if request.url.path.endswith("/item/1.json"):
+            body = {"id": 1, "type": "story", "kids": ["../../user/x", {"k": 1}, 2.5, True, 3]}
+        else:
+            body = {"id": 3, "type": "comment", "text": "t"}
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        thread = await _fetch_thread(client, 1, 50)
+
+    assert requested
+    assert all(item_path.match(p) for p in requested), requested
+    assert set(thread["comments"]) == {"3"}
+
+
+def test_hackernews_stored_walk_skips_kids_that_are_not_item_ids() -> None:
+    from particles.extraction.hackernews import _walk_comments_dfs
+
+    story = {"kids": ["2", True, 2.0, 3]}
+    comments = {"2": {"text": "string id"}, "True": {"text": "bool"}, "3": {"text": "ok"}}
+    walked = _walk_comments_dfs(story, comments, 0)
+    assert [c["text"] for _, c in walked] == ["ok"]
+
+
+def test_hackernews_api_url_refuses_a_non_integer_id() -> None:
+    from particles.extraction.hackernews import _api_url
+
+    for bad in ("../x", True, -1, 2.5):
+        with pytest.raises(ValueError):
+            _api_url(bad)  # type: ignore[arg-type]

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
+from particles.api.cli._terminal import terminal_echo
 from particles.config import get_config
 from particles.core.schema import ProvenanceRefType
 from particles.db import session_scope
@@ -356,7 +357,7 @@ def curate_apply_cmd(
 
 
 def _fail(message: str) -> NoReturn:
-    typer.echo(f"✗ {message}", err=True)
+    terminal_echo(f"✗ {message}", err=True)
     raise typer.Exit(1)
 
 
@@ -385,9 +386,9 @@ async def _show_precision(*, since: datetime | None, kind: CardKind | None, form
 
     if report is None:
         if format_ == "json":
-            typer.echo("null")
+            terminal_echo("null")
         else:
-            typer.echo(
+            terminal_echo(
                 "No curation precision to report: the store has no stored collection and "
                 "no recorded gesture. Work the queue with `particles curate`, or build a "
                 "collection with `particles curate --refresh`."
@@ -413,7 +414,7 @@ async def _show_precision(*, since: datetime | None, kind: CardKind | None, form
         typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
         return
     for line in render_precision_lines(report):
-        typer.echo(line)
+        terminal_echo(line)
 
 
 async def _show(
@@ -434,7 +435,7 @@ async def _show(
     async with session_scope() as session:
         report = await get_quality_report(session)
         if refresh:
-            typer.echo(
+            terminal_echo(
                 "Rebuilding the curation collection (running every finder)…"
                 if semantic
                 else "Rebuilding the curation collection (structural finders; "
@@ -450,30 +451,30 @@ async def _show(
         )
         related = await _load_related(session, result.cards)
 
-    typer.echo(
+    terminal_echo(
         f"Store: {report.active_particles:,} active · "
         f"{report.inconsistency_particles:,} inconsistency · "
         f"{report.snapshots_failed:,} failed snapshots · "
         f"{report.subjects_without_particles:,} subjects w/o particles"
     )
-    typer.echo(_freshness_line(result, bypassed=no_snapshot) + "\n")
+    terminal_echo(_freshness_line(result, bypassed=no_snapshot) + "\n")
 
     cards = result.cards
     if not cards:
-        typer.echo("Curation queue empty — nothing flagged. ✨")
+        terminal_echo("Curation queue empty — nothing flagged. ✨")
         return
 
     snooze_days = get_config().curation.snooze_days
-    typer.echo(
+    terminal_echo(
         f"Curation queue: {len(cards)} of {result.open_count:,} open cards, "
         "highest leverage first.\n"
     )
     for i, c in enumerate(cards, 1):
         for line in _render_card(i, c, related, snooze_days=snooze_days):
-            typer.echo(line)
-        typer.echo("")
-    typer.echo("Resolve a card with:  particles curate apply GESTURE KEY")
-    typer.echo("Inspect a belief with:  particles particle show ID")
+            terminal_echo(line)
+        terminal_echo("")
+    terminal_echo("Resolve a card with:  particles curate apply GESTURE KEY")
+    terminal_echo("Inspect a belief with:  particles particle show ID")
 
 
 async def _show_card(key: str) -> None:
@@ -486,7 +487,7 @@ async def _show_card(key: str) -> None:
         _fail(f"No open card with key {key!r}.")
     snooze_days = get_config().curation.snooze_days
     for line in _render_card(1, card, related, snooze_days=snooze_days):
-        typer.echo(line)
+        terminal_echo(line)
 
 
 _WIDTH = 88
@@ -702,7 +703,7 @@ async def _apply(
     try:
         card = CurationCard.from_key(card_key)
     except ValueError as exc:
-        typer.echo(f"✗ {exc}", err=True)
+        terminal_echo(f"✗ {exc}", err=True)
         raise typer.Exit(1) from exc
 
     async with session_scope() as session:
@@ -719,7 +720,10 @@ async def _apply(
                 note=note,
             )
         except ValueError as exc:
-            typer.echo(f"✗ {exc}", err=True)
+            terminal_echo(f"✗ {exc}", err=True)
             raise typer.Exit(1) from exc
-        await session.commit()
-    typer.echo(f"✓ {message}")
+        # A gesture that committed its own writes under the writer lock
+        # (supersede, assign-subject) leaves nothing to commit here.
+        if session.in_transaction():
+            await session.commit()
+    terminal_echo(f"✓ {message}")

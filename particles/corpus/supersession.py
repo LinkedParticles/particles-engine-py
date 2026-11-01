@@ -30,6 +30,17 @@ relation, in two halves:
 
 The §6.6 rung-1.5 prior (cap. 2) consults :func:`entry_supersedes` to
 prefer the superseding document's claim when two claims conflict.
+
+**A document's key is read within its own collection** (security review
+2026-10-24-2, P4). The number an ADR declares (``id: "0017"``, ``supersedes:
+"0017"``) names a record of the collection the document belongs to, not of the
+store, so the key graph's nodes are ``(lineage, key)`` pairs and an edge joins
+only nodes of one lineage. The lineage is what the engine recorded about the
+entry, never what the document says about itself: its depositor, its source
+type, its URI's scheme and authority, and its collection root
+(:func:`_document_lineage`). A document from another repository or host that
+declares it supersedes ``0017`` therefore supersedes nothing of the owner's,
+and a conflict between the two falls through to the trust rung.
 """
 
 from __future__ import annotations
@@ -37,11 +48,15 @@ from __future__ import annotations
 import json
 from collections import deque
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlparse
 
+import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from particles.core import bounded_yaml
 from particles.corpus.store import CorpusEntryRow
 
 
@@ -97,6 +112,8 @@ def _parse_frontmatter(content: bytes) -> dict[str, Any] | None:
     :func:`particles.extraction.general._strip_obsidian_frontmatter` detection,
     kept Engine-side so the corpus layer needn't import the Client extractor.
     Bounded to the first 8 KiB and tolerant of malformed YAML (returns ``None``).
+    Aliases count toward a node budget linear in the block, so a short header
+    cannot expand into a large value (security review 2026-10-26-1, W7).
     """
     # Cheap reject: only text documents that *open* with a fence can carry it.
     head = content[:8192]
@@ -112,17 +129,19 @@ def _parse_frontmatter(content: bytes) -> dict[str, Any] | None:
         return None
     yaml_block = text[after_open:close]
     try:
-        import yaml
-
-        parsed = yaml.safe_load(yaml_block) if yaml_block.strip() else None
+        parsed = bounded_yaml.load(yaml_block) if yaml_block.strip() else None
     except yaml.YAMLError:
         return None
     return parsed if isinstance(parsed, dict) else None
 
 
 def _normalise_adr_id(value: Any) -> str | None:
-    """``"0017"`` / ``17`` / an ``ADR``-prefixed string → ``"adr:0017"`` (None if unusable)."""
-    if value is None:
+    """``"0017"`` / ``17`` / an ``ADR``-prefixed string → ``"adr:0017"`` (None if unusable).
+
+    Only a string or an integer is an id; any other value (a list, a mapping,
+    a boolean) is unusable rather than stringified.
+    """
+    if isinstance(value, bool) or not isinstance(value, str | int):
         return None
     token = str(value).strip().lower().removeprefix("adr").strip(" :-")
     if not token:
@@ -141,7 +160,8 @@ def _coerce_id_list(value: Any) -> tuple[str, ...]:
 
 def _adr_relation(meta: dict[str, Any]) -> DocumentRelation | None:
     """The ADR genre adapter: ``type: ADR`` frontmatter → a DocumentRelation."""
-    if str(meta.get("type", "")).strip().upper() != "ADR":
+    doc_type = meta.get("type")
+    if not isinstance(doc_type, str) or doc_type.strip().upper() != "ADR":
         return None
     key = _normalise_adr_id(meta.get("id"))
     if key is None:
@@ -187,38 +207,77 @@ async def set_document_relation(
         await session.flush()
 
 
-async def _key_of(session: AsyncSession, entry_id: str) -> str | None:
+#: One document collection: who deposited it, as what, from where.
+Lineage = tuple[str, str, str, str]
+
+#: A node of the supersession graph: a document key inside its collection.
+_Node = tuple[Lineage, str]
+
+
+def _document_lineage(row: CorpusEntryRow) -> Lineage:
+    """The collection an entry's document belongs to, from what the engine recorded.
+
+    ``(deposited_by, source_type, scheme://authority, collection root)``. The
+    collection root is the directory above the one holding the document, so an
+    ADR tree whose lifecycle subdirectories (``active/``, ``superseded/``) sit
+    side by side is one collection, while another checkout, repository or host
+    is another. An entry with no URI-R has an empty root, and is one collection
+    with every other such entry of its depositor and type.
+    """
+    parsed = urlparse(row.uri_r or "")
+    path = PurePosixPath(unquote(parsed.path)) if parsed.path else None
+    root = str(path.parent.parent) if path is not None else ""
+    return (row.deposited_by, row.source_type, f"{parsed.scheme}://{parsed.netloc}", root)
+
+
+async def _node_of(session: AsyncSession, entry_id: str) -> _Node | None:
     row = await session.get(CorpusEntryRow, entry_id)
     if row is None or row.document_supersession_json is None:
         return None
     rel = DocumentRelation.from_json(row.document_supersession_json)
-    return rel.key if rel is not None else None
+    return (_document_lineage(row), rel.key) if rel is not None else None
 
 
-async def _supersession_graph(session: AsyncSession) -> dict[str, set[str]]:
-    """Forward adjacency ``superseding_key → {superseded_key, …}``.
+async def _relation_rows(
+    session: AsyncSession,
+) -> list[tuple[str, Lineage, DocumentRelation]]:
+    """``(entry_id, lineage, relation)`` for every entry that declares a relation."""
+    result = await session.execute(
+        select(CorpusEntryRow).where(CorpusEntryRow.document_supersession_json.is_not(None))
+    )
+    rows: list[tuple[str, Lineage, DocumentRelation]] = []
+    for row in result.scalars().all():
+        raw = row.document_supersession_json
+        rel = DocumentRelation.from_json(raw) if raw else None
+        if rel is not None:
+            rows.append((row.entry_id, _document_lineage(row), rel))
+    return rows
 
-    Built from every entry that declares a relation, merging edges from both
-    annotation directions (``supersedes`` on the new doc, ``superseded_by`` on
-    the old doc) so the graph is the same regardless of which side annotated.
+
+def _graph_of(rows: list[tuple[str, Lineage, DocumentRelation]]) -> dict[_Node, set[_Node]]:
+    """Forward adjacency ``superseding node → {superseded node, …}``, per lineage.
+
+    Merges edges from both annotation directions (``supersedes`` on the new
+    doc, ``superseded_by`` on the old doc) so the graph is the same regardless
+    of which side annotated. Every edge stays inside the lineage of the entry
+    that declared it, so no collection can add an edge to another's graph.
+    """
+    graph: dict[_Node, set[_Node]] = {}
+    for _entry_id, lineage, rel in rows:
+        for superseded in rel.supersedes:
+            graph.setdefault((lineage, rel.key), set()).add((lineage, superseded))
+        for superseding in rel.superseded_by:
+            graph.setdefault((lineage, superseding), set()).add((lineage, rel.key))
+    return graph
+
+
+async def _supersession_graph(session: AsyncSession) -> dict[_Node, set[_Node]]:
+    """The supersession graph over every entry carrying the column.
+
     Scoped to entries carrying the column, so it stays cheap at the motivating
     scale (a few hundred ADRs).
     """
-    result = await session.execute(
-        select(CorpusEntryRow.document_supersession_json).where(
-            CorpusEntryRow.document_supersession_json.is_not(None)
-        )
-    )
-    graph: dict[str, set[str]] = {}
-    for (raw,) in result.all():
-        rel = DocumentRelation.from_json(raw) if raw else None
-        if rel is None:
-            continue
-        for superseded in rel.supersedes:
-            graph.setdefault(rel.key, set()).add(superseded)
-        for superseding in rel.superseded_by:
-            graph.setdefault(superseding, set()).add(rel.key)
-    return graph
+    return _graph_of(await _relation_rows(session))
 
 
 async def entry_supersedes(
@@ -229,21 +288,22 @@ async def entry_supersedes(
 ) -> bool:
     """True if ``superseding_entry_id``'s document (transitively) supersedes the other's.
 
-    Resolves each entry to its document key, then walks the supersession key
+    Resolves each entry to its document node, then walks the supersession
     graph forward from the candidate superseder. Returns ``False`` when either
-    entry carries no genre relation, when the two share a key (same document —
-    not a supersession), or when no path connects them. Cycle-safe via a visited
-    set.
+    entry carries no genre relation, when the two belong to different
+    collections (:func:`_document_lineage`), when they share a key (same
+    document, not a supersession), or when no path connects them. Cycle-safe
+    via a visited set.
     """
-    src = await _key_of(session, superseding_entry_id)
-    dst = await _key_of(session, superseded_entry_id)
-    if src is None or dst is None or src == dst:
+    src = await _node_of(session, superseding_entry_id)
+    dst = await _node_of(session, superseded_entry_id)
+    if src is None or dst is None or src[0] != dst[0] or src == dst:
         return False
     graph = await _supersession_graph(session)
     if src not in graph:
         return False
-    seen: set[str] = {src}
-    queue: deque[str] = deque(graph[src])
+    seen: set[_Node] = {src}
+    queue: deque[_Node] = deque(graph[src])
     while queue:
         node = queue.popleft()
         if node == dst:
@@ -269,36 +329,31 @@ async def iter_supersession_entry_pairs(
     entries (a re-deposit) yields a pair for each; self-pairs (same key) are
     excluded. Returns ``[]`` when no entry carries a genre relation.
     """
-    result = await session.execute(
-        select(CorpusEntryRow.entry_id, CorpusEntryRow.document_supersession_json).where(
-            CorpusEntryRow.document_supersession_json.is_not(None)
-        )
-    )
-    key_to_entries: dict[str, list[str]] = {}
-    entry_key: dict[str, str] = {}
-    for entry_id, raw in result.all():
-        rel = DocumentRelation.from_json(raw) if raw else None
-        if rel is None:
-            continue
-        key_to_entries.setdefault(rel.key, []).append(entry_id)
-        entry_key[entry_id] = rel.key
-    if not entry_key:
+    rows = await _relation_rows(session)
+    node_to_entries: dict[_Node, list[str]] = {}
+    entry_node: dict[str, _Node] = {}
+    for entry_id, lineage, rel in rows:
+        node = (lineage, rel.key)
+        node_to_entries.setdefault(node, []).append(entry_id)
+        entry_node[entry_id] = node
+    if not entry_node:
         return []
 
-    graph = await _supersession_graph(session)
+    graph = _graph_of(rows)
     pairs: list[tuple[str, str]] = []
-    for sup_entry_id, src_key in entry_key.items():
-        if src_key not in graph:
+    for sup_entry_id, src_node in entry_node.items():
+        if src_node not in graph:
             continue
-        # BFS forward from src_key over the transitive supersession graph.
-        seen: set[str] = {src_key}
-        queue: deque[str] = deque(graph[src_key])
+        # BFS forward from src_node over the transitive supersession graph,
+        # which never leaves the source's lineage.
+        seen: set[_Node] = {src_node}
+        queue: deque[_Node] = deque(graph[src_node])
         while queue:
             node = queue.popleft()
             if node in seen:
                 continue
             seen.add(node)
-            for sub_entry_id in key_to_entries.get(node, ()):
+            for sub_entry_id in node_to_entries.get(node, ()):
                 if sub_entry_id != sup_entry_id:
                     pairs.append((sup_entry_id, sub_entry_id))
             queue.extend(graph.get(node, ()))

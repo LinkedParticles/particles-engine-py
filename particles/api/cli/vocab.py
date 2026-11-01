@@ -13,6 +13,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.db import session_scope
 
 vocab_app = typer.Typer(
@@ -30,7 +31,7 @@ _ACTOR = "cli:vocab"
 
 
 def _fail(exc: Exception) -> None:
-    typer.echo(str(exc), err=True)
+    terminal_echo(str(exc), err=True)
     raise typer.Exit(code=1) from exc
 
 
@@ -48,14 +49,15 @@ async def _vocab_list() -> None:
     async with session_scope() as session:
         rows = await list_documents(session)
     if not rows:
-        typer.echo("No vocabulary documents. Create one with `particles vocab create`.")
+        terminal_echo("No vocabulary documents. Create one with `particles vocab create`.")
         return
-    typer.echo(f"{'VERSION':7}  {'TERMS':>5}  {'NAME':24}  {'ADOPTED':20}  NAMESPACE")
-    typer.echo("-" * 96)
+    terminal_echo(f"{'VERSION':7}  {'TERMS':>5}  {'NAME':24}  {'ADOPTED':20}  NAMESPACE")
+    terminal_echo("-" * 96)
     for row, adoptions in rows:
         where = ", ".join("store" if lens == "" else f"lens:{lens}" for lens in adoptions) or "-"
-        typer.echo(
-            f"v{row.version:<6}  {row.term_count:>5}  {row.name:24}  {where:20}  {row.namespace}"
+        terminal_echo(
+            f"v{row.version:<6}  {row.term_count:>5}  {terminal_field(row.name):24}  "
+            f"{where:20}  {terminal_field(row.namespace)}"
         )
 
 
@@ -78,33 +80,45 @@ async def _vocab_show(name: str, version: int | None) -> None:
         doc = await get_document(session, name, version)
         versions = await list_versions(session, name)
     if doc is None:
-        typer.echo(f"No vocabulary {name!r}" + (f" v{version}" if version else "") + ".", err=True)
+        terminal_echo(
+            f"No vocabulary {name!r}" + (f" v{version}" if version else "") + ".", err=True
+        )
         raise typer.Exit(code=1)
-    typer.echo(f"{doc.name} v{doc.version}  {doc.prefix}: <{doc.namespace}>")
-    typer.echo(f"  publisher: {doc.publisher or '-'}   issued: {doc.issued.isoformat()}")
+    terminal_echo(
+        f"{terminal_field(doc.name)} v{doc.version}  "
+        f"{terminal_field(doc.prefix)}: <{terminal_field(doc.namespace)}>"
+    )
+    terminal_echo(
+        f"  publisher: {terminal_field(doc.publisher or '-')}   issued: {doc.issued.isoformat()}"
+    )
     if doc.description:
-        typer.echo(f"  {doc.description}")
-    typer.echo(f"  versions: {', '.join(f'v{v.version}' for v in versions)}")
+        terminal_echo(f"  {terminal_field(doc.description)}")
+    terminal_echo(f"  versions: {', '.join(f'v{v.version}' for v in versions)}")
     if not doc.terms:
-        typer.echo("  (no terms yet: run `particles vocab propose` and confirm a proposal)")
+        terminal_echo("  (no terms yet: run `particles vocab propose` and confirm a proposal)")
     for term in doc.terms:
         kind = effective_kind(term)
-        typer.echo("")
-        typer.echo(
-            f"  {doc.prefix}:{term.local_name}  [{term.subject_class}]  {term.form!r}"
-            + (f"  ({term.label})" if term.label else "")
+        terminal_echo("")
+        terminal_echo(
+            f"  {terminal_field(doc.prefix)}:{terminal_field(term.local_name)}  "
+            f"[{terminal_field(term.subject_class)}]  {term.form!r}"
+            + (f"  ({terminal_field(term.label)})" if term.label else "")
         )
-        typer.echo(f"    kind: {kind.value if kind else '-'}")
+        terminal_echo(f"    kind: {kind.value if kind else '-'}")
         for alias in term.aliases:
             role = term.profile.roles.get(alias.form) if term.profile else None
             suffix = f"  role: {role.value}" if role else ""
-            typer.echo(f"    alias {alias.form!r}  by {alias.ruling.confirmed_by}{suffix}")
+            terminal_echo(
+                f"    alias {alias.form!r}  by {terminal_field(alias.ruling.confirmed_by)}{suffix}"
+            )
         for a in term.alignments:
-            typer.echo(f"    {a.match.value} {a.target}  confidence {a.confidence:.2f}")
+            terminal_echo(
+                f"    {a.match.value} {terminal_field(a.target)}  confidence {a.confidence:.2f}"
+            )
         if term.profile is not None:
             p = term.profile
-            typer.echo(
-                f"    profile {p.kind.value}  by {p.ruling.confirmed_by}"
+            terminal_echo(
+                f"    profile {p.kind.value}  by {terminal_field(p.ruling.confirmed_by)}"
                 f" at {p.ruling.confirmed_at.date().isoformat()}"
             )
 
@@ -146,8 +160,11 @@ async def _vocab_create(
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(f"Created vocabulary {doc.name!r} v1 under {doc.prefix}: <{doc.namespace}>.")
-    typer.echo("It is not adopted yet: `particles vocab adopt` puts it in force.")
+    terminal_echo(
+        f"Created vocabulary {doc.name!r} v1 under "
+        f"{terminal_field(doc.prefix)}: <{terminal_field(doc.namespace)}>."
+    )
+    terminal_echo("It is not adopted yet: `particles vocab adopt` puts it in force.")
 
 
 @vocab_app.command("propose")
@@ -178,7 +195,7 @@ def vocab_propose_cmd(
     candidate until `vocab confirm`; nothing enters the document before then.
     """
     if kind not in ("alias", "profile", "all"):
-        typer.echo("--kind must be alias, profile or all.", err=True)
+        terminal_echo("--kind must be alias, profile or all.", err=True)
         raise typer.Exit(code=2)
     kinds = ("alias", "profile") if kind == "all" else (kind,)
     run(_vocab_propose(name, limit, threshold, kinds, subject_class, form, dry_run, top, json_out))
@@ -218,49 +235,49 @@ async def _vocab_propose(
             await session.commit()
 
     plan = report.plan
-    typer.echo(
+    terminal_echo(
         f"{report.claims} structured claims, {report.distinct_predicates} distinct predicates; "
         f"{report.classed_claims} claims on a classed subject "
         f"({plan.classed_predicates} predicate/class pairs, {plan.classed_forms} normalised "
         f"forms, {plan.classes} classes)."
     )
     if report.encoder_missing:
-        typer.echo("No local encoder: alias candidates skipped, profile candidates only.")
-    typer.echo(
+        terminal_echo("No local encoder: alias candidates skipped, profile candidates only.")
+    terminal_echo(
         f"{len(plan.aliases)} alias candidates covering {report.alias_coverage()} distinct "
         f"predicates; {len(plan.profiles)} profile candidates."
     )
     if plan.aliases and "alias" in kinds:
-        typer.echo("")
-        typer.echo(f"{'KEY':16}  {'CLAIMS':>6}  {'SIM':>5}  {'CLASS':22}  MEMBERS (claims)")
+        terminal_echo("")
+        terminal_echo(f"{'KEY':16}  {'CLAIMS':>6}  {'SIM':>5}  {'CLASS':22}  MEMBERS (claims)")
         for a in plan.aliases[:top]:
             members = ", ".join(f"{m.display!r} ({m.claims})" for m in a.members[:8])
             more = f", +{len(a.members) - 8} more" if len(a.members) > 8 else ""
-            typer.echo(
+            terminal_echo(
                 f"{a.key:16}  {a.claims:>6}  {a.min_similarity:>5.2f}  "
-                f"{a.subject_class[:22]:22}  {members}{more}"
+                f"{terminal_field(a.subject_class[:22]):22}  {members}{more}"
             )
     if plan.profiles and "profile" in kinds:
-        typer.echo("")
-        typer.echo(f"{'KEY':16}  {'CLAIMS':>6}  {'CLASS':22}  FORM (surfaces)")
+        terminal_echo("")
+        terminal_echo(f"{'KEY':16}  {'CLAIMS':>6}  {'CLASS':22}  FORM (surfaces)")
         for p in plan.profiles[:top]:
             surfaces = ", ".join(f"{s!r}" for s, _ in p.surfaces[:4])
             partner = f"  past partner: {p.past_partners[0]!r}" if p.past_partners else ""
-            typer.echo(
-                f"{p.key:16}  {p.claims:>6}  {p.subject_class[:22]:22}  "
+            terminal_echo(
+                f"{p.key:16}  {p.claims:>6}  {terminal_field(p.subject_class[:22]):22}  "
                 f"{p.form!r} ({surfaces}){partner}"
             )
-    typer.echo("")
+    terminal_echo("")
     if dry_run:
-        typer.echo(f"Dry run: {len(report.recorded)} candidates would be recorded as proposals.")
+        terminal_echo(f"Dry run: {len(report.recorded)} candidates would be recorded as proposals.")
     else:
-        typer.echo(
+        terminal_echo(
             f"Recorded {len(report.recorded)} proposals. Rule on them with "
             "`particles vocab confirm` or `particles vocab decline`."
         )
     if json_out is not None:
         json_out.write_text(json.dumps(_report_json(report), indent=2) + "\n", encoding="utf-8")
-        typer.echo(f"Wrote {json_out}.")
+        terminal_echo(f"Wrote {json_out}.")
 
 
 def _report_json(report: Any) -> dict[str, Any]:
@@ -322,17 +339,18 @@ async def _vocab_proposals(name: str | None) -> None:
     async with session_scope() as session:
         pending = await pending_proposals(session, name)
     if not pending:
-        typer.echo("No proposals awaiting a ruling.")
+        terminal_echo("No proposals awaiting a ruling.")
         return
-    typer.echo(f"{'KEY':16}  {'KIND':7}  {'CLAIMS':>6}  {'DOCUMENT':16}  {'CLASS':22}  PROPOSAL")
+    terminal_echo(f"{'KEY':16}  {'KIND':7}  {'CLAIMS':>6}  {'DOCUMENT':16}  {'CLASS':22}  PROPOSAL")
     for event in pending:
         p = event.payload or {}
         what = repr(p.get("form"))
         if p.get("kind") == "alias":
             what += " = " + ", ".join(repr(a) for a in p.get("aliases") or [])
-        typer.echo(
+        terminal_echo(
             f"{str(p.get('key')):16}  {str(p.get('kind')):7}  {int(p.get('claims', 0)):>6}  "
-            f"{str(p.get('document'))[:16]:16}  {str(p.get('subject_class'))[:22]:22}  {what}"
+            f"{terminal_field(str(p.get('document'))[:16]):16}  "
+            f"{terminal_field(str(p.get('subject_class'))[:22]):22}  {what}"
         )
 
 
@@ -359,7 +377,9 @@ def vocab_confirm_cmd(
         try:
             slot = SlotKind(kind)
         except ValueError:
-            typer.echo("--kind must be timeless_single, one_at_a_time or many_at_once.", err=True)
+            terminal_echo(
+                "--kind must be timeless_single, one_at_a_time or many_at_once.", err=True
+            )
             raise typer.Exit(code=2) from None
     run(_vocab_confirm(keys, slot, past, reason))
 
@@ -377,7 +397,7 @@ async def _vocab_confirm(keys: list[str], kind: Any, past: list[str], reason: st
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(f"Confirmed {len(keys)} proposal(s) into {doc.name!r} v{doc.version}.")
+    terminal_echo(f"Confirmed {len(keys)} proposal(s) into {doc.name!r} v{doc.version}.")
 
 
 @vocab_app.command("decline")
@@ -400,7 +420,7 @@ async def _vocab_decline(keys: list[str], reason: str | None) -> None:
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(f"Declined {len(keys)} proposal(s).")
+    terminal_echo(f"Declined {len(keys)} proposal(s).")
 
 
 @vocab_app.command("align")
@@ -483,7 +503,7 @@ async def _vocab_align(
             ruling=Ruling(confirmed_by=_ACTOR, evidence={"basis": basis}),
         )
     except ValueError as exc:
-        typer.echo(f"Invalid alignment: {exc}", err=True)
+        terminal_echo(f"Invalid alignment: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     async with session_scope() as session:
         try:
@@ -491,7 +511,7 @@ async def _vocab_align(
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(f"Aligned {term} to {target} ({match}) in {doc.name!r} v{doc.version}.")
+    terminal_echo(f"Aligned {term} to {target} ({match}) in {doc.name!r} v{doc.version}.")
 
 
 @vocab_app.command("export")
@@ -517,10 +537,10 @@ async def _vocab_export(name: str, version: int | None, output: Path | None) -> 
         except VocabularyError as exc:
             _fail(exc)
     if output is None:
-        typer.echo(text, nl=False)
+        terminal_echo(text, nl=False)
     else:
         output.write_text(text, encoding="utf-8")
-        typer.echo(f"Wrote {output}.", err=True)
+        terminal_echo(f"Wrote {output}.", err=True)
 
 
 @vocab_app.command("import")
@@ -542,9 +562,10 @@ async def _vocab_import(path: Path) -> None:
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(
+    terminal_echo(
         f"Imported {doc.name!r} v{doc.version} ({len(doc.terms)} terms, publisher "
-        f"{doc.publisher or '-'}). Adopt it with `particles vocab adopt {doc.name}`."
+        f"{terminal_field(doc.publisher or '-')}). "
+        f"Adopt it with `particles vocab adopt {terminal_field(doc.name)}`."
     )
 
 
@@ -571,7 +592,7 @@ async def _vocab_adopt(name: str, lens: str | None) -> None:
             _fail(exc)
         await session.commit()
     where = f"while lens {lens!r} is adopted" if lens else "store-wide"
-    typer.echo(f"Adopted vocabulary {name!r} {where}.")
+    terminal_echo(f"Adopted vocabulary {name!r} {where}.")
 
 
 @vocab_app.command("unadopt")
@@ -594,4 +615,4 @@ async def _vocab_unadopt(name: str, lens: str | None) -> None:
         except VocabularyError as exc:
             _fail(exc)
         await session.commit()
-    typer.echo(f"Unadopted vocabulary {name!r}.")
+    terminal_echo(f"Unadopted vocabulary {name!r}.")

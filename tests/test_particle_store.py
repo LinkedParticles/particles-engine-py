@@ -34,6 +34,7 @@ from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status
 from particles.store.particle_store import (
     ParticleRow,
+    get_active_particle_by_id_or_prefix,
     get_active_particles_for_chunk_hash,
     get_active_particles_with_extractor_id,
     get_active_particles_with_extractor_version,
@@ -511,3 +512,97 @@ class TestActiveEmbeddingLoader:
         assert "(subject_id=?)" in plan[0]
         assert plan[1] == "SEARCH particles USING INDEX sqlite_autoindex_particles_1 (id=?)"
         assert not any("ix_particles_status_confidence" in d for d in plan)
+
+
+class TestIdPrefixIsLiteral:
+    """Security review 2026-10-25-2, R35: the ACTIVE-id prefix resolver keeps the
+    single row its LIKE matched with no exact re-filter, so its text must be literal."""
+
+    @pytest.mark.asyncio
+    async def test_a_pin_resolves_only_to_an_id_it_literally_prefixes(
+        self, db_session: Any
+    ) -> None:
+        pid = "abcd1234-0000-0000-0000-000000000000"
+        await insert_particle(db_session, _particle().model_copy(update={"id": pid}))
+        await db_session.flush()
+        for pin in ("ab_d", "%1234", "abc%", "_"):
+            assert await get_active_particle_by_id_or_prefix(db_session, pin) is None, pin
+        found = await get_active_particle_by_id_or_prefix(db_session, "abcd12")
+        assert found is not None and found.id == pid
+
+
+class TestActiveWithEmbeddingsByIds:
+    """The bounded re-read a belief write runs under the writer lock (security
+    review 2026-10-31-2, AE5): the named rows only, filtered and ordered as the
+    whole-set loader is."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_named_active_rows_in_the_loaders_order(
+        self, db_session: Any
+    ) -> None:
+        from particles.store.particle_store import (
+            get_active_particles_with_embeddings,
+            get_active_particles_with_embeddings_by_ids,
+        )
+
+        def _at(value: float, status: Status = Status.ACTIVE) -> Particle:
+            return _particle().model_copy(
+                update={
+                    "id": str(uuid.uuid4()),
+                    "confidence": Confidence(
+                        value=value, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
+                    ),
+                    "status": status,
+                }
+            )
+
+        high, low, other = _at(0.9), _at(0.3), _at(0.5)
+        retired = _at(0.7, Status.INCONSISTENCY)
+        for p in (high, low, other, retired):
+            await insert_particle(db_session, p, [1.0, 0.0])
+        bare = _at(0.6)
+        await insert_particle(db_session, bare, None)
+        await db_session.flush()
+
+        named = {high.id, low.id, retired.id, bare.id, "no-such-id"}
+        got = await get_active_particles_with_embeddings_by_ids(db_session, named)
+        whole = await get_active_particles_with_embeddings(db_session)
+
+        assert [p.id for p, _ in got] == [p.id for p, _ in whole if p.id in named]
+        assert [p.id for p, _ in got] == [low.id, high.id]
+        assert await get_active_particles_with_embeddings_by_ids(db_session, []) == []
+
+
+@pytest.mark.asyncio
+async def test_a_record_naming_one_particle_twice_stores_one_edge_for_it(
+    db_session: Any,
+) -> None:
+    """An INCONSISTENCY record whose candidate has no SOURCE ref names it as
+    particle B and as the trigger; the record keeps both refs and one edge."""
+    from sqlalchemy import select
+
+    from particles.store.particle_store import ProvenanceEdgeRow, get_particle
+
+    other = str(uuid.uuid4())
+    record = _particle().model_copy(
+        update={
+            "status": Status.INCONSISTENCY,
+            "provenance": [
+                ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id="particle-a"),
+                ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=other),
+                ProvenanceRef(type=ProvenanceRefType.PARTICLE, corpus_entry_id=other),
+            ],
+        }
+    )
+    await insert_particle(db_session, record)
+    await db_session.flush()
+    edges = (
+        await db_session.execute(
+            select(ProvenanceEdgeRow.corpus_entry_id).where(
+                ProvenanceEdgeRow.particle_id == record.id
+            )
+        )
+    ).scalars()
+    assert sorted(edges) == sorted(["particle-a", other])
+    stored = await get_particle(db_session, record.id)
+    assert stored is not None and len(stored.provenance) == 3

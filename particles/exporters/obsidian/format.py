@@ -22,11 +22,8 @@ from __future__ import annotations
 import re
 
 from particles.core.schema import Particle, Subject
-from particles.render.markdown import (
-    SubjectNaming,
-    neutralize_inline_markdown,
-    neutralize_link_label,
-)
+from particles.render.escape import identifier, md_link, md_text, wikilink
+from particles.render.markdown import SubjectNaming
 
 # Sequential citation markers shown in the body. Index 0 is a dummy so
 # the table can be indexed by 1-based ordinal directly.
@@ -93,10 +90,6 @@ _PIVOT_CLASSES_FOR_RELATED = {
 }
 
 
-def _wiki(name: str) -> str:
-    return f"[[{name}]]"
-
-
 def _is_category(subject: Subject) -> bool:
     return subject.canonical_name.lower().startswith(("category:", "category "))
 
@@ -120,7 +113,7 @@ def _source_link_line(p: Particle, entry_uri_map: dict[str, str | None] | None) 
             label = re.sub(r"^https?://", "", uri)
             if len(label) > 70:
                 label = label[:69] + "…"
-            return f"> **Source:** [{label}]({uri})"
+            return f"> **Source:** {md_link(label, uri)}"
     return None
 
 
@@ -142,7 +135,7 @@ def _claim_for_heading(content: str) -> str:
     level. Collapse internal whitespace and strip leading ``#``-runs.
     """
     cleaned = _WHITESPACE_RUN_FOR_HEADING.sub(" ", content).strip()
-    return neutralize_inline_markdown(cleaned.lstrip("#").strip()) or "(empty claim)"
+    return md_text(cleaned.lstrip("#").strip()) or "(empty claim)"
 
 
 def _render_obsidian_reference_entry(
@@ -177,7 +170,7 @@ def _render_obsidian_reference_entry(
     """
     from particles.render.markdown import subject_slug
 
-    sid = particle.id[:8]
+    sid = identifier(particle.id[:8])
     conf = eff_conf.get(particle.id, particle.confidence.value)
     lines: list[str] = [
         f"### {ordinal}. {_claim_for_heading(particle.content)}",
@@ -200,7 +193,9 @@ def _render_obsidian_reference_entry(
     ]
     if others:
         links = ", ".join(
-            _wiki(subject_slug(naming.display_name(s) if naming is not None else s.canonical_name))
+            wikilink(
+                subject_slug(naming.display_name(s) if naming is not None else s.canonical_name)
+            )
             for s in others
         )
         lines.append(f"> **Related:** {links}")
@@ -215,13 +210,17 @@ def _render_obsidian_reference_entry(
     # as the link target; the literal ``^p-…`` text is hidden in
     # Reading View.
     ts = particle.asserted_at.date().isoformat() if particle.asserted_at else "?"
+    # The extractor's name and version and an asserter are stored text, which
+    # an imported bundle chooses, so each is written inert (security review
+    # 2026-10-27-1, G5).
     if particle.extractor_ref:
-        ext = f"{particle.extractor_ref.name} {particle.extractor_ref.version}"
+        ext = md_text(f"{particle.extractor_ref.name} {particle.extractor_ref.version}")
         lines.append(f"> **Extractor:** {ext} on {ts} ^p-{sid}")
     else:
         # No extractor_ref → a direct assertion. Attribute it to the
         # asserting principal rather than a phantom "Extractor: ?".
-        lines.append(f"> **Asserted by:** {particle.asserted_by or '?'} on {ts} ^p-{sid}")
+        asserter = md_text(particle.asserted_by or "?")
+        lines.append(f"> **Asserted by:** {asserter} on {ts} ^p-{sid}")
 
     return lines
 
@@ -293,7 +292,7 @@ def _render_narratives_section(narratives: list[Particle], narrative_naming: dic
         slug = narrative_naming.get(n.id)
         if slug is None:
             continue
-        links.append(f"- [[Narratives/{slug}|{neutralize_link_label(n.content)}]]")
+        links.append(f"- {wikilink(f'Narratives/{slug}', n.content)}")
     if not links:
         return ""
     return "## Narratives\n\n" + "\n".join(links) + "\n"

@@ -67,7 +67,7 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.observability import traced
-from particles.operations._quarantine import apply_demotion, promote_quarantined
+from particles.operations._quarantine import apply_demotion, promote_unless_contradicted
 from particles.operations.cascade import run_trust_cascade
 from particles.store.event_store import EventRefKind, OperatorEventType, list_events, record_event
 from particles.store.particle_store import (
@@ -209,10 +209,25 @@ async def resolve(
     for loser, demotion in plan.also_demote:
         await apply_demotion(session, loser.id, demotion)
     promoted_ids: list[str] = []
+    # A claim the resolution would promote is held again behind a new record
+    # when §6.6 now pairs it with a claim committed while it was held
+    # (security review 2026-10-31-3, AF1).
+    held_behind_ids: list[str] = []
+    members = [
+        inconsistency_particle_id,
+        *(pid for pid in (particle_a_id, particle_b_id) if pid),
+        *extra_a_ids,
+        *extra_b_ids,
+    ]
     minted: Particle | None = None
     if plan.promote is not None:
-        minted = await promote_quarantined(session, plan.promote)
-        promoted_ids.append(minted.id)
+        minted, held_behind = await promote_unless_contradicted(
+            session, plan.promote, exclude=members
+        )
+        if minted is not None:
+            promoted_ids.append(minted.id)
+        if held_behind is not None:
+            held_behind_ids.append(held_behind.id)
     elif action == ResolutionAction.PREFER_B and particle_b_id and particle_b is None:
         log.warning(
             "PREFER_B: particle %s not in DB (pre-ADR-0117 wrapper); claim B is"
@@ -221,10 +236,16 @@ async def resolve(
         )
     for mark in plan.aleatory:
         if mark.mint:
-            aleatory = await promote_quarantined(
-                session, mark.particle, uncertainty_nature=UncertaintyNature.ALEATORY
+            aleatory, held_behind = await promote_unless_contradicted(
+                session,
+                mark.particle,
+                exclude=members,
+                uncertainty_nature=UncertaintyNature.ALEATORY,
             )
-            promoted_ids.append(aleatory.id)
+            if aleatory is not None:
+                promoted_ids.append(aleatory.id)
+            if held_behind is not None:
+                held_behind_ids.append(held_behind.id)
         else:
             await update_uncertainty_nature(session, mark.particle.id, UncertaintyNature.ALEATORY)
 
@@ -280,7 +301,14 @@ async def resolve(
     await _persist_review_particle(session, review)
 
     refs: list[tuple[EventRefKind, str]] = [(EventRefKind.PARTICLE, inconsistency_particle_id)]
-    for ref_pid in (particle_a_id, particle_b_id, *extra_a_ids, *extra_b_ids, *promoted_ids):
+    for ref_pid in (
+        particle_a_id,
+        particle_b_id,
+        *extra_a_ids,
+        *extra_b_ids,
+        *promoted_ids,
+        *held_behind_ids,
+    ):
         if ref_pid:
             refs.append((EventRefKind.PARTICLE, ref_pid))
     if trust_statement_id:
@@ -297,6 +325,7 @@ async def resolve(
             "cascade_resolved": cascade_count,
             "trust_statement_id": trust_statement_id,
             "promoted_particle_ids": promoted_ids,
+            "held_behind_record_ids": held_behind_ids,
             "retracted_particle_ids": retracted_ids,
         },
     )

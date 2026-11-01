@@ -57,10 +57,10 @@ from particles.core.schema import CorpusEntry, Particle, ProvenanceRefType
 from particles.core.status import Status, StatusReason, validate_transition
 from particles.corpus.store import get_entry
 from particles.corpus.supersession import iter_supersession_entry_pairs
-from particles.db import write_transaction
+from particles.db import store_of, write_transaction
 from particles.embeddings import cosine_similarity
 from particles.extraction.registry import infer_domain
-from particles.ingest.conflict_plan import plan_update_event
+from particles.ingest.conflict_plan import plan_retirement_event, plan_update_event
 from particles.ingest.observer_gate import ObserverGate
 from particles.ingest.pair_selection import admits_update_first
 from particles.ingest.pipeline import (
@@ -81,7 +81,7 @@ from particles.llm.usage import observe_sampling
 from particles.operations._llm import _llm_call, record_unusable_reply
 from particles.operations.probe_ledger import recall, remember
 from particles.store.candidate_cache import load_active_candidates
-from particles.store.event_store import record_event
+from particles.store.event_store import OperatorEventType, record_event
 from particles.store.particle_store import (
     get_inconsistency_particles,
     insert_particle,
@@ -280,6 +280,17 @@ async def _supersession_candidates(
     return candidates
 
 
+def _store_mode(session: AsyncSession) -> str:
+    """The section 6.6 regime of the store ``session`` writes, not the global one.
+
+    A store is multi by its own ``reconciliation.per_store`` entry or by MCP
+    write-enablement, which the global ``store_mode`` does not show, so each
+    sweep reads the regime the extraction path reads (security review
+    2026-10-27-1, G6).
+    """
+    return get_config().reconciliation_mode_for(store_of(session))
+
+
 async def count_supersession_candidates(session: AsyncSession) -> int:
     """Candidate pairs the document sweep would probe from, uncapped.
 
@@ -287,7 +298,7 @@ async def count_supersession_candidates(session: AsyncSession) -> int:
     itself would be a no-op (disabled, multi-trust-order, no entry pairs).
     """
     cfg = get_config()
-    if not cfg.document_supersession.enabled or cfg.reconciliation.store_mode != "single":
+    if not cfg.document_supersession.enabled or _store_mode(session) != "single":
         return 0
     entry_pairs = await iter_supersession_entry_pairs(session)
     if not entry_pairs:
@@ -328,7 +339,7 @@ async def reconcile_supersession(
 
     cfg = get_config()
     enabled = cfg.document_supersession.enabled
-    single_trust_order = cfg.reconciliation.store_mode == "single"
+    single_trust_order = _store_mode(session) == "single"
     threshold = cfg.extraction.similarity_threshold
 
     probe_cap = cfg.consolidation.max_reconcile_probes
@@ -426,6 +437,27 @@ async def reconcile_supersession(
                     sub_p.id,
                     Status.PROVENANCE_STALE,
                     StatusReason.DOCUMENT_SUPERSEDED,
+                )
+                # Every automatic retirement is in the event log (security
+                # review 2026-10-24-2, P34), not only the run's count.
+                event = plan_retirement_event(
+                    sub_p.id,
+                    best_sup.id,
+                    event_type=OperatorEventType.DOCUMENT_SUPERSESSION,
+                    route="sweep",
+                    detail={
+                        "superseded_entry_id": sub_entry,
+                        "superseding_entry_id": sup_entry,
+                        "similarity": round(best_sim, 4),
+                    },
+                )
+                await record_event(
+                    session,
+                    actor=event.actor,
+                    event_type=event.event_type,
+                    reason=event.reason,
+                    refs=list(event.refs),
+                    payload=dict(event.payload),
                 )
         if progress is not None:
             verb = "would demote" if dry_run else "demoted"
@@ -598,7 +630,7 @@ async def count_update_candidates(session: AsyncSession, scope_ids: frozenset[st
         session,
         scope_ids=scope_ids,
         subject_floor=update_cfg.subject_floor,
-        require_attribution=cfg.reconciliation.store_mode != "single",
+        require_attribution=_store_mode(session) != "single",
     )
     return len(gathered.candidates)
 
@@ -668,7 +700,8 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     cfg = get_config()
     update_cfg = cfg.reconciliation.update_supersession
     probe_cap = cfg.consolidation.max_update_probes
-    require_attribution = cfg.reconciliation.store_mode != "single"
+    single_trust_order = _store_mode(session) == "single"
+    require_attribution = not single_trust_order
     summary: dict[str, object] = {
         "enabled": update_cfg.enabled,
         "dry_run": dry_run,
@@ -792,7 +825,7 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
             newer,
             has_contradiction_signal=not first,
             update_order=1,
-            single_trust_order=cfg.reconciliation.store_mode == "single",
+            single_trust_order=single_trust_order,
             same_slot_update=first,
         )
         if verdict is not ConflictVerdict.UPDATE_SUPERSEDES:

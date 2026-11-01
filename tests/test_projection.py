@@ -928,7 +928,7 @@ async def test_check_drift_region_trailer_consistency(
     host = tmp_path / "HOST.md"
     manifest = DocManifest(
         name="t",
-        output=str(host),
+        output=host.name,  # relative: a manifest path stays in its tree (P3)
         sections=[
             DerivedSection(
                 title="What is this",
@@ -981,7 +981,7 @@ async def test_check_drift_missing_region_and_missing_output(
     host = tmp_path / "HOST.md"
     manifest = DocManifest(
         name="t",
-        output=str(host),
+        output=host.name,  # relative: a manifest path stays in its tree (P3)
         sections=[
             DerivedSection(
                 title="A",

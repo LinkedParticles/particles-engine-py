@@ -430,6 +430,7 @@ $ particles project [OPTIONS] {MANIFEST} [output]
 * `--splice REGION`: Block-splice mode: write the rendered body *between* the `<!-- BEGIN/END PROJECTED: REGION -->` sentinels in the existing output file, preserving everything outside them, instead of overwriting the whole file. The output file must already carry the sentinel pair for REGION. On a manifest with per-section `region:` bindings, renders only that region's section, the single-region re-roll path.
 * `--splice-all`: Multi-region block-splice: render every section that declares a `region:` and splice each body into its own sentinel pair in the output file, in one pass. Every derived section must declare a region.
 * `--export-corpus`: Write the manifest's sibling `<name>.corpus.jsonl` gate bundle: exactly the particles the manifest's deterministic selection requires, encoded as interchange units the drift gate's ephemeral restore consumes. No render is performed.
+* `--allow-outside-paths`: Let the manifest's own `output:` and block paths be absolute, use `..`, or resolve outside the repository that holds the manifest. Without it they are refused, because a manifest a repository ships is data. It also lets the manifest file itself resolve outside that repository. Pass it only for a manifest you wrote.
 * `--verbose`: Per-section progress logging.
 * `--help`: Show this message and exit.
 
@@ -1601,6 +1602,7 @@ $ particles engine [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `serve`: Run the FastAPI engine, binding HOST:PORT.
+* `keys`: Per-client engine keys: each...
 
 ### `particles engine serve`
 
@@ -1628,6 +1630,85 @@ $ particles engine serve [OPTIONS] {HOST:PORT}
 **Options**:
 
 * `--daemon`: Resident mode: also run the in-process consolidation tick and intake watchers, so no launchd/cron is needed alongside the engine. Overrides daemon.enabled; configure the rest under `daemon`.
+* `--help`: Show this message and exit.
+
+### `particles engine keys`
+
+Per-client engine keys: each names a principal and a role (reader, agent or operator). Run on the engine's host; no HTTP route manages keys.
+
+**Usage**:
+
+```console
+$ particles engine keys [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `create`: Create a key and write it once to a...
+* `list`: List the keys: id, role, principal,...
+* `revoke`: Revoke a key.
+
+#### `particles engine keys create`
+
+Create a key and write it once to a private file. The engine keeps only its digest.
+
+The key never reaches standard output unless ``--print-token`` is given, since a
+harness that runs its shell on a pseudo-terminal looks like a person's terminal
+and keeps what it shows.
+
+**Usage**:
+
+```console
+$ particles engine keys create [OPTIONS]
+```
+
+**Options**:
+
+* `--role <str>`: reader (reads only), agent (writes as itself) or operator  [required]
+* `--principal <str>`: Who the key's requests are recorded as, e.g. mcp:claude-code. An operator key's principal is always curation.operator_identity.  [required]
+* `--project <str>`: Bind an agent key's writes to one project key. Reads are not confined: every key reads every project.
+* `--label <str>`: A note for `keys list`
+* `--reserved-principal`: Mint a principal some reader trusts by name (claude-code-hook, audit, rule-sync, init, mcp:memory-compat, web-clipper), or one the store's own writers stamp (an extractor id such as general-extractor, interchange-import, memory-consolidate). An agent key under a writer's label changes no belief that writer, or any other, asserted under that label. A harvester principal's key may write the memory-harvest tags and name session transcripts and memory files by URI, which places them in the harvest's document collections and update lineage.
+* `--memory-root <str>`: For a harvester key (claude-code-hook, audit): a client's Claude Code projects directory, resolved, under which its memory files lie. Repeat for each. With neither this nor --archive-root, the key records this host's own directories. On a remote client with engine.base_url set, `particles init claude-code` prints them.
+* `--archive-root <str>`: For a harvester key: a client's <claude_code.state_dir>/projects directory, resolved, under which its MEMORY.archive.md files lie. Repeat for each.
+* `--output <path>`: Write the key to this new file, created with mode 0600 and never over an existing one. The default is <key id>.key beside api.keys_file.
+* `--print-token`: Print the key to standard output instead of writing a file. Whatever shows or keeps that output (a terminal's scrollback, a pipe, a CI log, an agent harness's transcript) then holds the key.
+* `--help`: Show this message and exit.
+
+#### `particles engine keys list`
+
+List the keys: id, role, principal, project, label, created, revoked. Never a digest.
+
+**Usage**:
+
+```console
+$ particles engine keys list [OPTIONS]
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+#### `particles engine keys revoke`
+
+Revoke a key. The next request with it gets 401; the row stays for the audit trail.
+
+**Usage**:
+
+```console
+$ particles engine keys revoke [OPTIONS] {key_id}
+```
+
+**Arguments**:
+
+* `key_id`: The key id `keys list` shows  [required]
+
+**Options**:
+
 * `--help`: Show this message and exit.
 
 ## `particles events`
@@ -1665,6 +1746,8 @@ $ particles events list [OPTIONS]
 * `--subject <str>`: Only events touching this subject id
 * `--entry <str>`: Only events touching this corpus entry id
 * `--type <str>`: Only events of this type (e.g. SOURCE_RETRACTED)
+* `--principal <str>`: Only events an HTTP caller with this principal wrote (e.g. mcp:claude-code)
+* `--key <str>`: Only events one engine key's requests wrote (its key id)
 * `--limit <int>`: Maximum events to show  [default: 50]
 * `--help`: Show this message and exit.
 
@@ -2599,6 +2682,12 @@ Unlike ``import`` (claim-fingerprint merge, fresh ids), ``restore`` reconstructs
 the bundle's own store: ids are preserved verbatim and no §6.6 reconcile runs.
 The target must be empty; a populated target is refused.
 
+A bundle is read as untrusted unless ``--trust-bundle`` is given: a record
+naming a Particles server identity, the memory-server migration tag, an
+operator's or an agent's calibration, or a corpus entry the target already
+holds is restored as attribution, exactly as ``import`` treats it, so a
+bundle you are handed cannot become the memory-server facade's own memory.
+
 **Usage**:
 
 ```console
@@ -2612,6 +2701,7 @@ $ particles interchange restore [OPTIONS] {bundle}
 **Options**:
 
 * `--store <str>`: Target store handle (must be empty)  [default: default]
+* `--trust-bundle`: Restore the server identities, the migration tag and the calibration sources as written. Only for a bundle you exported from your own store.
 * `--help`: Show this message and exit.
 
 ## `particles links`
@@ -2887,6 +2977,7 @@ $ particles memory [OPTIONS] COMMAND [ARGS]...
 * `rescope`: Bring a store's project keys up to date,...
 * `widen`: Put a belief in view for every project...
 * `redate`: Give each harvested session its own start...
+* `absences`: Report the memory files that no longer...
 * `sweep-rank-lift`: Sweep the usefulness rank-lift and report...
 * `consolidate`: Run the scheduled consolidation cycle (ADR...
 * `serve`: Serve the reference memory-server...
@@ -3065,6 +3156,45 @@ $ particles memory redate [OPTIONS]
 **Options**:
 
 * `--dry-run`: Report what would change; write nothing.
+* `--transcripts DIR`: Read the transcripts from DIR instead of Claude Code's projects folder: the folder given to `audit --transcripts`, or a copy of the projects folder.
+* `--store <str>`: Store handle.  [default: default]
+* `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
+* `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
+* `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
+* `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
+* `--help`: Show this message and exit.
+
+### `particles memory absences`
+
+Report the memory files that no longer exist, and with `--record` retire their claims.
+
+A memory file deleted from a Claude Code memory directory keeps its claims
+until an absence is recorded for it. The session-end hook records one for
+each small deletion. It holds back the first deletion ever seen in a
+directory, and a deletion of more than a quarter of its files (and at least
+five), and reports them in the next session's digest.
+
+Without `--record` this reports, per directory, the files no longer found,
+the beliefs their absences would retire, and how many of those are lines of
+`MEMORY.md`. It writes nothing and makes no model call. With `--record` it
+records every absence, then processes them at once. A belief another
+current memory file still states is kept. When another memory file of the
+project is still waiting to be read, the absences are left for the next
+extraction pass, which reads that file first. Local store only. Exit code 0
+when done, 1 when a directory could not be read in full (nothing is
+recorded there), 2 when the verb could not start.
+
+**Usage**:
+
+```console
+$ particles memory absences [OPTIONS]
+```
+
+**Options**:
+
+* `--memory-dir <path>`: A Claude Code memory directory to check. Repeatable. Default: every memory directory the store serves.
+* `--record`: Record the absences and process them now, with no model call. Without it, the verb reports and writes nothing.
+* `--json`: Print the report as JSON.
 * `--store <str>`: Store handle.  [default: default]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
@@ -3523,6 +3653,7 @@ $ particles rules [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `sync`: Deposit the rule-source set as MUTABLE +...
+* `forget`: Remove recorded refresh roots, so the...
 
 ### `particles rules sync`
 
@@ -3543,6 +3674,37 @@ $ particles rules sync [OPTIONS] [paths]...
 * `--store <str>`: Store handle to report on / write to.  [default: default]
 * `--dry-run`: Resolve and print the set without depositing anything.
 * `--restamp-only`: Skip the deposit half; only re-apply the scope exemption to particles already extracted from the tracked set.
+* `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
+* `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
+* `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.
+* `--progress / --no-progress`: Liveness on stderr. Default: auto (on when stderr is a terminal).
+* `--help`: Show this message and exit.
+
+### `particles rules forget`
+
+Remove recorded refresh roots, so the refresh no longer reads rule files under them.
+
+Only the recorded rows are removed: no belief is retracted, no corpus entry
+is touched, and a later `particles rules sync` from the same place records
+the root again. Before removing a root the verb counts the sources it admits
+(under it, and under the main checkout of a recorded worktree) that stop
+being refreshed and the ones another route still admits, naming that route.
+Each removal is written to the operator event log.
+
+**Usage**:
+
+```console
+$ particles rules forget [OPTIONS] {roots}...
+```
+
+**Arguments**:
+
+* `roots...`: Recorded refresh roots to remove, as `particles rules` lists them. A path that names no recorded root is reported and changes nothing.  [required]
+
+**Options**:
+
+* `--store <str>`: Store handle to report on / write to.  [default: default]
+* `--dry-run`: Print what each removal would change without removing anything.
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
 * `-q, --quiet`: Narration off: suppress progress and non-error diagnostics.

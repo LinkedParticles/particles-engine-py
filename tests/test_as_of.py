@@ -70,15 +70,14 @@ def _particle(
     confidence: float = 0.9,
     entry_id: str = "entry-1",
     snapshot_id: str = "snap-1",
+    calibration_source: CalibrationSource = CalibrationSource.EXTRACTOR_DIRECT,
 ) -> Particle:
     kwargs: dict[str, Any] = {}
     if asserted_at is not None:
         kwargs["asserted_at"] = asserted_at
     return Particle(
         content=content,
-        confidence=Confidence(
-            value=confidence, calibration_source=CalibrationSource.EXTRACTOR_DIRECT
-        ),
+        confidence=Confidence(value=confidence, calibration_source=calibration_source),
         uncertainty_nature=UncertaintyNature.EPISTEMIC,
         asserted_by=asserted_by,
         status=status,
@@ -281,26 +280,43 @@ class TestRetirementStampCoverage:
         from particles.store.particle_store import get_retired_at, insert_particle
 
         identity = get_config().mcp.write.asserter_identity
-        pred = _particle("agent belief v1", asserted_by=identity)
-        victim = _particle("agent belief to retract", asserted_by=identity)
+        # Agent-asserted: the agent path changes only an agent's own assertions.
+        agent = CalibrationSource.AGENT_ASSERTED
+        pred = _particle("agent belief v1", asserted_by=identity, calibration_source=agent)
+        victim = _particle(
+            "agent belief to retract", asserted_by=identity, calibration_source=agent
+        )
         for particle in (pred, victim):
             await insert_particle(db_session, particle, EMB)
         await db_session.commit()
 
         successor = _particle("agent belief v2", asserted_by=identity, supersedes=pred.id)
-        with patch.object(
-            agent_write,
-            "_construct_and_insert",
-            new=AsyncMock(return_value=(successor.id, successor)),
-        ):
-            await agent_write.supersede_belief(
-                db_session,
-                store="default",
-                supersedes_id=pred.id,
-                content="agent belief v2",
-                subject_names=[],
-                confidence=0.9,
-            )
+        # Only the apply is stubbed: the real gather runs, so the call is one
+        # the real phases accept (security review 2026-10-31-1, AD26).
+        import particles.ingest.pipeline as pipeline
+        from particles import embeddings as ep
+
+        apply = AsyncMock(return_value=(successor.id, successor))
+        original = ep._embedding_model
+        ep.set_embedding_model(_mock_embeddings())
+        try:
+            with (
+                patch.object(agent_write, "_apply_belief", new=apply),
+                patch.object(pipeline, "_has_contradiction_signal", AsyncMock(return_value=False)),
+                patch.object(pipeline, "_has_update_signal", AsyncMock(return_value=None)),
+            ):
+                await agent_write.supersede_belief(
+                    db_session,
+                    store="default",
+                    supersedes_id=pred.id,
+                    content="agent belief v2",
+                    subject_names=[],
+                    confidence=0.9,
+                    source_excerpt="the belief changed",
+                )
+        finally:
+            ep.set_embedding_model(original)
+        assert apply.await_count == 1
         assert await get_retired_at(db_session, pred.id) is not None
 
         await agent_write.retract_belief(

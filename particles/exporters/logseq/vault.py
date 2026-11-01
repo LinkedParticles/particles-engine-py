@@ -39,6 +39,7 @@ from particles.exporters.logseq.format import (
 from particles.exporters.summaries import LogseqSummary
 from particles.extraction.polarity import is_non_asserted
 from particles.render.article_synthesis import compute_input_hash
+from particles.render.escape import logseq_alias, logseq_page_ref, logseq_text
 from particles.render.markdown import (
     MarkdownExportLedger,
     build_narrative_naming,
@@ -171,6 +172,9 @@ async def export_vault(
         # page with a backlink is spuriously invalidated each run.
         for nslug in narrative_naming.values():
             known_names.add(_narrative_page_name(nslug))
+        # The engine writes each reference through ``logseq_page_ref``, so that
+        # form of every name is a valid target too.
+        known_names |= {logseq_page_ref(name) for name in known_names}
         invalidated_paths = invalidate_stale_link_articles(
             pages_dir,
             known_names,
@@ -450,7 +454,7 @@ async def export_vault(
     for s in eligible_ordered:
         if s.id not in rendered_ids:
             continue
-        index_lines.append(f"- [[{naming.display_name(s)}]]\n")
+        index_lines.append(f"- [[{logseq_page_ref(naming.display_name(s))}]]\n")
     if ledger.write(pages_dir / "Contents.md", "".join(index_lines)):
         files_written += 1
 
@@ -462,11 +466,12 @@ async def export_vault(
         if len(members) < 2:
             continue
         disamb_lines = [
-            render_block(f"# {disambiguation_name(group.base_name)}"),
-            render_property("alias", group.base_name, depth=0),
+            render_block(f"# {logseq_text(disambiguation_name(group.base_name))}"),
+            render_property("alias", logseq_alias(group.base_name), depth=0),
         ]
         for s in sorted(members, key=lambda m: naming.display_name(m)):
-            disamb_lines.append(render_block(f"[[{naming.display_name(s)}]]", depth=0))
+            ref = logseq_page_ref(naming.display_name(s))
+            disamb_lines.append(render_block(f"[[{ref}]]", depth=0))
         disamb_path = pages_dir / f"{logseq_slug(disambiguation_name(group.base_name))}.md"
         if not is_within_directory(pages_dir, disamb_path):
             log.warning(

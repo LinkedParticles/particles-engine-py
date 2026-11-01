@@ -62,10 +62,18 @@ identical.
 !!! warning "Pin the paths for any unattended process"
     An MCP server is launched by your client and inherits almost nothing.
     Started with neither `DATABASE_URL` nor `PARTICLES_CONFIG`, it serves
-    `~/.particles/particles.db`, which is not the `./particles.db`
-    the `particles` command uses in a project directory. Started with
+    the store `~/.particles/config.yaml` names (a relative path there is read
+    under `~/.particles/`), or `~/.particles/particles.db` when that file
+    names none, which is not the `./particles.db` the `particles`
+    command uses in a project directory. Started with
     `PARTICLES_CONFIG` and no absolute store path, it refuses to start. Always
     set `DATABASE_URL` and `PARTICLES_BLOB_DIR` explicitly.
+
+The façade reads and writes its store in process. It has no route to a
+remote engine, so while `engine.base_url` is set every tool call is refused
+with a message that names the setting, rather than writing a local store the
+engine never reads. Run `particles memory serve` on the engine's host, against
+the engine's own store.
 
 ## Enabling writes
 
@@ -184,8 +192,11 @@ settles with `particles review`.
 
 Two smaller differences are invisible to a tool call. The server reports the
 Particles package version as its `serverInfo.version`, not the reference's.
-Where the reference queues mutations behind one lock, here each tool call is
-its own database transaction.
+Where the reference queues mutations behind one lock, here a tool call is not
+one database transaction: it makes its refusals before it writes anything,
+writes its deposit, entities and deletions in one transaction, then commits
+each claim it asserts in a transaction of its own, so a call stopped midway
+keeps the claims it had already committed.
 
 ## What is not different
 
@@ -349,8 +360,8 @@ the fabricated provenance the store exists to prevent.
 
 Two consequences worth knowing:
 
-- **Malformed lines are skipped and reported**, never silently dropped. The
-  original bytes stay in the corpus, so a later fix can re-read them without
+- **Malformed lines are skipped and reported**, never silently dropped
+  (the import notes each skipped line and why). The original bytes stay in the corpus, so a later fix can re-read them without
   asking you to export again. The same goes for a field the reference format
   does not define (a fork's timestamp, say): it is counted and left in the
   file, never guessed into a field that means something else.

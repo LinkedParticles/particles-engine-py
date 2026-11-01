@@ -25,7 +25,8 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Mapping, Sequence
+import stat
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,8 +34,18 @@ from typing import Any
 
 import yaml
 
-from particles.config import StorageConfig, get_config, sqlite_file_path, user_config_path
+from particles.config import (
+    StorageConfig,
+    get_config,
+    is_broad_root,
+    sqlite_file_path,
+    user_config_path,
+)
+from particles.core import bounded_yaml
+from particles.corpus.redaction import redact_secrets as redact_secrets
+from particles.corpus.worktree import is_unlinked_git_file
 from particles.render.markdown import find_projected_regions
+from particles.url_safety import url_without_userinfo
 
 log = logging.getLogger(__name__)
 
@@ -137,12 +148,42 @@ def find_repository_root(cwd: Path) -> Path | None:
         if dot_git.is_dir():
             return candidate
         if dot_git.is_file():
+            # A linked ``.git`` file repeats another checkout's claim (Q26).
+            if not is_unlinked_git_file(dot_git):
+                return candidate
             return _main_checkout_of(candidate, dot_git) or candidate
     return None
 
 
+def enclosing_work_tree(path: Path) -> Path | None:
+    """The nearest directory above ``path``'s resolved file that holds a ``.git`` entry, if any.
+
+    Read as the local refresh reads a store: the resolved path, so a name that
+    links into a clone counts, and no further up than the home directory or
+    another broad root, so a dotfiles repository there does not claim every
+    file under home (security review 2026-10-27-1, W16).
+    """
+    for parent in Path(os.path.realpath(path)).parents:
+        if is_broad_root(parent):
+            break
+        if os.path.lexists(parent / ".git"):
+            return parent
+    return None
+
+
 def _main_checkout_of(checkout: Path, dot_git_file: Path) -> Path | None:
-    """The main checkout a linked worktree belongs to, or ``None`` if it is not one."""
+    """The main checkout a linked worktree belongs to, or ``None`` if it is not one.
+
+    A ``.git`` file is a claim, so it is checked against git's own layout before
+    the checkout is keyed on another directory (security review 2026-10-24-2,
+    P22): its ``gitdir:`` must name ``<common>/worktrees/<name>``, that
+    directory's ``commondir`` must lead back to ``<common>``, ``<common>`` must
+    be a real git directory, and the worktree's ``gitdir`` back-pointer, which
+    ``git worktree add`` writes, must name this very ``.git`` file. A planted
+    chain (an unpacked archive, a co-tenant's directory) fails one of these and
+    the checkout is its own root. A ``.git`` file that is a symbolic or hard
+    link is refused before any of this (security review 2026-10-25-1, Q26).
+    """
     try:
         first_line = dot_git_file.read_text(encoding="utf-8", errors="replace").splitlines()[0]
         if not first_line.startswith("gitdir:"):
@@ -152,17 +193,59 @@ def _main_checkout_of(checkout: Path, dot_git_file: Path) -> Path | None:
         if not common_file.is_file():
             return None  # a submodule: its own root
         common = Path(os.path.normpath(git_dir / common_file.read_text(encoding="utf-8").strip()))
+        if not _is_registered_worktree(git_dir, common, dot_git_file):
+            return None
     except (OSError, IndexError):
         return None
     # A bare-repository worktree has no main checkout to key on.
     return common.parent if common.name == ".git" else None
 
 
-def _recorded_cwds(transcript_path: Path) -> list[str]:
-    """Distinct ``cwd`` values from the head of a transcript, in order."""
-    found: list[str] = []
+def _is_registered_worktree(git_dir: Path, common: Path, dot_git_file: Path) -> bool:
+    """Whether ``git_dir`` is a worktree ``common`` registered for ``dot_git_file``."""
+    if git_dir.parent.name != "worktrees" or git_dir.parent.parent != common:
+        return False
+    if not (common / "HEAD").is_file() or not (common / "objects").is_dir():
+        return False
+    back_file = git_dir / "gitdir"
+    if not back_file.is_file():
+        return False
+    raw = back_file.read_text(encoding="utf-8", errors="replace").strip()
+    back = Path(os.path.normpath(git_dir / raw))  # an absolute raw ignores git_dir
+    own = Path(os.path.normpath(dot_git_file.absolute()))
+    if back == own:
+        return True
+    # The same inode under another spelling of its path (case, a symlinked
+    # ancestor). Sound only because ``own`` is neither a symlink nor
+    # hard-linked, so that inode has no other name a planter could hold (Q26).
     try:
-        with transcript_path.open(encoding="utf-8", errors="replace") as fh:
+        return is_unlinked_git_file(own) and os.path.samefile(back, own)
+    except OSError:
+        return False
+
+
+def _recorded_cwds(transcript_path: Path) -> list[str]:
+    """Distinct ``cwd`` values from the head of a transcript, in order.
+
+    A symlinked transcript, or anything but a regular file, records none: the
+    project directories are walked by glob, and a link planted in one must not
+    choose the project key (security review 2026-10-25-2, R17).
+    """
+    found: list[str] = []
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(transcript_path, flags | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return found
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        os.close(fd)
+        return found
+    try:
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
             for index, line in enumerate(fh):
                 if index >= _LAUNCH_CWD_SCAN_LINES:
                     break
@@ -315,6 +398,48 @@ def _strip_worktree_infix(slug: str) -> str:
 
 _MEMORY_URI_RE = re.compile(r"/projects/(?P<slug>[^/]+)/memory/")
 _SESSION_URI_PREFIX = "claude-code://session/"
+#: The shape of a Claude Code session id (a UUID in practice). Nothing else is
+#: looked up, so an id cannot name a parent directory or widen the glob.
+_SESSION_ID_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]*")
+
+
+def session_transcripts(
+    uri_r: str | None, projects_root: Path, *, flat: bool = False
+) -> list[Path]:
+    """The transcripts under ``projects_root`` a ``claude-code://session/<id>`` URI names.
+
+    Claude Code keeps a session's transcript one directory down, in its
+    project's folder. ``flat`` also looks in ``projects_root`` itself, for a
+    folder of transcripts copied out of that layout (``audit --transcripts``).
+
+    A deposit's URI is the depositor's to choose, so the id must have a session
+    id's shape, and each transcript found must resolve inside ``projects_root``
+    (security review 2026-10-25-2, R28). Anything else names no transcript.
+    """
+    uri = uri_r or ""
+    if not uri.startswith(_SESSION_URI_PREFIX):
+        return []
+    session_id = uri[len(_SESSION_URI_PREFIX) :]
+    if _SESSION_ID_RE.fullmatch(session_id) is None:
+        return []
+    try:
+        root = projects_root.resolve()
+    except OSError:
+        return []
+    candidates = sorted(projects_root.glob(f"*/{session_id}.jsonl"))
+    if flat:
+        candidates.insert(0, projects_root / f"{session_id}.jsonl")
+    found: list[Path] = []
+    for transcript in candidates:
+        if not transcript.is_file():
+            continue
+        try:
+            inside = transcript.resolve().is_relative_to(root)
+        except OSError:
+            continue
+        if inside:
+            found.append(transcript)
+    return found
 
 
 def entry_project_key(uri_r: str | None, tags: list[str], projects_root: Path) -> str | None:
@@ -335,10 +460,8 @@ def entry_project_key(uri_r: str | None, tags: list[str], projects_root: Path) -
     match = _MEMORY_URI_RE.search(uri) if uri.startswith("file://") else None
     if match is not None:
         return canonical_project_key(match.group("slug"), projects_root)
-    if uri.startswith(_SESSION_URI_PREFIX):
-        session_id = uri[len(_SESSION_URI_PREFIX) :]
-        for transcript in sorted(projects_root.glob(f"*/{session_id}.jsonl")):
-            return transcript_project_key(transcript)
+    for transcript in session_transcripts(uri, projects_root):
+        return transcript_project_key(transcript)
     for tag in tags:
         if tag.startswith("project:") and len(tag) > len("project:"):
             return canonical_project_key(tag[len("project:") :], projects_root)
@@ -442,6 +565,41 @@ def is_claude_code_memory_dir(path: Path, projects_root: Path | None = None) -> 
     return resolved not in {p.resolve() for p in stray_memory_dirs(root_resolved)}
 
 
+@dataclass(frozen=True)
+class MemoryDirDiscovery:
+    """The Claude Code memory directories under ``root``, split by whether a store serves them."""
+
+    root: Path
+    bound: tuple[Path, ...]
+    """Directories ``store`` harvests and renders."""
+    refused: Mapping[Path, str]
+    """Every other directory, with :func:`projection_refusal`'s reason."""
+    strays: tuple[Path, ...]
+    """This SDK's own stray output, never Claude Code's."""
+
+
+def discover_memory_dirs(store: str) -> MemoryDirDiscovery:
+    """The ``~/.claude/projects/*/memory`` directories, and which of them ``store`` serves.
+
+    The one discovery consolidation pass 6, ``particles memory absences`` and
+    ``hook doctor`` share, so the three agree on which directories a store owns.
+    """
+    root = Path.home() / ".claude" / "projects"
+    strays = set(stray_memory_dirs(root)) if root.is_dir() else set()
+    found = (
+        sorted(p for p in root.glob("*/memory") if p.is_dir() and p not in strays)
+        if root.is_dir()
+        else []
+    )
+    reasons = {d: projection_refusal(store, d) for d in found}
+    return MemoryDirDiscovery(
+        root=root,
+        bound=tuple(d for d, reason in reasons.items() if reason is None),
+        refused={d: reason for d, reason in reasons.items() if reason is not None},
+        strays=tuple(sorted(strays)),
+    )
+
+
 def stray_memory_dirs(projects_root: Path) -> list[Path]:
     """Memory directories under ``projects_root`` that Claude Code never reads.
 
@@ -505,6 +663,25 @@ def state_dir() -> Path:
     return Path(get_config().claude_code.state_dir).expanduser()
 
 
+def local_harvest_roots() -> tuple[list[str], list[str]]:
+    """The directories this host's harvest writes from: ``(memory roots, archive roots)``.
+
+    The memory roots are Claude Code's resolved ``~/.claude/projects``, plus the
+    ``projects`` directory under ``CLAUDE_CONFIG_DIR`` when that names another
+    configuration directory; the archive root is the resolved
+    ``<claude_code.state_dir>/projects``. Resolved as the harvest resolves the
+    paths it sends, so a key recording them matches those paths segment for
+    segment.
+    """
+    memory = [str((Path.home() / ".claude" / "projects").resolve())]
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if configured:
+        moved = str((Path(configured).expanduser() / "projects").resolve())
+        if moved not in memory:
+            memory.append(moved)
+    return memory, [str((state_dir() / "projects").resolve())]
+
+
 def make_private_dir(path: Path) -> None:
     """Create ``path`` and any missing parents owner-only (``0o700``).
 
@@ -527,8 +704,43 @@ def make_private_dir(path: Path) -> None:
         os.chmod(directory, 0o700)  # mkdir's mode is filtered by the umask
 
 
+def _tighten_state_dir(path: Path) -> None:
+    """Make the state directory owner-only when ``path`` is inside it and it is this user's.
+
+    :func:`make_private_dir` leaves an existing directory as it found it, so a
+    state directory an older release created with the umask's mode stayed
+    listable until the next ``init``; it is this integration's own, so every
+    write into it tightens it (security review D46). The mode is set on a
+    descriptor opened without following a link, since a ``chmod`` that skips
+    links raises ``NotImplementedError`` where the C library cannot (Linux with
+    glibc before 2.32), which failed every private write (2026-10-27-1, D46).
+    """
+    state = state_dir()
+    if not path.is_relative_to(state):
+        return
+    flags = (
+        os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(state, flags)
+    except OSError:
+        return
+    try:
+        st = os.fstat(fd)
+        getuid = getattr(os, "getuid", None)
+        if (
+            stat.S_ISDIR(st.st_mode)
+            and (getuid is None or st.st_uid == getuid())
+            and st.st_mode & 0o077
+        ):
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
 def _open_private(path: Path, flags: int) -> int:
     make_private_dir(path.parent)
+    _tighten_state_dir(path)
     fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)  # an existing file written by an older version
     return fd
@@ -636,9 +848,11 @@ def absolutize_sqlite_dsn(dsn: str, *, base_dir: Path | None = None) -> str:
     scheme, sep, path = dsn.partition(":///")
     if not sep or not scheme.startswith("sqlite"):
         return dsn
-    file_path = Path(path)
+    # SQLite does no ``~`` expansion; the config does (security review P13), so
+    # a ``~`` path is the home file, never ``<base>/~/...``.
+    file_path = Path(path).expanduser()
     if file_path.is_absolute():
-        return dsn
+        return f"{scheme}:///{file_path}"
     base = base_dir if base_dir is not None else Path.cwd()
     abs_path = (base / file_path).resolve()
     return f"{scheme}:///{abs_path}"
@@ -801,7 +1015,10 @@ def _tool_line(block: dict[str, Any]) -> str:
         for key in _TOOL_SUMMARY_KEYS:
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
-                detail = " ".join(value.split())
+                # Masked before the cut: a secret the cut splits no longer
+                # matches its pattern, and most of it would survive the
+                # harvest's own mask (security review 2026-10-27-1, N28).
+                detail = redact_secrets(" ".join(value.split()))
                 if len(detail) > _MAX_TOOL_SUMMARY_CHARS:
                     detail = detail[: _MAX_TOOL_SUMMARY_CHARS - 1] + "…"
                 break
@@ -937,11 +1154,18 @@ class McpRegistration:
         return any(words[i : i + 2] == list(PROJECT_OBSERVER_ARGS) for i in range(len(words) - 1))
 
     def add_argv(self) -> list[str]:
-        """``claude mcp add`` arguments that (re)create this entry at user scope."""
-        argv = ["mcp", "add", "--scope", "user"]
+        """``claude mcp add`` arguments that (re)create this entry at user scope.
+
+        The name comes before the ``-e`` pairs. The CLI declares ``-e`` as
+        variadic, so it takes every following word up to the next option as an
+        env entry: a name after the pairs was read as one, refused for lacking
+        ``=``, and nothing was registered (security review 2026-10-27-1, E13).
+        The ``--`` ends the pairs before the command.
+        """
+        argv = ["mcp", "add", "--scope", "user", self.name]
         for key, value in sorted(self.env.items()):
             argv += ["-e", f"{key}={value}"]
-        return [*argv, self.name, "--", self.command, *self.args]
+        return [*argv, "--", self.command, *self.args]
 
 
 def particles_mcp_registrations(home: Path | None = None) -> list[McpRegistration]:
@@ -986,11 +1210,20 @@ def plan_mcp_registration(
     whatever config its starting directory offered (finding D8), and one with
     no ``DATABASE_URL`` serves the ``default`` store from ``./particles.db`` in
     each session's directory unless its config names an absolute one
-    (security review N3, N17). A ``DATABASE_URL`` already present is kept. A
-    config pin naming a different file is kept with its env as found, since
-    the installer cannot tell a stale pin from a deliberate one, unless
-    ``replace_config_pin`` (an explicit ``--config``) says to replace it; see
-    :func:`foreign_config_pin`.
+    (security review N3, N17). A ``DATABASE_URL`` already present is kept. It
+    gains the empty ``PARTICLES_ENGINE_BASE_URL`` pin when it has none, so an
+    engine URL in the environment Claude Code starts it with is no override
+    (security review E2), and a non-empty one is replaced by it, since that
+    engine is the pinned config's to name (2026-10-27-1, W32). A config pin
+    naming a different file is kept with its env as found, since the installer
+    cannot tell a stale pin from a deliberate one, unless ``replace_config_pin``
+    (an explicit ``--config``) says to replace it; see
+    :func:`foreign_config_pin`. A replaced config pin, or under
+    ``replace_config_pin`` a missing one, takes the rest of its env with it:
+    the registration then carries exactly the pins the install writes, so the
+    other config's ``DATABASE_URL`` and any pin the install never writes are
+    dropped, and the agent's tools serve the store the hooks harvest (security
+    review 2026-10-28-2, AA21; 2026-10-30-1, AB19).
     """
     if not existing:
         return (
@@ -1006,6 +1239,10 @@ def plan_mcp_registration(
     new_env = dict(current.env)
     wanted_config = env.get("PARTICLES_CONFIG")
     have_config = new_env.get("PARTICLES_CONFIG")
+    if replace_config_pin and wanted_config is not None and have_config != wanted_config:
+        # No config pin at all counts as a different one: its DATABASE_URL may
+        # name another store (security review 2026-10-30-1, AB19).
+        new_env = dict(env)
     if wanted_config is not None and (
         have_config is None or (replace_config_pin and have_config != wanted_config)
     ):
@@ -1016,6 +1253,12 @@ def plan_mcp_registration(
         and new_env.get("PARTICLES_CONFIG") == wanted_config
     ):
         new_env["DATABASE_URL"] = env["DATABASE_URL"]
+    if (
+        "PARTICLES_ENGINE_BASE_URL" in env
+        and new_env.get("PARTICLES_ENGINE_BASE_URL") != env["PARTICLES_ENGINE_BASE_URL"]
+        and new_env.get("PARTICLES_CONFIG") == wanted_config
+    ):
+        new_env["PARTICLES_ENGINE_BASE_URL"] = env["PARTICLES_ENGINE_BASE_URL"]
     args = current.args if current.bound else (*current.args, *PROJECT_OBSERVER_ARGS)
     if args == current.args and new_env == current.env:
         return None
@@ -1036,6 +1279,28 @@ def foreign_config_pin(existing: Sequence[McpRegistration], env: Mapping[str, st
     have = existing[0].env.get("PARTICLES_CONFIG")
     wanted = env.get("PARTICLES_CONFIG")
     return have if have is not None and wanted is not None and have != wanted else None
+
+
+def kept_database_url(
+    existing: Sequence[McpRegistration],
+    env: Mapping[str, str],
+    planned: McpRegistration | None,
+) -> str | None:
+    """The ``DATABASE_URL`` a registration keeps, when it is not the one the install writes.
+
+    :func:`plan_mcp_registration` keeps a ``DATABASE_URL`` already present
+    unless it replaces the registration's env wholesale. The installer reports
+    a kept one that differs, so the agent's tools are not left serving a
+    store other than the one the hooks harvest unnoticed (security review
+    2026-10-30-1, AB19). ``planned`` is the registration the plan writes, or
+    ``None`` when it leaves the existing one unchanged.
+    """
+    wanted = env.get("DATABASE_URL")
+    if not existing or wanted is None:
+        return None
+    result = planned.env if planned is not None else existing[0].env
+    have = existing[0].env.get("DATABASE_URL")
+    return have if have is not None and result.get("DATABASE_URL") == have != wanted else None
 
 
 def particles_mcp_executables(home: Path | None = None) -> list[str]:
@@ -1138,18 +1403,17 @@ def install_report(
     return lines
 
 
-def session_started_at(uri_r: str | None, projects_root: Path) -> datetime | None:
+def session_started_at(
+    uri_r: str | None, projects_root: Path, *, flat: bool = False
+) -> datetime | None:
     """The start of the session a ``claude-code://session/<id>`` URI names, or ``None``.
 
     Read from the transcript's first ``timestamp`` while the file still exists
     under ``projects_root``; ``particles memory redate`` injects it
-    into the Engine op, which never learns where transcripts live.
+    into the Engine op, which never learns where transcripts live. ``flat`` is
+    :func:`session_transcripts`'s.
     """
-    uri = uri_r or ""
-    if not uri.startswith(_SESSION_URI_PREFIX):
-        return None
-    session_id = uri[len(_SESSION_URI_PREFIX) :]
-    for transcript in sorted(projects_root.glob(f"*/{session_id}.jsonl")):
+    for transcript in session_transcripts(uri_r, projects_root, flat=flat):
         try:
             return transcript_started_at(transcript.read_text(encoding="utf-8", errors="replace"))
         except OSError:
@@ -1184,55 +1448,9 @@ def transcript_started_at(jsonl_text: str) -> datetime | None:
 # Redaction — best-effort defence in depth, not a guarantee
 # ---------------------------------------------------------------------------
 
-_REDACTIONS: list[tuple[re.Pattern[str], str]] = [
-    # PEM blocks first (they may contain substrings the later patterns match).
-    (
-        re.compile(r"-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----", re.DOTALL),
-        "[REDACTED PEM BLOCK]",
-    ),
-    # Bearer headers before generic keys so the header keeps its label.
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [REDACTED]"),
-    # Anthropic / OpenAI-style secret keys.
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "[REDACTED API KEY]"),
-    # AWS access key IDs.
-    (re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b"), "[REDACTED AWS KEY]"),
-    # GitHub tokens: classic (ghp_, gho_, ghu_, ghs_, ghr_) and fine-grained.
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}"), "[REDACTED GITHUB TOKEN]"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}"), "[REDACTED GITHUB TOKEN]"),
-    # Slack tokens (xoxb-, xoxp-, xoxa-, xoxr-, xoxs-, xoxe-).
-    (re.compile(r"\bxox[abeprs]-[A-Za-z0-9-]{10,}"), "[REDACTED SLACK TOKEN]"),
-    # Google API keys.
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), "[REDACTED GOOGLE KEY]"),
-    # JSON Web Tokens: three base64url segments, the first two JSON objects.
-    (
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-        "[REDACTED JWT]",
-    ),
-    # Secret-named assignments (password=…, api_key: …, "token": "…"), value only.
-    (
-        re.compile(
-            r"(?i)(?P<key>\b(?:password|passwd|pwd|secret|client_secret|api[_-]?key|"
-            r"access[_-]?token|auth[_-]?token|refresh[_-]?token|token)\b[\"']?\s*[:=]\s*)"
-            r"(?P<quote>[\"']?)(?P<value>[^\s\"',;]{6,})(?P=quote)"
-        ),
-        r"\g<key>\g<quote>[REDACTED]\g<quote>",
-    ),
-]
-
-
-def redact_secrets(text: str) -> str:
-    """Mask common credential shapes.
-
-    Deterministic pattern pass over harvested text before it reaches the
-    corpus (distilled transcripts, memory files, rule files): ``sk-…`` keys,
-    AWS access key IDs, GitHub, Slack and Google tokens, JWTs, ``Bearer``
-    headers, PEM blocks, and the value of a secret-named ``key=value`` or
-    ``key: value`` assignment. Best-effort defence in depth — stated as such
-    in the docs.
-    """
-    for pattern, replacement in _REDACTIONS:
-        text = pattern.sub(replacement, text)
-    return text
+# The patterns and :func:`redact_secrets` live in the corpus layer, so the
+# nightly refresh applies the same mask to a rule or memory file it re-reads
+# (security review P48); re-exported here for the harness callers.
 
 
 # ---------------------------------------------------------------------------
@@ -1477,6 +1695,21 @@ def pinned_default_dsn(env: Mapping[str, str]) -> str:
     return dsn if dsn is not None else StorageConfig().database_url
 
 
+def pinned_store_dsn(env: Mapping[str, str], handle: str) -> str | None:
+    """The DSN store ``handle`` resolves to in a process started with ``env``'s pins.
+
+    The ``default`` store is :func:`pinned_default_dsn`. A named store's DSN is
+    the ``storage.stores`` entry of the config the process reads (its
+    ``PARTICLES_CONFIG`` pin, else the user file), or ``None`` when that config
+    declares none. ``hook doctor`` uses it to flag a hook whose named store the
+    hook refuses (security review 2026-10-25, Q5).
+    """
+    if handle == "default":
+        return pinned_default_dsn(env)
+    pin = env.get("PARTICLES_CONFIG")
+    return _pinned_config_dsn(Path(pin) if pin else user_config_path(), handle)
+
+
 def _command_tokens(command: str) -> list[str]:
     try:
         return shlex.split(command)
@@ -1516,7 +1749,8 @@ def parse_hook_binding(command: str, settings_path: Path) -> HookBinding:
     elif "PARTICLES_CONFIG" in env:
         dsn = _pinned_config_dsn(Path(env["PARTICLES_CONFIG"]), handle)
     location = store_location(dsn) if dsn is not None else None
-    engine_url = env.get("PARTICLES_ENGINE_BASE_URL")
+    # An empty pin is no override: the pinned config names the engine (R41).
+    engine_url = env.get("PARTICLES_ENGINE_BASE_URL") or None
     if engine_url is None and "PARTICLES_CONFIG" in env:
         engine_url = _pinned_config_engine_url(Path(env["PARTICLES_CONFIG"]))
     return HookBinding(
@@ -1686,7 +1920,8 @@ def _remote_projection_refusal(
             "in each hook command"
         )
     return (
-        f"store {store!r} on {engine_url} is not the store the installed Claude Code "
+        f"store {store!r} on {engine_url and url_without_userinfo(engine_url)} is not the store "
+        "the installed Claude Code "
         f"hooks name ({', '.join(sorted({str(b.settings_path) for b in bindings}))})"
     )
 
@@ -1771,6 +2006,11 @@ def index_entry_target(line: str) -> str | None:
     return m.group("target") if m is not None else None
 
 
+#: Bytes of a memory topic file read for its frontmatter type; the header must
+#: close within them (the same bound as a web capture's header).
+_MEMORY_HEAD_BYTES = 8192
+
+
 def memory_file_type(path: Path) -> str | None:
     """A memory topic file's type from its frontmatter, lower-cased, or ``None``.
 
@@ -1778,18 +2018,37 @@ def memory_file_type(path: Path) -> str | None:
     ``project``, ``reference``); a top-level ``type`` is the older spelling and
     is read when ``metadata`` carries none. An unreadable file, a missing or
     malformed frontmatter block, or a non-string type is ``None``: no type,
-    never an error.
+    never an error. Only the file's first
+    :data:`_MEMORY_HEAD_BYTES` are read, through a descriptor that follows no
+    symbolic link, and the frontmatter must close within them, as a web
+    capture's header must (security review 2026-10-28-1, G18).
     """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        fd = os.open(path, flags)
+    except OSError:
         return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        head = os.read(fd, _MEMORY_HEAD_BYTES)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        text = head.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # A character cut at the head's end is not a malformed file.
+        if exc.start < len(head) - 3:
+            return None
+        text = head[: exc.start].decode("utf-8")
     lines = text.splitlines()
     if not lines or lines[0].rstrip() != "---":
         return None
     try:
         end = next(i for i in range(1, len(lines)) if lines[i].rstrip() == "---")
-        header = yaml.safe_load("\n".join(lines[1:end]))
+        header = bounded_yaml.load("\n".join(lines[1:end]))
     except (StopIteration, yaml.YAMLError):
         return None
     if not isinstance(header, dict):
@@ -1853,6 +2112,81 @@ def drop_index_entries(text: str, source_dir: Path) -> str:
     return "\n".join(kept) + ("\n" if text.endswith("\n") else "")
 
 
+@dataclass(frozen=True)
+class MemoryDirWalk:
+    """Every ``*.md`` path under a memory directory, and the errors met finding them."""
+
+    directory: Path
+    """The directory as the caller named it; ``files`` are under it."""
+    files: tuple[Path, ...]
+    """Each ``.md`` file name the walk enumerated, symlinks included, in path order."""
+    errors: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.errors
+
+    def listed_uris(self) -> frozenset[str]:
+        """The ``file://`` URI of each listed path, under the resolved directory.
+
+        A listed path counts as present whatever its read does next:
+        a symlink, an oversized or unreadable file, or one stripped empty
+        is never read as deleted.
+        """
+        root = self.directory.resolve()
+        return frozenset((root / md.relative_to(self.directory)).as_uri() for md in self.files)
+
+
+def walk_memory_dir(memory_dir: Path) -> MemoryDirWalk:
+    """List every ``*.md`` under ``memory_dir``, recording each enumeration error.
+
+    ``os.walk`` with an error hook rather than ``Path.rglob``, which skips a
+    subdirectory it may not read without saying so: a walk that missed a
+    folder must never read that folder's files as deleted (as
+    ``walk_vault`` does for a vault). Symlinked subdirectories are not entered.
+    """
+    errors: list[str] = []
+    files: list[Path] = []
+
+    def _record(exc: OSError) -> None:
+        errors.append(f"{exc.filename or memory_dir}: {exc.strerror or exc}")
+
+    for dirpath, _dirnames, filenames in os.walk(memory_dir, onerror=_record):
+        here = Path(dirpath)
+        files.extend(here / name for name in filenames if name.endswith(".md"))
+    return MemoryDirWalk(directory=memory_dir, files=tuple(sorted(files)), errors=tuple(errors))
+
+
+def read_memory_files(
+    memory_dir: Path, walk: MemoryDirWalk | None = None
+) -> Iterator[tuple[Path, str, os.stat_result]]:
+    """Each ``*.md`` under ``memory_dir`` with its text and ``fstat``, in path order.
+
+    The walk the SessionEnd harvest and ``particles audit`` share; pass
+    ``walk`` to read the files an earlier :func:`walk_memory_dir` listed. A
+    symlinked file is skipped, as the folder importers skip one, and every read
+    goes through :func:`~particles.corpus.local_read.read_local_file` contained
+    to ``memory_dir`` and capped at ``local_files.max_bytes``, so a link or a
+    hard link planted in the memory directory, or a parent swapped for a
+    symlink, deposits nothing from outside it (security review N24, P20). A
+    refused or unreadable file is logged and skipped.
+    """
+    from particles.corpus.local_read import read_local_file, within
+
+    max_bytes = get_config().local_files.max_bytes
+    contained = within(memory_dir)
+    for md in (walk or walk_memory_dir(memory_dir)).files:
+        if md.is_symlink():
+            log.warning("memory files: %s is a symlink; skipped", md)
+            continue
+        try:
+            read = read_local_file(md, max_bytes=max_bytes, allowed=contained)
+        except OSError as exc:
+            log.warning("memory files: %s not read (%s)", md, exc)
+            continue
+        yield md, read.content.decode("utf-8", errors="replace"), read.stat
+
+
 def filter_memory_file_for_deposit(
     text: str,
     snapshot_bodies: Mapping[str, str] | None = None,
@@ -1906,6 +2240,31 @@ def filter_memory_file_for_deposit(
 # ---------------------------------------------------------------------------
 # Digest byte budget
 # ---------------------------------------------------------------------------
+
+#: Claude Code's cap on a hook's ``additionalContext``, in characters. Over
+#: it, the harness saves the text to a file and passes the model only a
+#: 2,000-character preview, so a digest past the cap is mostly never seen.
+HOOK_CONTEXT_MAX_CHARS = 10_000
+
+#: The most the session-start digest may take, whatever the configured
+#: budget: the harness cap less a margin. The budget counts UTF-8 bytes, and
+#: a string's UTF-8 byte count is never below its character count (code
+#: points or UTF-16 units), so a digest within this many bytes is within the
+#: harness cap.
+DIGEST_BUDGET_CEILING = 9_500
+
+
+def session_start_budget(max_bytes: int) -> int:
+    """The byte budget the session-start hook cuts its digest to.
+
+    ``claude_code.digest_max_bytes`` clamped to :data:`DIGEST_BUDGET_CEILING`;
+    0 (no cap) also takes the ceiling. A larger budget would not show the
+    model more: the harness would replace the whole digest with a preview,
+    and the exposure record would credit lines the model never read.
+    """
+    if max_bytes <= 0:
+        return DIGEST_BUDGET_CEILING
+    return min(max_bytes, DIGEST_BUDGET_CEILING)
 
 
 def truncate_on_line_boundary(text: str, max_bytes: int) -> str:

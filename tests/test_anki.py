@@ -154,6 +154,31 @@ class TestAnkiExporter:
         assert "The weight is 1.1 g." in text
 
     @pytest.mark.asyncio
+    async def test_a_subject_name_line_break_stays_in_its_deck_header(
+        self, db_session: object, tmp_path: object
+    ) -> None:
+        """A stored subject name with line breaks adds no line of its own to the
+        deck file (security review 2026-10-27-1, R3)."""
+        from pathlib import Path
+
+        from particles.core.schema import Subject
+        from particles.exporters.anki import AnkiExporter
+        from particles.store.particle_store import insert_particle
+        from particles.store.subject_store import insert_subject, link_particle_to_subjects
+
+        p = _make_particle(content="The weight is 1.1 g.")
+        await insert_particle(db_session, p)  # type: ignore[arg-type]
+        s = Subject(canonical_name="Coins\nforged front\tforged back", asserted_by="test")
+        await insert_subject(db_session, s)  # type: ignore[arg-type]
+        await link_particle_to_subjects(db_session, p.id, [s.id])  # type: ignore[arg-type]
+
+        out: Path = tmp_path / "deck.txt"  # type: ignore[assignment]
+        await AnkiExporter().export(db_session, out)  # type: ignore[arg-type]
+        lines = out.read_text().splitlines()
+        assert not any(line.startswith("forged front") for line in lines), lines
+        assert any(line.startswith("#deck:") and "forged front" in line for line in lines)
+
+    @pytest.mark.asyncio
     async def test_min_confidence_filters_particles(
         self, db_session: object, tmp_path: object
     ) -> None:

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from particles.api.cli._terminal import terminal_field
+
 if TYPE_CHECKING:
     from particles.operations.source_passage import SourcePassage
 
@@ -37,7 +39,9 @@ def header_lines(passage: SourcePassage) -> list[str]:
     lines: list[str] = []
     if passage.uri_r or passage.source_type:
         kind = f"  ({passage.source_type})" if passage.source_type else ""
-        lines.append(f"Source:    {passage.uri_r or '(no URI)'}{kind}")
+        # The URI and the note are stored text, so each stays on its own
+        # labelled line (security review 2026-10-30-1, AB70).
+        lines.append(f"Source:    {terminal_field(passage.uri_r or '(no URI)')}{kind}")
     if passage.corpus_entry_id:
         snap = f"  snapshot {passage.snapshot_id[:8]}…" if passage.snapshot_id else ""
         lines.append(f"Entry:     {passage.corpus_entry_id[:8]}…{snap}")
@@ -48,5 +52,5 @@ def header_lines(passage: SourcePassage) -> list[str]:
             f"`particles corpus cat {(passage.snapshot_id or '')[:8]}` shows the full text)"
         )
     if passage.note:
-        lines.append(f"Note:      {passage.note}")
+        lines.append(f"Note:      {terminal_field(passage.note)}")
     return lines

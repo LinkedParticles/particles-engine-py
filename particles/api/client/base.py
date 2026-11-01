@@ -486,6 +486,8 @@ class Backend(Protocol):
         entry: str | None,
         event_type: str | None,
         limit: int,
+        principal: str | None = None,
+        key: str | None = None,
     ) -> list[OperatorEvent]: ...
 
     async def event_show(self, event_id: str) -> OperatorEvent | None: ...

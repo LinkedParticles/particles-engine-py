@@ -13,6 +13,7 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.api.client import get_backend
 from particles.core.schema import Particle, ResolutionAction
 from particles.db import session_scope
@@ -61,7 +62,7 @@ def review_cmd(
         try:
             bulk_action = ResolutionAction(bulk)
         except ValueError:
-            typer.echo(
+            terminal_echo(
                 f"Unknown action: {bulk!r}. Use PREFER_A, PREFER_B, BOTH_VALID, DEFER, or DISCARD.",
                 err=True,
             )
@@ -71,54 +72,54 @@ def review_cmd(
             # every conflict it would close, then ask.
             items = run(_list_review_detail())
             if not items:
-                typer.echo("No INCONSISTENCY particles pending review.")
+                terminal_echo("No INCONSISTENCY particles pending review.")
                 return
             _echo_items(items, hint=False)
             verb = "would retract" if dry_run else "will retract"
-            typer.echo(f"DISCARD {verb} both sides of {len(items)} conflicts.")
+            terminal_echo(f"DISCARD {verb} both sides of {len(items)} conflicts.")
             if dry_run:
                 return
             if not yes and not confirm("Proceed?", default=False):
-                typer.echo("Aborted; nothing written.")
+                terminal_echo("Aborted; nothing written.")
                 raise typer.Exit(1)
             particles_list = [item.inconsistency for item in items]
         else:
             particles_list = run(get_backend().review_list())
         if not particles_list:
-            typer.echo("No INCONSISTENCY particles pending review.")
+            terminal_echo("No INCONSISTENCY particles pending review.")
             return
         if dry_run:
-            typer.echo(f"Dry run: would apply {bulk_action} to {len(particles_list)} conflicts.")
+            terminal_echo(f"Dry run: would apply {bulk_action} to {len(particles_list)} conflicts.")
             return
-        typer.echo(f"Applying {bulk_action} to {len(particles_list)} conflicts…")
+        terminal_echo(f"Applying {bulk_action} to {len(particles_list)} conflicts…")
         succeeded = refused = failed = 0
         for p in particles_list:
             try:
                 run(get_backend().review_resolve(p.id, bulk_action, reviewer_id, domain, note))
                 succeeded += 1
             except ResolutionRefused as exc:
-                typer.echo(f"  Skipped {p.id[:8]}…: {exc}", err=True)
+                terminal_echo(f"  Skipped {p.id[:8]}…: {exc}", err=True)
                 refused += 1
             except Exception as exc:
-                typer.echo(f"  Failed {p.id[:8]}…: {exc}", err=True)
+                terminal_echo(f"  Failed {p.id[:8]}…: {exc}", err=True)
                 failed += 1
         skipped = f", {refused} refused" if refused else ""
-        typer.echo(f"Done: {succeeded} resolved{skipped}, {failed} failed.")
+        terminal_echo(f"Done: {succeeded} resolved{skipped}, {failed} failed.")
         return
 
     # Single-particle listing
     if particle_id is None:
         items = run(_list_review_detail())
         if not items:
-            typer.echo("No INCONSISTENCY particles pending review.")
+            terminal_echo("No INCONSISTENCY particles pending review.")
             return
         _echo_items(items, hint=True)
-        typer.echo(f"{len(items)} conflicts pending review.")
+        terminal_echo(f"{len(items)} conflicts pending review.")
         return
 
     # Single-particle resolution
     if action is None:
-        typer.echo("--action required when providing a particle_id", err=True)
+        terminal_echo("--action required when providing a particle_id", err=True)
         raise typer.Exit(1)
 
     from particles.api.cli._id_norm import normalise_particle_id
@@ -134,9 +135,9 @@ def review_cmd(
             backend.review_resolve(target, ResolutionAction(action), reviewer_id, domain, note)
         )
     except ValueError as exc:
-        typer.echo(f"✗ {exc}", err=True)
+        terminal_echo(f"✗ {exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"Review {review.review_id} recorded: {action}")
+    terminal_echo(f"Review {review.review_id} recorded: {action}")
 
 
 async def _resolve_local(id_prefix: str) -> str:
@@ -154,44 +155,46 @@ def _echo_items(items: list[ReviewDetailItem], *, hint: bool) -> None:
         inc = item.inconsistency
         pa = item.particle_a
         pb = item.particle_b
-        typer.echo(sep)
-        typer.echo(f"[{i}/{len(items)}]  {inc.id[:8]}…")
+        terminal_echo(sep)
+        terminal_echo(f"[{i}/{len(items)}]  {inc.id[:8]}…")
         census = _census_lines(inc.content)
         if census:
             # A census record names its claims by side; review
             # resolves every member of a side at once.
-            typer.echo("  Two sources disagree (the nightly check; a second reading confirmed it).")
+            terminal_echo(
+                "  Two sources disagree (the nightly check; a second reading confirmed it)."
+            )
             for line in census:
-                typer.echo(f"  {line}")
+                terminal_echo(f"  {terminal_field(line)}")
             for prior in item.history:
-                typer.echo(f"  earlier: {prior}")
+                terminal_echo(f"  earlier: {terminal_field(prior)}")
             if hint:
-                typer.echo(
+                terminal_echo(
                     f"  → particles review {inc.id}"
                     " --action [PREFER_A|PREFER_B|BOTH_VALID|DEFER|DISCARD]"
                     " (PREFER and DISCARD apply to every claim on a side)"
                 )
             continue
         if pa:
-            typer.echo(f"  A: {pa.content}")
-            typer.echo(f"     asserted_by: {pa.asserted_by}")
+            terminal_echo(f"  A: {terminal_field(pa.content)}")
+            terminal_echo(f"     asserted_by: {terminal_field(pa.asserted_by)}")
             author_a = _format_author(item.author_a_id, item.author_a_role)
             if author_a:
-                typer.echo(f"     author:      {author_a}")
+                terminal_echo(f"     author:      {terminal_field(author_a)}")
         b_text = _parse_particle_b(inc.content)
         if b_text:
             b_asserted = pb.asserted_by if pb else "—"
-            typer.echo(f"  B: {b_text}")
-            typer.echo(f"     asserted_by: {b_asserted}")
+            terminal_echo(f"  B: {terminal_field(b_text)}")
+            terminal_echo(f"     asserted_by: {terminal_field(b_asserted)}")
             author_b = _format_author(item.author_b_id, item.author_b_role)
             if author_b:
-                typer.echo(f"     author:      {author_b}")
+                terminal_echo(f"     author:      {terminal_field(author_b)}")
         if hint:
-            typer.echo(
+            terminal_echo(
                 f"  → particles review {inc.id}"
                 " --action [PREFER_A|PREFER_B|BOTH_VALID|DEFER|DISCARD]"
             )
-    typer.echo(sep)
+    terminal_echo(sep)
 
 
 def _census_lines(inc_content: str) -> list[str]:

@@ -13,7 +13,6 @@ recorded, and a contested global line must reach review.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -112,41 +111,48 @@ class TestMetrics:
 
 
 class TestEndToEnd:
-    @pytest.fixture
-    def report(self, bow_encoder: None, tmp_path: Path) -> Generator[object, None, None]:  # noqa: F811
-        yield asyncio.run(
+    def test_divergent_claims_stand_and_no_project_loses_its_own_line(
+        self,
+        bow_encoder: None,  # noqa: F811
+        tmp_path: Path,
+        subtests: pytest.Subtests,
+    ) -> None:
+        """Every check on one run of three worlds, each reported as its own subtest.
+
+        The run was a fixture shared by two tests, so it was paid twice.
+        """
+        from particles.benchmark.observer import ObserverReport
+
+        report = asyncio.run(
             run_observer_fixture(seeds=[1, 2, 3], days=14, work_dir=tmp_path, keep_stores=True)
         )
-
-    def test_divergent_claims_stand_and_no_project_loses_its_own_line(self, report: object) -> None:
-        from particles.benchmark.observer import ObserverReport
-
         assert isinstance(report, ObserverReport)
-        m, census = report.metrics, report.write_census
-        # No retirement crosses a project boundary (§4) …
-        assert census.cross_project_supersessions == 0
-        assert census.cross_project_cascades == 0
-        # … while a project's own update still retires its own earlier value.
-        assert census.own_supersessions > 0
-        # Every declined pair is disclosed as a CONTRADICTS relation.
-        assert census.declined_pairs > 0 and census.divergences_recorded > 0
-        assert census.declined_without_relation == 0
-        # A project contesting a global line reaches review, every time.
-        assert census.global_contests.value == 1.0
-        for kind in ("fact", "rule", "own"):
-            assert m.by_kind[kind].value is not None and m.by_kind[kind].value >= 0.99
-        assert m.leaked.numerator == 0
-        assert m.own_visible.numerator <= m.own_visible_store_wide.numerator
-        assert report.refused_llm_calls == {}
-        assert all(w.fingerprint == generate_world(w.seed, 14).fingerprint for w in report.worlds)
 
-    def test_report_renders(self, report: object) -> None:
-        from particles.benchmark.observer import ObserverReport
+        with subtests.test("divergent claims stand and no project loses its own line"):
+            m, census = report.metrics, report.write_census
+            # No retirement crosses a project boundary (§4) …
+            assert census.cross_project_supersessions == 0
+            assert census.cross_project_cascades == 0
+            # … while a project's own update still retires its own earlier value.
+            assert census.own_supersessions > 0
+            # Every declined pair is disclosed as a CONTRADICTS relation.
+            assert census.declined_pairs > 0 and census.divergences_recorded > 0
+            assert census.declined_without_relation == 0
+            # A project contesting a global line reaches review, every time.
+            assert census.global_contests.value == 1.0
+            for kind in ("fact", "rule", "own"):
+                assert m.by_kind[kind].value is not None and m.by_kind[kind].value >= 0.99
+            assert m.leaked.numerator == 0
+            assert m.own_visible.numerator <= m.own_visible_store_wide.numerator
+            assert report.refused_llm_calls == {}
+            assert all(
+                w.fingerprint == generate_world(w.seed, 14).fingerprint for w in report.worlds
+            )
 
-        assert isinstance(report, ObserverReport)
-        text = render_report(report)
-        assert "Own lines in view for their project" in text
-        assert "CONTRADICTS" in text
+        with subtests.test("the report renders"):
+            text = render_report(report)
+            assert "Own lines in view for their project" in text
+            assert "CONTRADICTS" in text
 
 
 class TestChunkedArm:

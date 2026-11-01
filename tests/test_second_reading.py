@@ -380,14 +380,15 @@ class TestSameEntry:
     async def test_no_llm_call_happens_inside_the_write_lock(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from particles import db
         from particles.ingest import pipeline
 
         held = [False]
-        real_lock = pipeline.write_lock
+        real_lock = db.write_lock
 
         @contextlib.asynccontextmanager
-        async def watched() -> AsyncIterator[None]:
-            async with real_lock():
+        async def watched(store: str = "default") -> AsyncIterator[None]:
+            async with real_lock(store):
                 held[0] = True
                 try:
                     yield
@@ -410,7 +411,7 @@ class TestSameEntry:
 
         from particles.ingest import second_reading
 
-        monkeypatch.setattr(pipeline, "write_lock", watched)
+        monkeypatch.setattr(db, "write_lock", watched)
         monkeypatch.setattr(second_reading, "_llm_verify_contradiction", reading)
         # A scoped patch: ``bow`` owns the probe's patch, and a monkeypatch
         # would restore bow's mock after bow had already torn it down.

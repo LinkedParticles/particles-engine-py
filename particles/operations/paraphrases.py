@@ -59,7 +59,7 @@ from particles.core.probe_verdict import ProbeKind, VerdictKey, verdict_key
 from particles.core.reanchor import Cursor
 from particles.core.schema import CorpusEntry, Particle
 from particles.core.status import Status, StatusReason
-from particles.db import write_transaction
+from particles.db import store_of, write_transaction
 from particles.embeddings import cosine_similarity
 from particles.ingest.conflict_plan import plan_update_event
 from particles.ingest.observer_gate import ObserverGate
@@ -413,7 +413,9 @@ async def run_paraphrases(  # noqa: PLR0912 — one linear cursor walk
         report.skipped_reason = "reconciliation.update_supersession.max_paraphrases is 0"
         return report
 
-    require_attribution = config.reconciliation.store_mode != "single"
+    # The regime of the store this pass writes, as the sweeps read it
+    # (security review 2026-10-27-1, G6).
+    require_attribution = config.reconciliation_mode_for(store_of(session)) != "single"
     speaker = await load_speaker_key(session)
     shared = _Gather(
         SubjectIndex.build(await load_active_candidates(session), speaker=speaker),

@@ -30,6 +30,7 @@ from particles.core.status import Status, StatusReason
 from particles.corpus.store import CorpusEntryRow, get_snapshot
 from particles.operations.abstraction import is_derived
 from particles.operations.query.decay_policy import load_decay_policy
+from particles.store.event_store import record_claims_retired
 from particles.store.particle_store import (
     get_active_epistemic_particles_with_variance,
     get_active_particles,
@@ -38,11 +39,36 @@ from particles.store.particle_store import (
     update_particle_status,
 )
 
+#: The actor a lint fix's retirement event names when the caller names none.
+LINT_ACTOR = "lint"
 
-async def _check_staleness(session: AsyncSession, fix: bool) -> list[LintFinding]:
-    """Flag ACTIVE particles whose valid_until has passed."""
+
+async def _record_fix(
+    session: AsyncSession, *, actor: str, route: str, ids: list[str], reason: StatusReason, why: str
+) -> None:
+    """Name the claims one fixing detector retired (security review 2026-10-28-1, O36)."""
+    await record_claims_retired(
+        session,
+        actor=actor,
+        route=route,
+        retired_ids=ids,
+        status=Status.PROVENANCE_STALE.value,
+        status_reason=reason.value,
+        reason=why,
+    )
+
+
+async def _check_staleness(
+    session: AsyncSession, fix: bool, *, actor: str = LINT_ACTOR
+) -> list[LintFinding]:
+    """Flag ACTIVE particles whose valid_until has passed.
+
+    With ``fix`` each is set ``PROVENANCE_STALE`` and one ``CLAIMS_RETIRED``
+    event names them all.
+    """
     now = datetime.now(UTC)
     findings: list[LintFinding] = []
+    retired: list[str] = []
     for p in await get_active_particles_with_valid_until(session):
         vu = p.valid_until
         if vu is None:
@@ -54,6 +80,7 @@ async def _check_staleness(session: AsyncSession, fix: bool) -> list[LintFinding
                 await update_particle_status(
                     session, p.id, Status.PROVENANCE_STALE, StatusReason.VALIDITY_EXPIRED
                 )
+                retired.append(p.id)
             findings.append(
                 LintFinding(
                     particle_id=p.id,
@@ -64,10 +91,20 @@ async def _check_staleness(session: AsyncSession, fix: bool) -> list[LintFinding
                     recommended_action="Set PROVENANCE_STALE",
                 )
             )
+    await _record_fix(
+        session,
+        actor=actor,
+        route="lint_staleness",
+        ids=retired,
+        reason=StatusReason.VALIDITY_EXPIRED,
+        why="lint fix: the claim's valid_until has passed",
+    )
     return findings
 
 
-async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> list[LintFinding]:
+async def _check_retraction_propagation(
+    session: AsyncSession, fix: bool, *, actor: str = LINT_ACTOR
+) -> list[LintFinding]:
     """Find ACTIVE particles whose provenance chain includes RETRACTED/SUPERSEDED particles.
 
     Deliberately **one-hop** (each particle's own refs only) — for the
@@ -81,8 +118,11 @@ async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> lis
     keep-ACTIVE-and-discount contract keeps a still-plausible abstraction
     visible (its effective confidence discounted at read time) until the dream
     cycle's revalidation ladder repairs or retires it.
+
+    The claims a fix retires are named in one ``CLAIMS_RETIRED`` event.
     """
     findings: list[LintFinding] = []
+    retired: list[str] = []
     for p in await get_active_particles(session):
         for ref in p.provenance:
             if ref.type != ProvenanceRefType.PARTICLE:
@@ -114,6 +154,7 @@ async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> lis
                     await update_particle_status(
                         session, p.id, Status.PROVENANCE_STALE, StatusReason.RETRACTED_DEPENDENCY
                     )
+                    retired.append(p.id)
                 findings.append(
                     LintFinding(
                         particle_id=p.id,
@@ -128,17 +169,29 @@ async def _check_retraction_propagation(session: AsyncSession, fix: bool) -> lis
                     )
                 )
                 break
+    await _record_fix(
+        session,
+        actor=actor,
+        route="lint_retraction_cascade",
+        ids=retired,
+        reason=StatusReason.RETRACTED_DEPENDENCY,
+        why="lint fix: a claim in the provenance chain was retracted or superseded",
+    )
     return findings
 
 
-async def _check_corpus_link_integrity(session: AsyncSession, fix: bool) -> list[LintFinding]:
+async def _check_corpus_link_integrity(
+    session: AsyncSession, fix: bool, *, actor: str = LINT_ACTOR
+) -> list[LintFinding]:
     """Find ACTIVE particles pointing to snapshots that no longer exist.
 
     A ``PARTICLE`` ref is skipped: its ``snapshot_id`` carries the premise's
     particle id, not a corpus snapshot, and the premise is
-    followed by ``_check_retraction_propagation`` instead.
+    followed by ``_check_retraction_propagation`` instead. The claims a fix
+    retires are named in one ``CLAIMS_RETIRED`` event.
     """
     findings: list[LintFinding] = []
+    retired: list[str] = []
     for p in await get_active_particles(session):
         for ref in p.provenance:
             if ref.type is ProvenanceRefType.PARTICLE or not ref.snapshot_id:
@@ -148,6 +201,7 @@ async def _check_corpus_link_integrity(session: AsyncSession, fix: bool) -> list
                     await update_particle_status(
                         session, p.id, Status.PROVENANCE_STALE, StatusReason.CORPUS_ENTRY_MISSING
                     )
+                    retired.append(p.id)
                 findings.append(
                     LintFinding(
                         particle_id=p.id,
@@ -159,6 +213,14 @@ async def _check_corpus_link_integrity(session: AsyncSession, fix: bool) -> list
                     )
                 )
                 break
+    await _record_fix(
+        session,
+        actor=actor,
+        route="lint_corpus_link",
+        ids=retired,
+        reason=StatusReason.CORPUS_ENTRY_MISSING,
+        why="lint fix: a referenced snapshot no longer exists",
+    )
     return findings
 
 

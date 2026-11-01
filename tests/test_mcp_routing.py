@@ -35,6 +35,7 @@ import pytest
 # cache hits.
 import particles.mcp  # noqa: F401
 from particles.db import DEFAULT_STORE, session_scope
+from tests._engine_client import TEST_ENGINE_KEY
 
 
 @pytest.fixture
@@ -46,14 +47,16 @@ def engine(cli_db: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[list[str]
     the HTTP path rather than the in-process one. Writes are enabled on the
     default store so the tools are offered locally and the engine gate passes.
     """
-    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "http://engine.test")
-    monkeypatch.delenv("PARTICLES_ENGINE_TOKEN", raising=False)
+    monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", "https://engine.test")
+    # A keyless engine serves reads only: key the engine and send it.
+    monkeypatch.setenv("PARTICLES_API_KEY", TEST_ENGINE_KEY)
+    monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", TEST_ENGINE_KEY)
     from particles.config import get_config, reset_config
 
     reset_config()
     get_config().mcp.write.enabled_stores = [DEFAULT_STORE]
-    # The in-process engine runs under the dev-key skip, which serves only
-    # loopback names and api.allowed_hosts (security review 2026-10-24, N1).
+    # Served only for loopback names and api.allowed_hosts (security review
+    # 2026-10-24, N1).
     get_config().api.allowed_hosts = ["engine.test"]
 
     from particles.api.app import app as fastapi_app
@@ -223,7 +226,7 @@ class TestMcpReadRouting:
         assert result["scope_type"] == "subject"
         assert any(n["subject_id"] == sid for n in result["nodes"])
         assert "/graph" in engine
-        assert result["url"].startswith("http://engine.test/app#/browse?scope=subject")
+        assert result["url"].startswith("https://engine.test/app#/browse?scope=subject")
 
 
 class TestMcpWriteRouting:
@@ -316,4 +319,4 @@ class TestMcpWriteRouting:
 
         out = asyncio.run(deposit_text("worth archiving"))
         assert out["corpus_entry_id"]
-        assert "/corpus/deposit/text" in engine
+        assert "/particles/deposit" in engine

@@ -82,7 +82,12 @@ def test_enforce_disabled_when_rate_not_positive(monkeypatch: pytest.MonkeyPatch
         _rate_limit.enforce_rate_limit(_Req())  # type: ignore[arg-type]
 
 
-def test_enforce_noop_without_peer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_peerless_requests_share_one_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A request without a network peer (a UNIX-socket connection) is not
+    # provably local any more (security review 2026-10-25-2, R1), so it is
+    # throttled, and all of them share one bucket: no address tells them apart.
+    from fastapi import HTTPException
+
     monkeypatch.setenv("PARTICLES_API_RATE_LIMIT_PER_MINUTE", "1")
     reset_config()
 
@@ -90,10 +95,10 @@ def test_enforce_noop_without_peer(monkeypatch: pytest.MonkeyPatch) -> None:
         client = None
         headers: dict[str, str] = {}
 
-    # A request without a network peer (in-process transport) is treated as
-    # local and never throttled.
-    for _ in range(5):
+    _rate_limit.enforce_rate_limit(_Req())  # type: ignore[arg-type]
+    with pytest.raises(HTTPException) as exc:
         _rate_limit.enforce_rate_limit(_Req())  # type: ignore[arg-type]
+    assert exc.value.status_code == 429
 
 
 class TestClientKeyAndBound:
@@ -106,7 +111,12 @@ class TestClientKeyAndBound:
             ("2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),
             ("::ffff:203.0.113.7", "203.0.113.7"),
             ("203.0.113.7", "203.0.113.7"),
-            ("not-an-ip", "not-an-ip"),
+            ("not-an-ip", "host:not-an-ip"),
+            # Security review 2026-10-24-2, P8: every loopback address is this host.
+            ("127.0.0.1", "loopback"),
+            ("127.200.3.4", "loopback"),
+            ("::1", "loopback"),
+            ("::ffff:127.0.0.9", "loopback"),
         ],
     )
     def test_ipv6_clients_share_their_slash_64(self, host: str, key: str) -> None:
