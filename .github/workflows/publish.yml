@@ -316,7 +316,12 @@ jobs:
           # timestamp and random serial, so re-running produces byte-identical
           # output.
           uv venv /tmp/sbom-tool
-          uv pip install --python /tmp/sbom-tool/bin/python --require-hashes \
+          # `--no-config`: this runs in the tree, whose pyproject's
+          # `[tool.uv] constraint-dependencies` (unpinned security floors)
+          # uv would otherwise add to a hash-locked install, which then
+          # refuses them, so no SBOM or provenance reached the 1.224.3
+          # Releases. The locked file is the whole closure on its own.
+          uv pip install --no-config --python /tmp/sbom-tool/bin/python --require-hashes \
             --only-binary :all: --index-url https://pypi.org/simple/ \
             -r .github/sbom-tool-requirements.txt
           # cyclonedx-py asks the interpreter it is given for its sys.path,
